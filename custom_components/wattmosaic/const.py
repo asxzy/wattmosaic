@@ -22,7 +22,7 @@ API_BASE_PATH = "/api/v1"
 
 #: Contract version mirrored from ``engine/wattmosaic_engine/contracts.py``.
 #: This is a consumer-side expectation, not a competing schema definition.
-CONTRACT_VERSION = "1.1.0"
+CONTRACT_VERSION = "1.2.0"
 
 HEADER_API_TOKEN = "X-API-Token"
 HEADER_CONTRACT_VERSION = "X-WattMosaic-Contract-Version"

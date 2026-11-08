@@ -113,6 +113,8 @@ class EngineFacade(Protocol):
 
     def confirm_topology(self) -> Any: ...
 
+    def nesting_candidates(self, *, hours: float = 12.0) -> Any: ...
+
     def quality(self) -> Any: ...
 
     def diagnostics(self) -> Any: ...
@@ -177,6 +179,9 @@ class NullFacade:
         return self._unavailable()
 
     def confirm_topology(self) -> Any:
+        return self._unavailable()
+
+    def nesting_candidates(self, *, hours: float = 12.0) -> Any:
         return self._unavailable()
 
     def quality(self) -> Any:
@@ -295,6 +300,9 @@ class StubFacade(NullFacade):
     def confirm_topology(self) -> dict[str, Any]:
         self._topology["status"] = "confirmed"
         return dict(self._topology)
+
+    def nesting_candidates(self, *, hours: float = 12.0) -> dict[str, Any]:
+        return {"candidates": [], "reason": "stub facade has no stored history"}
 
     def quality(self) -> dict[str, Any]:
         return {

@@ -65,10 +65,30 @@ Everything above that CT is a *containment constraint*, modelled explicitly:
   physical total). Main rows are never *added together* to obtain a total, and
   each device appears in a main row exactly once.
 
-* **nested mains** (`main` with a `parent_ct_id`, e.g. utility → panel feed) are
-  refused outright: `main_power_w()` returns
-  `errors = ["refusing to sum nested mains (double counting): panel under utility"]`
-  rather than a plausible-looking wrong number.
+* **nested mains** (`main` with a `parent_ct_id`) are a supported shape, to any
+  depth: utility → panel → sub-panel → branch. `main_power_w()` sums only the
+  *outermost* feed of each branch of the tree (`TopologyGraph.effective_feeds`),
+  so a nested feed is inside its parent's measurement and is never added again:
+
+  ```text
+  service 5000 W, panel 2000 W under it   ->  total 5000 W, not 7000 W
+  ```
+
+  The excluded feeds are listed in `MainPower.excluded_channels` and named in
+  `MainPower.notes` (`nested_feeds_not_summed: panel under service`). This is a
+  resolution, not a refusal: the nesting is a wiring fact and the total stays
+  available.
+
+* **duplicate feeds** (two CTs clamped on the same conductors, `alias_of_ct_id`)
+  measure one point twice. Only the canonical channel contributes; the alias is
+  still usable for its own device readings and is named in
+  `MainPower.notes` (`duplicate_feeds_counted_once: ...`).
+
+* a **circuit multiplier** (`CTChannel.measurement_multiplier`, default `1.0`)
+  scales a reading exactly once, on the way out of `TopologyGraph.scale_w()`.
+  It exists for one CT on one leg of a 240 V load; it is never inferred from
+  `phase` or `ct_type`, because the monitor commonly applies the vendor's
+  circuit multiplier itself and already publishes the full load.
 
 ---
 
@@ -327,7 +347,9 @@ validated model supplies the split, clearly labelled as not measurement-derived)
 verified dedicated CT:
 
 * Sums a symmetric double-pole pair into one total (`per_leg_w` retained for
-  provenance).
+  provenance). Each leg carries its own `measurement_multiplier`, applied once
+  by `TopologyGraph.scale_w()`, so a single-CT 240 V load declared as `2.0`
+  reports the full load.
 * `usable=False` for missing, bad-quality, or older-than-`max_age_s` values, with
   machine-readable reasons (`stale_measurement:ct_x`, `missing_measurement`, …).
 * A **branch** CT is never direct measurement for a device, even when only one
@@ -338,7 +360,73 @@ verified dedicated CT:
 
 ---
 
-## 8. Validation problems (`TopologyGraph.validate()`)
+## 7a. Proposing nesting from measurements
+
+`electrical/nesting.py` proposes panel nesting and duplicate feeds from aligned
+measurements. It is **candidate generation only**: `parent_ct_id` and
+`alias_of_ct_id` are never written by it, and the integration wizard asks the
+user to confirm. See `docs/integration.md` for the wizard fields.
+
+### The unit is a measurement node
+
+A comparison is made on a **node**, not a single CT. A node is one physical meter
+point:
+
+* a CT plus its reciprocal `paired_ct_id` partner (a declared double-pole
+  circuit), or
+* the two legs of a split-phase panel feed, `<stem>_l1` / `<stem>_l2`, grouped by
+  id stem and flagged `is_assumed` (the grouping is read off the channel ids, not
+  declared).
+
+Comparing legs compares different conductors. On the reference installation a
+sub-panel's declared loads total 796 W against a 331 W leg (ratio 2.40) because
+those loads span *both* legs, and one sub-panel leg is 0.6390 contained by one
+panel leg but 0.9950 contained by the *other* panel leg — the declared `phase`
+labels are contradicted by the measurements. Summed, panel ← sub-panel is
+0.9975. `phase` is therefore used only to make the written-back leg readable,
+never to reject a candidate.
+
+### Evidence
+
+* **containment** — fraction of instants the child never exceeds the parent
+  (+30 W). Necessary, not sufficient: a branch cannot draw more than its feed.
+* **excitation** — the child must reach 5 % of the parent at least once. An idle
+  circuit is trivially contained by everything.
+* **closure** — the parent's own directly measured loads plus the child must not
+  exceed the parent (+100 W). The *median remainder* ranks competing parents: the
+  immediate parent explains the child most tightly, while a grandparent always has
+  the child's siblings left over. Closure is a level-placement signal, not a
+  validity gate, so `CLOSURE_MIN` is 0.95 rather than 1.0.
+* **duplicate** — two nodes that are jointly active (≥200 W) for ≥50 % of their
+  combined active time, with median relative difference ≤0.15 and median
+  magnitude ratio ≤1.25. They are the same conductors measured twice, so summing
+  them double counts. Reported as an alias, never as a nest.
+
+### What measurement cannot decide
+
+**A load's level is not inferable.** Measured against 32 declared parents, four
+independent rules all failed: tightest-peak 0/32, coverage 0/32 (every container
+ties), unique-fit elimination 32/32 ambiguous, windowed step-response 1/25. A 9 W
+lighting circuit is contained by every panel in the house at 1.000 while idle.
+Only a `main` CT is therefore proposed as a nested child
+(`_NESTABLE_CHILD_TYPES = {"main"}`); loads are reported in `not_inferable` and
+the wizard asks the user.
+
+### Reported, not resolved
+
+* `ambiguous` — several parents fit and closure cannot separate them. The
+  candidate list is reported and nothing is proposed.
+* `suppressed` — a declared parent (`parent_already_declared`) or a parent whose
+  own loads over-explain it (`closure_rejected`).
+* `not_inferable` — a load (`load_level_not_measurable`).
+
+`GET /topology/nesting` returns `candidates`, `candidate_parents`,
+`candidate_aliases`, `ambiguous`, `suppressed`, `not_inferable` and `nodes`.
+"Same conductor" (`candidate_aliases`) and "fed by" (`candidate_parents`) are
+kept separate because they answer different questions and lead to different
+writes.
+
+---
 
 Returns human-readable strings, never raises for bad input:
 
@@ -346,7 +434,9 @@ Returns human-readable strings, never raises for bad input:
 * unknown `parent_ct_id`, `paired_ct_id`, `dedicated_ct_ids`, `parent_device_id`
 * self-parent, CT topology **cycles**
 * asymmetric pairing, paired leg not L1/L2, paired leg marked BOTH
-* `main` with a parent (nested mains)
+* `main` with a parent is **not** a problem: it is a nested feed (utility →
+  panel → sub-panel), and `effective_feeds()` resolves the outermost feed of each
+  branch rather than rejecting the topology.
 * dedicated CT with no/unknown device, or missing from `DeviceTopology`
 * `phase=BOTH` without `double_pole=True`, double-pole device declared L1/L2
 * device declaring branch CTs that are all disabled

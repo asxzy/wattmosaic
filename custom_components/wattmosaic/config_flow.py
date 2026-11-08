@@ -71,11 +71,15 @@ from .const import (
 )
 from .flow_logic import (
     ENERGY_ENTITY_FIELD,
+    MAX_MULTIPLIER,
+    MIN_MULTIPLIER,
+    apply_nesting_candidates,
     assignment_defaults,
     assignment_store,
     build_topology_update,
     candidate_labels,
     connection_defaults,
+    descendant_ids,
     device_candidates,
     device_configuration_command,
     discovered_base_url,
@@ -90,7 +94,9 @@ from .flow_logic import (
     resolve_confirmation,
     settings_defaults,
     stored_energy_choice,
+    suggested_alias,
     suggested_pair,
+    suggested_parent,
     uncertainty_summary,
     validate_assignments,
     validate_connection,
@@ -371,6 +377,15 @@ async def _probe_engine(
     except Exception:  # noqa: BLE001
         devices = None
 
+    # Candidate nesting is a proposal, not a fact.  It is attached to the
+    # topology copy the wizard works on so the parent dropdown can pre-select an
+    # unambiguous candidate; ``parent_ct_id`` itself is never written here.
+    try:
+        nesting = await client.nesting_candidates()
+    except Exception:  # noqa: BLE001 - never block connection on this
+        nesting = None
+    topology = apply_nesting_candidates(topology, nesting)
+
     return (
         topology if isinstance(topology, dict) else {},
         normalise_device_list(devices),
@@ -447,6 +462,9 @@ class _AssignmentWizard:
                         "phase",
                         "polarity",
                         "paired_ct_id",
+                        "parent_ct_id",
+                        "alias_of_ct_id",
+                        "measurement_multiplier",
                         "device_id",
                         "enabled",
                     )
@@ -464,6 +482,8 @@ class _AssignmentWizard:
 
         defaults = assignment_defaults(channel, self._assignments.get(ct_id))
         pair_suggestion = suggested_pair(channel, self._channels) or ""
+        parent_suggestion = suggested_parent(channel, self._channels) or ""
+        alias_suggestion = suggested_alias(channel, self._channels) or ""
 
         pair_options = [SelectOptionDict(value="", label="— none —")]
         for other in self._channels:
@@ -477,15 +497,47 @@ class _AssignmentWizard:
                 )
             )
 
+        parent_options = [SelectOptionDict(value="", label="— none (top level) —")]
+        alias_options = [SelectOptionDict(value="", label="— no (independent CT) —")]
+        for other in self._channels:
+            other_id = str(other.get("ct_id"))
+            if other_id == ct_id:
+                continue
+            label = f"{other.get('name') or other_id} ({other_id})"
+            # Only a container can be a parent: a device CT has nothing behind it.
+            if other_id not in descendant_ids(ct_id, self._channels):
+                parent_options.append(SelectOptionDict(value=other_id, label=label))
+            alias_options.append(SelectOptionDict(value=other_id, label=label))
+
         schema = vol.Schema(
             {
                 vol.Required("role", default=defaults["role"]): _role_select(),
                 vol.Required("phase", default=defaults["phase"]): _phase_select(),
                 vol.Required("polarity", default=defaults["polarity"]): _polarity_select(),
                 vol.Optional(
+                    "parent_ct_id", default=defaults["parent_ct_id"] or parent_suggestion
+                ): SelectSelector(
+                    SelectSelectorConfig(options=parent_options, mode=SelectSelectorMode.DROPDOWN)
+                ),
+                vol.Optional(
+                    "measurement_multiplier", default=defaults["measurement_multiplier"]
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=MIN_MULTIPLIER,
+                        max=MAX_MULTIPLIER,
+                        step=0.5,
+                        mode=NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Optional(
                     "paired_ct_id", default=defaults["paired_ct_id"] or pair_suggestion
                 ): SelectSelector(
                     SelectSelectorConfig(options=pair_options, mode=SelectSelectorMode.DROPDOWN)
+                ),
+                vol.Optional(
+                    "alias_of_ct_id", default=defaults["alias_of_ct_id"] or alias_suggestion
+                ): SelectSelector(
+                    SelectSelectorConfig(options=alias_options, mode=SelectSelectorMode.DROPDOWN)
                 ),
                 vol.Optional("device_id", default=defaults["device_id"] or ""): SelectSelector(
                     SelectSelectorConfig(
@@ -506,6 +558,8 @@ class _AssignmentWizard:
                 "position": f"{self._channel_index + 1} / {len(self._channels)}",
                 "entity_id": str(channel.get("entity_id") or ""),
                 "pair_suggestion": pair_suggestion or "none",
+                "parent_suggestion": parent_suggestion or "none",
+                "alias_suggestion": alias_suggestion or "none",
             },
         )
 

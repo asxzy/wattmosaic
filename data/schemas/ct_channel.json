@@ -113,6 +113,23 @@
       "default": null,
       "title": "Paired Ct Id"
     },
+    "alias_of_ct_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Alias Of Ct Id"
+    },
+    "measurement_multiplier": {
+      "default": 1.0,
+      "title": "Measurement Multiplier",
+      "type": "number"
+    },
     "nominal_voltage": {
       "anyOf": [
         {
@@ -171,5 +188,5 @@
   "title": "CTChannel",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/ct_channel.json",
-  "x-contract-version": "1.1.0"
+  "x-contract-version": "1.2.0"
 }

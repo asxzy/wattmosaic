@@ -34,7 +34,7 @@
       },
       "channels": {
         "title": "CT channel assignment",
-        "description": "Channel {position}: {channel_name} ({channel_id})\nEntity: {entity_id}\nSuggested double-pole pair: {pair_suggestion}\n\nAssign a role and phase. Values from the engine are suggestions only until you confirm them at the end of the wizard.",
+        "description": "Channel {position}: {channel_name} ({channel_id})\nEntity: {entity_id}\nSuggested double-pole pair: {pair_suggestion}\nSuggested parent feed: {parent_suggestion}\nSuggested duplicate (same conductor): {alias_suggestion}\n\nAssign a role and phase. Values from the engine are suggestions only until you confirm them at the end of the wizard.",
         "data": {
           "role": "Role",
           "phase": "Phase",
@@ -166,7 +166,7 @@
       },
       "channels": {
         "title": "CT channel assignment",
-        "description": "Channel {position}: {channel_name} ({channel_id})\nEntity: {entity_id}\nSuggested double-pole pair: {pair_suggestion}\n\nAssign a role and phase. Unconfirmed values stay candidates.",
+        "description": "Channel {position}: {channel_name} ({channel_id})\nEntity: {entity_id}\nSuggested double-pole pair: {pair_suggestion}\nSuggested parent feed: {parent_suggestion}\nSuggested duplicate (same conductor): {alias_suggestion}\n\nAssign a role and phase. Unconfirmed values stay candidates.",
         "data": {
           "role": "Role",
           "phase": "Phase",
@@ -372,10 +372,10 @@
   "entity": {
     "sensor": {
       "power": {
-        "name": "Estimated power"
+        "name": "Power"
       },
       "energy": {
-        "name": "Estimated energy"
+        "name": "Energy"
       },
       "source": {
         "name": "Measurement source",
@@ -444,7 +444,7 @@
         "name": "Inferred power"
       },
       "model_estimated_power": {
-        "name": "Model estimated power"
+        "name": "Model power"
       },
       "unknown_power": {
         "name": "Unknown / unattributed power"

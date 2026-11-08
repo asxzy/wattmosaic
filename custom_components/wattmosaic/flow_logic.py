@@ -8,7 +8,7 @@ only presentation + HTTP orchestration around these helpers.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from typing import Any
 
 from .const import (
@@ -41,6 +41,32 @@ from .util import as_bool, as_float, as_int, normalise_base_url
 #: Form field for the per-device energy-entity opt-in.  Integration-side only:
 #: it is stored in the config entry, never sent to the engine.
 ENERGY_ENTITY_FIELD = "create_energy_sensor"
+
+#: Default for ``CTChannel.measurement_multiplier``.  The monitor usually applies
+#: the Refoss "circuit multiplier" itself and already publishes the full load, so
+#: the engine must not scale again unless the user says so per circuit.
+DEFAULT_MULTIPLIER = 1.0
+
+#: A multiplier is a small integer factor in practice (the vendor app offers
+#: 2 or 3).  The bound is deliberately generous but finite: it rejects a typo
+#: such as 20 for 2.0 while still allowing a fractional correction.
+MIN_MULTIPLIER = 0.01
+MAX_MULTIPLIER = 100.0
+
+
+def _as_multiplier(value: Any) -> float:
+    """Coerce a stored multiplier to a float, defaulting to 1.0 when unusable.
+
+    An out-of-range *number* is deliberately preserved rather than clamped.
+    Clamping here would silently turn a typed ``200`` into ``1.0`` -- the circuit
+    would then be reported at one hundredth of its load with no error shown.
+    Range is a *validation* rule (:func:`validate_assignments`), so the value has
+    to survive normalisation for that check to be able to see it.
+    """
+    number = as_float(value)
+    if number is None:
+        return DEFAULT_MULTIPLIER
+    return float(number)
 
 # --------------------------------------------------------------------------- #
 # Connection step
@@ -243,6 +269,10 @@ def normalise_channels(topology: Mapping[str, Any] | None) -> list[dict[str, Any
                 "parent_ct_id": item.get("parent_ct_id")
                 if isinstance(item.get("parent_ct_id"), str)
                 else None,
+                "alias_of_ct_id": item.get("alias_of_ct_id")
+                if isinstance(item.get("alias_of_ct_id"), str)
+                else None,
+                "measurement_multiplier": _as_multiplier(item.get("measurement_multiplier")),
                 "enabled": bool(item.get("enabled", True)),
                 "topology_status": str(item.get("topology_status") or "candidate"),
             }
@@ -259,34 +289,212 @@ def is_double_pole_ct(channel: Mapping[str, Any]) -> bool:
     )
 
 
-def suggested_pair(channel: Mapping[str, Any], channels: Sequence[Mapping[str, Any]]) -> str | None:
-    """Suggest the sibling CT of a likely double-pole pair (CT1 <-> CT2)."""
-    if channel.get("paired_ct_id"):
-        return str(channel["paired_ct_id"])
-    ct_id = str(channel.get("ct_id") or "")
+def _raw_sibling(ct_id: str, present: Collection[str]) -> str | None:
+    """The naive 1<->2 counterpart of a channel id, or ``None``.
 
-    # Preferred: an explicit ``ct1``/``ct2`` marker anywhere in the id, which
-    # covers real HA entity ids such as
-    # ``panel_a_circuit_ct1_power``.
-    match = re.search(r"(?i)ct([12])(?![0-9])", ct_id)
+    Only legs 1 and 2 are ever paired.  A third leg (``ct3``) is a separate
+    circuit, not half of a 240 V load -- defect #28 is precisely that mistake
+    made in the other direction.  Anything that is not a 1 or a 2 therefore
+    has no counterpart at all.
+    """
+    # Preferred: an explicit ``ctN`` marker anywhere in the id, which covers
+    # real HA entity ids such as ``panel_a_circuit_ct1_power``.
+    match = re.search(r"(?i)ct([1-9])(?![0-9])", ct_id)
     if match:
-        other = "2" if match.group(1) == "1" else "1"
+        leg = match.group(1)
+        if leg not in ("1", "2"):
+            return None
+        other = "2" if leg == "1" else "1"
         sibling = ct_id[: match.start()] + f"ct{other}" + ct_id[match.end() :]
-        for candidate in channels:
-            if str(candidate.get("ct_id") or "") == sibling:
-                return sibling
-        return None
+        return sibling if sibling in present else None
 
     # Fallback: a trailing integer, e.g. ``channel_1`` <-> ``channel_2``.
     match = re.search(r"(?i)(.*?)(\d+)$", ct_id)
     if not match:
         return None
     prefix, number = match.group(1), match.group(2)
+    if number not in ("1", "2"):
+        return None
     sibling = f"{prefix}{2 if number == '1' else 1}"
-    for candidate in channels:
-        if str(candidate.get("ct_id") or "") == sibling:
-            return sibling
-    return None
+    return sibling if sibling in present else None
+
+
+def suggested_pair(channel: Mapping[str, Any], channels: Sequence[Mapping[str, Any]]) -> str | None:
+    """Suggest the sibling CT of a likely double-pole pair (CT1 <-> CT2).
+
+    A suggestion is only offered when it is *reciprocal*.  ``validate_assignments``
+    rejects a one-sided pair, and the wizard renders every channel's default from
+    this function, so a non-reciprocal guess would make the confirm step unable
+    to accept its own defaults -- a dead end the user cannot escape, because the
+    fix would be to know which channel to edit by hand.
+    """
+    ct_id = str(channel.get("ct_id") or "")
+    by_id = {str(c.get("ct_id") or ""): c for c in channels}
+    present = set(by_id)
+
+    declared = channel.get("paired_ct_id")
+    if declared:
+        partner = by_id.get(str(declared))
+        if partner is not None and str(partner.get("paired_ct_id") or "") == ct_id:
+            return str(declared)
+        # A declared pair the other side does not repeat is dropped here; the
+        # structural guess below may still find a legitimate partner.
+
+    sibling = _raw_sibling(ct_id, present)
+    if sibling is None:
+        return None
+    return sibling if _raw_sibling(sibling, present) == ct_id else None
+
+
+def descendant_ids(ct_id: str, channels: Sequence[Mapping[str, Any]]) -> set[str]:
+    """All CT ids that sit (transitively) under ``ct_id`` in the given channels.
+
+    Used by the wizard to keep a cycle out of the parent dropdown: a CT's own
+    descendant can never be offered as its parent.
+    """
+    children: dict[str, list[str]] = {}
+    for channel in channels:
+        cid = str(channel.get("ct_id") or "")
+        parent = channel.get("parent_ct_id")
+        if cid and isinstance(parent, str) and parent:
+            children.setdefault(parent, []).append(cid)
+    out: set[str] = set()
+    stack = list(children.get(ct_id, ()))
+    while stack:
+        current = stack.pop()
+        if current in out:
+            continue
+        out.add(current)
+        stack.extend(children.get(current, ()))
+    return out
+
+
+def nesting_candidates(channel: Mapping[str, Any]) -> list[str]:
+    """Parent CT ids that discovery *proposed* for this channel.
+
+    Discovery writes them to ``metadata.nesting_candidates`` after measuring
+    containment and closure between channels.  They are proposals only: a
+    candidate never becomes a parent link until the user accepts it in the
+    wizard, which keeps an inferred wiring fact out of the confirmed topology.
+    """
+    meta = channel.get("metadata")
+    if not isinstance(meta, Mapping):
+        return []
+    raw = meta.get("nesting_candidates")
+    if not isinstance(raw, list):
+        return []
+    return [str(item) for item in raw if isinstance(item, str) and item]
+
+
+def suggested_parent(
+    channel: Mapping[str, Any],
+    channels: Sequence[Mapping[str, Any]],
+) -> str | None:
+    """The single credible parent to pre-select, or ``None``.
+
+    A suggestion is only made when discovery found exactly one candidate and that
+    candidate is not the channel's own descendant (which would be a cycle).  Two
+    competing candidates mean the evidence is ambiguous, and pre-selecting either
+    one would present a guess as a measurement -- so the wizard leaves the field
+    empty and the user decides.
+    """
+    ct_id = str(channel.get("ct_id") or "")
+    candidates = nesting_candidates(channel)
+    if len(candidates) != 1:
+        return None
+    candidate = candidates[0]
+    if candidate == ct_id or candidate in descendant_ids(ct_id, channels):
+        return None
+    return candidate
+
+
+def alias_candidates(channel: Mapping[str, Any]) -> list[str]:
+    """CT ids that discovery proposed as the *same conductor* as this one.
+
+    Recorded in ``metadata.alias_candidates``.  An alias is not a parent: the
+    channel still measures a real wire, but another CT already measures that same
+    wire, so summing both would double count.  Kept separate from
+    ``nesting_candidates`` so the two questions never get confused.
+    """
+    meta = channel.get("metadata")
+    if not isinstance(meta, Mapping):
+        return []
+    raw = meta.get("alias_candidates")
+    if not isinstance(raw, list):
+        return []
+    return [str(item) for item in raw if isinstance(item, str) and item]
+
+
+def suggested_alias(
+    channel: Mapping[str, Any],
+    channels: Sequence[Mapping[str, Any]],
+) -> str | None:
+    """The single credible alias to pre-select, or ``None``.
+
+    Same rule as ``suggested_parent``: only an unambiguous, non-self, non-cyclic
+    proposal is pre-selected.  A declared pairing or declared parent already
+    answers the question, so it suppresses the suggestion rather than competing
+    with it.
+    """
+    ct_id = str(channel.get("ct_id") or "")
+    if channel.get("paired_ct_id") or channel.get("parent_ct_id"):
+        return None
+    candidates = alias_candidates(channel)
+    if len(candidates) != 1:
+        return None
+    candidate = candidates[0]
+    if candidate == ct_id or candidate in descendant_ids(ct_id, channels):
+        return None
+    return candidate
+
+
+def apply_nesting_candidates(
+    topology: Mapping[str, Any] | None,
+    payload: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Attach discovery's *proposed* parents and aliases to a copy of the topology.
+
+    The proposals are stored in each channel's ``metadata`` only.
+    ``parent_ct_id`` and ``alias_of_ct_id`` are left untouched, so nothing is
+    applied: the wizard can pre-select a single unambiguous candidate and the
+    user confirms it.
+
+    Two kinds of proposal are recorded, because they answer different questions:
+
+    ``nesting_candidates``
+        "what feeds this CT?"  A panel feed that stays inside a container.
+    ``alias_candidates``
+        "is this CT the same conductor as another?"  A duplicate feed, which must
+        not be summed as a second feed.  This is *not* a nesting: a nested feed
+        is still a real, separate measurement below its parent, while an alias is
+        the same wire seen twice.
+    """
+    result = dict(topology or {})
+    raw_channels = result.get("channels")
+    if not isinstance(raw_channels, list):
+        return result
+    proposals = (payload or {}).get("candidate_parents")
+    aliases = (payload or {}).get("candidate_aliases")
+    if not isinstance(proposals, Mapping) and not isinstance(aliases, Mapping):
+        return result
+    channels: list[dict[str, Any]] = []
+    for item in raw_channels:
+        if not isinstance(item, Mapping):
+            continue
+        channel = dict(item)
+        ct_id = str(channel.get("ct_id") or "")
+        parents = proposals.get(ct_id) if isinstance(proposals, Mapping) else None
+        alias = aliases.get(ct_id) if isinstance(aliases, Mapping) else None
+        metadata = dict(channel.get("metadata") or {})
+        if isinstance(parents, list) and parents:
+            metadata["nesting_candidates"] = [str(p) for p in parents]
+        if isinstance(alias, str) and alias:
+            metadata["alias_candidates"] = [alias]
+        if metadata != dict(channel.get("metadata") or {}):
+            channel["metadata"] = metadata
+        channels.append(channel)
+    result["channels"] = channels
+    return result
 
 
 def assignment_defaults(
@@ -302,11 +510,26 @@ def assignment_defaults(
         "paired_ct_id": existing.get("paired_ct_id")
         if existing.get("paired_ct_id") is not None
         else (channel.get("paired_ct_id") or ""),
+        "parent_ct_id": existing.get("parent_ct_id")
+        if existing.get("parent_ct_id") is not None
+        else (channel.get("parent_ct_id") or ""),
+        "alias_of_ct_id": existing.get("alias_of_ct_id")
+        if existing.get("alias_of_ct_id") is not None
+        else (channel.get("alias_of_ct_id") or ""),
+        "measurement_multiplier": _as_multiplier(
+            existing.get("measurement_multiplier", channel.get("measurement_multiplier"))
+        ),
         "device_id": existing.get("device_id")
         if existing.get("device_id") is not None
         else (channel.get("device_id") or ""),
         "enabled": bool(existing.get("enabled", channel.get("enabled", True))),
     }
+
+
+#: Roles that may contain another CT.  A ``dedicated_device`` CT watches one
+#: load, so nothing can sit behind it; an ``unknown`` role is likewise not a
+#: container.  ``main`` may nest to any depth (service -> panel -> sub-panel).
+CONTAINER_ROLES: tuple[str, ...] = (CT_ROLE_MAIN, "branch")
 
 
 def normalise_assignment(
@@ -336,9 +559,38 @@ def normalise_assignment(
         "phase": phase,
         "polarity": polarity,
         "paired_ct_id": _clean(submitted.get("paired_ct_id")),
+        "parent_ct_id": _clean(submitted.get("parent_ct_id")),
+        "alias_of_ct_id": _clean(submitted.get("alias_of_ct_id")),
+        "measurement_multiplier": _as_multiplier(
+            submitted.get("measurement_multiplier", channel.get("measurement_multiplier"))
+        ),
         "device_id": _clean(submitted.get("device_id")),
         "enabled": bool(submitted.get("enabled", channel.get("enabled", True))),
     }
+
+
+def _parent_cycle(ct_id: str, parents: Mapping[str, str | None]) -> bool:
+    """Whether following ``parent`` links from ``ct_id`` returns to it."""
+    seen = {ct_id}
+    current = parents.get(ct_id)
+    while current:
+        if current in seen:
+            return True
+        seen.add(current)
+        current = parents.get(current)
+    return False
+
+
+def _alias_cycle(ct_id: str, aliases: Mapping[str, str | None]) -> bool:
+    """Whether following ``alias_of`` links from ``ct_id`` returns to it."""
+    seen = {ct_id}
+    current = aliases.get(ct_id)
+    while current:
+        if current in seen:
+            return True
+        seen.add(current)
+        current = aliases.get(current)
+    return False
 
 
 def validate_assignments(
@@ -354,12 +606,27 @@ def validate_assignments(
     * a ``dedicated_device`` CT needs a device
     * pairing is reciprocal
     * ``both`` phase requires a paired CT (double-pole halves)
+    * a parent CT must exist, must be a container, and must not form a cycle
+    * an ``alias_of_ct_id`` must exist, must not be self, and must not cycle
+    * a multiplier must be a positive finite number
+
+    Nesting is *not* an error at any depth: a main CT may sit under another
+    main CT (service -> panel -> sub-panel), and the engine counts only the
+    outermost feed of each branch.  What is rejected is a structurally
+    impossible claim -- a parent that does not exist, a parent that is itself a
+    single device's CT, or a loop.
     """
     errors: list[str] = []
     known = {str(c.get("ct_id")) for c in channels} if channels else None
+    normalised = {str(ct_id): normalise_assignment(raw) for ct_id, raw in assignments.items()}
 
-    for ct_id, raw in assignments.items():
-        assignment = normalise_assignment(raw)
+    roles = {ct_id: a["role"] for ct_id, a in normalised.items()}
+    parents: dict[str, str | None] = {ct_id: a["parent_ct_id"] for ct_id, a in normalised.items()}
+    aliases: dict[str, str | None] = {
+        ct_id: a["alias_of_ct_id"] for ct_id, a in normalised.items()
+    }
+
+    for ct_id, assignment in normalised.items():
         role = assignment["role"]
         phase = assignment["phase"]
         pair = assignment["paired_ct_id"]
@@ -385,7 +652,47 @@ def validate_assignments(
         if phase == "both" and not pair:
             errors.append(f"both_needs_pair:{ct_id}")
 
+        parent = assignment["parent_ct_id"]
+        if parent is not None:
+            if known is not None and parent not in known:
+                errors.append(f"parent_unknown:{ct_id}:{parent}")
+            elif parent == ct_id:
+                errors.append(f"parent_self:{ct_id}")
+            elif not _is_container(parent, roles.get(parent)):
+                # Parent is declared in this same submission with a role that
+                # cannot contain anything (a single device's CT, or unknown).
+                errors.append(f"parent_not_container:{ct_id}:{parent}")
+            elif _parent_cycle(ct_id, parents):
+                errors.append(f"parent_cycle:{ct_id}")
+
+        alias = assignment["alias_of_ct_id"]
+        if alias is not None:
+            if known is not None and alias not in known:
+                errors.append(f"alias_unknown:{ct_id}:{alias}")
+            elif alias == ct_id:
+                errors.append(f"alias_self:{ct_id}")
+            elif _alias_cycle(ct_id, aliases):
+                errors.append(f"alias_cycle:{ct_id}")
+
+        multiplier = assignment["measurement_multiplier"]
+        if not isinstance(multiplier, (int, float)) or not (
+            MIN_MULTIPLIER <= float(multiplier) <= MAX_MULTIPLIER
+        ):
+            errors.append(f"multiplier_out_of_range:{ct_id}")
+
     return errors
+
+
+def _is_container(ct_id: str, role: str | None) -> bool:
+    """Whether a CT with ``role`` may be declared as another CT's parent.
+
+    When the parent's role is unknown (``None``) the check is skipped: the
+    wizard may not have reached that channel yet, and blocking a *forward*
+    reference would make the step order matter in a way the user cannot see.
+    """
+    if role is None:
+        return True
+    return role in CONTAINER_ROLES
 
 
 def resolve_confirmation(
@@ -470,6 +777,9 @@ def build_topology_update(
                         "phase": normalised["phase"],
                         "polarity": normalised["polarity"],
                         "paired_ct_id": normalised["paired_ct_id"],
+                        "parent_ct_id": normalised["parent_ct_id"],
+                        "alias_of_ct_id": normalised["alias_of_ct_id"],
+                        "measurement_multiplier": normalised["measurement_multiplier"],
                         "device_id": normalised["device_id"],
                         "enabled": normalised["enabled"],
                         "topology_status": "candidate",
@@ -531,11 +841,16 @@ def mapping_summary(
         raw = assignments.get(ct_id) or assignment_defaults(channel)
         normalised = normalise_assignment(raw, channel)
         pair = f" pair={normalised['paired_ct_id']}" if normalised["paired_ct_id"] else ""
+        parent = f" parent={normalised['parent_ct_id']}" if normalised["parent_ct_id"] else ""
+        alias = f" alias_of={normalised['alias_of_ct_id']}" if normalised["alias_of_ct_id"] else ""
+        if normalised["measurement_multiplier"] != DEFAULT_MULTIPLIER:
+            pair += f" x{normalised['measurement_multiplier']:g}"
         device = f" device={normalised['device_id']}" if normalised["device_id"] else ""
         flag = " (uncertain)" if is_uncertain(normalised) else ""
         lines.append(
             f"{ct_id} [{channel.get('name')}]: role={normalised['role']} "
-            f"phase={normalised['phase']} polarity={normalised['polarity']}{pair}{device}{flag}"
+            f"phase={normalised['phase']} polarity={normalised['polarity']}"
+            f"{pair}{parent}{alias}{device}{flag}"
         )
     if len(channels) > limit:
         lines.append(f"... and {len(channels) - limit} more channels")

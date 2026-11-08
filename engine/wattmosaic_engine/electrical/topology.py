@@ -77,6 +77,7 @@ class TopologyGraph:
     _descendants: dict[str, tuple[str, ...]] = field(default_factory=dict, init=False)
     _channels: dict[str, CTChannel] = field(default_factory=dict, init=False)
     _devices: dict[str, DeviceTopology] = field(default_factory=dict, init=False)
+    _nested_mains_seen: list[str] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
         if not 0.0 < self.phase_split_l1 < 1.0:
@@ -88,6 +89,7 @@ class TopologyGraph:
     # ------------------------------------------------------------------ #
     def _index(self) -> None:
         self.problems = []
+        self._nested_mains_seen = []
         cmap: dict[str, CTChannel] = {}
         for ch in self.topology.channels:
             if ch.ct_id in cmap:
@@ -229,10 +231,11 @@ class TopologyGraph:
                     f"CT {cid} has unknown phase; phase-dependent rows are treated as BOTH"
                 )
             if ch.ct_type == CTType.MAIN and ch.parent_ct_id is not None:
-                self.problems.append(
-                    f"CT {cid} is type=main but has a parent CT {ch.parent_ct_id} "
-                    "(nested mains cannot be summed)"
-                )
+                # A main with a parent is a *nested* feed (utility -> panel, or
+                # panel -> sub-panel).  This is a supported shape: the engine
+                # never sums a nested main, it resolves the outermost feeds.
+                # See ``TopologyGraph.effective_feeds``.
+                self._nested_mains_seen.append(ch.ct_id)
             if ch.paired_ct_id and ch.phase == Phase.BOTH:
                 self.problems.append(
                     f"CT {cid} is paired as one leg of a double-pole load but is marked BOTH"
@@ -528,7 +531,11 @@ class TopologyGraph:
         return out
 
     def nested_mains(self) -> list[tuple[str, str]]:
-        """Pairs ``(inner, outer)`` where one main CT contains another."""
+        """Pairs ``(inner, outer)`` where one main CT contains another.
+
+        Retained for diagnostics and for callers that want to *report* nesting.
+        Nesting is no longer an error: :meth:`effective_feeds` resolves it.
+        """
         mains = {c.ct_id for c in self.main_channels()}
         pairs: list[tuple[str, str]] = []
         for inner in mains:
@@ -536,6 +543,87 @@ class TopologyGraph:
                 if anc in mains:
                     pairs.append((inner, anc))
         return pairs
+
+    def multiplier_for(self, ct_id: str) -> float:
+        """The declared ``measurement_multiplier`` for a channel (default 1.0).
+
+        This is a per-circuit scaling declaration for the case where one CT
+        watches one leg of a 240 V load and the monitor does not already scale
+        it.  It is *never* inferred: the device commonly applies the circuit
+        multiplier itself and already publishes the full load, so inferring it
+        from ``phase`` or ``ct_type`` would double-count.
+        """
+        ch = self._channels.get(ct_id)
+        if ch is None:
+            return 1.0
+        return float(ch.measurement_multiplier or 1.0)
+
+    def scale_w(self, ct_id: str, value: float | None) -> float | None:
+        """Apply a channel's multiplier to one raw reading.
+
+        Readings are only ever scaled on the way out of this method.  Nothing
+        writes the scaled value back into a window or a reading object, so the
+        multiplier cannot be applied twice to the same measurement.
+        """
+        if value is None:
+            return None
+        m = self.multiplier_for(ct_id)
+        return value if m == 1.0 else value * m
+
+    def canonical_channel_id(self, ct_id: str) -> str:
+        """Resolve ``alias_of_ct_id`` chains to the channel that owns the wire."""
+        seen: set[str] = set()
+        current = ct_id
+        while True:
+            ch = self._channels.get(current)
+            target = ch.alias_of_ct_id if ch is not None else None
+            if not target or target not in self._channels or target in seen:
+                return current
+            seen.add(current)
+            current = target
+
+    def alias_channels(self) -> list[CTChannel]:
+        """Channels that measure a wire another channel already measures."""
+        return [c for c in self._channels.values() if c.alias_of_ct_id is not None]
+
+    def effective_feeds(self) -> list[str]:
+        """The CTs that legitimately define the whole-home total.
+
+        A feed is a ``main`` CT whose *shadow* carries no other main CT: if a
+        main sits under another main (any depth), the inner one is already
+        counted by the outer and must not be added again.  Aliased channels are
+        the same wire measured twice and only the canonical one contributes.
+
+        This is what makes an arbitrarily deep panel tree safe to sum: only the
+        topmost main of each independent branch of the tree contributes, and
+        parallel feeds at that level are still summed.
+
+        Only enabled channels participate, and only the *canonical* channel of an
+        alias chain contributes: an alias is the same wire measured twice.  The
+        result is sorted for determinism.
+        """
+        feeds: list[str] = []
+        for ch in self.main_channels():
+            if not ch.enabled:
+                continue
+            # Resolve the whole alias chain, not just one hop: ``a -> b -> c``
+            # must contribute once, as ``c``.
+            if self.canonical_channel_id(ch.ct_id) != ch.ct_id:
+                continue
+            # A main nested under another main is already inside that total.
+            has_main_ancestor = any(
+                anc in self._channels
+                and self._channels[anc].ct_type == CTType.MAIN
+                and self.is_enabled(anc)
+                for anc in self.ancestors(ch.ct_id)
+            )
+            if not has_main_ancestor:
+                feeds.append(ch.ct_id)
+        return sorted(feeds)
+
+    def feed_channels(self) -> list[CTChannel]:
+        """:meth:`effective_feeds` as ``CTChannel`` objects, in the same order."""
+        return [self._channels[cid] for cid in self.effective_feeds() if cid in self._channels]
 
 
 def build_graph(topology: Topology, *, phase_split_l1: float = 0.5) -> TopologyGraph:

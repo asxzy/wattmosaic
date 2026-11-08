@@ -32,6 +32,7 @@ from .const import (
     SERVICES,
 )
 from .coordinator import WattMosaicCoordinator
+from .entity_migration import async_migrate_entity_ids
 from .service_logic import (
     ConfirmationRequired,
     ServiceValidationError,
@@ -84,6 +85,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "coordinator": coordinator,
         "client": client,
     }
+
+    # A translated entity name changed, which changes the entity_id Home
+    # Assistant derives for new installs.  An existing install must be renamed
+    # explicitly so the recorder migrates its long-term statistics; without this
+    # a second entity would be created and the old series would be orphaned.
+    await async_migrate_entity_ids(hass, entry, domain="sensor")
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))

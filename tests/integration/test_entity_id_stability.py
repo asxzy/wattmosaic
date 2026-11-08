@@ -9,8 +9,8 @@ on*: the device name is prepended to the translated entity name.  So the same
 engine device produced two different IDs depending on whether its declarations
 happened to resolve to a real device:
 
-* bindable   -> ``sensor.<real device>_estimated_energy``
-* not bindable -> ``sensor.<engine device>_estimated_energy``
+* bindable   -> ``sensor.<real device>_energy``
+* not bindable -> ``sensor.<engine device>_energy``
 
 A device that became bindable *after* its first start therefore changed its
 entity ID.  Home Assistant only migrates long-term statistics when an entity is
@@ -238,7 +238,7 @@ ENGINE_NAME = "Water Heater"  # engine-reported device name -> synthetic device 
 REAL_DEVICE = Device(id="device_real_water_heater", name="Water Heater Thermostat")
 SYNTHETIC = Device(id="device_wm_water_heater", name=ENGINE_NAME)
 UNIQUE_ID = f"entry123_{ENGINE_DEVICE}_energy"
-ENTITY_NAME = "Estimated energy"
+ENTITY_NAME = "Energy"
 
 
 def _add(
@@ -270,11 +270,11 @@ class TestEntityIdDependsOnCreationDevice:
     def test_creating_on_the_real_device_changes_the_id(self) -> None:
         registry = Registry()
         on_synthetic = add_entity(_add(SYNTHETIC), registry)
-        assert on_synthetic == "sensor.water_heater_estimated_energy"
+        assert on_synthetic == "sensor.water_heater_energy"
 
         other = Registry()
         on_real = add_entity(_add(REAL_DEVICE, via="device_entry"), other)
-        assert on_real == "sensor.water_heater_thermostat_estimated_energy"
+        assert on_real == "sensor.water_heater_thermostat_energy"
         assert on_real != on_synthetic
 
     def test_a_device_becoming_bindable_moves_the_series(self) -> None:
@@ -291,16 +291,16 @@ class TestEntityIdDependsOnCreationDevice:
 
         first = add_entity(_add(SYNTHETIC), registry)
         stats.record(first, 0.47)
-        assert first == "sensor.water_heater_estimated_energy"
+        assert first == "sensor.water_heater_energy"
 
         # The entity registry entry is gone (the config entry was removed, or
         # this is a brand-new install) while statistics survive.
         registry = Registry()
         second = add_entity(_add(REAL_DEVICE, via="device_entry"), registry)
 
-        assert second == "sensor.water_heater_thermostat_estimated_energy"
+        assert second == "sensor.water_heater_thermostat_energy"
         # Two series for one physical load: the old one is orphaned.
-        assert stats.sums == {"sensor.water_heater_estimated_energy": pytest.approx(0.47)}
+        assert stats.sums == {"sensor.water_heater_energy": pytest.approx(0.47)}
         assert second not in stats.sums
 
 
@@ -317,7 +317,7 @@ class TestStableIdentityAfterTheFix:
         unbound = Registry()
         unbound_id = add_entity(_add(SYNTHETIC), unbound)
 
-        assert bound_id == unbound_id == "sensor.water_heater_estimated_energy"
+        assert bound_id == unbound_id == "sensor.water_heater_energy"
         # Only the device changed; the ID did not.
         assert bound.devices[bound_id] == REAL_DEVICE
 
@@ -335,7 +335,7 @@ class TestStableIdentityAfterTheFix:
         stats.record(second, 0.03)
 
         assert first == second
-        assert stats.sums == {"sensor.water_heater_estimated_energy": pytest.approx(0.50)}
+        assert stats.sums == {"sensor.water_heater_energy": pytest.approx(0.50)}
     def test_reload_keeps_the_stored_id(self) -> None:
         """A reload must not re-derive: the unique id already owns an ID.
 
@@ -429,7 +429,7 @@ class TestTheModelMatchesTheShippedSource:
 
         registry = Registry()
         entity_id = add_entity(add, registry)
-        assert entity_id == "sensor.water_heater_estimated_energy"
+        assert entity_id == "sensor.water_heater_energy"
 
         # The post-registration move is the only thing binding may do.
         registry.devices[entity_id] = REAL_DEVICE

@@ -295,7 +295,7 @@ inferred_w        = Σ power of inferred results
 model_estimated_w = Σ power of model_estimated results
 accounted_w       = direct + inferred + model
 
-main_power_w      = Σ parallel main CTs            (sign preserved)
+main_power_w      = Σ effective_feeds()             (sign preserved)
 unknown_residual  = main_power_w − accounted_w     (signed, never clamped)
 accounted_fraction = clamp(accounted / main, 0, 1)
 
@@ -309,9 +309,12 @@ measurement_uncertainty_w  = √(Σ_rows σ²)
   numbers and both are reported.
 * The residual is **never** distributed among devices. `unknown` devices keep
   `power_w = 0`; the residual exists only in `Reconciliation`.
-* When mains are nested (double counting risk), `main_power_w` is unavailable,
-  the residual is `0`, and `explanation` says so — rather than producing a
-  confident wrong number.
+* When mains are nested, `main_power_w` sums only the outermost feed of each
+  branch of the tree, so a sub-panel feed is never added on top of the feed that
+  already contains it. `MainPower.notes` names every excluded feed
+  (`nested_feeds_not_summed: ...`) and every duplicate feed counted once
+  (`duplicate_feeds_counted_once: ...`); the residual is computed from that
+  resolved total rather than being abandoned.
 
 ### 7.1 Worked example
 

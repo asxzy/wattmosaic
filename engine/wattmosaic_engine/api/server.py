@@ -31,6 +31,7 @@ import contextlib
 import hmac
 import json
 import logging
+import math
 import time
 from datetime import date, datetime
 from enum import Enum
@@ -355,6 +356,24 @@ async def topology_confirm(request: web.Request) -> web.Response:
     return _ok(await maybe_await(_facade(request).confirm_topology()))
 
 
+async def topology_nesting(request: web.Request) -> web.Response:
+    """Candidate parent links and duplicate feeds from stored history.
+
+    Read-only: nothing here writes a parent link.  The integration wizard turns a
+    candidate into a parent only when the user confirms it.
+    """
+    raw = request.query.get("hours")
+    hours = 12.0
+    if raw is not None:
+        try:
+            hours = float(raw)
+        except ValueError as exc:
+            raise InvalidRequest("hours must be a number") from exc
+        if not math.isfinite(hours) or hours <= 0 or hours > 24 * 90:
+            raise InvalidRequest("hours must be greater than 0 and at most 2160")
+    return _ok(await maybe_await(_facade(request).nesting_candidates(hours=hours)))
+
+
 async def quality(request: web.Request) -> web.Response:
     return _ok(await maybe_await(_facade(request).quality()))
 
@@ -460,6 +479,7 @@ def create_app(
     router.add_get(f"{base}/topology", topology_get)
     router.add_put(f"{base}/topology", topology_put)
     router.add_post(f"{base}/topology/confirm", topology_confirm)
+    router.add_get(f"{base}/topology/nesting", topology_nesting)
     router.add_get(f"{base}/quality", quality)
     router.add_get(f"{base}/diagnostics", diagnostics)
     router.add_get(f"{base}/models/{{device_id}}", models)

@@ -1,5 +1,5 @@
 {
-  "contract_version": "1.1.0",
+  "contract_version": "1.2.0",
   "schemas": {
     "measurement": "measurement.json",
     "ct_channel": "ct_channel.json",

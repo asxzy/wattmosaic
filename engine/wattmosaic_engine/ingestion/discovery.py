@@ -98,7 +98,7 @@ def _object_id(entity_id: str) -> str:
 
 
 def _panel_prefix(panel: str) -> str:
-    """Stable, generic ct-id prefix for a panel name (``Main Panel`` -> ``main_panel``)."""
+    """Stable, generic ct-id prefix for a panel name (``Panel A`` -> ``panel_a``)."""
     cleaned = re.sub(r"[^a-z0-9]+", "_", panel.lower()).strip("_")
     return cleaned or "panel"
 

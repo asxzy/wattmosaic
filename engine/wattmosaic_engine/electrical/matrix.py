@@ -96,6 +96,10 @@ class MeasurementMatrix:
     row_notes: dict[str, list[str]] = field(default_factory=dict)
     nested_children: dict[str, tuple[str, ...]] = field(default_factory=dict)
     channel_polarity: dict[str, str] = field(default_factory=dict)
+    #: Per-channel circuit multiplier (default 1.0).  Applied once, inside
+    #: :meth:`_reading_w`, so every row of the fit sees a consistently scaled
+    #: measurement and the multiplier is never applied twice.
+    channel_multiplier: dict[str, float] = field(default_factory=dict)
     unobserved_devices: list[str] = field(default_factory=list)
     topology_version: int = 1
     phase_split_l1: float = 0.5
@@ -142,6 +146,13 @@ class MeasurementMatrix:
 
     # -- targets --------------------------------------------------------------
     def _reading_w(self, readings: Mapping[str, object], channel_id: str) -> float | None:
+        value = self._raw_reading_w(readings, channel_id)
+        if value is None:
+            return None
+        m = self._channel_multiplier(channel_id)
+        return value if m == 1.0 else value * m
+
+    def _raw_reading_w(self, readings: Mapping[str, object], channel_id: str) -> float | None:
         raw = readings.get(channel_id)
         if raw is None:
             return None
@@ -165,6 +176,9 @@ class MeasurementMatrix:
 
     def _channel_polarity(self, channel_id: str) -> str:
         return self.channel_polarity.get(channel_id, "normal")
+
+    def _channel_multiplier(self, channel_id: str) -> float:
+        return float(self.channel_multiplier.get(channel_id, 1.0) or 1.0)
 
     def prepare(
         self,
@@ -326,6 +340,7 @@ def build_measurement_matrix(
         channel_polarity={
             cid: str(graph.channels[cid].polarity) for cid in rows
         },
+        channel_multiplier={cid: graph.multiplier_for(cid) for cid in rows},
         unobserved_devices=[d for d in devices if np.allclose(A[:, dev_index[d]], 0.0)],
         topology_version=graph.topology.version,
         phase_split_l1=graph.phase_split_l1,

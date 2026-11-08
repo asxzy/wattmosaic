@@ -114,5 +114,5 @@
   "title": "Reconciliation",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/reconciliation.json",
-  "x-contract-version": "1.1.0"
+  "x-contract-version": "1.2.0"
 }

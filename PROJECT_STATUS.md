@@ -1099,12 +1099,12 @@ already uses rather than by a longer list.
 
 | Location | Leak | Replacement |
 | --- | --- | --- |
-| `custom_components/wattmosaic/flow_logic.py` | `"refoss"` in the candidate `_STOPWORDS` | `panel_shared_tokens()`: the token set common to *every* channel, derived from the channels themselves |
-| `tools/audit/audit_environment.py` | `MONITOR_HINTS = (refoss, em16, shelly_em, neurio, sense, iotawatt)` | `identify_monitors()`: one device publishing ≥3 power entities |
+| `custom_components/wattmosaic/flow_logic.py` | a household's monitor brand in the candidate `_STOPWORDS` | `panel_shared_tokens()`: the token set common to *every* channel, derived from the channels themselves |
+| `tools/audit/audit_environment.py` | `MONITOR_HINTS` as a dated list of energy-monitor brand names | `identify_monitors()`: one device publishing ≥3 power entities |
 
 Neither fix is cosmetic. On the saved live snapshot the dated brand list matched
-**33 devices**, four of which were real monitors — one hint was the ordinary
-English word `sense`, which matched device names across unrelated integrations.
+**33 devices**, four of which were real monitors — one hint was an ordinary
+English word, which matched device names across unrelated integrations.
 The structural rule matched exactly the **4** multi-channel devices.
 
 The wizard's candidate filter had the same shape of bug: matching on the monitor
@@ -1465,6 +1465,426 @@ with 10/10 required. The tracked tree contains no real device slug, no MAC, no
 host IP and no time zone; the only appliance words left are public `DeviceType`
 enum values (`ev_charger`, `hot_tub`, `sauna`, ...), which are schema vocabulary
 and identify nothing.
+
+### 7m. Defect #47 — the wizard could not accept its own defaults
+
+Installing 0.1.5 on the live installation produced a config flow that walked all
+38 channels and then stopped dead on the confirm step with:
+
+```
+pair_not_reciprocal:<ct3 channel>:<its ct1 sibling>
+```
+
+**Why it blocked the install.** `suggested_pair()` supplies the default
+`paired_ct_id` for every channel, and `validate_assignments()` correctly rejects
+a one-sided pair. For a channel ending in `ct3` the trailing-integer fallback
+rewrote the leg to `1`; for the channel ending in `ct1` it rewrote it to `2`. So
+the wizard proposed a `ct3 -> ct1` pair while proposing `ct1 -> ct2`. The confirm
+form therefore could not accept its own defaults, and there is no way for a user
+to recover: the error names one channel, the real mistake is the default, and 38
+channels all look alike.
+
+It is not specific to three-leg lighting. Any circuit with `ctN`, `N >= 3`,
+triggers it.
+
+**Fix, in the suggestion layer.** Only legs 1 and 2 are ever paired — a third leg
+is a separate circuit, which is the rule the engine's discovery already applies
+(`if leg in (1, 2)`) and the same distinction as defect #28. A declared
+`paired_ct_id` is honoured only when the other side repeats it, and every
+suggestion is checked for reciprocity before it is offered. Validation was
+*not* relaxed.
+
+**Measured on the real topology.** Replaying the live engine's 38 channels
+through the fixed logic: accept-all-defaults gives 0 validation errors (was 1
+blocking), 18 reciprocal pairs, and 22 phase unknowns that stay honestly
+uncertain. `resolve_confirmation` returns `(False, None)` — a finishable
+*candidate*, which is the documented outcome.
+
+**Live result.** The config entry was created and is `loaded`; 322 entities were
+published (292 sensors, 30 binary sensors), 28 `*_estimated_energy` entities are
+all bound to 28 distinct real devices (none left on the synthetic device), and
+per-device power and energy are flowing. The topology was stored as a
+**candidate**, not confirmed — 22 channels have an unknown phase, and confirming
+upwards from that would be the false confirmation this project treats as worse
+than none.
+
+**Negative verification.** `test_a_third_leg_is_never_paired` and
+`test_every_suggestion_is_reciprocal` fail when the leg restriction and the
+reciprocity check are removed and pass with them. 1151 tests pass, `ruff check .`
+clean, 10/10 required gates.
+
+**App update: blocked, then resolved.** The Supervisor refused
+`AppManager.update` with *"not enough free space (1.8GB) left on the device"*
+(host disk 44.4 GB used of 48.5 GB, zero backups to reclaim). The free space then
+rose to 4.0 GB and the update completed; the App now runs **0.1.5**, so the
+`discovery:` announcement is live. Discovery was exercised against an existing
+entry and correctly aborted rather than duplicating it; the entry itself was
+created through the manual `async_step_user` path. This was an environment
+limit, not a defect.
+
+### 7n. Live finding: three monitor feeds are summed as if they were parallel
+
+The installation has three multi-channel monitors, each publishing its own panel
+feed. Discovery types every one of those feeds as `ct_type: main` with no
+`parent_ct_id`, and `main_power_w()` sums all enabled mains. Six feed legs are
+therefore added together.
+
+**The feeds are not parallel.** Measured over 12 h of recorder history (2627
+instants with more than 200 W somewhere, 30 W tolerance), the containment
+asymmetry is unambiguous:
+
+| row ≥ column | load-manager | main-panel | sub-panel |
+| --- | --- | --- | --- |
+| load-manager | 100.0% | 52.8% | 99.8% |
+| main-panel | 52.0% | 100.0% | 99.9% |
+| sub-panel | 0.2% | 0.2% | 100.0% |
+
+Parallel feeds would each sit near 50%. One feed contains another gives ~100% one
+way and ~0% the other. The sub-panel is inside both others at essentially every
+instant; the load-manager and main-panel pair is symmetrically ~52/52, so those
+two measure the same service (102% of each other's median, correlated 0.984).
+
+**A lag sweep rules out sampling skew.** If two CTs sat on one conductor but were
+sampled at different times, sweeping the comparison lag would collapse the gap to
+meter noise. It does not: for load-manager vs main-panel the median absolute
+difference bottoms out at 126 W at zero lag and rises monotonically either side,
+and for main-panel vs sub-panel it never falls below 604 W at any lag in
+−45…+45 s. These are different conductors, not one wire seen twice.
+
+**Physical closure confirms the sub-panel hangs off the main panel.** Summing
+each panel's own branch loads over 6 h (1437 grid instants, forward-filled):
+`main_feed − (main_loads + sub_feed)` is negative in only 11/1437 instants
+(0.8%), median remainder +230 W. Without the sub-feed the main feed is
+unexplained by 1110 W median against an 870 W median sub-feed — i.e. the sub-feed
+*is* the missing outlet. Each feed is also ≥ its own measured loads in ≥99.3% of
+instants, so the channels are individually sound.
+
+**The engine total is literally the sum of the six legs.** Across 57 paired
+instants the engine's `total_incoming_power` equals the arithmetic sum of all
+six feed legs with median relative error **1.35%** and ratio **1.007**. Against
+any single panel it is 2.89–3.24× out. There is no inference step in between.
+
+**Consequence, measured on the live install (48 paired instants):**
+
+| Quantity | Reported | Against the outermost feed |
+| --- | --- | --- |
+| `total_incoming_power` | 11 620 W median | 4 053 W |
+| `accounted_fraction` | 31.6% | 92.1% (**2.91× understated**) |
+| `unknown_unattributed_power` | 7 900 W | 334 W (**23.7× overstated**) |
+
+So the reconciliation denominator is roughly 2.9× too large, and almost all
+"unattributed" power is the double-counted feeds rather than a real unknown load.
+Per-device power and energy are unaffected — they come from the CT rows, not the
+total — which is why the 28 per-device energy entities look sane while the
+household roll-up does not.
+
+**Replaying the live channel set through the engine's own `main_power_w()`:**
+
+| Topology | mains | `total_w` |
+| --- | --- | --- |
+| as discovered (all six legs `main`) | 6 | 12 613 W |
+| main-panel feed retyped `branch` | 4 | 8 155 W |
+| main + sub feeds retyped `branch` | 2 | 4 356 W |
+
+A/B = 1.55×, A/C = 2.90×. So the excess is entirely the double count.
+
+**Why this is not simply a user error, and not yet called a defect either.**
+
+* The wizard's channel form exposes `role`, `phase`, `polarity`, `paired_ct_id`,
+  `device_id`, `enabled`. There is **no `parent_ct_id` field anywhere** in
+  `custom_components/`, so the correct nesting cannot be expressed through the
+  UI even by a user who knows the wiring.
+* The engine's nested-mains guard (`main_power_w()` refuses to sum mains where
+  one has a `parent_ct_id`) is therefore unreachable from the app: only an
+  explicit `parent_ct_id` triggers it, and discovery never sets one — it records
+  the panel name in `metadata["evidence"]` and discards the relationship.
+* `docs/electrical_model.md` documents nesting only as main-under-main. It says
+  nothing about a second monitor's feed feeding a sub-panel, which is what this
+  install has.
+* The simulator models the correct shape — `tools/simulator/topology.py` states
+  *"A sub-panel feed is a `branch` CT whose parent is the main-panel line. Nested
+  `main` CTs are illegal because mains are summed."* So the intended model exists
+  and the tests pass against it; production discovery just never produces it.
+
+**Workaround, and why it is not offered as a fix.** Retyping the two nested feeds
+to `branch` in the wizard does produce the correct total (row C above). But it
+silently discards the nested relationship: those channels stop being mains, so
+nothing downstream knows the sub-panel sits inside the main panel, and the
+`nested_child_missing` / subtraction logic never engages. It converts a visible
+double count into an invisible topology error. It is recorded here as evidence,
+not recommended.
+
+**What the fix requires.** Recorded here, then implemented in §7o.
+
+1. Discovery must carry the panel relationship. And it must be a *candidate*,
+   since which feed contains which is a wiring fact.
+2. The wizard must let the user see and confirm that nesting, and must offer a
+   circuit multiplier and a duplicate-feed declaration.
+3. Until a user confirms, the engine must not present a summed multi-panel total
+   as authoritative.
+
+**Is it a real defect?** The wiring is a household fact only the user can settle.
+The defect that *is* demonstrated is narrower and does not depend on the answer:
+discovery accepts several independent monitors, types all their feeds `main`,
+and the engine sums them with no containment check, no warning, and no UI path to
+correct it. `accounted_fraction` and `unknown_unattributed_power` are then
+reported as if they were meaningful. That is a reporting defect regardless of how
+the panels are wired.
+
+**Blast radius: per-device output is unaffected.** For every device measured by a
+dedicated CT, the published `*_estimated_power` is *exactly* its own CT reading —
+median absolute error 0.0 W over 68–70 aligned samples for six devices across two
+panels. Energy accumulation is also correct: aligning 5-minute energy deltas with
+5-minute mean power bucket-by-bucket gives a ratio of 0.99–1.01 for every
+segment after the first. (An earlier 0.78 figure was a window-misalignment
+artefact of comparing a closed energy window to a different power window; the
+aligned comparison is the valid one.) So the 28 per-device power and energy
+entities are trustworthy; only the household roll-up, the accounted fraction and
+the unknown residual are wrong.
+
+---
+
+## 7o. Nested panels, circuit multipliers and duplicate feeds (contract 1.2.0)
+
+§7n established the defect: several monitors' feeds were all typed `main` and
+summed as if parallel, so the household roll-up was 2.9× too high and the
+residual 23.7× too high. It also established that the fix needs a *wiring fact*,
+which only the user can supply. This section is the implementation.
+
+### 7o.1 Two user confirmations that frame the design
+
+The user confirmed two facts that the code must not re-derive:
+
+1. **The sub-panel is fed from the main panel — the structure is nested.** So a
+   `main` CT may legitimately have a `parent_ct_id`, to any depth.
+2. **The Refoss / VElectric device already applies its circuit multiplier** and
+   publishes the full load. So `measurement_multiplier` must default to `1.0` and
+   must never be inferred from `phase` or `ct_type`; inferring it would double a
+   circuit the device already doubled.
+
+Additionally: **all CT measurements are treated as ground truth.** CT sensor
+accuracy is out of scope. A CT serving exactly one load therefore carries very
+high confidence, and the UI must not hedge with the word "estimated" — the user
+reads confidence to decide what is inferred.
+
+### 7o.2 Contract (`1.2.0`)
+
+`CTChannel` gains:
+
+| Field | Meaning |
+| --- | --- |
+| `alias_of_ct_id` | this CT watches the *same conductors* as another; only the canonical one contributes to a total |
+| `measurement_multiplier` | scale applied to this channel's reading, default `1.0` |
+
+Validators: the multiplier must be positive and finite (zero would silently hide
+the circuit, negative would read as export), and a CT cannot be an alias of
+itself. `parent_ct_id` is now documented as arbitrary depth.
+
+### 7o.3 Resolution replaces refusal
+
+`main_power_w()` no longer returns an error for nested mains. It sums
+`TopologyGraph.effective_feeds()` — the mains with no *main* ancestor — so:
+
+| topology | as-discovered sum (old) | resolved sum (new) |
+| --- | --- | --- |
+| three monitors, all `main` | 12 613 W | depends on declared nesting |
+| main-panel → branch (4 mains) | — | 8 155 W |
+| main + sub → branch (2 mains) | — | 4 356 W |
+
+Every exclusion is named in `MainPower.notes`
+(`nested_feeds_not_summed: …`, `duplicate_feeds_counted_once: …`) and listed in
+`excluded_channels`. A refusal would have been safer than a wrong number, but a
+*resolution* is better than both: the nesting is a real wiring fact, so the total
+stays available and correct.
+
+The destructive branch-subtraction logic in `MeasurementMatrix` was already
+depth-agnostic (`ancestors`/`descendants` are recursive), so nested branch CTs
+needed no change.
+
+### 7o.4 Multiplier applied exactly once
+
+The multiplier is applied only on the way out of a raw reading, never written
+back into a window or reading object:
+
+| site | change |
+| --- | --- |
+| `electrical/direct.py` | `topology.scale_w(cid, reading.signed_w())` |
+| `electrical/main_power.py` | `graph.scale_w(...)` before summation |
+| `electrical/matrix.py` | `channel_multiplier` map; `_reading_w()` scales, `_raw_reading_w()` does not |
+| `disaggregation/events.py` | `detect_changes(..., multipliers=…)` scales the series, baseline *and* threshold |
+
+Scaling the step-detection threshold too is deliberate: a doubled leg has
+doubled noise, so the same significance rule applies to the *load* step.
+
+### 7o.5 Candidate nesting, never inferred fact
+
+New module `electrical/nesting.py`. It returns `NestingCandidate` objects, all
+`requires_confirmation=True`. The inference unit is a **measurement node**, not a
+CT: a CT plus its reciprocal `paired_ct_id` partner, or the two legs of a
+split-phase panel feed (`<stem>_l1`/`<stem>_l2`, grouped by id stem, flagged
+`is_assumed`). Comparing legs compares different conductors, which is why the
+first implementation failed.
+
+**The shipped detector did not reproduce §7n.** The originally published version
+used *mutual containment* (each inside the other at ±10 %) as the duplicate test.
+Replayed against the stored 48 h of real measurements, it found **zero**
+duplicates: the real alias pair balances only 0.7475 / 0.5347, because the two
+monitors disagree by a few percent at each instant and a strict mutual bound is
+the wrong statistic. §7n's conclusion was right; the test that was supposed to
+reproduce it was not. That test was deleted.
+
+The detector was rebuilt around **joint activity**, and then around nodes:
+
+* **activity** — two channels are only comparable while *both* carry ≥200 W.
+  Two circuits at 8 W and 9 W agree to the watt on everything.
+* **relative difference** — median |a−b| / max(a,b) ≤ 0.15. Measured separation
+  on the reference installation: the real alias pair 0.065, the closest pair of
+  genuinely different circuits 0.166. The threshold sits inside that margin.
+* **magnitude ratio** — ≤ 1.25. This is *not* subsumed by the relative
+  difference: rel = 0.125 with ratio = 1.29 is reachable, and it is what keeps a
+  circuit-multiplier channel from being collapsed into its partner.
+* **declared facts are excluded** — a declared double-pole pair and any declared
+  ancestor/descendant pair are never tested for duplication.
+
+**A load's level is not inferable — measured, not assumed.** Four independent
+rules were tried against the 32 declared parents in the stored topology:
+
+| Rule | Result |
+| --- | --- |
+| tightest peak among containers with containment ≥ 0.995 | **0/32 correct** |
+| coverage (parent live whenever child is live) | 0/32 — every container ties |
+| unique-fit elimination (a load exceeding a panel cannot be on it) | **32/32 ambiguous** |
+| windowed step-response (parent follows the child's steps) | 1/25 |
+
+Containment prunes but never selects: a 9 W lighting circuit is contained by
+every panel in the house at 1.000 while idle. So **only a `main` CT may be
+proposed as a nested child** (`_NESTABLE_CHILD_TYPES = {"main"}`); loads are
+reported in `report["not_inferable"]` as `load_level_not_measurable` and the
+wizard asks the user. `phase_compatible()` was deleted for the same reason it
+could not help: the measurements contradict the phase labels
+(one sub-panel leg is 0.9950 contained by the *other* panel leg), so phase is now used
+only to make the written-back leg readable.
+
+**Ambiguity is reported, not resolved.** When several parents fit and closure
+cannot separate them, the child goes into `report["ambiguous"]` with the
+candidate list and is never proposed. A channel with a declared parent is skipped
+and recorded under `report["suppressed"]` as `parent_already_declared`.
+
+**Acceptance on real data (48 h, 38 channels, 32 declared parents):**
+
+| Metric | Result |
+| --- | --- |
+| duplicate candidates | 2 (panel leg 1 == load-manager leg 1, same for leg 2), act 0.993, rel 0.065, ratio 1.07 |
+| nested candidates | 2 (sub-panel leg 1 → load-manager leg 1, same for leg 2), containment 0.9972 |
+| false nestings | 0 |
+| loads reported not inferable | 28 |
+| whole-home feeds | **6 → 2** |
+| median whole-home power | **2 100 W** (was ~12.6 kW with 6 mains summed) |
+
+**Known limitation.** sub-panel → load-manager is the unique measured answer,
+but the load manager and the panel are the same wire (the alias above), so the
+proposal names the load-manager leg as the parent rather than the panel leg.
+Functionally correct — the feeds drop from 6 to 2 either way — but which of two
+aliases becomes the canonical parent is arbitrary. Duplicates are offered to the
+wizard as `candidate_aliases` (a separate proposal kind from
+`candidate_parents`, because "same conductor" and "fed by" are different
+questions), and `suggested_alias` pre-selects one only when it is unambiguous and
+does not contradict a declared pair or parent.
+
+**`GET /topology/nesting`** exposes all of it: `candidates`,
+`candidate_parents`, `candidate_aliases`, `ambiguous`, `suppressed`,
+`not_inferable`, `nodes`, and `notes`.
+
+### 7o.6 UI wording
+
+Display names no longer use "estimated": `Estimated power` → `Power`,
+`Estimated energy` → `Energy`, `Model estimated power` → `Model power`. The
+source enum values (`model_estimated`) are protocol, not UI, and are unchanged.
+
+Renaming a translated name changes the `entity_id` Home Assistant derives, which
+would orphan long-term statistics. `entity_migration.py` therefore performs an
+**explicit registry rename** at setup (`async_update_entity(new_entity_id=…)`),
+which is the only path that makes the recorder migrate `statistics` /
+`statistics_short_term` rows. The decision (which entities to rename) is pure and
+unit-tested; the guard was negative-verified by deleting the "user-renamed"
+check, which made the test fail.
+
+### 7o.7 Verification
+
+| Check | Result |
+| --- | --- |
+| Full suite | 1 249 passed |
+| `ruff check engine/ tools/dev/ --no-cache` | clean |
+| `ruff check custom_components/ tests/ --no-cache` | clean |
+| Contract version | `1.2.0`, `data/schemas/` regenerated (19) |
+| Negative verification (nesting + alias) | **17/17** guards fail when removed |
+| Real-data replay (48 h, 38 channels) | 6 → 2 feeds, 2 100 W, 0 false nestings |
+
+The negative verification is the part worth spelling out. On the node-based
+rewrite it first reported **6/14**, and that number was itself wrong twice over:
+
+1. **The harness was flaky.** It did not clear `__pycache__` or disable the
+   pytest cache, so a removed guard could be masked by stale bytecode, and it
+   gave different answers for the same case on consecutive runs. It now purges
+   bytecode, runs with `-p no:cacheprovider`, and re-runs each test on the
+   restored file to prove the failure was caused by the removal. It lives at
+   `tools/dev/negverify_nesting.py` so the check is reproducible.
+2. **Eight tests were too weak.** They called `duplicate_evidence` directly
+   while the guards they were supposed to prove live in `infer_nesting`'s
+   duplicate loop, so removing the guard could not possibly fail them. Each was
+   rewritten to exercise the guard at the level it actually operates, using the
+   measured separating cases.
+
+Two guards were nearly deleted as redundant, and measuring saved both:
+`ratio_ceiling` is *not* subsumed by `rel_diff` (rel = 0.125 with ratio = 1.29
+is reachable), and `leg_count_exactly_two` could not be tested with three legs
+(the regex only matches `_l1`/`_l2`) but *is* load-bearing for a **lone** leg,
+which must not be grouped.
+
+| # | Guard | Where |
+| --- | --- | --- |
+| 1 | joint-activity floor rejects rare co-activity | `nesting.infer_nesting` |
+| 2 | relative-difference ceiling rejects tracking feeds | `nesting.infer_nesting` |
+| 3 | magnitude ratio rejects a consistent multiple | `nesting.infer_nesting` |
+| 4 | a one-sided declared pair is never collapsed | `nesting.infer_nesting` |
+| 5 | a declared parent is not re-proposed | `nesting.infer_nesting` |
+| 6 | only a `main` may be a nested child | `nesting.infer_nesting` |
+| 7 | excitation rejects a standby feed | `nesting.infer_nesting` |
+| 8 | a child that exceeds its parent is not nested | `nesting.infer_nesting` |
+| 9 | closure rejects an over-explained parent | `nesting.infer_nesting` |
+| 10 | a non-reciprocal pair is not grouped | `nesting.build_nodes` |
+| 11 | a lone leg is not grouped | `nesting.build_nodes` |
+| 12 | a node reading is the sum of its members | `nesting._node_series` |
+| 13 | closure skips an unknown own-load instant | `nesting.closure_fraction` |
+| 14 | containment skips instants below the parent floor | `nesting.containment` |
+| 15 | a declared fact suppresses the alias suggestion | `flow_logic.suggested_alias` |
+| 16 | an alias never suggests itself or a descendant | `flow_logic.suggested_alias` |
+| 17 | a parent proposal is not read as an alias | `flow_logic.alias_candidates` |
+
+Earlier guards, still verified in the same pass: `effective_feeds` excludes a
+main with a main ancestor and resolves alias chains; `scale_w` and the
+direct/matrix/event paths apply the multiplier; a parent cycle, an alias cycle, a
+single-load parent and an out-of-range multiplier are all rejected by
+`validate_assignments`; two candidates are never narrowed to one; discovery
+proposals never write `parent_ct_id`; a descendant is never suggested as a
+parent.
+
+**Defect found by the earlier negative pass (fixed).** `_as_multiplier` clamped an
+out-of-range value to `1.0` during *normalisation*, which meant
+`validate_assignments` could never see the bad number: a user typing `200`
+would have had the circuit silently reported at 1/200th of its load, with no
+error shown. Range is a validation rule, so normalisation now preserves a finite
+number and only falls back to `1.0` when the input cannot be parsed at all.
+
+**Integration gap found and fixed.** The duplicate candidates — the single
+biggest correction on real data, the ones that take the total from 6 feeds to
+2 — had no path to the wizard at all: `candidate_parents` carried only `nested`
+candidates. `candidate_aliases` now carries them, `apply_nesting_candidates`
+records them in a separate `metadata.alias_candidates` key, and
+`suggested_alias` pre-selects one without ever writing `alias_of_ct_id`.
+
+**Still unverified:** real per-device accuracy. There is no household ground
+truth, so it stays "unverified" rather than being claimed.
 
 ---
 

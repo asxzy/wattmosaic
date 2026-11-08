@@ -87,7 +87,11 @@ def resolve_direct(
                 reasons.append(f"missing_channel:{cid}")
                 qualities.append(QualityStatus.MISSING)
                 continue
-            legs[cid] = reading.signed_w()
+            # A declared circuit multiplier is applied once, here, on the way
+            # out of the raw reading.  Two CTs on one leg (``paired_ct_id``)
+            # each carry their own multiplier, so a 240 V load monitored on one
+            # leg with ``measurement_multiplier=2.0`` sums to the full load.
+            legs[cid] = topology.scale_w(cid, reading.signed_w())
             ages.append(reading.age_s)
             qualities.append(reading.quality)
             repeated = repeated or reading.repeated

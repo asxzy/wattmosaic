@@ -349,6 +349,24 @@ class EngineClient:
             body["version"] = int(version)
         return await self._request("POST", "/topology/confirm", json_body=body)
 
+    async def nesting_candidates(self, *, hours: float = 12.0) -> dict[str, Any]:
+        """``GET /topology/nesting`` -> candidate links, never applied.
+
+        Read-only.  Returns two independent proposal kinds, which answer
+        different questions and must not be conflated:
+
+        * ``candidate_parents`` -- "what feeds this CT?"  A panel feed that stays
+          inside a container.  Pre-selected only when unambiguous.
+        * ``candidate_aliases`` -- "is this CT the same conductor as another?"
+          A duplicate feed, offered as an alias because summing both would double
+          count.
+
+        The payload also reports ``ambiguous`` (several parents fit, none proven)
+        and ``not_inferable`` (a load, whose level measurement cannot establish),
+        so the wizard can ask the user instead of showing nothing.
+        """
+        return await self._request("GET", f"/topology/nesting?hours={float(hours):g}")
+
     async def quality(self) -> dict[str, Any]:
         """``GET /quality`` -> ``DataQualityReport``."""
         return await self._request("GET", "/quality")

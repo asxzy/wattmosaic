@@ -31,6 +31,7 @@ class MainPower:
     missing_channels: tuple[str, ...] = ()
     excluded_channels: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
+    notes: tuple[str, ...] = ()
     complete: bool = True
     has_export: bool = False
 
@@ -47,6 +48,7 @@ class MainPower:
             "missing_channels": list(self.missing_channels),
             "excluded_channels": list(self.excluded_channels),
             "errors": list(self.errors),
+            "notes": list(self.notes),
             "complete": self.complete,
             "has_export": self.has_export,
         }
@@ -92,22 +94,29 @@ def main_power_w(
     *,
     phase_split_l1: float = 0.5,
 ) -> MainPower:
-    """Sum the parallel main CTs, preserving sign and refusing nested mains."""
+    """Sum the parallel feeds of the household, preserving sign.
+
+    Only :meth:`TopologyGraph.effective_feeds` contribute.  A nested main (one
+    feed behind another) is not added again, so a panel tree of any depth sums
+    correctly.  Aliased channels (two CTs on one conductor) contribute once.
+
+    A channel's ``measurement_multiplier`` is applied here, so every consumer of
+    a main total sees the same scaled value.
+    """
     errors: list[str] = []
     nested = graph.nested_mains()
+    notes: list[str] = []
     if nested:
+        # Reported, not refused: the inner feed is excluded from the sum and the
+        # exclusion is visible to the caller.
         detail = ", ".join(f"{inner} under {outer}" for inner, outer in nested)
-        errors.append(
-            "refusing to sum nested mains (double counting): " + detail
-        )
-        return MainPower(
-            total_w=0.0,
-            excluded_channels=tuple(sorted({c for pair in nested for c in pair})),
-            errors=tuple(errors),
-            complete=False,
-        )
+        notes.append("nested_feeds_not_summed: " + detail)
 
-    mains = graph.main_channels()
+    aliases = [c.ct_id for c in graph.alias_channels() if graph.is_enabled(c.ct_id)]
+    if aliases:
+        notes.append("duplicate_feeds_counted_once: " + ", ".join(sorted(aliases)))
+
+    mains = graph.feed_channels()
     if not mains:
         errors.append("no enabled main CT is defined in the topology")
         return MainPower(total_w=0.0, errors=tuple(errors), complete=False)
@@ -119,8 +128,9 @@ def main_power_w(
     both: list[float] = []
 
     for ch in mains:
-        value = _read_w(
-            readings, ch.ct_id, channel_polarity=Polarity(ch.polarity)
+        value = graph.scale_w(
+            ch.ct_id,
+            _read_w(readings, ch.ct_id, channel_polarity=Polarity(ch.polarity)),
         )
         if value is None:
             missing.append(ch.ct_id)
@@ -154,7 +164,14 @@ def main_power_w(
         l2_w=reported_l2,
         per_channel_w=per_channel,
         missing_channels=tuple(missing),
+        excluded_channels=tuple(
+            sorted(
+                ({c for pair in nested for c in pair} | set(aliases))
+                - set(per_channel)
+            )
+        ),
         errors=tuple(errors),
+        notes=tuple(notes),
         complete=complete,
         has_export=any(v < 0 for v in per_channel.values()),
     )

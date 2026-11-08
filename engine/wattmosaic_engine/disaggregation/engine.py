@@ -418,7 +418,7 @@ class DisaggregationEngine:
         unknown_state_devices = [d for d in device_states if d not in graph.devices]
 
         diagnostics: dict[str, Any] = {
-            "contract": "1.1.0",
+            "contract": "1.2.0",
             "topology_version": topology.version,
             "topology_status": str(topology.status),
             "topology_problems": graph.validate(),
@@ -465,6 +465,7 @@ class DisaggregationEngine:
             min_delta_w=self.min_delta_w,
             noise_floor_w=self.noise_floor_w,
             previous_values=previous_values,
+            multipliers={cid: graph.multiplier_for(cid) for cid in coerced.readings},
         )
         state_overrides = _device_state_overrides(topology)
         transitions = _collect_transitions(coerced, device_states, state_overrides)

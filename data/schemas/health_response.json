@@ -12,7 +12,7 @@
       "type": "string"
     },
     "contract_version": {
-      "default": "1.1.0",
+      "default": "1.2.0",
       "title": "Contract Version",
       "type": "string"
     },
@@ -81,5 +81,5 @@
   "title": "HealthResponse",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/health_response.json",
-  "x-contract-version": "1.1.0"
+  "x-contract-version": "1.2.0"
 }

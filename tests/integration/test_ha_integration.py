@@ -1327,6 +1327,72 @@ class TestChannelNormalisation:
         assert flow.suggested_pair({"ct_id": "ct_hot_tub_ct2"}, channels) == "ct_hot_tub_ct1"
         assert flow.suggested_pair({"ct_id": "ct_other"}, channels) is None
 
+    def test_a_third_leg_is_never_paired(self) -> None:
+        """``ct3`` is a separate circuit, not the other half of a 240 V load.
+
+        The wizard fills every channel's default from ``suggested_pair``.  A
+        trailing-integer fallback used to pair ``example_circuit_ct3`` with
+        ``example_circuit_ct1`` while ``example_circuit_ct1`` paired with
+        ``example_circuit_ct2``; the one-sided result fails
+        ``validate_assignments``, so the confirm step rejected its own defaults
+        and the install could not be completed.
+        """
+        topology = {
+            "channels": [
+                {"ct_id": "example_circuit_ct1", "name": "Example circuit",
+                 "ct_type": "dedicated_device"},
+                {"ct_id": "example_circuit_ct2", "name": "Example circuit",
+                 "ct_type": "dedicated_device"},
+                {"ct_id": "example_circuit_ct3", "name": "Example circuit",
+                 "ct_type": "dedicated_device"},
+            ]
+        }
+        channels = flow.normalise_channels(topology)
+        assert flow.suggested_pair({"ct_id": "example_circuit_ct1"}, channels) == (
+            "example_circuit_ct2"
+        )
+        assert flow.suggested_pair({"ct_id": "example_circuit_ct2"}, channels) == (
+            "example_circuit_ct1"
+        )
+        assert flow.suggested_pair({"ct_id": "example_circuit_ct3"}, channels) is None
+
+    def test_every_suggestion_is_reciprocal(self) -> None:
+        """No channel may default to a partner that does not point back.
+
+        This is the property that keeps the wizard finishable for an arbitrary
+        topology: whatever the engine reports, accepting all defaults must
+        produce a set of assignments that validates.
+        """
+        topology = {
+            "channels": [
+                {"ct_id": "main_1", "ct_type": "main", "phase": "l1"},
+                {"ct_id": "main_2", "ct_type": "main", "phase": "l2"},
+                {"ct_id": "plug_1", "ct_type": "dedicated_device"},
+                {"ct_id": "plug_2", "ct_type": "dedicated_device"},
+                {"ct_id": "plug_3", "ct_type": "dedicated_device"},
+                {"ct_id": "plug_10", "ct_type": "dedicated_device"},
+            ]
+        }
+        channels = flow.normalise_channels(topology)
+        by_id = {c["ct_id"]: c for c in channels}
+        for channel in channels:
+            pair = flow.suggested_pair(channel, channels)
+            if pair is None:
+                continue
+            assert flow.suggested_pair(by_id[pair], channels) == channel["ct_id"], channel["ct_id"]
+
+    def test_a_declared_but_one_sided_pair_is_not_suggested(self) -> None:
+        """A stale ``paired_ct_id`` on one side must not be forced on the user."""
+        topology = {
+            "channels": [
+                {"ct_id": "a_1", "ct_type": "branch", "paired_ct_id": "a_2"},
+                {"ct_id": "a_2", "ct_type": "branch"},
+            ]
+        }
+        channels = flow.normalise_channels(topology)
+        pair = flow.suggested_pair({"ct_id": "a_1", "paired_ct_id": "a_2"}, channels)
+        assert pair == "a_2", "a structural 1<->2 partner is still the right suggestion"
+
 
 class TestAssignmentValidation:
     def test_valid_assignments(self) -> None:
@@ -1389,6 +1455,9 @@ class TestAssignmentValidation:
             "phase": "l1",
             "polarity": "inverted",
             "paired_ct_id": None,
+            "parent_ct_id": None,
+            "alias_of_ct_id": None,
+            "measurement_multiplier": 1.0,
             "device_id": None,
             "enabled": True,
         }

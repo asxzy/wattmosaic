@@ -58,6 +58,8 @@ def _ch(
     resolution: float | None = None,
     reliability: float = 1.0,
     polarity: Polarity = Polarity.NORMAL,
+    alias: str | None = None,
+    multiplier: float = 1.0,
 ) -> CTChannel:
     return CTChannel(
         ct_id=cid,
@@ -71,6 +73,8 @@ def _ch(
         resolution_w=resolution,
         reliability=reliability,
         polarity=polarity,
+        alias_of_ct_id=alias,
+        measurement_multiplier=multiplier,
         topology_status=TopologyStatus.CONFIRMED,
     )
 
@@ -156,7 +160,13 @@ def test_unknown_parent_and_duplicate_ids_are_reported():
     assert any("duplicate device id" in p for p in problems)
 
 
-def test_nested_main_is_flagged_and_main_power_refuses_to_sum():
+def test_nested_main_sums_only_the_outermost_feed():
+    """A panel feed behind a service feed is counted once, not twice.
+
+    Nesting is a supported wiring shape, so this is no longer reported as a
+    validation problem.  The nested feed must simply not be added again: the
+    answer is the outer feed (5000 W), never the double-counted 7000 W.
+    """
     topo = Topology(
         channels=[
             _ch("utility", CTType.MAIN, phase=Phase.BOTH),
@@ -164,14 +174,110 @@ def test_nested_main_is_flagged_and_main_power_refuses_to_sum():
         ]
     )
     graph = build_graph(topo)
-    assert any("nested mains" in p for p in graph.validate())
+    assert not any("nested mains" in p for p in graph.validate()), (
+        "nesting is a supported shape and must not be a validation problem"
+    )
     readings = {"utility": 5000.0, "panel": 2000.0}
     result = main_power_w(graph, readings)
-    assert result.errors
-    assert "nested mains" in result.errors[0]
-    # Critically: it must NOT return 7000 (which would double count).
-    assert result.total_w != 7000.0
-    assert result.complete is False
+    assert result.errors == ()
+    assert result.total_w == 5000.0
+    assert result.total_w != 7000.0, "the nested feed must not be double counted"
+    assert result.complete is True
+    assert result.per_channel_w == {"utility": 5000.0}
+    assert "panel" in result.excluded_channels
+    assert any(n.startswith("nested_feeds_not_summed") for n in result.notes)
+
+
+def test_three_level_nesting_sums_only_the_root():
+    """Arbitrary depth: service -> panel -> sub-panel contributes once."""
+    topo = Topology(
+        channels=[
+            _ch("service", CTType.MAIN, phase=Phase.BOTH),
+            _ch("panel", CTType.MAIN, phase=Phase.BOTH, parent="service"),
+            _ch("sub", CTType.MAIN, phase=Phase.BOTH, parent="panel"),
+        ]
+    )
+    graph = build_graph(topo)
+    assert graph.effective_feeds() == ["service"]
+    result = main_power_w(graph, {"service": 4000.0, "panel": 1500.0, "sub": 800.0})
+    assert result.errors == ()
+    assert result.total_w == 4000.0
+
+
+def test_parallel_feeds_under_the_same_parent_are_both_summed():
+    """Two panels fed from one service are parallel, not nested."""
+    topo = Topology(
+        channels=[
+            _ch("service", CTType.MAIN, phase=Phase.BOTH),
+            _ch("panel_a", CTType.MAIN, phase=Phase.BOTH, parent="service"),
+            _ch("panel_b", CTType.MAIN, phase=Phase.BOTH, parent="service"),
+        ]
+    )
+    graph = build_graph(topo)
+    assert graph.effective_feeds() == ["service"]
+    assert main_power_w(graph, {"service": 4000.0}).total_w == 4000.0
+
+
+def test_root_level_parallel_feeds_are_summed():
+    """Independent services (or L1/L2 roots) are genuinely additive."""
+    topo = Topology(
+        channels=[
+            _ch("l1", CTType.MAIN, phase=Phase.L1),
+            _ch("l2", CTType.MAIN, phase=Phase.L2),
+        ]
+    )
+    graph = build_graph(topo)
+    assert graph.effective_feeds() == ["l1", "l2"]
+    result = main_power_w(graph, {"l1": 1200.0, "l2": 800.0})
+    assert result.total_w == 2000.0
+    assert result.l1_w == 1200.0
+    assert result.l2_w == 800.0
+
+
+def test_a_nested_feed_that_is_disabled_is_ignored_when_resolving_feeds():
+    topo = Topology(
+        channels=[
+            _ch("service", CTType.MAIN, phase=Phase.BOTH),
+            _ch("panel", CTType.MAIN, phase=Phase.BOTH, parent="service", enabled=False),
+            _ch("orphan", CTType.MAIN, phase=Phase.BOTH),
+        ]
+    )
+    graph = build_graph(topo)
+    assert graph.effective_feeds() == ["orphan", "service"]
+
+
+def test_an_aliased_main_contributes_once():
+    """Two monitors on the same service conductors are one feed, not two."""
+    topo = Topology(
+        channels=[
+            _ch("monitor_a", CTType.MAIN, phase=Phase.BOTH),
+            _ch("monitor_b", CTType.MAIN, phase=Phase.BOTH, alias="monitor_a"),
+        ]
+    )
+    graph = build_graph(topo)
+    assert graph.effective_feeds() == ["monitor_a"]
+    result = main_power_w(graph, {"monitor_a": 2400.0, "monitor_b": 2412.0})
+    assert result.total_w == 2400.0, "the duplicate measurement must not be added"
+    assert "monitor_b" in result.excluded_channels
+    assert any(n.startswith("duplicate_feeds_counted_once") for n in result.notes)
+
+
+def test_an_alias_chain_contributes_once_through_the_whole_chain():
+    """``a -> b -> c`` is one wire; only ``c`` may define the total."""
+    topo = Topology(
+        channels=[
+            _ch("monitor_a", CTType.MAIN, phase=Phase.BOTH, alias="monitor_b"),
+            _ch("monitor_b", CTType.MAIN, phase=Phase.BOTH, alias="monitor_c"),
+            _ch("monitor_c", CTType.MAIN, phase=Phase.BOTH),
+        ]
+    )
+    graph = build_graph(topo)
+    assert graph.effective_feeds() == ["monitor_c"]
+    result = main_power_w(
+        graph, {"monitor_a": 2400.0, "monitor_b": 2410.0, "monitor_c": 2405.0}
+    )
+    assert result.total_w == 2405.0
+    assert set(result.excluded_channels) == {"monitor_a", "monitor_b"}
 
 
 def test_double_pole_pair_detection():
@@ -598,6 +704,121 @@ def test_resolve_direct_uses_dedicated_ct_only():
     assert readings["tv"].power_w == pytest.approx(75.0)
     assert readings["tv"].usable
     assert readings["tv"].ct_ids == ("ct_tv",)
+
+
+def _single_leg_multiplier_topology() -> Topology:
+    """One CT on one leg of a 240 V load, declared with a x2 circuit multiplier."""
+    return Topology(
+        channels=[
+            _ch("main", CTType.MAIN, phase=Phase.BOTH),
+            _ch(
+                "ct_tub",
+                CTType.DEDICATED_DEVICE,
+                phase=Phase.L1,
+                device="tub",
+                multiplier=2.0,
+            ),
+        ],
+        devices=[
+            DeviceTopology(
+                device_id="tub",
+                dedicated_ct_ids=["ct_tub"],
+                phase=Phase.L1,
+                double_pole=True,
+            )
+        ],
+    )
+
+
+def test_default_multiplier_is_one_and_changes_nothing():
+    """The common case: the monitor already scales, so the engine must not."""
+    graph = build_graph(Topology(channels=[_ch("ct_tv", CTType.DEDICATED_DEVICE, device="tv")]))
+    assert graph.multiplier_for("ct_tv") == 1.0
+    assert graph.scale_w("ct_tv", 75.0) == 75.0
+    assert graph.multiplier_for("not_a_channel") == 1.0
+    assert graph.scale_w("not_a_channel", 75.0) == 75.0
+
+
+def test_scale_w_applies_the_declared_multiplier_once():
+    graph = build_graph(_single_leg_multiplier_topology())
+    assert graph.multiplier_for("ct_tub") == 2.0
+    assert graph.scale_w("ct_tub", 1100.0) == pytest.approx(2200.0)
+    # Scaling is a pure function of the input, so calling it again on the raw
+    # value cannot accumulate: nothing writes the result back.
+    assert graph.scale_w("ct_tub", 1100.0) == pytest.approx(2200.0)
+    assert graph.scale_w("ct_tub", None) is None
+
+
+def test_direct_measurement_applies_the_multiplier_and_reports_the_full_load():
+    graph = build_graph(_single_leg_multiplier_topology())
+    window = ObservationWindow.from_values(T0, {"main": 3000.0, "ct_tub": 1100.0})
+    readings = resolve_direct(window, graph)
+    assert readings["tub"].power_w == pytest.approx(2200.0)
+    assert readings["tub"].per_leg_w == {"ct_tub": pytest.approx(2200.0)}
+    # The raw reading stays unscaled, so a caller cannot apply it a second time.
+    assert readings["tub"].raw_power_w is None
+
+
+def test_main_power_applies_a_multiplier_on_a_nested_feed():
+    """A doubled sub-panel feed must not leak into the outer total."""
+    topo = Topology(
+        channels=[
+            _ch("service", CTType.MAIN, phase=Phase.BOTH),
+            _ch(
+                "panel",
+                CTType.MAIN,
+                phase=Phase.BOTH,
+                parent="service",
+                multiplier=2.0,
+            ),
+        ]
+    )
+    graph = build_graph(topo)
+    result = main_power_w(graph, {"service": 3000.0, "panel": 900.0})
+    assert result.total_w == pytest.approx(3000.0)
+    assert "panel" in result.excluded_channels
+
+
+def test_matrix_scales_the_target_but_not_the_raw_reading():
+    graph = build_graph(_single_leg_multiplier_topology())
+    matrix = build_measurement_matrix(graph, ["tub"])
+    assert matrix.channel_multiplier["ct_tub"] == 2.0
+    prepared = matrix.prepare({"ct_tub": 1100.0})
+    row = matrix.row_channel_ids.index("ct_tub")
+    # y is the *load* the row measures, which the device already doubled.
+    assert prepared.y[row] == pytest.approx(2200.0)
+    assert matrix._raw_reading_w({"ct_tub": 1100.0}, "ct_tub") == pytest.approx(1100.0)
+    assert matrix._reading_w({"ct_tub": 1100.0}, "ct_tub") == pytest.approx(2200.0)
+
+
+def test_step_detection_reports_the_step_in_the_load_not_the_leg():
+    """A doubled leg's step must be doubled, and so must its threshold."""
+    history = []
+    for i in range(20):
+        history.append((T0 + timedelta(seconds=15.7 * i), 300.0))
+    for i in range(20, 23):
+        history.append((T0 + timedelta(seconds=15.7 * i), 800.0))
+    at = T0 + timedelta(seconds=15.7 * 22)
+    reading = ChannelReading(channel_id="ct_tub", value_w=800.0, history=tuple(history))
+    step = detect_step(reading, at, before_s=40.0, after_s=20.0, multiplier=2.0)
+    assert step is not None and step.detected
+    assert step.delta_w == pytest.approx(1000.0)  # (800-300) * 2
+    assert step.after_w == pytest.approx(1600.0)
+    assert step.before_w == pytest.approx(600.0)
+
+
+def test_detect_changes_scales_the_previous_snapshot_fallback():
+    readings = {"ct_tub": ChannelReading(channel_id="ct_tub", value_w=400.0)}
+    changes = detect_changes(
+        readings,
+        T0,
+        before_s=10.0,
+        after_s=5.0,
+        previous_values={"ct_tub": 100.0},
+        multipliers={"ct_tub": 2.0},
+    )
+    assert changes["ct_tub"].delta_w == pytest.approx(600.0)  # (400-100) * 2
+    assert changes["ct_tub"].after_w == pytest.approx(800.0)
 
 
 def test_direct_double_pole_sums_both_legs():

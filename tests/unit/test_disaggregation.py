@@ -767,8 +767,9 @@ def test_residual_is_never_force_distributed():
 def test_main_power_is_never_double_counted_with_nested_panels():
     """Utility main 3000 W, panel feed 1200 W nested underneath.
 
-    Summing them would give 4200 W.  The engine must refuse to sum and report
-    an explicit error instead of a plausible-looking wrong number.
+    Summing them would give 4200 W.  The nested feed is inside the outer feed's
+    measurement, so only the outer feed may define the total.  The trick is to
+    get this right *without* discarding the nested feed's own attribution.
     """
     topo = topology(
         [
@@ -780,12 +781,18 @@ def test_main_power_is_never_double_counted_with_nested_panels():
     )
     win = window({"utility_l1": 3000.0, "panel_l1": 1200.0, "branch_a": 1200.0})
     batch = run(topo, win, states("a"))
-    assert batch.diagnostics["main_power"]["errors"]
-    assert "nested mains" in batch.diagnostics["main_power"]["errors"][0]
-    assert "main_power_unavailable" in batch.diagnostics["warnings"]
-    # Must not report 4200 W.
+    main = batch.diagnostics["main_power"]
+    assert main["errors"] == []
+    assert "main_power_unavailable" not in batch.diagnostics["warnings"]
+    # Must not report 4200 W: the nested feed is counted once, by its parent.
+    assert batch.reconciliation.main_power_w == pytest.approx(3000.0)
     assert batch.reconciliation.main_power_w != pytest.approx(4200.0)
-    assert batch.reconciliation.unknown_residual_w == 0.0
+    assert main["per_channel_w"] == {"utility_l1": 3000.0}
+    assert main["excluded_channels"] == ["panel_l1"]
+    assert any(n.startswith("nested_feeds_not_summed") for n in main["notes"])
+    # The household's real unexplained load is the outer feed minus what the
+    # engine attributed, and it must stay positive rather than being hidden.
+    assert batch.reconciliation.unknown_residual_w == pytest.approx(1800.0)
 
 
 def test_sum_of_devices_does_not_exceed_main_power_for_consistent_data():

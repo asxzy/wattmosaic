@@ -117,7 +117,10 @@ One dialog per channel, with:
 | Role | `main`, `branch`, `dedicated_device`, `unknown` |
 | Phase | `l1`, `l2`, `both`, `unknown` |
 | Polarity | `normal`, `inverted` |
+| Parent CT | the CT (panel feed or branch) that physically feeds this one; empty for a top-level feed |
+| Circuit multiplier | scale applied to the reported reading, default `1.0` |
 | Paired CT | sibling CT for a double-pole load |
+| Duplicate of | another CT clamped on the *same* conductors (an alias) |
 | Device | device served by a `dedicated_device` CT |
 | Enabled | whether the channel participates |
 
@@ -125,13 +128,48 @@ Channels come from `GET /topology`. Where the engine already suggests a
 `ct1`/`ct2` sibling, that pair is **pre-selected as a suggestion** (visible in
 the dialog), not committed.
 
+**Nesting is supported to any depth.** A `main` CT may name another `main` CT as
+its parent (utility → panel → sub-panel), and a branch may sit under any feed.
+Only the outermost feed of each branch of the tree contributes to the whole-home
+total, so declaring the real wiring never double-counts. The same applies to a
+branch that contains sub-CTs.
+
+**Circuit multiplier.** One CT on one leg of a 240 V load under-reports by 2×.
+Set the multiplier to `2` for that circuit. The default is `1.0` and it is never
+inferred: most monitors apply the vendor's circuit multiplier themselves and
+already publish the full load, so inferring it would double-count. The
+multiplier is applied exactly once, on the way out of the reading layer.
+
+**Duplicate feeds.** Two monitors clamped on the same service entrance measure
+one point twice. Declaring one as a duplicate of the other makes the engine count
+it once; the alias still serves its own device readings.
+
+Parent links are **proposed, not applied**: `GET /topology/nesting` measures
+containment (a child cannot exceed its feed) and closure (the parent's own loads
+plus the child must not over-explain the parent) over stored history, and returns
+candidates. A single unambiguous candidate is pre-selected in the dropdown; the
+user confirms it. Two candidates mean the evidence is ambiguous and nothing is
+pre-selected.
+
+**Only a panel feed is proposed as a child.** A load's level is not measurable
+from power alone: a 9 W circuit is contained by every panel in the house while
+idle. The engine therefore reports loads as *not inferable* and the wizard asks
+the user for their parent instead of offering a guess. Duplicate feeds are
+proposed separately, as *aliases* rather than parents — the same conductor
+measured twice is not a nesting — and a declared pair or declared parent
+suppresses the alias suggestion rather than competing with it.
+
 Validation rules (enforced on the confirmation step):
 
 - a `main` CT must have a concrete phase (`l1`/`l2`/`both`);
 - a `dedicated_device` CT must name a device;
 - pairing must be reciprocal and cannot be self-referential;
 - phase `both` requires a paired CT;
-- every `ct_id` must exist in the engine topology.
+- every `ct_id` must exist in the engine topology;
+- a parent must exist, must be a container (`main`/`branch`), and must not form
+  a cycle;
+- a duplicate-of target must exist, must not be self, and must not form a cycle;
+- a multiplier must be positive and finite.
 
 ### Step 4 — Device mapping (candidates)
 
@@ -181,8 +219,8 @@ after the engine device; all entities hang off a **WattMosaic Engine** device
 
 | Entity | Unit | Device class | State class | Notes |
 | --- | --- | --- | --- | --- |
-| Estimated power | W | `power` | `measurement` | `InferenceResult.power_w` |
-| Estimated energy | kWh | `energy` | `total_increasing` | Engine-owned total; published when the reading is publishable, restored on restart |
+| Power | W | `power` | `measurement` | `InferenceResult.power_w` |
+| Energy | kWh | `energy` | `total_increasing` | Engine-owned total; published when the reading is publishable, restored on restart |
 | Measurement source | enum | `enum` | — | `direct_measured` / `inferred` / `model_estimated` / `unknown` |
 | Confidence | % | — | `measurement` | Engineering score ×100, **not calibrated** |
 | Evidence tier | enum | `enum` | — | `tier_0_unknown` … `tier_4_verified` (ADR-0013) |
@@ -207,7 +245,7 @@ The evidence-tier entity additionally exposes `tier_reasons`.
 | L2 power | W | `power` | `measurement` | `Reconciliation.l2_power_w` |
 | Directly measured power | W | `power` | `measurement` | `direct_measured_w` |
 | Inferred power | W | `power` | `measurement` | `inferred_w` |
-| Model estimated power | W | `power` | `measurement` | `model_estimated_w` |
+| Model power | W | `power` | `measurement` | `model_estimated_w` |
 | Unknown / unattributed power | W | `power` | `measurement` | `unknown_residual_w` |
 | Power reconciliation error | W | `power` | `measurement` | `reconciliation_error_w` |
 | Accounted fraction | % | — | `measurement` | `accounted_fraction` ×100 |
@@ -238,7 +276,7 @@ published as current measurements. Two exceptions are deliberate:
 
 ### 3.4 Energy restoration
 
-`Estimated energy` uses `RestoreEntity`: the last published total is read on
+`Energy` uses `RestoreEntity`: the last published total is read on
 startup so a Home Assistant restart never resets the meter.
 
 The engine owns the lifetime total, and the integration publishes it

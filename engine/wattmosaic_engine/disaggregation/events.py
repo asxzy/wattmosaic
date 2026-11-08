@@ -105,12 +105,15 @@ def mad_sigma(values: Sequence[float], centre: float | None = None) -> float:
     return MAD_TO_SIGMA * median([abs(v - c) for v in values])
 
 
-def _series(reading: ChannelReading, at: datetime) -> list[tuple[datetime, float]]:
-    samples = [(t, float(v)) for t, v in reading.history if t <= at]
+def _series(
+    reading: ChannelReading, at: datetime, *, multiplier: float = 1.0
+) -> list[tuple[datetime, float]]:
+    samples = [(t, float(v) * multiplier) for t, v in reading.history if t <= at]
     samples.sort(key=lambda s: s[0])
     if reading.value_w is not None:
         value = reading.signed_w()
         if value is not None:
+            value *= multiplier
             if samples and abs((samples[-1][0] - at).total_seconds()) < 1e-6:
                 samples[-1] = (at, value)
             elif not samples or samples[-1][0] < at:
@@ -129,12 +132,20 @@ def detect_step(
     noise_floor_w: float = DEFAULT_NOISE_FLOOR_W,
     min_before_samples: int = 2,
     min_after_samples: int = 1,
+    multiplier: float = 1.0,
 ) -> StepChange | None:
-    """Detect the dominant step in one channel's recent history."""
-    samples = _series(reading, at)
+    """Detect the dominant step in one channel's recent history.
+
+    ``multiplier`` is the channel's declared circuit multiplier.  It scales the
+    whole series -- history, baseline and threshold alike -- so a ``2.0``
+    channel reports the *load* step rather than the single-leg step.  Scaling the
+    threshold too is deliberate: a doubled leg has doubled noise, so the same
+    significance rule applies.
+    """
+    samples = _series(reading, at, multiplier=multiplier)
     if len(samples) < 2:
         return None
-    resolution = float(reading.resolution_w or 0.0)
+    resolution = float(reading.resolution_w or 0.0) * multiplier
     best: StepChange | None = None
     best_score = -1.0
     for change_time, _ in samples:
@@ -194,6 +205,7 @@ def detect_changes(
     previous_values: dict[str, float] | None = None,
     min_before_samples: int = 2,
     min_after_samples: int = 1,
+    multipliers: Mapping[str, float] | None = None,
 ) -> dict[str, StepChange]:
     """Detect steps for every channel with timing information.
 
@@ -201,10 +213,17 @@ def detect_changes(
     the previous inference cycle) provides a two-point fallback.  Such changes
     are marked ``source="previous_snapshot"`` and are only trusted when they
     exceed the threshold.
+
+    ``multipliers`` applies each channel's declared circuit multiplier, so a
+    step on a doubled leg is reported as a step in the *load*.  It must be the
+    same map the rest of the pipeline uses; passing none means "no scaling",
+    which is the correct behaviour for an unscaled topology.
     """
     previous_values = previous_values or {}
+    multipliers = multipliers or {}
     out: dict[str, StepChange] = {}
     for channel_id, reading in readings.items():
+        multiplier = float(multipliers.get(channel_id, 1.0) or 1.0)
         step = detect_step(
             reading,
             at,
@@ -215,6 +234,7 @@ def detect_changes(
             noise_floor_w=noise_floor_w,
             min_before_samples=min_before_samples,
             min_after_samples=min_after_samples,
+            multiplier=multiplier,
         )
         if step is not None:
             out[channel_id] = step
@@ -222,8 +242,10 @@ def detect_changes(
         prev = previous_values.get(channel_id)
         current = reading.signed_w()
         if prev is not None and current is not None:
-            threshold = max(min_delta_w, float(reading.resolution_w or 0.0))
-            delta = current - float(prev)
+            current *= multiplier
+            prev = float(prev) * multiplier
+            threshold = max(min_delta_w, float(reading.resolution_w or 0.0) * multiplier)
+            delta = current - prev
             out[channel_id] = StepChange(
                 channel_id=channel_id,
                 change_time=at,

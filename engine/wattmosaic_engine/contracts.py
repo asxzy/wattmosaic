@@ -26,7 +26,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-CONTRACT_VERSION = "1.1.0"
+CONTRACT_VERSION = "1.2.0"
 
 
 def utcnow() -> datetime:
@@ -316,12 +316,29 @@ class CTChannel(Model):
     name: str | None = None
     ct_type: CTType = CTType.UNKNOWN
     phase: Phase = Phase.UNKNOWN
+    # Containment.  Any CT may sit under any other CT, to any depth: a panel
+    # feed under the service feed, a sub-panel feed under the panel feed, a
+    # branch under a sub-panel, and so on.  Nesting is a wiring fact; the engine
+    # never invents it and always requires ``TopologyStatus.CONFIRMED`` before
+    # a nested total is presented as authoritative.
     parent_ct_id: str | None = None
     polarity: Polarity = Polarity.NORMAL
     device_id: str | None = None
     enabled: bool = True
     # Paired CT for a single double-pole load: this CT is one leg.
     paired_ct_id: str | None = None
+    # Set on a CT that measures *the same conductor* as another CT (two monitors
+    # clamped on one service entrance).  Only the canonical channel contributes
+    # to a total; the alias is still usable for its own device readings.
+    alias_of_ct_id: str | None = None
+    # Scaling applied to the reported reading, for the Refoss "circuit
+    # multiplier" case: one CT on one leg of a 240 V load, doubled in software.
+    #
+    # Defaults to 1.0 because the monitor commonly applies the multiplier
+    # itself and already publishes the full load.  Multiplying again would
+    # double-count, so this is never inferred from ``phase`` or ``ct_type`` --
+    # it is a per-circuit user declaration.
+    measurement_multiplier: float = 1.0
     # Optional nominal voltage for current-only channels.
     nominal_voltage: float | None = None
     resolution_w: float | None = None
@@ -329,6 +346,29 @@ class CTChannel(Model):
     reliability: float = 1.0
     topology_status: TopologyStatus = TopologyStatus.CANDIDATE
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("measurement_multiplier")
+    @classmethod
+    def _multiplier_must_be_positive_finite(cls, v: float) -> float:
+        """Reject a multiplier that would zero, invert or explode a reading.
+
+        A multiplier is a *scaling* declaration for one leg of a split load.  It
+        must never be zero (which would silently hide the circuit), negative
+        (which would look like export), or non-finite.  Values below 1.0 are
+        allowed but unusual, so they are not rejected.
+        """
+        value = float(v)
+        if value != value or value in (float("inf"), float("-inf")):
+            raise ValueError("measurement_multiplier must be finite")
+        if value <= 0.0:
+            raise ValueError("measurement_multiplier must be greater than zero")
+        return value
+
+    @model_validator(mode="after")
+    def _alias_is_not_self(self) -> CTChannel:
+        if self.alias_of_ct_id is not None and self.alias_of_ct_id == self.ct_id:
+            raise ValueError("a CT cannot be an alias of itself")
+        return self
 
 
 class DeviceTopology(Model):

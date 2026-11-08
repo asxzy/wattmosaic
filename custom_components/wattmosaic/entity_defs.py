@@ -15,7 +15,7 @@ from typing import Any
 
 DEVICE_SENSORS: dict[str, dict[str, Any]] = {
     "power": {
-        "name": "Estimated power",
+        "name": "Power",
         "device_class": "power",
         "state_class": "measurement",
         "unit": "W",
@@ -23,7 +23,7 @@ DEVICE_SENSORS: dict[str, dict[str, Any]] = {
         "suggested_display_precision": 1,
     },
     "energy": {
-        "name": "Estimated energy",
+        "name": "Energy",
         "device_class": "energy",
         "state_class": "total_increasing",
         "unit": "kWh",
@@ -145,7 +145,7 @@ GLOBAL_SENSORS: dict[str, dict[str, Any]] = {
         "suggested_display_precision": 1,
     },
     "model_estimated_power": {
-        "name": "Model estimated power",
+        "name": "Model power",
         "device_class": "power",
         "state_class": "measurement",
         "unit": "W",
