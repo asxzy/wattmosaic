@@ -2055,6 +2055,17 @@ four feeds are present and excluded. The stable entry, running 0.1.5 against the
 same conductors, still reports the naive six-feed sum. Both entries now report
 `supports_options: true`.
 
+### Operational consequence of installing a dev integration
+
+The Marketplace installs an integration **per domain, not per entry**: selecting
+an explicit ref replaces the files for `custom_components/wattmosaic` that *both*
+config entries load. During this validation the stable App also had to be
+reinstalled, because removing the stable repository entry had taken its container
+with it. Practical rule for this project: while a dev ref is installed, every
+WattMosaic entry — including the "stable" one — runs dev code. The A/B
+separation that holds for the App (`#dev` → its own slug and `/data`) does
+**not** extend to the integration.
+
 ### Verification
 
 1256 tests pass; `tools/dev/verify.py` reports **11/11 gates** (10/10 required).
