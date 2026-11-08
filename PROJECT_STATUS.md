@@ -1267,7 +1267,7 @@ kilowatt-hour for that device was left behind under the old ID.
 **Measured, not reasoned.** The scenario was reproduced against a faithful
 transcription of the HA functions that decide the ID: a water heater created on the
 synthetic device records 0.47 kWh as `sensor.water_heater_estimated_energy`; after the
-user declares a state entity, the old code creates it on `Boiler Thermostat` and
+user declares a state entity, the old code creates it on the declared device and
 the new ID is `sensor.water_heater_thermostat_estimated_energy`. The 0.47 kWh stays
 under the old key, and the live statistics resume from zero under the new one.
 The same measurement for the six bindable devices on the live installation gives
