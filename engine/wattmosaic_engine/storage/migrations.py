@@ -341,6 +341,21 @@ MIGRATIONS: tuple[Migration, ...] = (
             "CREATE INDEX IF NOT EXISTS idx_inference_tier ON inference_results(confidence_tier)",
         ),
     ),
+    Migration(
+        version=6,
+        name="ct_channel_alias_and_multiplier",
+        statements=(
+            # ``CTChannel`` has carried ``alias_of_ct_id`` and
+            # ``measurement_multiplier`` since contract 1.2.0, but
+            # ``ct_channels`` had no columns for them.  ``save_topology`` writes
+            # an explicit column list, so both fields were silently dropped on
+            # every write and ``load_topology`` rebuilt channels without them:
+            # a user's alias declaration never survived the round trip, and the
+            # circuit measured twice stayed in the whole-home total.
+            "ALTER TABLE ct_channels ADD COLUMN alias_of_ct_id TEXT",
+            "ALTER TABLE ct_channels ADD COLUMN measurement_multiplier REAL NOT NULL DEFAULT 1.0",
+        ),
+    ),
 )
 
 LATEST_VERSION = max(m.version for m in MIGRATIONS)

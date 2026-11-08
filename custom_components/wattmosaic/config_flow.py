@@ -727,6 +727,23 @@ class WattMosaicConfigFlow(_AssignmentWizard, ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> WattMosaicOptionsFlow:
+        """Return the options flow for an existing entry.
+
+        This *must* be a method on the config-flow class: Home Assistant's
+        ``OptionsFlowManager.async_create_flow`` calls
+        ``handler.async_get_options_flow(entry)`` on the registered handler and
+        ``ConfigFlow.async_supports_options_flow`` decides ``supports_options``
+        by comparing ``cls.async_get_options_flow`` with the base method.  A
+        module-level factory is invisible to both, so the entry reports
+        ``supports_options: false`` and HA rejects every ``options/flow``
+        request with ``Invalid handler specified`` -- leaving a user unable to
+        edit CT assignments or energy toggles after install.
+        """
+        return WattMosaicOptionsFlow(config_entry)
+
     def __init__(self) -> None:
         self._base_url: str = ""
         self._api_token: str | None = None
@@ -1189,8 +1206,3 @@ class WattMosaicOptionsFlow(_AssignmentWizard, OptionsFlow):
         return stored_energy_choice(
             self._config().get(CONF_ENERGY_ENTITIES), self._device_config_device_id
         )
-
-
-@callback
-def async_get_options_flow(config_entry: ConfigEntry) -> WattMosaicOptionsFlow:
-    return WattMosaicOptionsFlow(config_entry)

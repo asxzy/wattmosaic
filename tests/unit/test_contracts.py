@@ -171,9 +171,126 @@ def _topology() -> Topology:
             CTChannel(ct_id="main_l1", entity_id="sensor.main_l1", ct_type=CTType.MAIN, phase=Phase.L1),
             CTChannel(ct_id="br1", entity_id="sensor.br1", ct_type=CTType.BRANCH, phase=Phase.L1,
                       parent_ct_id="main_l1"),
+            CTChannel(
+                ct_id="panel_l1", entity_id="sensor.panel_l1", ct_type=CTType.MAIN, phase=Phase.L1,
+                alias_of_ct_id="main_l1", measurement_multiplier=2.5,
+            ),
         ],
         devices=[DeviceTopology(device_id="dev1", dedicated_ct_ids=["br1"])],
     )
+
+
+def test_topology_roundtrip_preserves_alias_and_multiplier(tmp_path: Path) -> None:
+    """Storage must not silently drop declaration fields it has no column for.
+
+    ``alias_of_ct_id`` and ``measurement_multiplier`` existed on the contract
+    but had no ``ct_channels`` column, so ``save_topology`` wrote an explicit
+    column list without them and ``load_topology`` rebuilt every channel with
+    the defaults.  A user's alias declaration therefore never reached the
+    compute path: the whole-home total kept summing a wire measured twice.
+    """
+    db = Database(tmp_path / "t.db")
+    try:
+        db.save_topology(_topology())
+        loaded = db.load_topology()
+        assert loaded is not None
+        by_id = loaded.channel_map()
+        assert by_id["panel_l1"].alias_of_ct_id == "main_l1"
+        assert by_id["panel_l1"].measurement_multiplier == 2.5
+        # Undeclared channels keep the neutral default, not a stray value.
+        assert by_id["main_l1"].alias_of_ct_id is None
+        assert by_id["main_l1"].measurement_multiplier == 1.0
+    finally:
+        db.close()
+
+
+def test_saved_alias_removes_the_duplicate_feed(tmp_path: Path) -> None:
+    """The persisted declaration must change the computed whole-home total."""
+    from wattmosaic_engine.electrical.topology import build_graph
+
+    db = Database(tmp_path / "t.db")
+    try:
+        db.save_topology(_topology())
+        loaded = db.load_topology()
+        assert loaded is not None
+        graph = build_graph(loaded)
+        # ``panel_l1`` is the alias of ``main_l1``: only the canonical wire feeds
+        # the total.  Without the fix both mains would appear here.
+        assert graph.effective_feeds() == ["main_l1"]
+    finally:
+        db.close()
+
+
+def test_save_topology_accepts_child_before_parent(tmp_path: Path) -> None:
+    """A nested channel may be listed before its parent.
+
+    ``ct_channels.parent_ct_id`` is a self-referencing foreign key and
+    ``PRAGMA foreign_keys=ON`` is set.  Inserting in payload order therefore
+    aborted the whole write with ``FOREIGN KEY constraint failed`` whenever a
+    sub-panel feed came before the service feed -- which is exactly the order
+    the wizard sends channels in.  Nesting could never be saved at all.
+    """
+    db = Database(tmp_path / "t.db")
+    try:
+        child_first = Topology(
+            status=TopologyStatus.CANDIDATE,
+            channels=[
+                CTChannel(
+                    ct_id="sub_l1", entity_id="sensor.sub_l1", ct_type=CTType.MAIN,
+                    phase=Phase.L1, parent_ct_id="service_l1",
+                ),
+                CTChannel(
+                    ct_id="service_l1", entity_id="sensor.service_l1",
+                    ct_type=CTType.MAIN, phase=Phase.L1,
+                ),
+            ],
+        )
+        db.save_topology(child_first)
+        loaded = db.load_topology()
+        assert loaded is not None
+        assert loaded.channel_map()["sub_l1"].parent_ct_id == "service_l1"
+    finally:
+        db.close()
+
+
+def test_save_topology_rejects_a_parent_cycle_without_corrupting_state(tmp_path: Path) -> None:
+    """An impossible cycle must fail atomically, leaving the old topology intact.
+
+    ``ct_channels.parent_ct_id`` is a self-referencing foreign key, so a cycle
+    cannot be stored.  ``TopologyGraph`` treats it as a problem rather than a
+    relationship, and the config wizard already refuses to submit one; what
+    matters at the storage boundary is that the rejected write rolls back
+    instead of leaving the installation with no topology at all.
+    """
+    db = Database(tmp_path / "t.db")
+    try:
+        db.save_topology(_topology())
+        before = db.load_topology()
+        assert before is not None
+
+        cyclic = Topology(
+            status=TopologyStatus.CANDIDATE,
+            channels=[
+                CTChannel(
+                    ct_id="a", entity_id="sensor.a", ct_type=CTType.MAIN,
+                    phase=Phase.L1, parent_ct_id="b",
+                ),
+                CTChannel(
+                    ct_id="b", entity_id="sensor.b", ct_type=CTType.MAIN,
+                    phase=Phase.L1, parent_ct_id="a",
+                ),
+            ],
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            db.save_topology(cyclic)
+
+        after = db.load_topology()
+        assert after is not None
+        assert {c.ct_id for c in after.channels} == {
+            c.ct_id for c in before.channels
+        }
+    finally:
+        db.close()
 
 
 def test_topology_roundtrip(tmp_path: Path) -> None:
@@ -183,7 +300,7 @@ def test_topology_roundtrip(tmp_path: Path) -> None:
         assert version >= 1
         loaded = db.load_topology()
         assert loaded is not None
-        assert {c.ct_id for c in loaded.channels} == {"main_l1", "br1"}
+        assert {c.ct_id for c in loaded.channels} == {"main_l1", "br1", "panel_l1"}
         assert loaded.device_map()["dev1"].dedicated_ct_ids == ["br1"]
     finally:
         db.close()

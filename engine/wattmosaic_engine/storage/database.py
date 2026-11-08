@@ -118,6 +118,39 @@ class Database:
         return json.loads(row["value"]) if row else default
 
     # -- topology --------------------------------------------------------- #
+    @staticmethod
+    def _insertion_order(channels: Iterable[CTChannel]) -> list[CTChannel]:
+        """Order channels so a parent is always written before its children.
+
+        ``ct_channels.parent_ct_id`` is a self-referencing foreign key and
+        ``PRAGMA foreign_keys=ON`` is set, so inserting a nested channel before
+        the channel it hangs from aborts the whole transaction with
+        ``FOREIGN KEY constraint failed``.  The wizard sends channels in
+        discovery order, which puts a sub-panel feed before the service feed on
+        this installation, so this ordering is required for any real nested
+        topology -- not just a nicety.
+
+        Unknown parents and cycles are tolerated: they are already reported by
+        ``TopologyGraph``, and refusing to persist the whole topology would be a
+        worse failure than storing a relationship the engine will ignore.  Any
+        channel whose parent never becomes insertable is appended in its
+        original order.
+        """
+        ordered: list[CTChannel] = []
+        pending = {ch.ct_id: ch for ch in channels}
+        emitted: set[str] = set()
+        progress = True
+        while pending and progress:
+            progress = False
+            for ct_id in list(pending):
+                parent = pending[ct_id].parent_ct_id
+                if parent is None or parent not in pending or parent in emitted:
+                    ordered.append(pending.pop(ct_id))
+                    emitted.add(ct_id)
+                    progress = True
+        ordered.extend(pending.values())
+        return ordered
+
     def save_topology(self, topology: Topology, note: str = "") -> int:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
@@ -125,15 +158,18 @@ class Database:
                 self._conn.execute("DELETE FROM ct_channels")
                 self._conn.execute("DELETE FROM devices")
                 now = iso(utcnow())
-                for ch in topology.channels:
+                for ch in self._insertion_order(topology.channels):
                     self._conn.execute(
                         """INSERT INTO ct_channels(ct_id, entity_id, name, ct_type, phase, parent_ct_id,
-                        polarity, device_id, paired_ct_id, enabled, resolution_w, expected_interval_s,
+                        polarity, device_id, paired_ct_id, alias_of_ct_id, measurement_multiplier,
+                        enabled, resolution_w, expected_interval_s,
                         reliability, topology_status, metadata_json, updated_at)
-                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (
                             ch.ct_id, ch.entity_id, ch.name, ch.ct_type, ch.phase, ch.parent_ct_id,
-                            ch.polarity, ch.device_id, ch.paired_ct_id, int(ch.enabled), ch.resolution_w,
+                            ch.polarity, ch.device_id, ch.paired_ct_id, ch.alias_of_ct_id,
+                            float(ch.measurement_multiplier),
+                            int(ch.enabled), ch.resolution_w,
                             ch.expected_interval_s, ch.reliability, ch.topology_status,
                             json.dumps(ch.metadata), now,
                         ),
@@ -197,7 +233,10 @@ class Database:
                 CTChannel(
                     ct_id=r["ct_id"], entity_id=r["entity_id"], name=r["name"], ct_type=r["ct_type"],
                     phase=r["phase"], parent_ct_id=r["parent_ct_id"], polarity=r["polarity"],
-                    device_id=r["device_id"], paired_ct_id=r["paired_ct_id"], enabled=bool(r["enabled"]),
+                    device_id=r["device_id"], paired_ct_id=r["paired_ct_id"],
+                    alias_of_ct_id=r["alias_of_ct_id"],
+                    measurement_multiplier=float(r["measurement_multiplier"]),
+                    enabled=bool(r["enabled"]),
                     resolution_w=r["resolution_w"], expected_interval_s=r["expected_interval_s"],
                     reliability=r["reliability"], topology_status=r["topology_status"],
                     metadata=json.loads(r["metadata_json"]),

@@ -1,5 +1,63 @@
 # Release Notes
 
+## v0.2.0-dev2 — 2026-11-08 (development channel)
+
+Installing the dev build on the live installation exposed that the nested-feed
+and duplicate-feed fix **could not take effect through the product surface**.
+Two independent wiring defects made the declarations vanish. Both are fixed
+here, and both were verified by proving the test fails when the guard is
+removed. **This is a prerelease. It is installed from the `dev` branch and does
+not replace the stable integration or App.**
+
+### Fixed
+
+- **A declared alias or multiplier was silently discarded.** `CTChannel` has
+  carried `alias_of_ct_id` and `measurement_multiplier` since contract 1.2.0,
+  but `ct_channels` had no columns for them. `save_topology()` writes an
+  explicit column list, so both fields were dropped on every write and
+  `load_topology()` rebuilt each channel with the defaults. A user could declare
+  "these two CTs measure the same conductor", the wizard would accept it, and
+  the engine would still count the wire twice. Migration 6 adds both columns.
+- **A nested topology could not be saved at all.** `ct_channels.parent_ct_id`
+  is a self-referencing foreign key with `PRAGMA foreign_keys=ON`, and channels
+  were inserted in payload order. The wizard sends channels in discovery order,
+  which puts a sub-panel feed *before* the service feed it hangs from, so the
+  write aborted with `FOREIGN KEY constraint failed`. `save_topology()` now
+  inserts parents before children (cycle-safe), and the rejected-cycle path was
+  proven to roll back atomically rather than emptying the topology.
+- **The options flow could never be opened.** `async_get_options_flow` was a
+  module-level function, but Home Assistant looks it up on the config-flow
+  class: `OptionsFlowManager` calls `handler.async_get_options_flow(entry)` and
+  `async_supports_options_flow` decides `supports_options` by comparing it with
+  the base method. The entry therefore advertised `supports_options: false` and
+  every options request was rejected with `Invalid handler specified` — a user
+  could never change CT assignments or energy toggles after installing. It is
+  now a `@staticmethod` on `WattMosaicConfigFlow`, with a test asserting the
+  registration shape so it cannot drift back.
+
+### Measured
+
+Replayed over the reference installation's 48-hour history, now going through
+the **real storage layer** rather than an in-memory topology:
+
+| | feeds summed | median whole-home |
+| --- | --- | --- |
+| before, no declarations persisted | 6 | 4975 W |
+| after, alias + parent stored and reloaded | 2 | 2100 W |
+
+The notes are emitted as `duplicate_feeds_counted_once` and
+`nested_feeds_not_summed`. On the live system the same defect read as ~13 kW
+while the canonical feed alone was ~4.9 kW.
+
+### Verification
+
+1256 tests pass; `tools/dev/verify.py` reports **11/11 gates** (10/10 required).
+Every new guard was negatively verified: removing the write path, the read path,
+the migration, the insertion ordering or the options-flow registration each
+makes its test fail, and restoring it makes it pass.
+
+---
+
 ## v0.2.0-dev1 — 2026-11-08 (development channel)
 
 The first build on the `dev` channel. It fixes the two defects that made the

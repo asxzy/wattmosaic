@@ -1925,7 +1925,7 @@ than an upgrade of the stable one.
 
 - **`dev` branch** carries development versions. `main` is untouched by a dev
   release.
-- **App version** is a SemVer prerelease (`0.2.0-dev1`), which is what the
+- **App version** is a SemVer prerelease (`0.2.0-dev2`), which is what the
   Supervisor pulls as an image tag. The dev App is installed from
   `https://github.com/asxzy/wattmosaic#dev` as a separate repository entry.
 - **Integration version** is the same prerelease string. The Marketplace cannot
@@ -1951,6 +1951,89 @@ Assistant version, not a project version.
 1249 tests pass; `tools/dev/verify.py` reports **11/11 gates** (10/10 required).
 The dev tree is byte-identical to the verified local tree except for the version
 strings, the release notes, the docs section above and the workflow trigger.
+
+---
+
+## 7q. Defect #48 — the nesting fix could not reach the engine
+
+The dev build was installed on the live installation to prove the 7o fix with
+real CT data. It reported **~13.7 kW** while the canonical feed alone measured
+**~4.9 kW**, and the alias declaration was demonstrably absent from what the
+engine read back. Three independent wiring defects were found. All three are
+invisible to a unit suite that builds topologies in memory — the shipped code
+was correct, the path the product actually uses was not.
+
+### #48a. `alias_of_ct_id` and `measurement_multiplier` had no column
+
+`CTChannel` has carried both fields since contract 1.2.0, and every consumer
+(`canonical_channel_id`, `alias_channels`, `scale_w`, `multiplier_for`) reads
+them from the contract object. But `ct_channels` had columns only for the fields
+that existed earlier, and `save_topology()` writes an explicit column list:
+
+```sql
+INSERT INTO ct_channels(ct_id, entity_id, name, ct_type, phase, parent_ct_id,
+    polarity, device_id, paired_ct_id, enabled, ...)   -- no alias, no multiplier
+```
+
+`load_topology()` then rebuilt each `CTChannel` without them, so both silently
+took their defaults. `parent_ct_id` survived **only because it had a column**,
+which is exactly the asymmetry the live measurement showed: the sub-panel
+disappeared from the total while the duplicate feed stayed in it.
+
+Migration 6 adds both columns; the write and read paths now carry them.
+
+### #48b. A nested topology could not be written at all
+
+`ct_channels.parent_ct_id` is `TEXT REFERENCES ct_channels(ct_id)` and the
+connection sets `PRAGMA foreign_keys=ON`. Channels were inserted in payload
+order. The wizard sends channels in discovery order, which puts the sub-panel
+feed **before** the service feed it hangs from, so the statement
+aborted with `FOREIGN KEY constraint failed` and the whole transaction rolled
+back. On the live 38-channel map, declaring nesting made the write fail rather
+than persist.
+
+`save_topology()` now orders channels parents-first (`_insertion_order`, tolerant
+of unknown parents and of cycles). A genuine cycle remains unstorable — a
+self-referencing FK cannot represent one — but it was verified to fail
+**atomically**, leaving the previous topology intact rather than emptying the
+installation.
+
+### #48c. The options flow was unreachable
+
+`async_get_options_flow` was a module-level function in `config_flow.py`. Home
+Assistant resolves it on the handler *class*:
+
+- `OptionsFlowManager.async_create_flow` → `handler.async_get_options_flow(entry)`
+- `ConfigFlow.async_supports_options_flow` → compares
+  `cls.async_get_options_flow` with `ConfigFlow.async_get_options_flow`
+
+Neither can see a module-level function, so the entry reported
+`supports_options: false` and `POST /api/config/config_entries/options/flow`
+answered `{"message": "Invalid handler specified"}`. A user could install the
+integration and then never edit CT assignments or energy toggles again. It is
+now a `@staticmethod` on `WattMosaicConfigFlow`.
+
+### Measured through the real storage layer
+
+The 48-hour replay was re-run so the topology went through
+`save_topology()`/`load_topology()` rather than staying in memory — the path
+that was broken:
+
+| | feeds summed | median whole-home | notes |
+| --- | --- | --- | --- |
+| before | 6 | 4975 W | — |
+| after | 2 | 2100 W | `duplicate_feeds_counted_once`, `nested_feeds_not_summed` |
+
+`effective_feeds()` returned the two service-feed legs,
+`alias_channels()` returned the two duplicate panel legs, and `nested_mains()`
+returned both sub-panel→service-feed links.
+
+### Verification
+
+1256 tests pass; `tools/dev/verify.py` reports **11/11 gates** (10/10 required).
+Five guards were negatively verified — the alias write path, the alias read
+path, migration 6, the insertion ordering, and the options-flow registration.
+Removing each makes its test fail; restoring it makes it pass.
 
 ---
 

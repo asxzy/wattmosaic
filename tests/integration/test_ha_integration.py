@@ -2209,6 +2209,48 @@ class TestEnergyWiring:
         )
 
 
+class TestOptionsFlowRegistration:
+    """The options flow must be reachable from Home Assistant's flow manager.
+
+    ``OptionsFlowManager.async_create_flow`` does
+    ``handler.async_get_options_flow(entry)`` on the *config-flow class*, and
+    ``ConfigFlow.async_supports_options_flow`` derives ``supports_options`` by
+    comparing that attribute with the base implementation.  A module-level
+    factory satisfies neither, so the entry advertises
+    ``supports_options: false`` and every ``options/flow`` request is rejected
+    with ``Invalid handler specified`` -- the user can never edit CT
+    assignments or energy toggles after the entry is created.
+    """
+
+    def _source(self) -> str:
+        return (PACKAGE_DIR / "config_flow.py").read_text()
+
+    def test_factory_is_a_method_on_the_config_flow(self) -> None:
+        source = self._source()
+        class_start = source.index("class WattMosaicConfigFlow")
+        class_end = source.index("class WattMosaicOptionsFlow")
+        body = source[class_start:class_end]
+        assert "def async_get_options_flow" in body, (
+            "async_get_options_flow must live on WattMosaicConfigFlow; HA looks "
+            "it up on the handler class, so a module-level function is ignored"
+        )
+
+    def test_no_module_level_factory_shadows_the_method(self) -> None:
+        source = self._source()
+        # A stray module-level ``def async_get_options_flow`` has no effect but
+        # signals the wiring is drifting back to the broken shape.
+        assert "\ndef async_get_options_flow" not in source
+        assert "\n@callback\ndef async_get_options_flow" not in source
+
+    def test_factory_returns_the_options_flow_and_is_a_staticmethod(self) -> None:
+        source = self._source()
+        class_start = source.index("class WattMosaicConfigFlow")
+        class_end = source.index("class WattMosaicOptionsFlow")
+        body = source[class_start:class_end]
+        assert "@staticmethod" in body
+        assert "return WattMosaicOptionsFlow(config_entry)" in body
+
+
 # --------------------------------------------------------------------------- #
 # Reference-household sanity (uses the synthetic fixture, no HA connection)
 # --------------------------------------------------------------------------- #
