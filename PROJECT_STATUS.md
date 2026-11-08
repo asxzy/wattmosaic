@@ -1888,6 +1888,72 @@ truth, so it stays "unverified" rather than being claimed.
 
 ---
 
+## 7p. Release channels — `main` stable, `dev` development
+
+### The constraint that shaped it
+
+Both artifacts install from a git ref, and neither had a development path:
+
+- The **Marketplace** tracks the default branch's commit SHA for a repository
+  without releases (the live install reports `available_version: eec273d`, a
+  commit, not a version).
+- The **App** reads `addon/config.yaml` from the default branch and pulls
+  `ghcr.io/asxzy/wattmosaic-engine:<version>`, where the tag *is* that field.
+
+So a dev build placed on `main` would be what every stable user receives. Two
+alternatives were rejected: a separate repository (the credential cannot create
+one), and publishing dev versions on `main` (it defeats the point of a stable
+channel).
+
+### What the two installers actually support
+
+Read from the upstream source rather than assumed, because the two differ:
+
+| Mechanism | Supervisor (App) | Marketplace (integration) |
+| --- | --- | --- |
+| `#branch` in the repository URL | **accepted** (`GitRepo` parses it) | **rejected** — `is_valid_ref` forbids `#`, and the URL regex keeps only `owner/repo` |
+| Install an explicit version/ref | via `addon/config.yaml` | **yes** — `marketplace/repository/install` takes an optional `version` |
+| Prerelease versions | any `AwesomeVersion` | **yes** — releases are read with `prerelease=True`; `show_beta` controls what is offered |
+
+The `#branch` suffix also changes the repository id, because the id is
+`sha1(lowercased URL)[:8]`: the stable URL hashes to `f48de52e`, the `#dev` URL
+to `7acd0210`. A different id means a different app slug, a different `/data`
+volume and a different sidebar entry — so a dev App is a *second* app rather
+than an upgrade of the stable one.
+
+### Decision
+
+- **`dev` branch** carries development versions. `main` is untouched by a dev
+  release.
+- **App version** is a SemVer prerelease (`0.2.0-dev1`), which is what the
+  Supervisor pulls as an image tag. The dev App is installed from
+  `https://github.com/asxzy/wattmosaic#dev` as a separate repository entry.
+- **Integration version** is the same prerelease string. The Marketplace cannot
+  pin the branch, so a dev build is installed with **Install another version**
+  and an explicit ref; the stable entry keeps tracking `main`.
+- **One workflow, two branches.** `.github/workflows/app-image.yaml` now runs on
+  `push` to `main` *and* `dev`. The tag is the `version:` field, so the branch
+  only decides which version was committed; a tag already in GHCR is still never
+  rebuilt without `force`.
+
+### Tooling defect found while doing it
+
+`tools/dev/check_hacs.py` rejected any manifest version that was not exactly
+`MAJOR.MINOR.PATCH`, which contradicts SemVer 2.0.0 (a prerelease suffix is part
+of the spec, not a violation of it). The gate would have failed on a correctly
+versioned dev build, so it was fixed to accept an optional prerelease suffix
+rather than the dev version being renamed to a fake stable one. `hacs.json`'s
+minimum-Home-Assistant check keeps the strict form, because that value is a Home
+Assistant version, not a project version.
+
+### Verification
+
+1249 tests pass; `tools/dev/verify.py` reports **11/11 gates** (10/10 required).
+The dev tree is byte-identical to the verified local tree except for the version
+strings, the release notes, the docs section above and the workflow trigger.
+
+---
+
 ## 8. Needs user authorization
 
 | Action | Why it needs authorization |

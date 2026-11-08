@@ -17,15 +17,26 @@
 # and force-pushing. GitHub cannot compute a before/after diff for a push whose
 # new history shares no ancestor with the old one, so a path-filtered workflow
 # never fires - which is exactly what happened to the first release. The job
-# therefore runs on every push to main and decides for itself whether there is
-# work to do: the app version *is* the release key, and a version that is already
-# in the registry is left alone (re-pushing it would silently mutate a tag users
-# may already have pulled). Bump `version` in addon/config.yaml to publish.
+# therefore runs on every push and decides for itself whether there is work to
+# do: the app version *is* the release key, and a version that is already in the
+# registry is left alone (re-pushing it would silently mutate a tag users may
+# already have pulled). Bump `version` in addon/config.yaml to publish.
+#
+# Release channels
+# ----------------
+# `main` is the stable channel: its image tags are stable versions. `dev` is the
+# development channel: its image tags carry a prerelease suffix (``-dev1``).
+# Both branches share this one workflow because the tag is the version field,
+# not the branch name; the branch only decides *which* version string was
+# committed. The Supervisor reaches the dev channel by pinning the repository
+# URL to the branch (``...#dev``), which gives it a different repository id and
+# therefore a separate app slug, /data volume and sidebar entry - so installing
+# a dev build cannot overwrite a stable one.
 name: App image
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "dev"]
   workflow_dispatch:
     inputs:
       force:

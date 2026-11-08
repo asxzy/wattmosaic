@@ -221,7 +221,10 @@ def test_manifest_consistency() -> None:
     manifest = json.loads((PKG / "manifest.json").read_text())
     assert manifest["domain"] == "wattmosaic"
     assert manifest["config_flow"] is True
-    assert manifest["version"] == "0.1.5"
+    # The version is bumped per release (stable and dev channels share the
+    # field), so assert its shape rather than a literal that would have to be
+    # edited on every release.
+    assert re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?", manifest["version"]), manifest["version"]
     assert manifest.get("iot_class") == "local_polling"
     # HA provides aiohttp
     assert "aiohttp" not in json.dumps(manifest.get("requirements", []))

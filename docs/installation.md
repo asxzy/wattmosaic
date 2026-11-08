@@ -355,6 +355,33 @@ Then confirm the CT topology — see §A5.
 `custom_components/wattmosaic/brand/` provides the icon and logo. Integration
 releases are ordinary git tags; `manifest.json` carries the version.
 
+#### Release channels
+
+There are two channels, and they are separate installs rather than a toggle:
+
+| Channel | Git ref | App version | Integration version | Intended for |
+| --- | --- | --- | --- | --- |
+| Stable | `main` | `x.y.z` | `x.y.z` | normal use |
+| Development | `dev` | `x.y.z-devN` | `x.y.z-devN` | testing a fix before it is stable |
+
+**The App** distinguishes the channels by repository URL. The Supervisor accepts
+a `#branch` suffix, and because the repository id is the SHA-1 of the whole URL,
+`https://github.com/asxzy/wattmosaic#dev` resolves to a *different* repository id
+than the stable URL. That gives the dev App its own slug, its own `/data` volume
+and its own sidebar entry, so installing a dev build cannot overwrite a stable
+one. Add it as a second app repository and install it alongside the stable app.
+
+**The integration** cannot pin a branch: the Marketplace extracts `owner/repo`
+from the URL and rejects `#`. Install a dev build explicitly instead — in the
+Marketplace repository page use **Install another version** and pick the
+prerelease tag. The dev tree is installable by ref, so no GitHub release has to
+exist for the channel to work, and the stable channel keeps tracking `main`.
+
+Both branches publish through the same workflow (`.github/workflows/app-image.yaml`),
+because the image tag is the `version:` field rather than the branch name. A
+version already present in GHCR is never rebuilt unless the workflow is
+dispatched with `force`, so a published tag is immutable.
+
 ---
 
 ## Verifying a fresh install

@@ -35,7 +35,10 @@ NOTES: list[str] = []
 #: users to a 404 issue tracker after a fork or rename.
 PLACEHOLDER_ORGS = ("wattmosaic/wattmosaic",)
 
-SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
+#: SemVer 2.0.0: MAJOR.MINOR.PATCH with an optional prerelease suffix
+#: (``-dev1``, ``-rc.2``).  The suffix is part of the spec, not a violation of
+#: it, so a dev channel does not need a fake stable version number.
+SEMVER = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$")
 
 
 def _load_json(path: Path) -> dict | None:
@@ -165,7 +168,11 @@ def check_release_consistency() -> None:
     if not addon.is_file():
         return
     text = addon.read_text()
-    m = re.search(r"^version:\s*[\"']?([0-9.]+)[\"']?\s*$", text, re.MULTILINE)
+    m = re.search(
+        r"^version:\s*[\"']?(\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)[\"']?\s*$",
+        text,
+        re.MULTILINE,
+    )
     manifest = COMPONENT / "manifest.json"
     if not m or not manifest.is_file():
         return

@@ -1,5 +1,47 @@
 # Release Notes
 
+## v0.2.0-dev1 — 2026-11-08 (development channel)
+
+The first build on the `dev` channel. It fixes the two defects that made the
+live install report wrong numbers: nested panel feeds were summed as if they
+were parallel, and a duplicate measurement of the same conductors was counted
+twice. **This is a prerelease. It is installed from the `dev` branch and does
+not replace the stable integration or App.**
+
+### Fixed
+
+- **Nested feeds were added together.** A sub-panel feed is measured *again* by
+  the CT on the feed that supplies it, so adding every `main` channel counted
+  the same watts at two levels. `main_power_w()` now sums only feeds that have no
+  `main` ancestor (``effective_feeds()``), and reports what it excluded in
+  `MainPower.notes`. On the reference installation the whole-home feed count
+  dropped from 6 to 2 and the reported total from ~14.9 kW to ~2.1 kW.
+- **The same conductors could be counted twice.** Two CTs reading one wire
+  (a load-manager tap and the panel feed it sits on) were both summed. Such a
+  pair is now a *duplicate* candidate: reported, never silently merged, and only
+  proposed when both feeds are active together, agree instant by instant, and
+  are not a constant multiple of one another.
+- **A circuit multiplier is no longer inferred.** Some CT hardware publishes the
+  already-multiplied value. `measurement_multiplier` therefore defaults to `1.0`
+  and is applied exactly once, only when the user sets it. Inferring it from
+  `phase` or `ct_type` multiplied real readings by two.
+
+### Added
+
+- **Nesting candidates in the wizard.** `GET /topology/nesting` returns parent
+  candidates (a `main` CT measured inside another `main` CT) and alias
+  candidates (a duplicate measurement of the same conductors). Both pre-select in
+  the wizard and neither is ever written without confirmation.
+- **Honest "not inferable" reporting.** A load's level cannot be measured from
+  power alone, so branch and dedicated-device CTs are listed under
+  `not_inferable` instead of being guessed. Ambiguous parents are reported as
+  ambiguous rather than resolved arbitrarily.
+
+### Not changed
+
+- No API version change (`/api/v1` stays at 1.1.0). The topology contract moves
+  to `1.2.0`, which adds fields and changes no existing one.
+
 ## v0.1.5 — 2026-11-08
 
 An App install now announces itself, so the integration can be added from a
