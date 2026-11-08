@@ -2028,6 +2028,33 @@ that was broken:
 `alias_channels()` returned the two duplicate panel legs, and `nested_mains()`
 returned both sub-panel→service-feed links.
 
+### Measured on the live installation
+
+The dev App (`0.2.0-dev2`) and the dev integration entry were installed
+alongside the untouched stable pair, and the four proven declarations were
+applied **through the options flow** — the surface that had been unreachable
+before #48c.
+
+At one sampled instant, reading the raw CT sensors and the integration's own
+entities in the same response:
+
+| Reading | Value |
+| --- | --- |
+| `main_load_manager` L1 (raw CT) | 1128.0 W |
+| dev entry `l1_power` | 1128.0 W (exact) |
+| `main_load_manager` L2 (raw CT) | 1536.0 W |
+| dev entry `l2_power` | 1536.0 W (exact) |
+| **dev entry total** | **2664.0 W** = L1 + L2 exactly |
+| sub-panel legs (nested) | 1172.1 W — excluded |
+| main-panel legs (alias) | 2584.7 W — excluded |
+| naive six-feed sum | 6420.9 W |
+| stable entry (0.1.5, no declarations) | 6434.8 W |
+
+The dev total equals the canonical service feed *to the watt* while the other
+four feeds are present and excluded. The stable entry, running 0.1.5 against the
+same conductors, still reports the naive six-feed sum. Both entries now report
+`supports_options: true`.
+
 ### Verification
 
 1256 tests pass; `tools/dev/verify.py` reports **11/11 gates** (10/10 required).

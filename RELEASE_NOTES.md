@@ -56,6 +56,29 @@ Every new guard was negatively verified: removing the write path, the read path,
 the migration, the insertion ordering or the options-flow registration each
 makes its test fail, and restoring it makes it pass.
 
+### Measured on the live installation
+
+Both artifacts were installed alongside the untouched stable pair and the four
+proven declarations were applied **through the options flow** — the surface that
+had been unreachable before this release. At one sampled instant, reading the raw
+CT sensors and the integration's own entities in the same response:
+
+| Reading | Value |
+| --- | --- |
+| service feed L1 (raw CT) | 1128.0 W |
+| dev entry `l1_power` | 1128.0 W (exact) |
+| service feed L2 (raw CT) | 1536.0 W |
+| dev entry `l2_power` | 1536.0 W (exact) |
+| **dev entry total** | **2664.0 W** = L1 + L2 exactly |
+| sub-panel legs (nested) | 1172.1 W — excluded |
+| main-panel legs (alias) | 2584.7 W — excluded |
+| naive six-feed sum | 6420.9 W |
+| stable entry (0.1.5) | 6434.8 W |
+
+The dev total equals the canonical service feed to the watt while the other four
+feeds are present and excluded. Both entries now report
+`supports_options: true`.
+
 ---
 
 ## v0.2.0-dev1 — 2026-11-08 (development channel)
