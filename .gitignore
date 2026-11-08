@@ -1,0 +1,63 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*.token
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Runtime data (local observations, databases, exports)
+data/*.db
+data/*.db-wal
+data/*.db-shm
+# Timestamped backups of a live installation database: same household data.
+data/backups/
+data/raw/
+data/exports/
+data/passive/
+*.sqlite3
+
+# Full HA registry dumps carry MAC addresses, serial numbers and internal IPs.
+# The reproducible derivative is data/entity_registry_slim.json.
+data/entity_registry.json
+
+# Live-install audit output.  These describe *a real home*: room and appliance
+# names, device-registry hashes, MAC addresses, serial numbers, config-entry
+# IDs.  They are produced by the tools in tools/audit/ against your own Home
+# Assistant and must never be committed.  The publishable, synthetic stand-in
+# lives in data/examples/reference_house/ and is what tests and docs use.
+data/ha_environment_audit.json
+data/entity_inventory.json
+data/device_inventory.json
+data/initial_mapping_candidates.json
+data/entity_registry_slim.json
+data/ct_update_profile.json
+data/state_entity_candidates.json
+data/topology_candidates.json
+data/real_ha_validation.json
+
+# Operator-specific topology knowledge (panel mains, double-pole prefixes).
+# Optional; every field falls back to auditing the CT channels.
+data/install_profile.json
+
+# Runtime logs.  They name real entities and devices, so they are local-only.
+logs/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

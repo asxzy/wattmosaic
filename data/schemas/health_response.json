@@ -1,0 +1,85 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "status": {
+      "default": "ok",
+      "enum": [
+        "ok",
+        "degraded",
+        "error"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "contract_version": {
+      "default": "1.1.0",
+      "title": "Contract Version",
+      "type": "string"
+    },
+    "engine_version": {
+      "default": "0.1.2",
+      "title": "Engine Version",
+      "type": "string"
+    },
+    "database": {
+      "default": "unknown",
+      "title": "Database",
+      "type": "string"
+    },
+    "ha_connected": {
+      "default": false,
+      "title": "Ha Connected",
+      "type": "boolean"
+    },
+    "ha_last_event_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ha Last Event At"
+    },
+    "uptime_seconds": {
+      "default": 0.0,
+      "title": "Uptime Seconds",
+      "type": "number"
+    },
+    "queue_depth": {
+      "default": 0,
+      "title": "Queue Depth",
+      "type": "integer"
+    },
+    "inference_last_run_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Inference Last Run At"
+    },
+    "learning_active": {
+      "default": true,
+      "title": "Learning Active",
+      "type": "boolean"
+    },
+    "details": {
+      "additionalProperties": true,
+      "title": "Details",
+      "type": "object"
+    }
+  },
+  "title": "HealthResponse",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/health_response.json",
+  "x-contract-version": "1.1.0"
+}

@@ -1,0 +1,996 @@
+"""Pure configuration-flow logic (no Home Assistant imports).
+
+Everything the UI wizard needs to *decide* lives here so it can be tested on a
+machine without ``homeassistant``.  The flow classes in ``config_flow.py`` are
+only presentation + HTTP orchestration around these helpers.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any
+
+from .const import (
+    COMMAND_SET_DEVICE_CONFIGURATION,
+    CONNECTIVITY_LEVELS,
+    CT_ROLE_DEDICATED,
+    CT_ROLE_MAIN,
+    CT_ROLE_UNKNOWN,
+    CT_ROLES,
+    DEFAULT_SCAN_INTERVAL,
+    DEFAULT_STALE_AFTER,
+    DEFAULT_UNAVAILABLE_AFTER,
+    DEVICE_TYPES,
+    LIGHT_TYPES,
+    MAX_SCAN_INTERVAL,
+    MAX_STALE_AFTER,
+    MAX_UNAVAILABLE_AFTER,
+    MIN_SCAN_INTERVAL,
+    MIN_STALE_AFTER,
+    MIN_UNAVAILABLE_AFTER,
+    MONITORING_LEVELS,
+    PHASE_UNKNOWN,
+    PHASES,
+    POLARITIES,
+    POLARITY_NORMAL,
+    POWER_BEHAVIORS,
+)
+from .util import as_bool, as_float, as_int, normalise_base_url
+
+#: Form field for the per-device energy-entity opt-in.  Integration-side only:
+#: it is stored in the config entry, never sent to the engine.
+ENERGY_ENTITY_FIELD = "create_energy_sensor"
+
+# --------------------------------------------------------------------------- #
+# Connection step
+# --------------------------------------------------------------------------- #
+
+
+def validate_connection(base_url: Any, api_token: Any = None) -> dict[str, str]:
+    """Validate the connection step.  Returns ``{field: error_key}``.
+
+    The token is never echoed or included in an error message.
+    """
+    errors: dict[str, str] = {}
+    if normalise_base_url(base_url) is None:
+        errors["base_url"] = "invalid_url"
+    if api_token is not None and not isinstance(api_token, str):
+        errors["api_token"] = "invalid_token"
+    return errors
+
+
+def connection_defaults(data: Mapping[str, Any] | None) -> dict[str, Any]:
+    data = data or {}
+    return {
+        "base_url": data.get("base_url", ""),
+        # Never pre-fill an existing token: show a flag instead.
+        "api_token": "",
+        "token_configured": bool(data.get("api_token")),
+    }
+
+
+#: Announced port assumed when the App does not state one.  Matches the gateway
+#: port in ``addon/config.yaml`` and ``run.sh``.
+DEFAULT_ENGINE_PORT = 8787
+
+#: One DNS label: no leading/trailing hyphen, at most 63 characters.
+_LABEL = r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?"
+#: A bare host name (optionally fully qualified) — no scheme, path, userinfo,
+#: port or whitespace.  Discovery data is untrusted, so it is matched, not
+#: repaired.
+_HOSTNAME_RE = re.compile(rf"^{_LABEL}(?:\.{_LABEL})*\.?$")
+#: A bracketed IPv6 literal, which is the only host form containing ``:``.
+_IPV6_RE = re.compile(r"^\[[0-9A-Fa-f:.]+\]$")
+#: Names that point Home Assistant at itself rather than at an App container.
+_LOOPBACK_NAMES = frozenset(
+    {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}
+)
+_LOOPBACK_ADDRESSES = frozenset({"127.0.0.1", "0.0.0.0", "::1", "[::1]"})
+
+
+def _is_bare_host(value: str) -> bool:
+    """True if ``value`` is a host name only, with no URL syntax around it."""
+    if not value or any(ch.isspace() for ch in value):
+        return False
+    if _IPV6_RE.match(value):
+        return True
+    return bool(_HOSTNAME_RE.match(value))
+
+
+def discovered_base_url(config: Mapping[str, Any] | None) -> str | None:
+    """The engine URL implied by a Supervisor discovery message.
+
+    The App announces ``{"host": ..., "port": ...}``.  Home Assistant's own
+    service-discovery examples put the port in the config as a string, so both
+    a string and a number are accepted.  A message without a host is useless and
+    returns ``None``.
+
+    The host must be a bare host name: anything carrying a scheme, a path, a
+    query, userinfo or its own port is rejected rather than reinterpreted.
+    This message comes from another container, so ``user@evil.example`` must not
+    become ``http://evil.example`` and ``host/path`` must not fold the port into
+    a path.
+
+    The result is normalised through the same ``normalise_base_url`` the manual
+    step uses, so a discovered entry and a hand-typed entry for the same engine
+    compare equal — which is what makes the unique id (and therefore the
+    "already configured" check) consistent across both paths.
+
+    No scheme is honoured from the message: discovery is only ever produced on
+    the Supervisor's private network, where plain HTTP is the only option.  A
+    message can therefore not downgrade or redirect an existing HTTPS setup.
+    """
+    if not isinstance(config, Mapping):
+        return None
+    host = config.get("host")
+    if not isinstance(host, str):
+        return None
+    host = host.strip()
+    if not _is_bare_host(host):
+        return None
+    if host.lower() in _LOOPBACK_NAMES or host.lower() in _LOOPBACK_ADDRESSES:
+        # ``localhost`` would point Home Assistant at itself.
+        return None
+    port = config.get("port", DEFAULT_ENGINE_PORT)
+    if isinstance(port, bool) or not isinstance(port, (int, str)):
+        port = DEFAULT_ENGINE_PORT
+    port_text = str(port).strip()
+    if not port_text.isdigit() or not (1 <= int(port_text) <= 65535):
+        port_text = str(DEFAULT_ENGINE_PORT)
+    return normalise_base_url(f"http://{host}:{port_text}")
+
+
+# --------------------------------------------------------------------------- #
+# Settings step
+# --------------------------------------------------------------------------- #
+
+
+def validate_settings(
+    scan_interval: Any,
+    stale_after: Any,
+    unavailable_after: Any,
+) -> dict[str, str]:
+    """Validate polling/threshold options.  Returns ``{field: error_key}``."""
+    errors: dict[str, str] = {}
+
+    def _check(name: str, value: Any, low: int, high: int, default: int) -> int | None:
+        if value in (None, ""):
+            return default
+        number = as_int(value)
+        if number is None:
+            errors[name] = "invalid_number"
+            return None
+        if number < low or number > high:
+            errors[name] = "out_of_range"
+            return None
+        return number
+
+    interval = _check(
+        "scan_interval", scan_interval, MIN_SCAN_INTERVAL, MAX_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
+    )
+    stale = _check("stale_after", stale_after, MIN_STALE_AFTER, MAX_STALE_AFTER, DEFAULT_STALE_AFTER)
+    unavailable = _check(
+        "unavailable_after",
+        unavailable_after,
+        MIN_UNAVAILABLE_AFTER,
+        MAX_UNAVAILABLE_AFTER,
+        DEFAULT_UNAVAILABLE_AFTER,
+    )
+
+    if interval is not None and stale is not None and stale < interval:
+        # A stale threshold below the poll interval would flap every cycle.
+        errors["stale_after"] = "stale_below_interval"
+    if unavailable is not None and stale is not None and unavailable < stale:
+        errors["unavailable_after"] = "unavailable_below_stale"
+    return errors
+
+
+def settings_defaults(config: Mapping[str, Any] | None) -> dict[str, Any]:
+    config = config or {}
+    return {
+        "scan_interval": as_int(config.get("scan_interval")) or DEFAULT_SCAN_INTERVAL,
+        "stale_after": as_int(config.get("stale_after")) or DEFAULT_STALE_AFTER,
+        "unavailable_after": as_int(config.get("unavailable_after"))
+        or DEFAULT_UNAVAILABLE_AFTER,
+    }
+
+
+def normalise_settings(data: Mapping[str, Any]) -> dict[str, int]:
+    """Return validated settings (assumes :func:`validate_settings` passed)."""
+    defaults = settings_defaults(data)
+    return {
+        "scan_interval": as_int(data.get("scan_interval")) or defaults["scan_interval"],
+        "stale_after": as_int(data.get("stale_after")) or defaults["stale_after"],
+        "unavailable_after": as_int(data.get("unavailable_after"))
+        or defaults["unavailable_after"],
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Topology / channel normalisation
+# --------------------------------------------------------------------------- #
+
+
+def normalise_channels(topology: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """Extract a stable, ordered channel list from a ``Topology`` payload."""
+    if not isinstance(topology, Mapping):
+        return []
+    raw = topology.get("channels")
+    if not isinstance(raw, list):
+        return []
+    channels: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        ct_id = item.get("ct_id")
+        if not isinstance(ct_id, str) or not ct_id.strip() or ct_id in seen:
+            continue
+        seen.add(ct_id)
+        channels.append(
+            {
+                "ct_id": ct_id,
+                "entity_id": str(item.get("entity_id") or ""),
+                "name": str(item.get("name") or ct_id),
+                "ct_type": str(item.get("ct_type") or CT_ROLE_UNKNOWN),
+                "phase": str(item.get("phase") or PHASE_UNKNOWN),
+                "polarity": str(item.get("polarity") or POLARITY_NORMAL),
+                "device_id": item.get("device_id") if isinstance(item.get("device_id"), str) else None,
+                "paired_ct_id": item.get("paired_ct_id")
+                if isinstance(item.get("paired_ct_id"), str)
+                else None,
+                "parent_ct_id": item.get("parent_ct_id")
+                if isinstance(item.get("parent_ct_id"), str)
+                else None,
+                "enabled": bool(item.get("enabled", True)),
+                "topology_status": str(item.get("topology_status") or "candidate"),
+            }
+        )
+    return channels
+
+
+def is_double_pole_ct(channel: Mapping[str, Any]) -> bool:
+    """Heuristic used only to *suggest* pairing, never to commit it."""
+    ct_id = str(channel.get("ct_id") or "")
+    name = str(channel.get("name") or "")
+    return str(channel.get("phase") or "") == "both" or bool(
+        re.search(r"(?i)(?:^|[_\s-])ct(?:1|2)(?:$|[_\s-])", ct_id + " " + name)
+    )
+
+
+def suggested_pair(channel: Mapping[str, Any], channels: Sequence[Mapping[str, Any]]) -> str | None:
+    """Suggest the sibling CT of a likely double-pole pair (CT1 <-> CT2)."""
+    if channel.get("paired_ct_id"):
+        return str(channel["paired_ct_id"])
+    ct_id = str(channel.get("ct_id") or "")
+
+    # Preferred: an explicit ``ct1``/``ct2`` marker anywhere in the id, which
+    # covers real HA entity ids such as
+    # ``panel_a_circuit_ct1_power``.
+    match = re.search(r"(?i)ct([12])(?![0-9])", ct_id)
+    if match:
+        other = "2" if match.group(1) == "1" else "1"
+        sibling = ct_id[: match.start()] + f"ct{other}" + ct_id[match.end() :]
+        for candidate in channels:
+            if str(candidate.get("ct_id") or "") == sibling:
+                return sibling
+        return None
+
+    # Fallback: a trailing integer, e.g. ``channel_1`` <-> ``channel_2``.
+    match = re.search(r"(?i)(.*?)(\d+)$", ct_id)
+    if not match:
+        return None
+    prefix, number = match.group(1), match.group(2)
+    sibling = f"{prefix}{2 if number == '1' else 1}"
+    for candidate in channels:
+        if str(candidate.get("ct_id") or "") == sibling:
+            return sibling
+    return None
+
+
+def assignment_defaults(
+    channel: Mapping[str, Any],
+    existing: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Form defaults for one CT, never inventing a confirmed mapping."""
+    existing = existing or {}
+    return {
+        "role": str(existing.get("role") or channel.get("ct_type") or CT_ROLE_UNKNOWN),
+        "phase": str(existing.get("phase") or channel.get("phase") or PHASE_UNKNOWN),
+        "polarity": str(existing.get("polarity") or channel.get("polarity") or POLARITY_NORMAL),
+        "paired_ct_id": existing.get("paired_ct_id")
+        if existing.get("paired_ct_id") is not None
+        else (channel.get("paired_ct_id") or ""),
+        "device_id": existing.get("device_id")
+        if existing.get("device_id") is not None
+        else (channel.get("device_id") or ""),
+        "enabled": bool(existing.get("enabled", channel.get("enabled", True))),
+    }
+
+
+def normalise_assignment(
+    submitted: Mapping[str, Any] | None,
+    channel: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Coerce one submitted CT assignment into the stored shape."""
+    submitted = submitted or {}
+    channel = channel or {}
+    role = str(submitted.get("role") or channel.get("ct_type") or CT_ROLE_UNKNOWN).lower()
+    phase = str(submitted.get("phase") or channel.get("phase") or PHASE_UNKNOWN).lower()
+    polarity = str(submitted.get("polarity") or channel.get("polarity") or POLARITY_NORMAL).lower()
+    if role not in CT_ROLES:
+        role = CT_ROLE_UNKNOWN
+    if phase not in PHASES:
+        phase = PHASE_UNKNOWN
+    if polarity not in POLARITIES:
+        polarity = POLARITY_NORMAL
+
+    def _clean(value: Any) -> str | None:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return None
+
+    return {
+        "role": role,
+        "phase": phase,
+        "polarity": polarity,
+        "paired_ct_id": _clean(submitted.get("paired_ct_id")),
+        "device_id": _clean(submitted.get("device_id")),
+        "enabled": bool(submitted.get("enabled", channel.get("enabled", True))),
+    }
+
+
+def validate_assignments(
+    assignments: Mapping[str, Mapping[str, Any]],
+    channels: Sequence[Mapping[str, Any]] | None = None,
+) -> list[str]:
+    """Validate the whole assignment set.  Returns user-facing error keys.
+
+    Rules (documented in ``docs/integration.md``):
+
+    * a CT cannot pair with itself
+    * a ``main`` CT needs a concrete phase (l1/l2/both)
+    * a ``dedicated_device`` CT needs a device
+    * pairing is reciprocal
+    * ``both`` phase requires a paired CT (double-pole halves)
+    """
+    errors: list[str] = []
+    known = {str(c.get("ct_id")) for c in channels} if channels else None
+
+    for ct_id, raw in assignments.items():
+        assignment = normalise_assignment(raw)
+        role = assignment["role"]
+        phase = assignment["phase"]
+        pair = assignment["paired_ct_id"]
+        device = assignment["device_id"]
+
+        if known is not None and ct_id not in known:
+            errors.append(f"unknown_channel:{ct_id}")
+            continue
+        if role == CT_ROLE_MAIN and phase == PHASE_UNKNOWN:
+            errors.append(f"main_needs_phase:{ct_id}")
+        if role == CT_ROLE_DEDICATED and not device:
+            errors.append(f"dedicated_needs_device:{ct_id}")
+        if pair and pair == ct_id:
+            errors.append(f"self_pair:{ct_id}")
+        if pair:
+            other = assignments.get(pair)
+            if other is None:
+                errors.append(f"pair_missing:{ct_id}:{pair}")
+            else:
+                other_pair = normalise_assignment(other)["paired_ct_id"]
+                if other_pair != ct_id:
+                    errors.append(f"pair_not_reciprocal:{ct_id}:{pair}")
+        if phase == "both" and not pair:
+            errors.append(f"both_needs_pair:{ct_id}")
+
+    return errors
+
+
+def resolve_confirmation(
+    validation_errors: Sequence[str],
+    uncertain: Sequence[str],
+    confirm_uncertain: bool,
+) -> tuple[bool | None, str | None]:
+    """Decide the outcome of the confirm step: ``(confirmed, error_key)``.
+
+    ``confirmed is None`` means the step must be re-shown with ``error_key``.
+
+    Submitting the form *is* an explicit user action, so an unticked box does
+    not block the wizard: it stores the assignments and leaves the topology
+    ``candidate``, which is what the documentation promises.  Refusing the
+    submission instead would leave no way out whenever any channel is an
+    assumption (an unknown phase, say) — and the only exit would be a blanket
+    confirmation of every uncertain channel, which is precisely the false
+    confirmation this project treats as worse than none.
+
+    The box therefore only ever *adds* confirmation; it is never required in
+    order to finish.
+    """
+    if validation_errors:
+        return None, "invalid_mapping"
+    return (not uncertain) or bool(confirm_uncertain), None
+
+
+def is_uncertain(assignment: Mapping[str, Any]) -> bool:
+    """Whether an assignment needs explicit user confirmation."""
+    normalised = normalise_assignment(assignment)
+    return (
+        normalised["role"] == CT_ROLE_UNKNOWN
+        or normalised["phase"] == PHASE_UNKNOWN
+        or (normalised["role"] == CT_ROLE_DEDICATED and not normalised["device_id"])
+    )
+
+
+def uncertainty_summary(assignments: Mapping[str, Mapping[str, Any]]) -> list[str]:
+    """Human-readable list of assignments that are still assumptions."""
+    uncertain: list[str] = []
+    for ct_id, raw in sorted(assignments.items()):
+        if is_uncertain(raw):
+            normalised = normalise_assignment(raw)
+            reasons = []
+            if normalised["role"] == CT_ROLE_UNKNOWN:
+                reasons.append("role unknown")
+            if normalised["phase"] == PHASE_UNKNOWN:
+                reasons.append("phase unknown")
+            if normalised["role"] == CT_ROLE_DEDICATED and not normalised["device_id"]:
+                reasons.append("no device")
+            uncertain.append(f"{ct_id}: " + ", ".join(reasons))
+    return uncertain
+
+
+def build_topology_update(
+    topology: Mapping[str, Any] | None,
+    assignments: Mapping[str, Mapping[str, Any]],
+    *,
+    confirmed: bool = False,
+    notes: Iterable[str] | None = None,
+) -> dict[str, Any]:
+    """Merge assignments into a copy of the engine topology for ``PUT``.
+
+    Unassigned channels keep their previous values.  The result stays
+    ``candidate`` unless the caller explicitly confirms.
+    """
+    topology = dict(topology or {})
+    raw_channels = topology.get("channels")
+    channels: list[dict[str, Any]] = []
+    if isinstance(raw_channels, list):
+        for item in raw_channels:
+            if not isinstance(item, Mapping):
+                continue
+            channel = dict(item)
+            ct_id = channel.get("ct_id")
+            assignment = assignments.get(str(ct_id)) if ct_id is not None else None
+            if assignment is not None:
+                normalised = normalise_assignment(assignment, channel)
+                channel.update(
+                    {
+                        "ct_type": normalised["role"],
+                        "phase": normalised["phase"],
+                        "polarity": normalised["polarity"],
+                        "paired_ct_id": normalised["paired_ct_id"],
+                        "device_id": normalised["device_id"],
+                        "enabled": normalised["enabled"],
+                        "topology_status": "candidate",
+                    }
+                )
+            channels.append(channel)
+    topology["channels"] = channels
+
+    # Mirror dedicated CTs onto device topology entries (engine contract:
+    # DeviceTopology.dedicated_ct_ids).
+    raw_devices = topology.get("devices")
+    if isinstance(raw_devices, list):
+        devices: list[dict[str, Any]] = []
+        for item in raw_devices:
+            if not isinstance(item, Mapping):
+                continue
+            device = dict(item)
+            device_id = device.get("device_id")
+            dedicated = [
+                ct_id
+                for ct_id, raw in assignments.items()
+                if normalise_assignment(raw)["role"] == CT_ROLE_DEDICATED
+                and normalise_assignment(raw)["device_id"] == device_id
+            ]
+            if dedicated:
+                device["dedicated_ct_ids"] = dedicated
+                if str(device.get("topology_status") or "candidate") == "candidate":
+                    device.setdefault("metadata", {})
+            devices.append(device)
+        topology["devices"] = devices
+
+    if confirmed:
+        topology["status"] = "confirmed"
+        for channel in channels:
+            channel["topology_status"] = "confirmed"
+        for device in topology.get("devices") or []:
+            if isinstance(device, dict):
+                device["topology_status"] = "confirmed"
+    else:
+        topology["status"] = "candidate"
+
+    extra_notes = list(notes or [])
+    if extra_notes:
+        existing_notes = topology.get("notes")
+        topology["notes"] = list(existing_notes or []) + extra_notes
+    return topology
+
+
+def mapping_summary(
+    channels: Sequence[Mapping[str, Any]],
+    assignments: Mapping[str, Mapping[str, Any]],
+    *,
+    limit: int = 50,
+) -> list[str]:
+    """Compact human-readable summary used on the confirmation screen."""
+    lines: list[str] = []
+    for channel in channels[:limit]:
+        ct_id = str(channel.get("ct_id") or "")
+        raw = assignments.get(ct_id) or assignment_defaults(channel)
+        normalised = normalise_assignment(raw, channel)
+        pair = f" pair={normalised['paired_ct_id']}" if normalised["paired_ct_id"] else ""
+        device = f" device={normalised['device_id']}" if normalised["device_id"] else ""
+        flag = " (uncertain)" if is_uncertain(normalised) else ""
+        lines.append(
+            f"{ct_id} [{channel.get('name')}]: role={normalised['role']} "
+            f"phase={normalised['phase']} polarity={normalised['polarity']}{pair}{device}{flag}"
+        )
+    if len(channels) > limit:
+        lines.append(f"... and {len(channels) - limit} more channels")
+    return lines
+
+
+# --------------------------------------------------------------------------- #
+# Device candidates
+# --------------------------------------------------------------------------- #
+
+#: Tokens that carry no device-identifying information in a CT channel name.
+#: These are structural words from the wiring vocabulary, never brand names: a
+#: monitor's own name is filtered by ``panel_shared_tokens`` instead, which works for
+#: any hardware.
+_STOPWORDS = frozenset(
+    {
+        "power",
+        "sensor",
+        "energy",
+        "the",
+        "and",
+        "ct",
+        "ct1",
+        "ct2",
+        "ct3",
+        "channel",
+        "panel",
+        "main",
+        "sub",
+    }
+)
+
+
+def _tokens(text: Any, extra: frozenset[str] = frozenset()) -> set[str]:
+    words = re.split(r"[^a-z0-9]+", str(text or "").lower())
+    return {
+        word
+        for word in words
+        if len(word) > 1 and word not in _STOPWORDS and word not in extra
+    }
+
+
+def panel_shared_tokens(channels: Sequence[Mapping[str, Any]]) -> frozenset[str]:
+    """Tokens that appear in *every* channel name or ct id.
+
+    This is the panel/monitor prefix, whatever the hardware is called.  Without
+    it a channel called ``acme_panel_ct3`` would be offered the monitor device
+    named ``Acme`` as a candidate: the shared token says nothing about which
+    load the circuit serves.  Deriving it from the channels keeps the rule
+    brand-agnostic, and it degrades to an empty set for a single channel.
+    """
+    shared: set[str] | None = None
+    for channel in channels:
+        tokens = _tokens(channel.get("ct_id")) | _tokens(channel.get("name"))
+        shared = tokens if shared is None else (shared & tokens)
+    # A single channel shares every token with itself, which says nothing about
+    # a panel prefix; subtracting them would leave no candidates at all.
+    if shared is None or len(channels) < 2:
+        return frozenset()
+    return frozenset(shared)
+
+
+def normalise_device_list(payload: Any) -> list[dict[str, Any]]:
+    """Normalise ``GET /devices`` into ``[{device_id, name, has_power}]``.
+
+    When the engine includes a per-device ``configuration`` object it is kept
+    verbatim under the same key, because the integration needs it to decide
+    whether a device gets an energy entity and which real HA entity may host
+    it.  A device without configuration simply has no such key.
+    """
+    raw: Any = payload
+    if isinstance(payload, Mapping):
+        raw = payload.get("devices") or payload.get("items") or []
+    if not isinstance(raw, list):
+        return []
+
+    devices: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw:
+        if isinstance(item, str):
+            device_id, name, has_power = item, item, False
+            configuration = None
+        elif isinstance(item, Mapping):
+            device_id = item.get("device_id") or item.get("id")
+            if not isinstance(device_id, str) or not device_id.strip():
+                continue
+            name = item.get("name") or item.get("friendly_name") or device_id
+            has_power = bool(item.get("has_power") or item.get("power_w") is not None)
+            configuration = item.get("configuration")
+        else:
+            continue
+        if device_id in seen:
+            continue
+        seen.add(device_id)
+        entry: dict[str, Any] = {
+            "device_id": device_id,
+            "name": str(name),
+            "has_power": has_power,
+        }
+        if isinstance(configuration, Mapping):
+            entry["configuration"] = dict(configuration)
+        devices.append(entry)
+    return devices
+
+
+def device_candidates(
+    devices: Sequence[Mapping[str, Any]],
+    channel: Mapping[str, Any],
+    *,
+    limit: int = 5,
+    shared_tokens: frozenset[str] = frozenset(),
+) -> list[dict[str, Any]]:
+    """Rank devices by token overlap with a channel name.
+
+    Candidates are *suggestions only* and are never written to the topology
+    without an explicit user selection (master spec §15.2).  ``shared_tokens``
+    is the panel/monitor prefix that every channel carries (``panel_shared_tokens``);
+    matching on it would only ever suggest the monitor itself.
+    """
+    channel_tokens = _tokens(channel.get("name"), shared_tokens) | _tokens(
+        channel.get("ct_id"), shared_tokens
+    )
+    if not channel_tokens:
+        return []
+    scored: list[tuple[int, bool, str, dict[str, Any]]] = []
+    for device in devices:
+        device_tokens = _tokens(device.get("name")) | _tokens(device.get("device_id"))
+        overlap = channel_tokens & device_tokens
+        if not overlap:
+            continue
+        score = len(overlap)
+        scored.append(
+            (
+                score,
+                bool(device.get("has_power")),
+                str(device.get("name") or device.get("device_id")),
+                {
+                    **dict(device),
+                    "overlap": sorted(overlap),
+                    "confidence": "low" if score < 2 else "medium",
+                },
+            )
+        )
+    scored.sort(key=lambda item: (-item[0], not item[1], item[2]))
+    return [item[3] for item in scored[:limit]]
+
+
+def candidate_labels(candidates: Sequence[Mapping[str, Any]]) -> list[tuple[str, str]]:
+    """``(device_id, label)`` pairs for a select field; never auto-selected."""
+    labels: list[tuple[str, str]] = []
+    for candidate in candidates:
+        device_id = str(candidate.get("device_id") or "")
+        if not device_id:
+            continue
+        overlap = ",".join(candidate.get("overlap") or [])
+        label = f"{candidate.get('name') or device_id} ({device_id})"
+        if overlap:
+            label += f" — match: {overlap}"
+        labels.append((device_id, label))
+    return labels
+
+
+def coercion_error_keys(errors: Sequence[str]) -> dict[str, str]:
+    """Map validation keys to flow error keys for display."""
+    mapped: dict[str, str] = {}
+    for error in errors:
+        key = error.split(":", 1)[0]
+        mapped[key] = "invalid_mapping"
+    return mapped
+
+
+def assignment_store(
+    assignments: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Serialise assignments into a JSON-friendly dict for the config entry."""
+    return {str(ct_id): normalise_assignment(raw) for ct_id, raw in assignments.items()}
+
+
+def count_confirmed(
+    assignments: Mapping[str, Mapping[str, Any]],
+) -> tuple[int, int]:
+    """``(total, uncertain)`` counts for the flow summary."""
+    total = len(assignments)
+    uncertain = sum(1 for raw in assignments.values() if is_uncertain(raw))
+    return total, uncertain
+
+
+def format_voltage_hint(channel: Mapping[str, Any]) -> str:
+    """Small helper used in flow descriptions."""
+    voltage = as_float(channel.get("nominal_voltage"))
+    if voltage is None:
+        return "voltage unknown"
+    return f"{voltage:g} V"
+
+
+# --------------------------------------------------------------------------- #
+# Per-device configuration (options flow)
+# --------------------------------------------------------------------------- #
+#
+# ``DeviceConfiguration`` is nested (``expected`` / ``light`` / ``controller``)
+# and validates cross-field rules.  The flow therefore keeps the *editing* shape
+# flat — one form, one field per input — and converts it here, where the rules
+# are testable without Home Assistant.
+
+
+def parse_entity_list(value: Any) -> list[str]:
+    """Parse a comma-separated entity list into a deduplicated list of ids.
+
+    Accepts a string (the form field), an iterable of strings, or ``None``.
+    Whitespace around each entry is trimmed, empty entries are dropped, and the
+    first occurrence wins so a user can paste a list twice without duplicates.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw: list[Any] = value.split(",")
+    elif isinstance(value, Iterable) and not isinstance(value, (bytes, Mapping)):
+        raw = list(value)
+    else:
+        return []
+
+    entities: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        entities.append(text)
+    return entities
+
+
+def _clean_choice(value: Any, allowed: Sequence[str]) -> str | None:
+    """Coerce one select value; ``None`` when empty, ``unknown`` when invalid."""
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    return text if text in allowed else "unknown"
+
+
+def normalise_device_configuration(user_input: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Convert one flat form submission into ``DeviceConfiguration`` fields.
+
+    Only stated values are emitted: an absent field means "not stated", never a
+    zero.  ``0.0`` *is* kept for ``expected_on_w`` because a user may legitimately
+    assert that a device draws nothing while running (a standby-only device).
+    ``device_id`` is never included — it travels on the command itself.
+    """
+    data = user_input or {}
+    params: dict[str, Any] = {}
+
+    for field, allowed in (
+        ("device_type", DEVICE_TYPES),
+        ("connectivity", CONNECTIVITY_LEVELS),
+        ("monitoring", MONITORING_LEVELS),
+        ("behavior", POWER_BEHAVIORS),
+    ):
+        choice = _clean_choice(data.get(field), allowed)
+        # ``unknown`` is the contract default: sending it would not change the
+        # engine's behaviour, so it is omitted like an empty field.
+        if choice is not None and choice != "unknown":
+            params[field] = choice
+
+    state_entities = parse_entity_list(data.get("state_entity_ids"))
+    if state_entities:
+        params["state_entity_ids"] = state_entities
+
+    mode_entities = parse_entity_list(data.get("mode_entity_ids"))
+    if mode_entities:
+        params["mode_entity_ids"] = mode_entities
+
+    expected: dict[str, float] = {}
+    for field, key in (("expected_on_w", "on_w"), ("expected_standby_w", "standby_w")):
+        watts = as_float(data.get(field))
+        if watts is not None and watts >= 0.0:
+            expected[key] = watts
+    if expected:
+        params["expected"] = expected
+
+    light = _normalise_light(data, params.get("device_type", "unknown"))
+    if light:
+        params["light"] = light
+
+    controller = _normalise_controller(data)
+    if controller:
+        params["controller"] = controller
+
+    # Integration-side only: the engine has no concept of a Home Assistant
+    # energy entity, so this never travels in the command parameters.  It is
+    # returned separately by ``energy_entity_choice``.
+    return params
+
+
+def energy_entity_choice(user_input: Mapping[str, Any] | None) -> bool | None:
+    """Per-device decision to create the energy entity.
+
+    ``None`` means the form did not express an opinion, which must be treated
+    as "leave the stored value alone" rather than "enable" or "disable".
+    """
+    data = user_input or {}
+    if ENERGY_ENTITY_FIELD not in data:
+        return None
+    return as_bool(data.get(ENERGY_ENTITY_FIELD), default=True)
+
+
+def stored_energy_choice(
+    stored: Any, device_id: str, *, default: bool = True
+) -> bool:
+    """The form default for the energy opt-in.
+
+    The wizard form always submits its checkbox, so the *default* is what
+    decides the outcome when a user edits any other field on the same device.
+    Showing an unconditional ``True`` would silently re-enable an entity the
+    user deliberately turned off.  The stored choice therefore wins, and
+    ``default`` applies only to a device that has never been configured.
+    """
+    if not isinstance(stored, Mapping):
+        return default
+    return as_bool(stored.get(device_id), default=default)
+
+
+def _normalise_light(data: Mapping[str, Any], device_type: str) -> dict[str, Any]:
+    """Light sub-fields, only for the device types the contract allows."""
+    if device_type not in ("light", "light_group", "unknown"):
+        return {}
+
+    light_type = _clean_choice(data.get("light_type"), LIGHT_TYPES)
+    bulb_count = as_int(data.get("bulb_count"))
+    watts = as_float(data.get("watts_per_bulb_on"))
+
+    light: dict[str, Any] = {}
+    if light_type is not None and light_type != "unknown":
+        light["light_type"] = light_type
+    if bulb_count is not None:
+        light["bulb_count"] = max(1, min(200, int(bulb_count)))
+    if watts is not None and watts >= 0.0:
+        light["watts_per_bulb_on"] = watts
+
+    # A default fixture (one unknown bulb, no stated watts) is not worth sending.
+    meaningful = (
+        light.get("light_type") not in (None, "unknown")
+        or "watts_per_bulb_on" in light
+        or light.get("bulb_count", 1) != 1
+    )
+    return light if meaningful else {}
+
+
+def _normalise_controller(data: Mapping[str, Any]) -> dict[str, Any]:
+    controller: dict[str, Any] = {}
+    mode_entity = data.get("controller_mode_entity_id")
+    if isinstance(mode_entity, str) and mode_entity.strip():
+        controller["mode_entity_id"] = mode_entity.strip()
+    load_entities = parse_entity_list(data.get("controller_load_entity_ids"))
+    if load_entities:
+        controller["load_entity_ids"] = load_entities
+    return controller
+
+
+def validate_device_configuration(
+    user_input: Mapping[str, Any] | None,
+) -> dict[str, str]:
+    """Validate one flat form submission.  Returns ``{field: error_key}``.
+
+    Mirrors the cross-field rules in ``DeviceConfiguration`` so the user sees a
+    field error instead of an engine rejection.
+    """
+    data = user_input or {}
+    errors: dict[str, str] = {}
+
+    device_type = _clean_choice(data.get("device_type"), DEVICE_TYPES)
+    connectivity = _clean_choice(data.get("connectivity"), CONNECTIVITY_LEVELS)
+    behavior = _clean_choice(data.get("behavior"), POWER_BEHAVIORS)
+
+    if device_type is None:
+        errors["device_type"] = "invalid_choice"
+    if connectivity is None:
+        errors["connectivity"] = "invalid_choice"
+    if behavior is None:
+        errors["behavior"] = "invalid_choice"
+
+    state_entities = parse_entity_list(data.get("state_entity_ids"))
+    if connectivity == "not_connected" and state_entities:
+        errors["state_entity_ids"] = "not_connected_with_state_entities"
+
+    if state_entities and any(not _looks_like_entity_id(e) for e in state_entities):
+        errors["state_entity_ids"] = "invalid_entity_id"
+
+    mode_entities = parse_entity_list(data.get("mode_entity_ids"))
+    if mode_entities and any(not _looks_like_entity_id(e) for e in mode_entities):
+        errors["mode_entity_ids"] = "invalid_entity_id"
+
+    load_entities = parse_entity_list(data.get("controller_load_entity_ids"))
+    if load_entities and any(not _looks_like_entity_id(e) for e in load_entities):
+        errors["controller_load_entity_ids"] = "invalid_entity_id"
+
+    mode_entity = data.get("controller_mode_entity_id")
+    if (
+        isinstance(mode_entity, str)
+        and mode_entity.strip()
+        and not _looks_like_entity_id(mode_entity.strip())
+    ):
+        errors["controller_mode_entity_id"] = "invalid_entity_id"
+
+    if behavior == "complex" and not (
+        (isinstance(mode_entity, str) and mode_entity.strip()) or load_entities
+    ):
+        errors["behavior"] = "complex_requires_controller"
+
+    for field in ("expected_on_w", "expected_standby_w", "watts_per_bulb_on"):
+        raw = data.get(field)
+        if raw in (None, ""):
+            continue
+        number = as_float(raw)
+        if number is None or number < 0.0:
+            errors[field] = "invalid_number"
+
+    raw_bulbs = data.get("bulb_count")
+    if raw_bulbs not in (None, ""):
+        bulbs = as_int(raw_bulbs)
+        if bulbs is None or bulbs < 1:
+            errors["bulb_count"] = "invalid_number"
+
+    # An all-default form states nothing.  The engine reads an empty parameter
+    # mapping as "remove this device's configuration", so a blank submission must
+    # be refused rather than silently deleting what the user has not replaced.
+    # The energy opt-in is integration-side, so it alone *is* something to save
+    # and must not be rejected as empty.
+    if (
+        not errors
+        and not normalise_device_configuration(data)
+        and energy_entity_choice(data) is None
+    ):
+        errors["base"] = "nothing_to_save"
+
+    return errors
+
+
+def _looks_like_entity_id(value: str) -> bool:
+    """``domain.object_id`` — deliberately permissive about the characters."""
+    text = str(value).strip()
+    if text.count(".") != 1:
+        return False
+    domain, object_id = text.split(".", 1)
+    return bool(domain) and bool(object_id) and " " not in text
+
+
+def device_configuration_command(
+    device_id: str, parameters: Mapping[str, Any]
+) -> dict[str, Any]:
+    """The ``ServiceCommand`` body for ``set_device_configuration``."""
+    return {
+        "command": COMMAND_SET_DEVICE_CONFIGURATION,
+        "device_id": str(device_id).strip(),
+        "parameters": dict(parameters),
+    }
+

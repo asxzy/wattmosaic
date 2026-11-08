@@ -1,0 +1,24 @@
+{
+  "contract_version": "1.1.0",
+  "schemas": {
+    "measurement": "measurement.json",
+    "ct_channel": "ct_channel.json",
+    "device_topology": "device_topology.json",
+    "topology": "topology.json",
+    "device_configuration": "device_configuration.json",
+    "device_configuration_set": "device_configuration_set.json",
+    "light_configuration": "light_configuration.json",
+    "controller_configuration": "controller_configuration.json",
+    "device_event": "device_event.json",
+    "device_model_version": "device_model_version.json",
+    "learning_sample": "learning_sample.json",
+    "inference_result": "inference_result.json",
+    "reconciliation": "reconciliation.json",
+    "data_quality_report": "data_quality_report.json",
+    "health_response": "health_response.json",
+    "snapshot_response": "snapshot_response.json",
+    "error_response": "error_response.json",
+    "service_command": "service_command.json",
+    "service_result": "service_result.json"
+  }
+}

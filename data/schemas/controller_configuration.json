@@ -1,0 +1,123 @@
+{
+  "$defs": {
+    "ControllerStateMapping": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/ControllerStateRole",
+          "default": "mode"
+        },
+        "power_w": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Power W"
+        },
+        "confirmed": {
+          "default": false,
+          "title": "Confirmed",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "label"
+      ],
+      "title": "ControllerStateMapping",
+      "type": "object"
+    },
+    "ControllerStateRole": {
+      "description": "What one label of a multi-state controller means for *load*.",
+      "enum": [
+        "load",
+        "mode",
+        "off",
+        "ignore"
+      ],
+      "title": "ControllerStateRole",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Multi-state / delayed controller detail (ADR-0012).\n\n``mode_entity_id`` never contributes load by itself.  ``load_entity_ids``\nare the declared signals that do prove runtime.",
+  "properties": {
+    "mode_entity_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Mode Entity Id"
+    },
+    "load_entity_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Load Entity Ids",
+      "type": "array"
+    },
+    "states": {
+      "items": {
+        "$ref": "#/$defs/ControllerStateMapping"
+      },
+      "title": "States",
+      "type": "array"
+    },
+    "on_delay_s": {
+      "anyOf": [
+        {
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "On Delay S"
+    },
+    "off_delay_s": {
+      "anyOf": [
+        {
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Off Delay S"
+    },
+    "obeys_control": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Obeys Control"
+    }
+  },
+  "title": "ControllerConfiguration",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/controller_configuration.json",
+  "x-contract-version": "1.1.0"
+}

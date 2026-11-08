@@ -1,0 +1,12 @@
+# Example Home Assistant App / add-on options.
+# Copy the values into the App Configuration UI. Never commit real tokens.
+ha_url: http://homeassistant:8123
+ha_token: replace-with-a-long-lived-access-token
+api_token: replace-with-a-random-local-token
+learning_enabled: true
+stale_after_s: 120
+inference_interval_s: 5
+database_path: /data/wattmosaic.db
+retention_days_raw: 30
+retention_days_aggregates: 730
+log_level: INFO

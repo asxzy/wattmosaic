@@ -1,0 +1,33 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "error": {
+      "title": "Error",
+      "type": "string"
+    },
+    "detail": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detail"
+    },
+    "retryable": {
+      "default": false,
+      "title": "Retryable",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "error"
+  ],
+  "title": "ErrorResponse",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/error_response.json",
+  "x-contract-version": "1.1.0"
+}

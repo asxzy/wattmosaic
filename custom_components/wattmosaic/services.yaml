@@ -1,0 +1,183 @@
+# WattMosaic services.
+#
+# All services are read-only with respect to physical devices: they only send
+# commands to the WattMosaic engine over its local HTTP API.
+#
+# `device_id` is the *engine* device identifier (shown in the integration's
+# entities as the "Engine device ID" attribute / diagnostics). You may also use
+# Home Assistant's `target.device` picker, which is resolved to the engine ID
+# through the device registry.
+
+start_learning:
+  name: Start learning
+  description: Enable active learning in the engine.
+  fields: {}
+
+pause_learning:
+  name: Pause learning
+  description: Pause the learning pipeline without discarding collected samples.
+  fields: {}
+
+resume_learning:
+  name: Resume learning
+  description: Resume a paused learning pipeline.
+  fields: {}
+
+accept_sample:
+  name: Accept learning sample
+  description: Accept a pending or rejected learning sample for one device.
+  fields:
+    device_id:
+      name: Device
+      description: Engine device identifier.
+      required: true
+      example: "panel_a_network_gear"
+      selector:
+        text:
+    sample_id:
+      name: Sample
+      description: Identifier of the learning sample.
+      required: true
+      example: "sample-000123"
+      selector:
+        text:
+
+reject_sample:
+  name: Reject learning sample
+  description: >-
+    Permanently reject a learning sample. This is destructive and requires
+    confirm to be set to true.
+  fields:
+    device_id:
+      name: Device
+      description: Engine device identifier.
+      required: true
+      example: "panel_a_network_gear"
+      selector:
+        text:
+    sample_id:
+      name: Sample
+      description: Identifier of the learning sample.
+      required: true
+      example: "sample-000123"
+      selector:
+        text:
+    confirm:
+      name: Confirm
+      description: Must be true. Rejecting a sample cannot be undone.
+      required: true
+      example: true
+      selector:
+        boolean:
+
+rebuild_model:
+  name: Rebuild model
+  description: Retrain the model for one device from stored learning samples.
+  fields:
+    device_id:
+      name: Device
+      description: Engine device identifier.
+      required: true
+      example: "panel_a_network_gear"
+      selector:
+        text:
+
+freeze_model:
+  name: Freeze model
+  description: Freeze the active model for one device so learning cannot replace it.
+  fields:
+    device_id:
+      name: Device
+      description: Engine device identifier.
+      required: true
+      example: "panel_a_network_gear"
+      selector:
+        text:
+
+unfreeze_model:
+  name: Unfreeze model
+  description: Allow a frozen model to be replaced by future learning.
+  fields:
+    device_id:
+      name: Device
+      description: Engine device identifier.
+      required: true
+      example: "panel_a_network_gear"
+      selector:
+        text:
+
+reset_device_model:
+  name: Reset device model
+  description: >-
+    Delete every learned model for one device. This is destructive and requires
+    confirm to be set to true.
+  fields:
+    device_id:
+      name: Device
+      description: Engine device identifier.
+      required: true
+      example: "panel_a_network_gear"
+      selector:
+        text:
+    confirm:
+      name: Confirm
+      description: Must be true. Deleting models cannot be undone.
+      required: true
+      example: true
+      selector:
+        boolean:
+
+rebuild_topology:
+  name: Rebuild topology
+  description: >-
+    Ask the engine to recompute topology candidates. Existing candidate
+    assignments are discarded; the result is always a candidate topology that
+    must be confirmed in the UI. Requires confirm to be set to true.
+  fields:
+    device_id:
+      name: Device
+      description: Optional engine device identifier to scope the rebuild.
+      required: false
+      example: "panel_a_network_gear"
+      selector:
+        text:
+    confirm:
+      name: Confirm
+      description: Must be true. Rebuilding topology discards candidate assignments.
+      required: true
+      example: true
+      selector:
+        boolean:
+
+run_diagnostics:
+  name: Run diagnostics
+  description: >-
+    Run engine diagnostics. The report is returned as a service response and is
+    also logged at debug level.
+  fields:
+    parameters:
+      name: Parameters
+      description: Optional diagnostic options forwarded to the engine.
+      required: false
+      selector:
+        object:
+
+export_device_data:
+  name: Export device data
+  description: >-
+    Export stored raw and inferred data for one device. The export is returned
+    as a service response.
+  fields:
+    device_id:
+      name: Device
+      description: Engine device identifier.
+      required: true
+      example: "panel_a_network_gear"
+      selector:
+        text:
+    parameters:
+      name: Parameters
+      description: Optional export options forwarded to the engine.
+      required: false
+      selector:
+        object:

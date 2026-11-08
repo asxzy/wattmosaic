@@ -1,0 +1,125 @@
+{
+  "$defs": {
+    "SampleRejection": {
+      "enum": [
+        "stale_measurement",
+        "timestamp_unreliable",
+        "concurrent_events",
+        "missing_measurement",
+        "unstable_reading",
+        "ambiguous_topology",
+        "excessive_noise",
+        "inconsistent_change",
+        "unconfirmed_association",
+        "duplicate_state",
+        "insufficient_magnitude"
+      ],
+      "title": "SampleRejection",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "sample_id": {
+      "title": "Sample Id",
+      "type": "string"
+    },
+    "device_id": {
+      "title": "Device Id",
+      "type": "string"
+    },
+    "captured_at": {
+      "format": "date-time",
+      "title": "Captured At",
+      "type": "string"
+    },
+    "duration_s": {
+      "default": 0.0,
+      "title": "Duration S",
+      "type": "number"
+    },
+    "baseline_power_w": {
+      "default": 0.0,
+      "title": "Baseline Power W",
+      "type": "number"
+    },
+    "event_power_w": {
+      "default": 0.0,
+      "title": "Event Power W",
+      "type": "number"
+    },
+    "delta_power_w": {
+      "default": 0.0,
+      "title": "Delta Power W",
+      "type": "number"
+    },
+    "control_value": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Control Value"
+    },
+    "control_variable": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Control Variable"
+    },
+    "supporting_ct_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Supporting Ct Ids",
+      "type": "array"
+    },
+    "quality_score": {
+      "default": 0.0,
+      "title": "Quality Score",
+      "type": "number"
+    },
+    "accepted": {
+      "default": true,
+      "title": "Accepted",
+      "type": "boolean"
+    },
+    "rejection_reason": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SampleRejection"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "notes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Notes",
+      "type": "array"
+    }
+  },
+  "required": [
+    "sample_id",
+    "device_id",
+    "captured_at"
+  ],
+  "title": "LearningSample",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/learning_sample.json",
+  "x-contract-version": "1.1.0"
+}

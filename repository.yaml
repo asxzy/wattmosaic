@@ -1,0 +1,10 @@
+# Home Assistant App repository manifest.
+#
+# The Supervisor reads this file at the *repository root* to recognise the
+# repository at all; without it the app store rejects the URL with
+# "is not a valid app repository".  Only ``name`` is required.
+#
+# Reference: https://contributors.home-assistant.io/apps/guides/repository
+name: "WattMosaic"
+url: "https://github.com/asxzy/wattmosaic"
+maintainer: "asxzy <https://github.com/asxzy>"

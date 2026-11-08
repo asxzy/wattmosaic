@@ -1,0 +1,94 @@
+{
+  "$defs": {
+    "Phase": {
+      "enum": [
+        "l1",
+        "l2",
+        "both",
+        "unknown"
+      ],
+      "title": "Phase",
+      "type": "string"
+    },
+    "TopologyStatus": {
+      "enum": [
+        "candidate",
+        "confirmed",
+        "rejected"
+      ],
+      "title": "TopologyStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Where in the electrical tree a logical device sits.\n\nA device may sit under multiple branch CTs only if that is genuinely true\n(redundant CTs); normally exactly one branch path applies.",
+  "properties": {
+    "device_id": {
+      "title": "Device Id",
+      "type": "string"
+    },
+    "name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Name"
+    },
+    "dedicated_ct_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Dedicated Ct Ids",
+      "type": "array"
+    },
+    "branch_ct_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Branch Ct Ids",
+      "type": "array"
+    },
+    "phase": {
+      "$ref": "#/$defs/Phase",
+      "default": "unknown"
+    },
+    "double_pole": {
+      "default": false,
+      "title": "Double Pole",
+      "type": "boolean"
+    },
+    "parent_device_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Device Id"
+    },
+    "topology_status": {
+      "$ref": "#/$defs/TopologyStatus",
+      "default": "candidate"
+    },
+    "metadata": {
+      "additionalProperties": true,
+      "title": "Metadata",
+      "type": "object"
+    }
+  },
+  "required": [
+    "device_id"
+  ],
+  "title": "DeviceTopology",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/device_topology.json",
+  "x-contract-version": "1.1.0"
+}

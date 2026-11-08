@@ -1,0 +1,64 @@
+{
+  "generated_at": "2026-01-01T00:00:00+00:00",
+  "devices": {
+    "dev_panel_a_central_hvac": {
+      "status": "supported",
+      "state_entity_ids": [
+        "binary_sensor.panel_a_central_hvac_running"
+      ],
+      "state_overrides": {
+        "on": [
+          "on"
+        ],
+        "off": [
+          "off"
+        ]
+      },
+      "reason": "balanced_accuracy_above_strong",
+      "evidence": {
+        "balanced_accuracy": 0.94
+      }
+    },
+    "dev_panel_b_hot_water_tank": {
+      "status": "weak",
+      "state_entity_ids": [
+        "binary_sensor.panel_b_hot_water_tank_running"
+      ],
+      "state_overrides": {},
+      "reason": "balanced_accuracy_below_strong:0.71",
+      "evidence": {
+        "balanced_accuracy": 0.71
+      }
+    },
+    "dev_panel_b_utility_sink": {
+      "status": "confounded",
+      "state_entity_ids": [],
+      "reason": "additive_multi_device",
+      "evidence": {}
+    },
+    "dev_panel_b_display_panel": {
+      "status": "supported",
+      "state_entity_ids": [
+        "binary_sensor.panel_b_display_panel_on"
+      ],
+      "state_overrides": {},
+      "reason": "balanced_accuracy_above_strong",
+      "duplicate_of": "dev_panel_b_display_panel",
+      "evidence": {
+        "balanced_accuracy": 0.9
+      }
+    }
+  },
+  "channels": {
+    "sensor.panel_a_patio_heater_ct1_power": {
+      "polarity_evidence": {
+        "candidate_polarity": "inverted"
+      }
+    },
+    "sensor.panel_b_garden_outlet_power": {
+      "polarity_evidence": {
+        "candidate_polarity": "normal"
+      }
+    }
+  }
+}

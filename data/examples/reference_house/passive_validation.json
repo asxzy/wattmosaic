@@ -1,0 +1,670 @@
+{
+  "generated_at": "2026-01-01T00:00:15+00:00",
+  "minutes": 20.0,
+  "synthetic": true,
+  "power_entity_count": 36,
+  "states": [
+    {
+      "entity_id": "sensor.panel_a_ct1_power",
+      "state": "10972.689",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_main_l1 power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_a_ct2_power",
+      "state": "2162.701",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_main_l2 power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_a_underfloor_loop_power",
+      "state": "1498.262",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_main_underfloor_loop power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_a_vehicle_charger_power",
+      "state": "4963.66",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_main_vehicle_charger power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_a_water_heater_ct1_power",
+      "state": "2.941",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_main_water_heater_ct1 power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_a_water_heater_ct2_power",
+      "state": "3.087",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_main_water_heater_ct2 power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_a_utility_plug_ct1_power",
+      "state": "2.06",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_main_utility_plug_ct1 power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_a_utility_plug_ct2_power",
+      "state": "3.013",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_main_utility_plug_ct2 power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_a_lighting_ct1_power",
+      "state": "0.443",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_main_lighting_ct1 power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_a_lighting_ct2_power",
+      "state": "0.161",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_main_lighting_ct2 power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_a_central_hvac_power",
+      "state": "899.951",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_main_central_hvac power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_a_space_heater_power",
+      "state": "2.371",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_main_space_heater power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_a_patio_heater_ct1_power",
+      "state": "1499.91",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_main_patio_heater_ct1 power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_a_patio_heater_ct2_power",
+      "state": "1499.211",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_main_patio_heater_ct2 power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_a_upper_ac_power",
+      "state": "3.132",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_main_upper_ac power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_a_upper_central_hvac_power",
+      "state": "800.841",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_main_upper_central_hvac power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_b_ct1_power",
+      "state": "944.948",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_sub_l1 power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_b_ct2_power",
+      "state": "293.307",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_sub_l2 power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_b_refrigerator_1_power",
+      "state": "120.659",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_sub_refrigerator_1 power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_b_refrigerator_2_power",
+      "state": "0.992",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_sub_refrigerator_2 power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_b_hot_water_tank_power",
+      "state": "250.634",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_sub_hot_water_tank power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_b_utility_sink_power",
+      "state": "1.936",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_sub_utility_sink power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_b_workshop_outlet_power",
+      "state": "2.577",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_sub_workshop_outlet power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_b_guest_bath_unit_power",
+      "state": "2.546",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_sub_guest_bath_unit power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_b_humidifier_1_power",
+      "state": "91.683",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_sub_humidifier_1 power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_b_office_outlet_power",
+      "state": "7.028",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_sub_office_outlet power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_b_garden_outlet_power",
+      "state": "500.583",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_sub_garden_outlet power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_b_display_panel_power",
+      "state": "1.925",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_sub_display_panel power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_b_network_cabinet_power",
+      "state": "215.919",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_sub_network_cabinet power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_b_eave_outlet_power",
+      "state": "60.05",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_sub_eave_outlet power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_b_humidifier_2_power",
+      "state": "0.577",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_sub_humidifier_2 power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_b_upper_plug_ct1_power",
+      "state": "3.663",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_sub_upper_plug_ct1 power"
+      }
+    },
+    {
+      "entity_id": "sensor.panel_b_upper_plug_ct2_power",
+      "state": "68.578",
+      "attributes": {
+        "device_class": "power",
+        "unit_of_measurement": "W",
+        "friendly_name": "ct_sub_upper_plug_ct2 power"
+      }
+    }
+  ],
+  "result": {
+    "channels": {
+      "sensor.panel_a_ct1_power": {
+        "observations": 75,
+        "min": 4366.017,
+        "max": 19464.944,
+        "mean": 14068.157,
+        "noise_mad_w": 3170.137,
+        "median_interval_s": 15.703,
+        "min_nonzero_delta_w": 0.202,
+        "range_w": 15098.927
+      },
+      "sensor.panel_a_ct2_power": {
+        "observations": 73,
+        "min": 2162.701,
+        "max": 10982.934,
+        "mean": 7134.851,
+        "noise_mad_w": 801.749,
+        "median_interval_s": 15.792,
+        "min_nonzero_delta_w": 0.22,
+        "range_w": 8820.233
+      },
+      "sensor.panel_a_underfloor_loop_power": {
+        "observations": 76,
+        "min": 1.234,
+        "max": 1502.894,
+        "mean": 1283.189,
+        "noise_mad_w": 1.06,
+        "median_interval_s": 15.746,
+        "min_nonzero_delta_w": 0.002,
+        "range_w": 1501.66
+      },
+      "sensor.panel_a_vehicle_charger_power": {
+        "observations": 75,
+        "min": 9.157,
+        "max": 4966.825,
+        "mean": 2717.424,
+        "noise_mad_w": 6.416,
+        "median_interval_s": 15.756,
+        "min_nonzero_delta_w": 0.018,
+        "range_w": 4957.668
+      },
+      "sensor.panel_a_water_heater_ct1_power": {
+        "observations": 74,
+        "min": 2.652,
+        "max": 3005.312,
+        "mean": 1541.854,
+        "noise_mad_w": 7.604,
+        "median_interval_s": 15.679,
+        "min_nonzero_delta_w": 0.01,
+        "range_w": 3002.66
+      },
+      "sensor.panel_a_water_heater_ct2_power": {
+        "observations": 76,
+        "min": 2.634,
+        "max": 3003.001,
+        "mean": 1501.356,
+        "noise_mad_w": 1496.8435,
+        "median_interval_s": 15.78,
+        "min_nonzero_delta_w": 0.005,
+        "range_w": 3000.367
+      },
+      "sensor.panel_a_utility_plug_ct1_power": {
+        "observations": 76,
+        "min": 1.622,
+        "max": 2404.077,
+        "mean": 1165.599,
+        "noise_mad_w": 901.0835,
+        "median_interval_s": 15.632,
+        "min_nonzero_delta_w": 0.005,
+        "range_w": 2402.455
+      },
+      "sensor.panel_a_utility_plug_ct2_power": {
+        "observations": 76,
+        "min": 2.964,
+        "max": 2003.335,
+        "mean": 812.37,
+        "noise_mad_w": 200.7465,
+        "median_interval_s": 15.714,
+        "min_nonzero_delta_w": 0.009,
+        "range_w": 2000.371
+      },
+      "sensor.panel_a_lighting_ct1_power": {
+        "observations": 76,
+        "min": 0.17,
+        "max": 241.27,
+        "mean": 69.766,
+        "noise_mad_w": 0.0785,
+        "median_interval_s": 15.53,
+        "min_nonzero_delta_w": 0.002,
+        "range_w": 241.1
+      },
+      "sensor.panel_a_lighting_ct2_power": {
+        "observations": 72,
+        "min": -0.048,
+        "max": 481.637,
+        "mean": 86.817,
+        "noise_mad_w": 0.075,
+        "median_interval_s": 15.833,
+        "min_nonzero_delta_w": 0.004,
+        "range_w": 481.685
+      },
+      "sensor.panel_a_lighting_ct3_power": {
+        "observations": 72,
+        "min": 0.272,
+        "max": 180.452,
+        "mean": 37.838,
+        "noise_mad_w": 0.07,
+        "median_interval_s": 15.948,
+        "min_nonzero_delta_w": 0.005,
+        "range_w": 180.18
+      },
+      "sensor.panel_a_air_conditioner_power": {
+        "observations": 73,
+        "min": 7.524,
+        "max": 3504.837,
+        "mean": 2542.967,
+        "noise_mad_w": 2.311,
+        "median_interval_s": 15.775,
+        "min_nonzero_delta_w": 0.012,
+        "range_w": 3497.313
+      },
+      "sensor.panel_a_central_hvac_power": {
+        "observations": 76,
+        "min": 5.594,
+        "max": 902.011,
+        "mean": 617.65,
+        "noise_mad_w": 1.065,
+        "median_interval_s": 15.722,
+        "min_nonzero_delta_w": 0.01,
+        "range_w": 896.417
+      },
+      "sensor.panel_a_patio_heater_ct1_power": {
+        "observations": 77,
+        "min": 6.977,
+        "max": 1503.598,
+        "mean": 588.777,
+        "noise_mad_w": 0.24,
+        "median_interval_s": 15.715,
+        "min_nonzero_delta_w": 0.001,
+        "range_w": 1496.621
+      },
+      "sensor.panel_a_upper_ac_power": {
+        "observations": 75,
+        "min": 3.127,
+        "max": 3204.868,
+        "mean": 1239.317,
+        "noise_mad_w": 0.165,
+        "median_interval_s": 15.865,
+        "min_nonzero_delta_w": 0.01,
+        "range_w": 3201.741
+      },
+      "sensor.panel_a_upper_central_hvac_power": {
+        "observations": 74,
+        "min": 4.576,
+        "max": 802.496,
+        "mean": 413.176,
+        "noise_mad_w": 3.7735,
+        "median_interval_s": 15.669,
+        "min_nonzero_delta_w": 0.006,
+        "range_w": 797.92
+      },
+      "sensor.panel_b_ct2_power": {
+        "observations": 72,
+        "min": 22.562,
+        "max": 1867.871,
+        "mean": 546.969,
+        "noise_mad_w": 209.3875,
+        "median_interval_s": 15.957,
+        "min_nonzero_delta_w": 0.01,
+        "range_w": 1845.309
+      },
+      "sensor.panel_b_refrigerator_1_power": {
+        "observations": 76,
+        "min": 0.596,
+        "max": 120.711,
+        "mean": 22.746,
+        "noise_mad_w": 0.061,
+        "median_interval_s": 15.657,
+        "min_nonzero_delta_w": 0.002,
+        "range_w": 120.115
+      },
+      "sensor.panel_b_refrigerator_2_power": {
+        "observations": 76,
+        "min": 0.783,
+        "max": 120.604,
+        "mean": 46.364,
+        "noise_mad_w": 0.1015,
+        "median_interval_s": 15.776,
+        "min_nonzero_delta_w": 0.016,
+        "range_w": 119.821
+      },
+      "sensor.panel_b_hot_water_tank_power": {
+        "observations": 75,
+        "min": 5.379,
+        "max": 250.634,
+        "mean": 64.211,
+        "noise_mad_w": 0.114,
+        "median_interval_s": 15.79,
+        "min_nonzero_delta_w": 0.002,
+        "range_w": 245.255
+      },
+      "sensor.panel_b_utility_sink_power": {
+        "observations": 75,
+        "min": 1.804,
+        "max": 902.583,
+        "mean": 385.285,
+        "noise_mad_w": 0.229,
+        "median_interval_s": 15.842,
+        "min_nonzero_delta_w": 0.008,
+        "range_w": 900.779
+      },
+      "sensor.panel_b_guest_bath_unit_power": {
+        "observations": 76,
+        "min": 2.235,
+        "max": 802.193,
+        "mean": 159.882,
+        "noise_mad_w": 0.0805,
+        "median_interval_s": 15.69,
+        "min_nonzero_delta_w": 0.003,
+        "range_w": 799.958
+      },
+      "sensor.panel_b_humidifier_1_power": {
+        "observations": 77,
+        "min": 8.927,
+        "max": 129.84,
+        "mean": 88.928,
+        "noise_mad_w": 9.188,
+        "median_interval_s": 15.811,
+        "min_nonzero_delta_w": 0.022,
+        "range_w": 120.913
+      },
+      "sensor.panel_b_office_outlet_power": {
+        "observations": 77,
+        "min": 6.688,
+        "max": 135.577,
+        "mean": 53.352,
+        "noise_mad_w": 0.173,
+        "median_interval_s": 15.619,
+        "min_nonzero_delta_w": 0.012,
+        "range_w": 128.889
+      },
+      "sensor.panel_b_garden_outlet_power": {
+        "observations": 77,
+        "min": 1.224,
+        "max": 501.812,
+        "mean": 454.632,
+        "noise_mad_w": 0.628,
+        "median_interval_s": 15.587,
+        "min_nonzero_delta_w": 0.031,
+        "range_w": 500.588
+      },
+      "sensor.panel_b_display_panel_power": {
+        "observations": 77,
+        "min": 1.805,
+        "max": 35.371,
+        "mean": 21.716,
+        "noise_mad_w": 0.324,
+        "median_interval_s": 15.75,
+        "min_nonzero_delta_w": 0.001,
+        "range_w": 33.566
+      },
+      "sensor.panel_b_network_cabinet_power": {
+        "observations": 75,
+        "min": 8.361,
+        "max": 309.547,
+        "mean": 201.127,
+        "noise_mad_w": 0.833,
+        "median_interval_s": 15.721,
+        "min_nonzero_delta_w": 0.007,
+        "range_w": 301.186
+      },
+      "sensor.panel_b_eave_outlet_power": {
+        "observations": 73,
+        "min": 1.713,
+        "max": 60.55,
+        "mean": 50.463,
+        "noise_mad_w": 0.179,
+        "median_interval_s": 15.941,
+        "min_nonzero_delta_w": 0.013,
+        "range_w": 58.837
+      },
+      "sensor.panel_b_ventilation_unit_power": {
+        "observations": 71,
+        "min": 4.069,
+        "max": 160.784,
+        "mean": 56.599,
+        "noise_mad_w": 64.212,
+        "median_interval_s": 15.621,
+        "min_nonzero_delta_w": 0.003,
+        "range_w": 156.715
+      },
+      "sensor.panel_b_humidifier_2_power": {
+        "observations": 76,
+        "min": 0.339,
+        "max": 1201.067,
+        "mean": 205.634,
+        "noise_mad_w": 0.0605,
+        "median_interval_s": 15.682,
+        "min_nonzero_delta_w": 0.002,
+        "range_w": 1200.728
+      },
+      "sensor.panel_b_upper_plug_ct1_power": {
+        "observations": 73,
+        "min": 3.59,
+        "max": 266.105,
+        "mean": 95.663,
+        "noise_mad_w": 0.218,
+        "median_interval_s": 15.861,
+        "min_nonzero_delta_w": 0.003,
+        "range_w": 262.515
+      },
+      "sensor.panel_b_upper_plug_ct2_power": {
+        "observations": 74,
+        "min": 3.554,
+        "max": 68.578,
+        "mean": 39.288,
+        "noise_mad_w": 0.8845,
+        "median_interval_s": 15.756,
+        "min_nonzero_delta_w": 0.002,
+        "range_w": 65.024
+      },
+      "sensor.panel_a_space_heater_power": {
+        "observations": 74,
+        "min": 2.104,
+        "max": 4504.144,
+        "mean": 3284.555,
+        "noise_mad_w": 2.1145,
+        "median_interval_s": 15.697,
+        "min_nonzero_delta_w": 0.005,
+        "range_w": 4502.04
+      },
+      "sensor.panel_a_patio_heater_ct2_power": {
+        "observations": 75,
+        "min": 6.902,
+        "max": 1502.968,
+        "mean": 584.28,
+        "noise_mad_w": 0.238,
+        "median_interval_s": 15.791,
+        "min_nonzero_delta_w": 0.003,
+        "range_w": 1496.066
+      },
+      "sensor.panel_b_ct1_power": {
+        "observations": 75,
+        "min": 33.769,
+        "max": 2673.961,
+        "mean": 1391.511,
+        "noise_mad_w": 503.571,
+        "median_interval_s": 15.781,
+        "min_nonzero_delta_w": 0.011,
+        "range_w": 2640.192
+      },
+      "sensor.panel_b_workshop_outlet_power": {
+        "observations": 76,
+        "min": 2.376,
+        "max": 2.849,
+        "mean": 2.608,
+        "noise_mad_w": 0.045,
+        "median_interval_s": 15.754,
+        "min_nonzero_delta_w": 0.001,
+        "range_w": 0.473
+      }
+    },
+    "channels_observed": 36
+  }
+}

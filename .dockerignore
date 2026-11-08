@@ -1,0 +1,71 @@
+# Build context hygiene.  Anything excluded here cannot leak into an image
+# layer, which matters because this repository also holds a local .env and a
+# live SQLite database during development.
+
+# --- secrets and credentials ------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.token
+secrets/
+**/secrets/
+
+# --- runtime data (never bake a database into an image) ---------------------
+data/
+!data/schemas/
+data/*.db
+data/*.db-wal
+data/*.db-shm
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+addon-data/
+backups/
+*.bak
+
+# --- VCS / editors ----------------------------------------------------------
+.git
+.gitignore
+.gitattributes
+.github
+.idea
+.vscode
+.DS_Store
+*.swp
+
+# --- Python virtualenvs and caches -----------------------------------------
+.venv
+venv
+env
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- tests, docs, tooling (not needed at runtime) --------------------------
+tests/
+tools/
+custom_components/
+docs/
+scripts/
+PROJECT_STATUS.md
+CONTRIBUTING.md
+RELEASE_NOTES.md
+
+# --- addon sources are copied explicitly by the Dockerfiles ----------------
+# addon/config.yaml, addon/README.md and the PNGs stay out of the runtime image
+# (the Supervisor reads them from /addon, not from the image).
+addon/*.png
+addon/config.yaml
+addon/README.md
+addon/*.log

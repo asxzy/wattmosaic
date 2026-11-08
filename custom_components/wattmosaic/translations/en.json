@@ -1,0 +1,486 @@
+{
+  "title": "WattMosaic",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to the WattMosaic engine",
+        "description": "Enter the address of the WattMosaic engine. The engine performs all inference and learning; this integration only reads its results.\n\nStored API token: {token_status}.",
+        "data": {
+          "base_url": "Engine URL",
+          "api_token": "API token (optional)"
+        },
+        "data_description": {
+          "base_url": "Example: http://192.168.1.10:8787. Do not include /api/v1.",
+          "api_token": "Sent as the X-API-Token header. Leave empty if the engine has no token configured."
+        }
+      },
+      "hassio_confirm": {
+        "title": "WattMosaic App found",
+        "description": "{app_name} announced itself to Home Assistant, so the connection details are already filled in.\n\nEngine URL: {url}\nCT channels reported: {channel_count}\n\nNothing is written to the engine until you confirm the topology. If the engine is not reachable, the usual connection error is shown and you can retry."
+      },
+      "settings": {
+        "title": "Polling and freshness",
+        "description": "How often the integration polls the engine, and when data is considered stale or unavailable. The engine currently reports {channel_count} CT channel(s).",
+        "data": {
+          "scan_interval": "Scan interval (seconds)",
+          "stale_after": "Stale after (seconds)",
+          "unavailable_after": "Unavailable after (seconds)"
+        },
+        "data_description": {
+          "scan_interval": "Default 30 s. Minimum 5 s.",
+          "stale_after": "Results older than this are not published as current measurements. Default 120 s.",
+          "unavailable_after": "The engine is treated as offline after this long without a successful poll. Default 120 s."
+        }
+      },
+      "channels": {
+        "title": "CT channel assignment",
+        "description": "Channel {position}: {channel_name} ({channel_id})\nEntity: {entity_id}\nSuggested double-pole pair: {pair_suggestion}\n\nAssign a role and phase. Values from the engine are suggestions only until you confirm them at the end of the wizard.",
+        "data": {
+          "role": "Role",
+          "phase": "Phase",
+          "polarity": "Polarity",
+          "paired_ct_id": "Paired CT (double-pole)",
+          "device_id": "Device",
+          "enabled": "Enabled"
+        },
+        "data_description": {
+          "channel": "Which CT to configure.",
+          "role": "main = utility feed, branch = circuit, dedicated_device = single device.",
+          "phase": "l1, l2, both (double-pole) or unknown.",
+          "paired_ct_id": "The other leg of a double-pole load, if any.",
+          "device_id": "Required for a dedicated_device CT. Suggestions are never applied automatically."
+        }
+      },
+      "mapping": {
+        "title": "Device mapping",
+        "description": "Map {channel_name} ({channel_id}) to a device.\n\nSuggested candidates ({candidate_count}):\n{candidates}\n\nSuggestions are never applied automatically. Pick a candidate, type a device ID, or skip.",
+        "data": {
+          "candidate": "Suggested candidate",
+          "manual_override": "Enter device ID manually",
+          "skip": "Skip this channel"
+        }
+      },
+      "confirm": {
+        "title": "Confirm topology",
+        "description": "Review the assignment before it is sent to the engine.\n\nUncertain entries ({uncertain_count}):\n{uncertain_list}\n\nValidation problems: {validation_errors}\n\nNothing is committed until you submit this step. Submitting stores these assignments and leaves the topology candidate; tick the box only if you have verified the uncertain rows and want them confirmed.",
+        "data": {
+          "summary": "Summary",
+          "confirm_uncertain": "Confirm uncertain assignments"
+        },
+        "data_description": {
+          "confirm_uncertain": "Marks the topology confirmed in the engine. Leave unticked to keep it candidate, which is the normal choice when some rows are still assumptions."
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure WattMosaic",
+        "description": "Update the engine connection. Leave the token empty to keep the current one.\n\nStored API token: {token_status}.",
+        "data": {
+          "base_url": "Engine URL",
+          "api_token": "New API token (optional)"
+        },
+        "data_description": {
+          "api_token": "Leave empty to keep the stored token. The current token is never shown."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot reach the engine. Check the URL, that the engine is running, and that Home Assistant can reach it.",
+      "invalid_auth": "The engine rejected the API token.",
+      "contract_mismatch": "The engine speaks an incompatible API contract version. Update the integration or the engine.",
+      "invalid_response": "The engine returned a response that could not be understood.",
+      "unknown": "Unexpected error while contacting the engine.",
+      "invalid_url": "Enter a valid http:// or https:// URL.",
+      "invalid_token": "The API token must be text.",
+      "invalid_number": "Enter a whole number.",
+      "out_of_range": "The value is outside the allowed range.",
+      "stale_below_interval": "Stale after must be greater than or equal to the scan interval.",
+      "unavailable_below_stale": "Unavailable after must be greater than or equal to stale after.",
+      "invalid_mapping": "The CT assignment is inconsistent. Check pairing, role and device.",
+      "no_channels": "The engine reported no CT channels. Configure the engine topology first.",
+      "cannot_fetch_topology": "Could not fetch the topology from the engine.",
+      "mapping_failed": "The engine rejected the topology update.",
+      "already_configured": "This engine is already configured."
+    },
+    "abort": {
+      "already_configured": "This WattMosaic engine is already configured.",
+      "reconfigure_successful": "Reconfiguration was successful.",
+      "not_configured": "The WattMosaic entry is not configured."
+    },
+    "progress": {
+      "connect": "Contacting the WattMosaic engine..."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "WattMosaic options",
+        "description": "Adjust polling and freshness thresholds. The engine currently reports {channel_count} CT channel(s).\n\nTick \"Configure one device\" to state what the engine cannot infer by itself (device type, monitoring, expected watts).",
+        "data": {
+          "scan_interval": "Scan interval (seconds)",
+          "stale_after": "Stale after (seconds)",
+          "unavailable_after": "Unavailable after (seconds)",
+          "configure_device": "Configure one device"
+        }
+      },
+      "device_config": {
+        "title": "Configure a device",
+        "description": "Choose the device to describe. The engine reports {device_count} device(s): {device_ids}.\n\nPick one from the list or type its device id. One device is configured per visit; nothing else in the topology changes.",
+        "data": {
+          "device_id": "Device",
+          "custom_device_id": "Device id (if not listed)"
+        },
+        "data_description": {
+          "device_id": "Devices the engine already knows about.",
+          "custom_device_id": "Type an id to configure a device the engine did not list."
+        }
+      },
+      "device_config_details": {
+        "title": "Device configuration",
+        "description": "Describe device {device_id}. Every field is optional knowledge: a blank value means \"not stated\", never zero watts.\n\nState entities are comma-separated entity ids that prove the device is running. Mode entities are context only and never count as proof of load.",
+        "data": {
+          "device_type": "Device type",
+          "connectivity": "Home Assistant connectivity",
+          "monitoring": "Monitoring level",
+          "behavior": "Power behaviour",
+          "state_entity_ids": "State entity ids (comma separated)",
+          "mode_entity_ids": "Mode entity ids (comma separated)",
+          "expected_on_w": "Expected running power (W)",
+          "expected_standby_w": "Expected standby power (W)",
+          "bulb_count": "Number of bulbs",
+          "light_type": "Lamp type",
+          "watts_per_bulb_on": "Watts per bulb at full output (W)",
+          "controller_mode_entity_id": "Controller mode entity",
+          "controller_load_entity_ids": "Controller load entities (comma separated)",
+          "create_energy_sensor": "Create an energy (kWh) entity"
+        },
+        "data_description": {
+          "connectivity": "connected = HA holds an entity for it; not_connected = non-smart device.",
+          "monitoring": "dedicated = its own CT; shared = a circuit with other loads; home_total_only = only visible in the total; unmonitored = no CT at all.",
+          "behavior": "fixed = constant watts; variable = follows a dimmer/speed; complex = multi-state controller.",
+          "bulb_count": "A five-bulb fixture at 9 W per bulb is 45 W, not 9 W.",
+          "watts_per_bulb_on": "Per bulb, not per fixture.",
+          "controller_mode_entity_id": "Context only: it never proves the appliance draws power.",
+          "controller_load_entity_ids": "Entities that do prove runtime when active.",
+          "create_energy_sensor": "Adds a total-increasing energy sensor for this load, attached to the physical device when its state entity belongs to one. Turn this off for loads you do not want in the Energy Dashboard."
+        }
+      },
+      "channels": {
+        "title": "CT channel assignment",
+        "description": "Channel {position}: {channel_name} ({channel_id})\nEntity: {entity_id}\nSuggested double-pole pair: {pair_suggestion}\n\nAssign a role and phase. Unconfirmed values stay candidates.",
+        "data": {
+          "role": "Role",
+          "phase": "Phase",
+          "polarity": "Polarity",
+          "paired_ct_id": "Paired CT (double-pole)",
+          "device_id": "Device",
+          "enabled": "Enabled"
+        }
+      },
+      "mapping": {
+        "title": "Device mapping",
+        "description": "Map {channel_name} ({channel_id}) to a device.\n\nSuggested candidates ({candidate_count}):\n{candidates}\n\nSuggestions are never applied automatically.",
+        "data": {
+          "candidate": "Suggested candidate",
+          "manual_override": "Enter device ID manually",
+          "skip": "Skip this channel"
+        }
+      },
+      "confirm": {
+        "title": "Confirm topology",
+        "description": "Review the assignment before it is sent to the engine.\n\nUncertain entries ({uncertain_count}):\n{uncertain_list}\n\nValidation problems: {validation_errors}\n\nNothing is committed until you submit this step. Submitting stores these assignments and leaves the topology candidate; tick the box only if you have verified the uncertain rows and want them confirmed.",
+        "data": {
+          "summary": "Summary",
+          "confirm_uncertain": "Confirm uncertain assignments"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot reach the engine.",
+      "invalid_auth": "The engine rejected the API token.",
+      "contract_mismatch": "Incompatible API contract version.",
+      "invalid_response": "Unreadable engine response.",
+      "invalid_number": "Enter a whole number.",
+      "out_of_range": "The value is outside the allowed range.",
+      "stale_below_interval": "Stale after must be greater than or equal to the scan interval.",
+      "unavailable_below_stale": "Unavailable after must be greater than or equal to stale after.",
+      "invalid_mapping": "The CT assignment is inconsistent. Check pairing, role and device.",
+      "cannot_fetch_topology": "Could not fetch the topology from the engine.",
+      "mapping_failed": "The engine rejected the topology update.",
+      "device_required": "Choose a device from the list or type its device id.",
+      "invalid_choice": "Select one of the listed values.",
+      "invalid_entity_id": "Use Home Assistant entity ids like light.kitchen.",
+      "not_connected_with_state_entities": "A device that is not connected to Home Assistant cannot declare state entities.",
+      "complex_requires_controller": "A complex controller needs a mode entity or at least one load entity.",
+      "nothing_to_save": "Nothing was stated about this device. Fill in at least one field (an empty form would remove the stored configuration).",
+      "engine_rejected": "The engine rejected the device configuration."
+    },
+    "abort": {
+      "not_configured": "The WattMosaic entry is not configured."
+    }
+  },
+  "services": {
+    "start_learning": {
+      "name": "Start learning",
+      "description": "Enable active learning in the engine. Read-only toward devices."
+    },
+    "pause_learning": {
+      "name": "Pause learning",
+      "description": "Pause the learning pipeline without discarding collected samples."
+    },
+    "resume_learning": {
+      "name": "Resume learning",
+      "description": "Resume a paused learning pipeline."
+    },
+    "accept_sample": {
+      "name": "Accept learning sample",
+      "description": "Accept one rejected or pending learning sample.",
+      "fields": {
+        "device_id": {
+          "name": "Device",
+          "description": "Device the sample belongs to."
+        },
+        "sample_id": {
+          "name": "Sample",
+          "description": "Identifier of the learning sample."
+        }
+      }
+    },
+    "reject_sample": {
+      "name": "Reject learning sample",
+      "description": "Permanently reject one learning sample. Requires confirm: true.",
+      "fields": {
+        "device_id": {
+          "name": "Device",
+          "description": "Device the sample belongs to."
+        },
+        "sample_id": {
+          "name": "Sample",
+          "description": "Identifier of the learning sample."
+        },
+        "confirm": {
+          "name": "Confirm",
+          "description": "Must be true. Rejection is destructive."
+        }
+      }
+    },
+    "rebuild_model": {
+      "name": "Rebuild model",
+      "description": "Retrain the active model for one device from stored samples.",
+      "fields": {
+        "device_id": {
+          "name": "Device",
+          "description": "Device whose model should be rebuilt."
+        }
+      }
+    },
+    "freeze_model": {
+      "name": "Freeze model",
+      "description": "Freeze the active model so learning cannot replace it.",
+      "fields": {
+        "device_id": {
+          "name": "Device",
+          "description": "Device whose model should be frozen."
+        }
+      }
+    },
+    "unfreeze_model": {
+      "name": "Unfreeze model",
+      "description": "Allow a frozen model to be replaced by future learning.",
+      "fields": {
+        "device_id": {
+          "name": "Device",
+          "description": "Device whose model should be unfrozen."
+        }
+      }
+    },
+    "reset_device_model": {
+      "name": "Reset device model",
+      "description": "Delete all learned models for one device. Requires confirm: true.",
+      "fields": {
+        "device_id": {
+          "name": "Device",
+          "description": "Device whose models should be deleted."
+        },
+        "confirm": {
+          "name": "Confirm",
+          "description": "Must be true. This cannot be undone."
+        }
+      }
+    },
+    "rebuild_topology": {
+      "name": "Rebuild topology",
+      "description": "Ask the engine to recompute topology candidates. Requires confirm: true. Produces candidates only.",
+      "fields": {
+        "device_id": {
+          "name": "Device",
+          "description": "Optional device to scope the rebuild to."
+        },
+        "confirm": {
+          "name": "Confirm",
+          "description": "Must be true. Existing candidate assignments are discarded."
+        }
+      }
+    },
+    "run_diagnostics": {
+      "name": "Run diagnostics",
+      "description": "Run engine diagnostics and return the report as a service response."
+    },
+    "export_device_data": {
+      "name": "Export device data",
+      "description": "Export stored raw and inferred data for one device as a service response.",
+      "fields": {
+        "device_id": {
+          "name": "Device",
+          "description": "Device to export."
+        },
+        "parameters": {
+          "name": "Parameters",
+          "description": "Optional export options passed to the engine."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "confirmation_required": {
+      "message": "{service} is destructive and requires 'confirm: true'."
+    },
+    "device_required": {
+      "message": "{service} requires a device_id."
+    },
+    "sample_required": {
+      "message": "{service} requires a sample_id."
+    },
+    "unknown_service": {
+      "message": "Unknown WattMosaic service: {service}."
+    },
+    "invalid_parameters": {
+      "message": "'parameters' must be a mapping."
+    },
+    "invalid_device_id": {
+      "message": "The device_id is not valid."
+    },
+    "invalid_sample_id": {
+      "message": "The sample_id is not valid."
+    },
+    "engine_unavailable": {
+      "message": "The WattMosaic engine is unreachable."
+    },
+    "engine_rejected": {
+      "message": "The engine rejected the command: {detail}"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "power": {
+        "name": "Estimated power"
+      },
+      "energy": {
+        "name": "Estimated energy"
+      },
+      "source": {
+        "name": "Measurement source",
+        "state": {
+          "direct_measured": "Directly measured",
+          "inferred": "Inferred",
+          "model_estimated": "Model estimated",
+          "unknown": "Unknown"
+        }
+      },
+      "confidence": {
+        "name": "Confidence"
+      },
+      "confidence_tier": {
+        "name": "Evidence tier",
+        "state": {
+          "tier_0_unknown": "Unknown — no usable evidence",
+          "tier_1_modelled": "Modelled — configured prior",
+          "tier_2_inferred": "Inferred — solved from CTs",
+          "tier_3_measured": "Measured — dedicated CT",
+          "tier_4_verified": "Verified — CT plus load signal"
+        }
+      },
+      "sample_count": {
+        "name": "Sample count"
+      },
+      "model_validity": {
+        "name": "Model validity",
+        "state": {
+          "valid": "Valid",
+          "frozen": "Frozen",
+          "invalid": "Invalid",
+          "not_required": "Not required",
+          "unknown": "Unknown"
+        }
+      },
+      "operating_stage": {
+        "name": "Operating stage"
+      },
+      "last_inference": {
+        "name": "Last inference"
+      },
+      "data_quality": {
+        "name": "Data quality",
+        "state": {
+          "good": "Good",
+          "degraded": "Degraded",
+          "stale": "Stale",
+          "bad": "Bad",
+          "missing": "Missing"
+        }
+      },
+      "total_power": {
+        "name": "Total incoming power"
+      },
+      "l1_power": {
+        "name": "L1 power"
+      },
+      "l2_power": {
+        "name": "L2 power"
+      },
+      "direct_measured_power": {
+        "name": "Directly measured power"
+      },
+      "inferred_power": {
+        "name": "Inferred power"
+      },
+      "model_estimated_power": {
+        "name": "Model estimated power"
+      },
+      "unknown_power": {
+        "name": "Unknown / unattributed power"
+      },
+      "reconciliation_error": {
+        "name": "Power reconciliation error"
+      },
+      "accounted_fraction": {
+        "name": "Accounted fraction"
+      },
+      "quality_score": {
+        "name": "Data quality score"
+      },
+      "engine_status": {
+        "name": "Engine status",
+        "state": {
+          "ok": "OK",
+          "degraded": "Degraded",
+          "error": "Error",
+          "offline": "Offline"
+        }
+      },
+      "last_update": {
+        "name": "Last snapshot"
+      }
+    },
+    "binary_sensor": {
+      "running": {
+        "name": "Running"
+      },
+      "engine_reachable": {
+        "name": "Engine reachable"
+      },
+      "learning_active": {
+        "name": "Active learning"
+      }
+    }
+  }
+}

@@ -1,0 +1,499 @@
+{
+  "$defs": {
+    "ControllerConfiguration": {
+      "additionalProperties": false,
+      "description": "Multi-state / delayed controller detail (ADR-0012).\n\n``mode_entity_id`` never contributes load by itself.  ``load_entity_ids``\nare the declared signals that do prove runtime.",
+      "properties": {
+        "mode_entity_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mode Entity Id"
+        },
+        "load_entity_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Load Entity Ids",
+          "type": "array"
+        },
+        "states": {
+          "items": {
+            "$ref": "#/$defs/ControllerStateMapping"
+          },
+          "title": "States",
+          "type": "array"
+        },
+        "on_delay_s": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "On Delay S"
+        },
+        "off_delay_s": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Off Delay S"
+        },
+        "obeys_control": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Obeys Control"
+        }
+      },
+      "title": "ControllerConfiguration",
+      "type": "object"
+    },
+    "ControllerStateMapping": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/ControllerStateRole",
+          "default": "mode"
+        },
+        "power_w": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Power W"
+        },
+        "confirmed": {
+          "default": false,
+          "title": "Confirmed",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "label"
+      ],
+      "title": "ControllerStateMapping",
+      "type": "object"
+    },
+    "ControllerStateRole": {
+      "description": "What one label of a multi-state controller means for *load*.",
+      "enum": [
+        "load",
+        "mode",
+        "off",
+        "ignore"
+      ],
+      "title": "ControllerStateRole",
+      "type": "string"
+    },
+    "DeviceConfiguration": {
+      "additionalProperties": false,
+      "description": "Everything the user can state about one device.\n\nAll three taxonomy axes carry an explicit ``unknown`` so a partially filled\nconfiguration is honest rather than silently defaulted.",
+      "properties": {
+        "device_id": {
+          "title": "Device Id",
+          "type": "string"
+        },
+        "device_type": {
+          "$ref": "#/$defs/DeviceType",
+          "default": "unknown"
+        },
+        "connectivity": {
+          "$ref": "#/$defs/HaConnectivity",
+          "default": "unknown"
+        },
+        "state_entity_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "State Entity Ids",
+          "type": "array"
+        },
+        "mode_entity_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Mode Entity Ids",
+          "type": "array"
+        },
+        "controllable_entity_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Controllable Entity Ids",
+          "type": "array"
+        },
+        "monitoring": {
+          "$ref": "#/$defs/MonitoringLevel",
+          "default": "unknown"
+        },
+        "monitored_by_ct_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Monitored By Ct Ids",
+          "type": "array"
+        },
+        "behavior": {
+          "$ref": "#/$defs/PowerBehavior",
+          "default": "unknown"
+        },
+        "expected": {
+          "$ref": "#/$defs/ExpectedPower"
+        },
+        "light": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LightConfiguration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "controller": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ControllerConfiguration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "configured_by": {
+          "default": "user",
+          "enum": [
+            "user",
+            "import",
+            "default"
+          ],
+          "title": "Configured By",
+          "type": "string"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Notes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "device_id"
+      ],
+      "title": "DeviceConfiguration",
+      "type": "object"
+    },
+    "DeviceType": {
+      "description": "User-facing appliance class.  Drives prior watts and expected behaviour.",
+      "enum": [
+        "light",
+        "light_group",
+        "fan",
+        "pump",
+        "hvac_heat",
+        "hvac_cool",
+        "hvac_combined",
+        "water_heater",
+        "appliance",
+        "refrigeration",
+        "ev_charger",
+        "electronics",
+        "socket",
+        "motor",
+        "humidifier",
+        "dehumidifier",
+        "sauna",
+        "hot_tub",
+        "other",
+        "unknown"
+      ],
+      "title": "DeviceType",
+      "type": "string"
+    },
+    "ExpectedPower": {
+      "additionalProperties": false,
+      "description": "Watt envelopes the user asserts for a device.\n\nEvery field is optional: an absent field means \"not stated\", never zero.",
+      "properties": {
+        "on_w": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "On W"
+        },
+        "idle_w": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Idle W"
+        },
+        "standby_w": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Standby W"
+        },
+        "startup_w": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Startup W"
+        },
+        "shutdown_w": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Shutdown W"
+        },
+        "tolerance_w": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tolerance W"
+        },
+        "tolerance_fraction": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tolerance Fraction"
+        }
+      },
+      "title": "ExpectedPower",
+      "type": "object"
+    },
+    "HaConnectivity": {
+      "description": "Axis 1 \u2014 can Home Assistant observe/actuate the device itself?",
+      "enum": [
+        "connected",
+        "not_connected",
+        "unknown"
+      ],
+      "title": "HaConnectivity",
+      "type": "string"
+    },
+    "LightConfiguration": {
+      "additionalProperties": false,
+      "description": "Advanced light detail \u2014 the highest-value confidence lever in a house\nwith 81 dimmable ``light.*`` entities.",
+      "properties": {
+        "light_type": {
+          "$ref": "#/$defs/LightType",
+          "default": "unknown"
+        },
+        "bulb_count": {
+          "default": 1,
+          "maximum": 200,
+          "minimum": 1,
+          "title": "Bulb Count",
+          "type": "integer"
+        },
+        "watts_per_bulb_on": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Watts Per Bulb On"
+        },
+        "standby_w": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Standby W"
+        },
+        "min_output_fraction": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Output Fraction"
+        },
+        "dimming_curve": {
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "type": "array"
+          },
+          "title": "Dimming Curve",
+          "type": "array"
+        }
+      },
+      "title": "LightConfiguration",
+      "type": "object"
+    },
+    "LightType": {
+      "description": "Lamp technology \u2014 sets the dimming-to-watts relationship for lights.",
+      "enum": [
+        "led",
+        "incandescent",
+        "halogen",
+        "cfl",
+        "fluorescent",
+        "smart_bulb",
+        "unknown"
+      ],
+      "title": "LightType",
+      "type": "string"
+    },
+    "MonitoringLevel": {
+      "description": "Axis 2 \u2014 how closely does the electrical tree observe the device?",
+      "enum": [
+        "dedicated",
+        "shared",
+        "home_total_only",
+        "unmonitored",
+        "unknown"
+      ],
+      "title": "MonitoringLevel",
+      "type": "string"
+    },
+    "PowerBehavior": {
+      "description": "Axis 3 \u2014 how does power relate to the device's control state?",
+      "enum": [
+        "fixed",
+        "variable",
+        "complex",
+        "unknown"
+      ],
+      "title": "PowerBehavior",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Persisted, versioned collection of per-device configurations.",
+  "properties": {
+    "version": {
+      "default": 1,
+      "title": "Version",
+      "type": "integer"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    },
+    "devices": {
+      "items": {
+        "$ref": "#/$defs/DeviceConfiguration"
+      },
+      "title": "Devices",
+      "type": "array"
+    }
+  },
+  "title": "DeviceConfigurationSet",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/device_configuration_set.json",
+  "x-contract-version": "1.1.0"
+}

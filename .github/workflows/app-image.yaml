@@ -1,0 +1,120 @@
+# Build and publish the Home Assistant App image.
+#
+# The Supervisor pulls a *prebuilt* image for the App (see `image:` in
+# addon/config.yaml) because its Docker build context is the app folder
+# (`addon/`), which deliberately does not contain a copy of the engine package.
+#
+# Published form:
+#   ghcr.io/asxzy/wattmosaic-engine:<version from addon/config.yaml>
+#   ... as a multi-arch manifest list: linux/amd64 + linux/aarch64
+#
+# The tag is not arbitrary: the Supervisor always pulls `<image>:<version>`,
+# where `version` is the `version:` field in addon/config.yaml.
+#
+# Why there is no `paths:` filter
+# ------------------------------
+# This repository publishes by replacing history with a fresh orphan root commit
+# and force-pushing. GitHub cannot compute a before/after diff for a push whose
+# new history shares no ancestor with the old one, so a path-filtered workflow
+# never fires - which is exactly what happened to the first release. The job
+# therefore runs on every push to main and decides for itself whether there is
+# work to do: the app version *is* the release key, and a version that is already
+# in the registry is left alone (re-pushing it would silently mutate a tag users
+# may already have pulled). Bump `version` in addon/config.yaml to publish.
+name: App image
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Republish even if the version tag already exists"
+        type: boolean
+        default: false
+
+# Never let two publishes race on the same tag.
+concurrency:
+  group: app-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the app version the Supervisor will request
+        id: version
+        run: |
+          version=$(python - <<'PY'
+          import pathlib, yaml
+          cfg = yaml.safe_load(pathlib.Path("addon/config.yaml").read_text())
+          print(cfg["version"])
+          PY
+          )
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "app version: ${version}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Is this version already published?
+        id: exists
+        run: |
+          tag="ghcr.io/asxzy/wattmosaic-engine:${{ steps.version.outputs.version }}"
+          if docker buildx imagetools inspect "${tag}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "${tag} already exists; nothing to publish."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "${tag} does not exist yet; it will be built."
+          fi
+
+      - name: Explain the skip
+        if: steps.exists.outputs.exists == 'true' && inputs.force != true
+        run: |
+          # Not an error: the tag is immutable per version by design. Remind the
+          # reader what to do instead of silently doing nothing.
+          echo "::notice::App image ${{ steps.version.outputs.version }} is already published. Bump 'version' in addon/config.yaml to release a new image, or dispatch this workflow with force=true to republish the existing one."
+
+      - name: Build and push (multi-arch manifest list)
+        if: steps.exists.outputs.exists == 'false' || inputs.force == true
+        uses: docker/build-push-action@v6
+        with:
+          # The root Dockerfile is the standalone variant and is the one that
+          # has the full repository as its build context (it needs engine/).
+          # The App runtime is identical; only addon/Dockerfile differs in that
+          # it expects a pre-staged context.
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/asxzy/wattmosaic-engine:${{ steps.version.outputs.version }}
+          labels: |
+            org.opencontainers.image.title=WattMosaic Engine
+            org.opencontainers.image.description=Multi-CT load disaggregation engine for WattMosaic
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.source=https://github.com/asxzy/wattmosaic
+
+      - name: Verify the published manifest list
+        run: |
+          # Run even on a skip: this is the check that matters to an installing
+          # user, and it also proves the package is publicly readable (a private
+          # package would make the store entry fail at pull time).
+          docker buildx imagetools inspect \
+            "ghcr.io/asxzy/wattmosaic-engine:${{ steps.version.outputs.version }}"

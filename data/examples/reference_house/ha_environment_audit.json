@@ -1,0 +1,2413 @@
+{
+  "generated_at": "2026-01-01T00:00:00+00:00",
+  "ha": {
+    "version": "2026.11.0",
+    "time_zone": "UTC",
+    "unit_system": {
+      "length": "km",
+      "accumulated_precipitation": "mm",
+      "area": "m²",
+      "mass": "g",
+      "pressure": "Pa",
+      "temperature": "°C",
+      "volume": "L",
+      "wind_speed": "m/s"
+    },
+    "state": "RUNNING",
+    "safe_mode": false,
+    "location_name": "Home"
+  },
+  "counts": {
+    "states": 72,
+    "entities_registry": 72,
+    "devices_registry": 2,
+    "areas_registry": 4,
+    "floors_registry": 1,
+    "entities": 72,
+    "devices": 2,
+    "power_entities": 36,
+    "energy_entities": 36,
+    "energy_monitors": 2,
+    "monitor_power_entities": 36,
+    "monitor_energy_entities": 36,
+    "state_rich_devices": 0,
+    "power_measured_devices": 2
+  },
+  "energy_monitors": [
+    {
+      "id": "9816956bf67206a13db330ce53d7a304",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "name": "Panel A",
+      "model": "multi-channel CT monitor",
+      "manufacturer": null,
+      "area_id": "utility",
+      "hw_version": "3.0.0"
+    },
+    {
+      "id": "9816956bf67207243db330ce53d7a281",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "name": "Panel B",
+      "model": "multi-channel CT monitor",
+      "manufacturer": null,
+      "area_id": "utility",
+      "hw_version": "3.0.0"
+    }
+  ],
+  "ct_channels": [
+    {
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "entity_id": "sensor.panel_a_ct1_power",
+      "name": "Panel A CT1 power",
+      "label": "ct1",
+      "area_id": "utility",
+      "unit": "W",
+      "state": "1840.216",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "entity_id": "sensor.panel_a_ct2_power",
+      "name": "Panel A CT2 power",
+      "label": "ct2",
+      "area_id": "utility",
+      "unit": "W",
+      "state": "1210.404",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "entity_id": "sensor.panel_a_heat_pump_power",
+      "name": "Panel A Heat Pump power",
+      "label": "channel",
+      "area_id": "main_floor",
+      "unit": "W",
+      "state": "48.120",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "entity_id": "sensor.panel_a_vehicle_charger_power",
+      "name": "Panel A Vehicle Charger power",
+      "label": "channel",
+      "area_id": "main_floor",
+      "unit": "W",
+      "state": "48.120",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "entity_id": "sensor.panel_a_water_heater_ct1_power",
+      "name": "Panel A Water Heater CT1 power",
+      "label": "ct1",
+      "area_id": "main_floor",
+      "unit": "W",
+      "state": "48.120",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "entity_id": "sensor.panel_a_water_heater_ct2_power",
+      "name": "Panel A Water Heater CT2 power",
+      "label": "ct2",
+      "area_id": "main_floor",
+      "unit": "W",
+      "state": "2.848",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "entity_id": "sensor.panel_a_dishwasher_ct1_power",
+      "name": "Panel A Dishwasher CT1 power",
+      "label": "ct1",
+      "area_id": "main_floor",
+      "unit": "W",
+      "state": "48.120",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "entity_id": "sensor.panel_a_dishwasher_ct2_power",
+      "name": "Panel A Dishwasher CT2 power",
+      "label": "ct2",
+      "area_id": "main_floor",
+      "unit": "W",
+      "state": "2.848",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "entity_id": "sensor.panel_a_lighting_ct1_power",
+      "name": "Panel A Lighting Circuit 1 power",
+      "label": "ct1",
+      "area_id": "main_floor",
+      "unit": "W",
+      "state": "48.120",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "entity_id": "sensor.panel_a_lighting_ct2_power",
+      "name": "Panel A Lighting Circuit 2 power",
+      "label": "ct2",
+      "area_id": "main_floor",
+      "unit": "W",
+      "state": "48.120",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "entity_id": "sensor.panel_a_lighting_ct3_power",
+      "name": "Panel A Lighting Circuit 3 power",
+      "label": "channel",
+      "area_id": "main_floor",
+      "unit": "W",
+      "state": "48.120",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "entity_id": "sensor.panel_a_air_conditioner_power",
+      "name": "Panel A Air Conditioner power",
+      "label": "channel",
+      "area_id": "main_floor",
+      "unit": "W",
+      "state": "48.120",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "entity_id": "sensor.panel_a_central_hvac_power",
+      "name": "Panel A Central HVAC power",
+      "label": "channel",
+      "area_id": "main_floor",
+      "unit": "W",
+      "state": "48.120",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "entity_id": "sensor.panel_a_space_heater_power",
+      "name": "Panel A Space Heater power",
+      "label": "channel",
+      "area_id": "main_floor",
+      "unit": "W",
+      "state": "48.120",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "entity_id": "sensor.panel_a_patio_heater_ct1_power",
+      "name": "Panel A Patio Heater CT1 power",
+      "label": "ct1",
+      "area_id": "main_floor",
+      "unit": "W",
+      "state": "48.120",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "entity_id": "sensor.panel_a_patio_heater_ct2_power",
+      "name": "Panel A Patio Heater CT2 power",
+      "label": "ct2",
+      "area_id": "main_floor",
+      "unit": "W",
+      "state": "2.848",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "entity_id": "sensor.panel_a_upper_ac_power",
+      "name": "Panel A Upper Floor AC power",
+      "label": "channel",
+      "area_id": "main_floor",
+      "unit": "W",
+      "state": "48.120",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "entity_id": "sensor.panel_a_upper_central_hvac_power",
+      "name": "Panel A Upper Floor HVAC power",
+      "label": "channel",
+      "area_id": "main_floor",
+      "unit": "W",
+      "state": "48.120",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "entity_id": "sensor.panel_b_ct1_power",
+      "name": "Panel B CT1 power",
+      "label": "ct1",
+      "area_id": "utility",
+      "unit": "W",
+      "state": "860.112",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "entity_id": "sensor.panel_b_ct2_power",
+      "name": "Panel B CT2 power",
+      "label": "ct2",
+      "area_id": "utility",
+      "unit": "W",
+      "state": "744.900",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "entity_id": "sensor.panel_b_refrigerator_1_power",
+      "name": "Panel B Refrigerator 1 power",
+      "label": "channel",
+      "area_id": "basement",
+      "unit": "W",
+      "state": "12.480",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "entity_id": "sensor.panel_b_refrigerator_2_power",
+      "name": "Panel B Refrigerator 2 power",
+      "label": "channel",
+      "area_id": "basement",
+      "unit": "W",
+      "state": "12.480",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "entity_id": "sensor.panel_b_hot_water_tank_power",
+      "name": "Panel B Hot Water Tank power",
+      "label": "channel",
+      "area_id": "basement",
+      "unit": "W",
+      "state": "12.480",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "entity_id": "sensor.panel_b_utility_sink_power",
+      "name": "Panel B Utility Sink power",
+      "label": "channel",
+      "area_id": "basement",
+      "unit": "W",
+      "state": "12.480",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "entity_id": "sensor.panel_b_workshop_outlet_power",
+      "name": "Panel B Workshop Outlet power",
+      "label": "channel",
+      "area_id": "basement",
+      "unit": "W",
+      "state": "12.480",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "entity_id": "sensor.panel_b_guest_bath_unit_power",
+      "name": "Panel B Guest Bath Unit power",
+      "label": "channel",
+      "area_id": "basement",
+      "unit": "W",
+      "state": "12.480",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "entity_id": "sensor.panel_b_humidifier_1_power",
+      "name": "Panel B Humidifier 1 power",
+      "label": "channel",
+      "area_id": "basement",
+      "unit": "W",
+      "state": "12.480",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "entity_id": "sensor.panel_b_office_outlet_power",
+      "name": "Panel B Office Outlet power",
+      "label": "channel",
+      "area_id": "basement",
+      "unit": "W",
+      "state": "12.480",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "entity_id": "sensor.panel_b_garden_outlet_power",
+      "name": "Panel B Garden Outlet power",
+      "label": "channel",
+      "area_id": "basement",
+      "unit": "W",
+      "state": "12.480",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "entity_id": "sensor.panel_b_display_panel_power",
+      "name": "Panel B Wall Display power",
+      "label": "channel",
+      "area_id": "basement",
+      "unit": "W",
+      "state": "12.480",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "entity_id": "sensor.panel_b_network_cabinet_power",
+      "name": "Panel B Network Cabinet power",
+      "label": "channel",
+      "area_id": "basement",
+      "unit": "W",
+      "state": "12.480",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "entity_id": "sensor.panel_b_eave_outlet_power",
+      "name": "Panel B Eave Outlet power",
+      "label": "channel",
+      "area_id": "basement",
+      "unit": "W",
+      "state": "12.480",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "entity_id": "sensor.panel_b_ventilation_unit_power",
+      "name": "Panel B Ventilation Unit power",
+      "label": "channel",
+      "area_id": "basement",
+      "unit": "W",
+      "state": "12.480",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "entity_id": "sensor.panel_b_humidifier_2_power",
+      "name": "Panel B Humidifier 2 power",
+      "label": "channel",
+      "area_id": "basement",
+      "unit": "W",
+      "state": "12.480",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "entity_id": "sensor.panel_b_upper_plug_ct1_power",
+      "name": "Panel B Upper Floor Plug CT1 power",
+      "label": "ct1",
+      "area_id": "upper_floor",
+      "unit": "W",
+      "state": "1.204",
+      "state_class": "measurement"
+    },
+    {
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "entity_id": "sensor.panel_b_upper_plug_ct2_power",
+      "name": "Panel B Upper Floor Plug CT2 power",
+      "label": "ct2",
+      "area_id": "upper_floor",
+      "unit": "W",
+      "state": "2.848",
+      "state_class": "measurement"
+    }
+  ],
+  "duplicate_power_names": [
+    {
+      "duplicate_ct_id": "panel_b_display_panel",
+      "duplicate_of": "dev_panel_b_display_panel"
+    }
+  ],
+  "mapping_candidates": [
+    {
+      "ct": {
+        "device_id": "9816956bf67206a13db330ce53d7a304",
+        "device_name": "Panel A",
+        "entity_id": "sensor.panel_a_ct1_power",
+        "name": "Panel A CT1 power",
+        "label": "ct1",
+        "area_id": "utility",
+        "unit": "W",
+        "state": "1840.216",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67206a13db330ce53d7a304",
+        "device_name": "Panel A",
+        "entity_id": "sensor.panel_a_ct2_power",
+        "name": "Panel A CT2 power",
+        "label": "ct2",
+        "area_id": "utility",
+        "unit": "W",
+        "state": "1210.404",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67206a13db330ce53d7a304",
+        "device_name": "Panel A",
+        "entity_id": "sensor.panel_a_heat_pump_power",
+        "name": "Panel A Heat Pump power",
+        "label": "channel",
+        "area_id": "main_floor",
+        "unit": "W",
+        "state": "48.120",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67206a13db330ce53d7a304",
+        "device_name": "Panel A",
+        "entity_id": "sensor.panel_a_vehicle_charger_power",
+        "name": "Panel A Vehicle Charger power",
+        "label": "channel",
+        "area_id": "main_floor",
+        "unit": "W",
+        "state": "48.120",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67206a13db330ce53d7a304",
+        "device_name": "Panel A",
+        "entity_id": "sensor.panel_a_water_heater_ct1_power",
+        "name": "Panel A Water Heater CT1 power",
+        "label": "ct1",
+        "area_id": "main_floor",
+        "unit": "W",
+        "state": "48.120",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67206a13db330ce53d7a304",
+        "device_name": "Panel A",
+        "entity_id": "sensor.panel_a_water_heater_ct2_power",
+        "name": "Panel A Water Heater CT2 power",
+        "label": "ct2",
+        "area_id": "main_floor",
+        "unit": "W",
+        "state": "2.848",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67206a13db330ce53d7a304",
+        "device_name": "Panel A",
+        "entity_id": "sensor.panel_a_dishwasher_ct1_power",
+        "name": "Panel A Dishwasher CT1 power",
+        "label": "ct1",
+        "area_id": "main_floor",
+        "unit": "W",
+        "state": "48.120",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67206a13db330ce53d7a304",
+        "device_name": "Panel A",
+        "entity_id": "sensor.panel_a_dishwasher_ct2_power",
+        "name": "Panel A Dishwasher CT2 power",
+        "label": "ct2",
+        "area_id": "main_floor",
+        "unit": "W",
+        "state": "2.848",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67206a13db330ce53d7a304",
+        "device_name": "Panel A",
+        "entity_id": "sensor.panel_a_lighting_ct1_power",
+        "name": "Panel A Lighting Circuit 1 power",
+        "label": "ct1",
+        "area_id": "main_floor",
+        "unit": "W",
+        "state": "48.120",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67206a13db330ce53d7a304",
+        "device_name": "Panel A",
+        "entity_id": "sensor.panel_a_lighting_ct2_power",
+        "name": "Panel A Lighting Circuit 2 power",
+        "label": "ct2",
+        "area_id": "main_floor",
+        "unit": "W",
+        "state": "48.120",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67206a13db330ce53d7a304",
+        "device_name": "Panel A",
+        "entity_id": "sensor.panel_a_lighting_ct3_power",
+        "name": "Panel A Lighting Circuit 3 power",
+        "label": "channel",
+        "area_id": "main_floor",
+        "unit": "W",
+        "state": "48.120",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67206a13db330ce53d7a304",
+        "device_name": "Panel A",
+        "entity_id": "sensor.panel_a_air_conditioner_power",
+        "name": "Panel A Air Conditioner power",
+        "label": "channel",
+        "area_id": "main_floor",
+        "unit": "W",
+        "state": "48.120",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67206a13db330ce53d7a304",
+        "device_name": "Panel A",
+        "entity_id": "sensor.panel_a_central_hvac_power",
+        "name": "Panel A Central HVAC power",
+        "label": "channel",
+        "area_id": "main_floor",
+        "unit": "W",
+        "state": "48.120",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67206a13db330ce53d7a304",
+        "device_name": "Panel A",
+        "entity_id": "sensor.panel_a_space_heater_power",
+        "name": "Panel A Space Heater power",
+        "label": "channel",
+        "area_id": "main_floor",
+        "unit": "W",
+        "state": "48.120",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67206a13db330ce53d7a304",
+        "device_name": "Panel A",
+        "entity_id": "sensor.panel_a_patio_heater_ct1_power",
+        "name": "Panel A Patio Heater CT1 power",
+        "label": "ct1",
+        "area_id": "main_floor",
+        "unit": "W",
+        "state": "48.120",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67206a13db330ce53d7a304",
+        "device_name": "Panel A",
+        "entity_id": "sensor.panel_a_patio_heater_ct2_power",
+        "name": "Panel A Patio Heater CT2 power",
+        "label": "ct2",
+        "area_id": "main_floor",
+        "unit": "W",
+        "state": "2.848",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67206a13db330ce53d7a304",
+        "device_name": "Panel A",
+        "entity_id": "sensor.panel_a_upper_ac_power",
+        "name": "Panel A Upper Floor AC power",
+        "label": "channel",
+        "area_id": "main_floor",
+        "unit": "W",
+        "state": "48.120",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67206a13db330ce53d7a304",
+        "device_name": "Panel A",
+        "entity_id": "sensor.panel_a_upper_central_hvac_power",
+        "name": "Panel A Upper Floor HVAC power",
+        "label": "channel",
+        "area_id": "main_floor",
+        "unit": "W",
+        "state": "48.120",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67207243db330ce53d7a281",
+        "device_name": "Panel B",
+        "entity_id": "sensor.panel_b_ct1_power",
+        "name": "Panel B CT1 power",
+        "label": "ct1",
+        "area_id": "utility",
+        "unit": "W",
+        "state": "860.112",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67207243db330ce53d7a281",
+        "device_name": "Panel B",
+        "entity_id": "sensor.panel_b_ct2_power",
+        "name": "Panel B CT2 power",
+        "label": "ct2",
+        "area_id": "utility",
+        "unit": "W",
+        "state": "744.900",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67207243db330ce53d7a281",
+        "device_name": "Panel B",
+        "entity_id": "sensor.panel_b_refrigerator_1_power",
+        "name": "Panel B Refrigerator 1 power",
+        "label": "channel",
+        "area_id": "basement",
+        "unit": "W",
+        "state": "12.480",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67207243db330ce53d7a281",
+        "device_name": "Panel B",
+        "entity_id": "sensor.panel_b_refrigerator_2_power",
+        "name": "Panel B Refrigerator 2 power",
+        "label": "channel",
+        "area_id": "basement",
+        "unit": "W",
+        "state": "12.480",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67207243db330ce53d7a281",
+        "device_name": "Panel B",
+        "entity_id": "sensor.panel_b_hot_water_tank_power",
+        "name": "Panel B Hot Water Tank power",
+        "label": "channel",
+        "area_id": "basement",
+        "unit": "W",
+        "state": "12.480",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67207243db330ce53d7a281",
+        "device_name": "Panel B",
+        "entity_id": "sensor.panel_b_utility_sink_power",
+        "name": "Panel B Utility Sink power",
+        "label": "channel",
+        "area_id": "basement",
+        "unit": "W",
+        "state": "12.480",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67207243db330ce53d7a281",
+        "device_name": "Panel B",
+        "entity_id": "sensor.panel_b_workshop_outlet_power",
+        "name": "Panel B Workshop Outlet power",
+        "label": "channel",
+        "area_id": "basement",
+        "unit": "W",
+        "state": "12.480",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67207243db330ce53d7a281",
+        "device_name": "Panel B",
+        "entity_id": "sensor.panel_b_guest_bath_unit_power",
+        "name": "Panel B Guest Bath Unit power",
+        "label": "channel",
+        "area_id": "basement",
+        "unit": "W",
+        "state": "12.480",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67207243db330ce53d7a281",
+        "device_name": "Panel B",
+        "entity_id": "sensor.panel_b_humidifier_1_power",
+        "name": "Panel B Humidifier 1 power",
+        "label": "channel",
+        "area_id": "basement",
+        "unit": "W",
+        "state": "12.480",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67207243db330ce53d7a281",
+        "device_name": "Panel B",
+        "entity_id": "sensor.panel_b_office_outlet_power",
+        "name": "Panel B Office Outlet power",
+        "label": "channel",
+        "area_id": "basement",
+        "unit": "W",
+        "state": "12.480",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67207243db330ce53d7a281",
+        "device_name": "Panel B",
+        "entity_id": "sensor.panel_b_garden_outlet_power",
+        "name": "Panel B Garden Outlet power",
+        "label": "channel",
+        "area_id": "basement",
+        "unit": "W",
+        "state": "12.480",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67207243db330ce53d7a281",
+        "device_name": "Panel B",
+        "entity_id": "sensor.panel_b_display_panel_power",
+        "name": "Panel B Wall Display power",
+        "label": "channel",
+        "area_id": "basement",
+        "unit": "W",
+        "state": "12.480",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67207243db330ce53d7a281",
+        "device_name": "Panel B",
+        "entity_id": "sensor.panel_b_network_cabinet_power",
+        "name": "Panel B Network Cabinet power",
+        "label": "channel",
+        "area_id": "basement",
+        "unit": "W",
+        "state": "12.480",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67207243db330ce53d7a281",
+        "device_name": "Panel B",
+        "entity_id": "sensor.panel_b_eave_outlet_power",
+        "name": "Panel B Eave Outlet power",
+        "label": "channel",
+        "area_id": "basement",
+        "unit": "W",
+        "state": "12.480",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67207243db330ce53d7a281",
+        "device_name": "Panel B",
+        "entity_id": "sensor.panel_b_ventilation_unit_power",
+        "name": "Panel B Ventilation Unit power",
+        "label": "channel",
+        "area_id": "basement",
+        "unit": "W",
+        "state": "12.480",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67207243db330ce53d7a281",
+        "device_name": "Panel B",
+        "entity_id": "sensor.panel_b_humidifier_2_power",
+        "name": "Panel B Humidifier 2 power",
+        "label": "channel",
+        "area_id": "basement",
+        "unit": "W",
+        "state": "12.480",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67207243db330ce53d7a281",
+        "device_name": "Panel B",
+        "entity_id": "sensor.panel_b_upper_plug_ct1_power",
+        "name": "Panel B Upper Floor Plug CT1 power",
+        "label": "ct1",
+        "area_id": "upper_floor",
+        "unit": "W",
+        "state": "1.204",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    },
+    {
+      "ct": {
+        "device_id": "9816956bf67207243db330ce53d7a281",
+        "device_name": "Panel B",
+        "entity_id": "sensor.panel_b_upper_plug_ct2_power",
+        "name": "Panel B Upper Floor Plug CT2 power",
+        "label": "ct2",
+        "area_id": "upper_floor",
+        "unit": "W",
+        "state": "2.848",
+        "state_class": "measurement"
+      },
+      "candidates": [
+        {
+          "device_id": "9816956bf67206a13db330ce53d7a304",
+          "device_name": "Panel A",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        },
+        {
+          "device_id": "9816956bf67207243db330ce53d7a281",
+          "device_name": "Panel B",
+          "overlap_tokens": [
+            "panel"
+          ],
+          "has_power": true
+        }
+      ],
+      "status": "pending_confirmation",
+      "note": "Name-token evidence only. Not committed topology."
+    }
+  ],
+  "power_entities": [
+    {
+      "entity_id": "sensor.panel_a_ct1_power",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A CT1 power",
+      "original_name": "CT1 power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "1840.216"
+    },
+    {
+      "entity_id": "sensor.panel_a_ct2_power",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A CT2 power",
+      "original_name": "CT2 power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "1210.404"
+    },
+    {
+      "entity_id": "sensor.panel_a_heat_pump_power",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A Heat Pump power",
+      "original_name": "Heat Pump power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "48.120"
+    },
+    {
+      "entity_id": "sensor.panel_a_vehicle_charger_power",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A Vehicle Charger power",
+      "original_name": "Vehicle Charger power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "48.120"
+    },
+    {
+      "entity_id": "sensor.panel_a_water_heater_ct1_power",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A Water Heater CT1 power",
+      "original_name": "Water Heater CT1 power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "48.120"
+    },
+    {
+      "entity_id": "sensor.panel_a_water_heater_ct2_power",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A Water Heater CT2 power",
+      "original_name": "Water Heater CT2 power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "2.848"
+    },
+    {
+      "entity_id": "sensor.panel_a_dishwasher_ct1_power",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A Dishwasher CT1 power",
+      "original_name": "Dishwasher CT1 power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "48.120"
+    },
+    {
+      "entity_id": "sensor.panel_a_dishwasher_ct2_power",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A Dishwasher CT2 power",
+      "original_name": "Dishwasher CT2 power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "2.848"
+    },
+    {
+      "entity_id": "sensor.panel_a_lighting_ct1_power",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A Lighting Circuit 1 power",
+      "original_name": "Lighting Circuit 1 power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "48.120"
+    },
+    {
+      "entity_id": "sensor.panel_a_lighting_ct2_power",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A Lighting Circuit 2 power",
+      "original_name": "Lighting Circuit 2 power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "48.120"
+    },
+    {
+      "entity_id": "sensor.panel_a_lighting_ct3_power",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A Lighting Circuit 3 power",
+      "original_name": "Lighting Circuit 3 power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "48.120"
+    },
+    {
+      "entity_id": "sensor.panel_a_air_conditioner_power",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A Air Conditioner power",
+      "original_name": "Air Conditioner power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "48.120"
+    },
+    {
+      "entity_id": "sensor.panel_a_central_hvac_power",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A Central HVAC power",
+      "original_name": "Central HVAC power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "48.120"
+    },
+    {
+      "entity_id": "sensor.panel_a_space_heater_power",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A Space Heater power",
+      "original_name": "Space Heater power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "48.120"
+    },
+    {
+      "entity_id": "sensor.panel_a_patio_heater_ct1_power",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A Patio Heater CT1 power",
+      "original_name": "Patio Heater CT1 power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "48.120"
+    },
+    {
+      "entity_id": "sensor.panel_a_patio_heater_ct2_power",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A Patio Heater CT2 power",
+      "original_name": "Patio Heater CT2 power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "2.848"
+    },
+    {
+      "entity_id": "sensor.panel_a_upper_ac_power",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A Upper Floor AC power",
+      "original_name": "Upper Floor AC power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "48.120"
+    },
+    {
+      "entity_id": "sensor.panel_a_upper_central_hvac_power",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A Upper Floor HVAC power",
+      "original_name": "Upper Floor HVAC power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "48.120"
+    },
+    {
+      "entity_id": "sensor.panel_b_ct1_power",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B CT1 power",
+      "original_name": "CT1 power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "860.112"
+    },
+    {
+      "entity_id": "sensor.panel_b_ct2_power",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B CT2 power",
+      "original_name": "CT2 power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "744.900"
+    },
+    {
+      "entity_id": "sensor.panel_b_refrigerator_1_power",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B Refrigerator 1 power",
+      "original_name": "Refrigerator 1 power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "12.480"
+    },
+    {
+      "entity_id": "sensor.panel_b_refrigerator_2_power",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B Refrigerator 2 power",
+      "original_name": "Refrigerator 2 power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "12.480"
+    },
+    {
+      "entity_id": "sensor.panel_b_hot_water_tank_power",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B Hot Water Tank power",
+      "original_name": "Hot Water Tank power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "12.480"
+    },
+    {
+      "entity_id": "sensor.panel_b_utility_sink_power",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B Utility Sink power",
+      "original_name": "Utility Sink power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "12.480"
+    },
+    {
+      "entity_id": "sensor.panel_b_workshop_outlet_power",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B Workshop Outlet power",
+      "original_name": "Workshop Outlet power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "12.480"
+    },
+    {
+      "entity_id": "sensor.panel_b_guest_bath_unit_power",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B Guest Bath Unit power",
+      "original_name": "Guest Bath Unit power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "12.480"
+    },
+    {
+      "entity_id": "sensor.panel_b_humidifier_1_power",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B Humidifier 1 power",
+      "original_name": "Humidifier 1 power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "12.480"
+    },
+    {
+      "entity_id": "sensor.panel_b_office_outlet_power",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B Office Outlet power",
+      "original_name": "Office Outlet power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "12.480"
+    },
+    {
+      "entity_id": "sensor.panel_b_garden_outlet_power",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B Garden Outlet power",
+      "original_name": "Garden Outlet power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "12.480"
+    },
+    {
+      "entity_id": "sensor.panel_b_display_panel_power",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B Wall Display power",
+      "original_name": "Wall Display power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "12.480"
+    },
+    {
+      "entity_id": "sensor.panel_b_network_cabinet_power",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B Network Cabinet power",
+      "original_name": "Network Cabinet power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "12.480"
+    },
+    {
+      "entity_id": "sensor.panel_b_eave_outlet_power",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B Eave Outlet power",
+      "original_name": "Eave Outlet power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "12.480"
+    },
+    {
+      "entity_id": "sensor.panel_b_ventilation_unit_power",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B Ventilation Unit power",
+      "original_name": "Ventilation Unit power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "12.480"
+    },
+    {
+      "entity_id": "sensor.panel_b_humidifier_2_power",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B Humidifier 2 power",
+      "original_name": "Humidifier 2 power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "12.480"
+    },
+    {
+      "entity_id": "sensor.panel_b_upper_plug_ct1_power",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B Upper Floor Plug CT1 power",
+      "original_name": "Upper Floor Plug CT1 power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "1.204"
+    },
+    {
+      "entity_id": "sensor.panel_b_upper_plug_ct2_power",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B Upper Floor Plug CT2 power",
+      "original_name": "Upper Floor Plug CT2 power",
+      "platform": "energy_monitor",
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state": "2.848"
+    }
+  ],
+  "energy_entities": [
+    {
+      "entity_id": "sensor.panel_a_ct1_energy",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_a_ct2_energy",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_a_heat_pump_energy",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_a_vehicle_charger_energy",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_a_water_heater_ct1_energy",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_a_water_heater_ct2_energy",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_a_dishwasher_ct1_energy",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_a_dishwasher_ct2_energy",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_a_lighting_ct1_energy",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_a_lighting_ct2_energy",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_a_lighting_ct3_energy",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_a_air_conditioner_energy",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_a_central_hvac_energy",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_a_space_heater_energy",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_a_patio_heater_ct1_energy",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_a_patio_heater_ct2_energy",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_a_upper_ac_energy",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_a_upper_central_hvac_energy",
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "device_name": "Panel A",
+      "friendly_name": "Panel A energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_b_ct1_energy",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_b_ct2_energy",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_b_refrigerator_1_energy",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_b_refrigerator_2_energy",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_b_hot_water_tank_energy",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_b_utility_sink_energy",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_b_workshop_outlet_energy",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_b_guest_bath_unit_energy",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_b_humidifier_1_energy",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_b_office_outlet_energy",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_b_garden_outlet_energy",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_b_display_panel_energy",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_b_network_cabinet_energy",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_b_eave_outlet_energy",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_b_ventilation_unit_energy",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_b_humidifier_2_energy",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_b_upper_plug_ct1_energy",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    },
+    {
+      "entity_id": "sensor.panel_b_upper_plug_ct2_energy",
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "device_name": "Panel B",
+      "friendly_name": "Panel B energy",
+      "platform": "energy_monitor",
+      "device_class": "energy",
+      "unit_of_measurement": "kWh"
+    }
+  ],
+  "devices": [
+    {
+      "device_id": "9816956bf67206a13db330ce53d7a304",
+      "name": "Panel A",
+      "entity_count": 18,
+      "has_power": true,
+      "state_richness": "power_measured"
+    },
+    {
+      "device_id": "9816956bf67207243db330ce53d7a281",
+      "name": "Panel B",
+      "entity_count": 18,
+      "has_power": true,
+      "state_richness": "power_measured"
+    }
+  ],
+  "areas": [
+    {
+      "id": "utility",
+      "name": "Utility"
+    },
+    {
+      "id": "main_floor",
+      "name": "Main Floor"
+    },
+    {
+      "id": "upper_floor",
+      "name": "Upper Floor"
+    },
+    {
+      "id": "basement",
+      "name": "Basement"
+    }
+  ],
+  "limitations": [
+    "Mapping candidates are name-token evidence only and MUST be confirmed.",
+    "Physical measurement timestamps are not exposed by HA; last_updated is a state update time.",
+    "This file is a synthetic reference household, not a real installation."
+  ]
+}

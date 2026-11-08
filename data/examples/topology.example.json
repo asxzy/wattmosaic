@@ -1,0 +1,147 @@
+{
+  "version": 1,
+  "status": "candidate",
+  "created_at": "2026-01-01T00:00:00+00:00",
+  "notes": [
+    "Example only. Replace entity_ids with your own.",
+    "This example deliberately shows a nested branch to demonstrate the no-double-count rule.",
+    "Confirm the topology before relying on inference: POST /api/v1/topology/confirm"
+  ],
+  "channels": [
+    {
+      "ct_id": "main_l1",
+      "entity_id": "sensor.ct_panel_a_l1_power",
+      "name": "Main L1",
+      "ct_type": "main",
+      "phase": "l1",
+      "polarity": "normal",
+      "enabled": true,
+      "expected_interval_s": 15.0,
+      "reliability": 0.95,
+      "topology_status": "candidate",
+      "metadata": {}
+    },
+    {
+      "ct_id": "main_l2",
+      "entity_id": "sensor.ct_panel_a_l2_power",
+      "name": "Main L2",
+      "ct_type": "main",
+      "phase": "l2",
+      "polarity": "normal",
+      "enabled": true,
+      "expected_interval_s": 15.0,
+      "reliability": 0.95,
+      "topology_status": "candidate",
+      "metadata": {}
+    },
+    {
+      "ct_id": "branch_kitchen",
+      "entity_id": "sensor.ct_kitchen_power",
+      "name": "Kitchen circuit",
+      "ct_type": "branch",
+      "phase": "l1",
+      "parent_ct_id": "main_l1",
+      "polarity": "normal",
+      "enabled": true,
+      "topology_status": "candidate",
+      "metadata": {}
+    },
+    {
+      "ct_id": "branch_kitchen_plugs",
+      "entity_id": "sensor.ct_kitchen_plugs_power",
+      "name": "Kitchen plugs (nested under kitchen circuit)",
+      "ct_type": "branch",
+      "phase": "l1",
+      "parent_ct_id": "branch_kitchen",
+      "polarity": "normal",
+      "enabled": true,
+      "topology_status": "candidate",
+      "metadata": {}
+    },
+    {
+      "ct_id": "dedicated_fridge",
+      "entity_id": "sensor.ct_fridge_power",
+      "name": "Fridge",
+      "ct_type": "dedicated_device",
+      "phase": "l1",
+      "parent_ct_id": "branch_kitchen",
+      "polarity": "normal",
+      "enabled": true,
+      "topology_status": "candidate",
+      "metadata": {}
+    },
+    {
+      "ct_id": "dedicated_spa_pump_l1",
+      "entity_id": "sensor.ct_spa_pump_l1_power",
+      "name": "Hot tub leg 1",
+      "ct_type": "branch",
+      "phase": "l1",
+      "parent_ct_id": "main_l1",
+      "paired_ct_id": "dedicated_spa_pump_l2",
+      "polarity": "normal",
+      "enabled": true,
+      "topology_status": "candidate",
+      "metadata": {
+        "pair_confidence": "name_derived"
+      }
+    },
+    {
+      "ct_id": "dedicated_spa_pump_l2",
+      "entity_id": "sensor.ct_spa_pump_l2_power",
+      "name": "Hot tub leg 2",
+      "ct_type": "branch",
+      "phase": "l2",
+      "parent_ct_id": "main_l2",
+      "paired_ct_id": "dedicated_spa_pump_l1",
+      "polarity": "normal",
+      "enabled": true,
+      "topology_status": "candidate",
+      "metadata": {
+        "pair_confidence": "name_derived"
+      }
+    }
+  ],
+  "devices": [
+    {
+      "device_id": "dev_fridge",
+      "name": "Kitchen Fridge",
+      "dedicated_ct_ids": [
+        "dedicated_fridge"
+      ],
+      "branch_ct_ids": [],
+      "phase": "l1",
+      "double_pole": false,
+      "topology_status": "candidate",
+      "metadata": {
+        "note": "dedicated CT -> direct_measured"
+      }
+    },
+    {
+      "device_id": "dev_kitchen_plugs",
+      "name": "Kitchen plug loads",
+      "dedicated_ct_ids": [],
+      "branch_ct_ids": [
+        "branch_kitchen_plugs"
+      ],
+      "phase": "l1",
+      "double_pole": false,
+      "topology_status": "candidate",
+      "metadata": {}
+    },
+    {
+      "device_id": "dev_spa_pump",
+      "name": "Spa Pump",
+      "dedicated_ct_ids": [],
+      "branch_ct_ids": [
+        "dedicated_spa_pump_l1",
+        "dedicated_spa_pump_l2"
+      ],
+      "phase": "both",
+      "double_pole": true,
+      "topology_status": "candidate",
+      "metadata": {
+        "note": "Two legs of one 240V load. Power is the sum of both legs, modelled once."
+      }
+    }
+  ]
+}

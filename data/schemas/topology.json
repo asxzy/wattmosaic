@@ -1,0 +1,288 @@
+{
+  "$defs": {
+    "CTChannel": {
+      "additionalProperties": false,
+      "properties": {
+        "ct_id": {
+          "title": "Ct Id",
+          "type": "string"
+        },
+        "entity_id": {
+          "title": "Entity Id",
+          "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "ct_type": {
+          "$ref": "#/$defs/CTType",
+          "default": "unknown"
+        },
+        "phase": {
+          "$ref": "#/$defs/Phase",
+          "default": "unknown"
+        },
+        "parent_ct_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent Ct Id"
+        },
+        "polarity": {
+          "$ref": "#/$defs/Polarity",
+          "default": "normal"
+        },
+        "device_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Device Id"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "paired_ct_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Paired Ct Id"
+        },
+        "nominal_voltage": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Nominal Voltage"
+        },
+        "resolution_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resolution W"
+        },
+        "expected_interval_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Interval S"
+        },
+        "reliability": {
+          "default": 1.0,
+          "title": "Reliability",
+          "type": "number"
+        },
+        "topology_status": {
+          "$ref": "#/$defs/TopologyStatus",
+          "default": "candidate"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        }
+      },
+      "required": [
+        "ct_id",
+        "entity_id"
+      ],
+      "title": "CTChannel",
+      "type": "object"
+    },
+    "CTType": {
+      "enum": [
+        "main",
+        "branch",
+        "dedicated_device",
+        "unknown"
+      ],
+      "title": "CTType",
+      "type": "string"
+    },
+    "DeviceTopology": {
+      "additionalProperties": false,
+      "description": "Where in the electrical tree a logical device sits.\n\nA device may sit under multiple branch CTs only if that is genuinely true\n(redundant CTs); normally exactly one branch path applies.",
+      "properties": {
+        "device_id": {
+          "title": "Device Id",
+          "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "dedicated_ct_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Dedicated Ct Ids",
+          "type": "array"
+        },
+        "branch_ct_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Branch Ct Ids",
+          "type": "array"
+        },
+        "phase": {
+          "$ref": "#/$defs/Phase",
+          "default": "unknown"
+        },
+        "double_pole": {
+          "default": false,
+          "title": "Double Pole",
+          "type": "boolean"
+        },
+        "parent_device_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent Device Id"
+        },
+        "topology_status": {
+          "$ref": "#/$defs/TopologyStatus",
+          "default": "candidate"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        }
+      },
+      "required": [
+        "device_id"
+      ],
+      "title": "DeviceTopology",
+      "type": "object"
+    },
+    "Phase": {
+      "enum": [
+        "l1",
+        "l2",
+        "both",
+        "unknown"
+      ],
+      "title": "Phase",
+      "type": "string"
+    },
+    "Polarity": {
+      "enum": [
+        "normal",
+        "inverted"
+      ],
+      "title": "Polarity",
+      "type": "string"
+    },
+    "TopologyStatus": {
+      "enum": [
+        "candidate",
+        "confirmed",
+        "rejected"
+      ],
+      "title": "TopologyStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "default": 1,
+      "title": "Version",
+      "type": "integer"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/TopologyStatus",
+      "default": "candidate"
+    },
+    "channels": {
+      "items": {
+        "$ref": "#/$defs/CTChannel"
+      },
+      "title": "Channels",
+      "type": "array"
+    },
+    "devices": {
+      "items": {
+        "$ref": "#/$defs/DeviceTopology"
+      },
+      "title": "Devices",
+      "type": "array"
+    },
+    "notes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Notes",
+      "type": "array"
+    }
+  },
+  "title": "Topology",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/topology.json",
+  "x-contract-version": "1.1.0"
+}

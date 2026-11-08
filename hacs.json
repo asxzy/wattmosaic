@@ -1,0 +1,6 @@
+{
+  "name": "WattMosaic",
+  "homeassistant": "2024.11.0",
+  "content_in_root": false,
+  "hide_default_branch": false
+}

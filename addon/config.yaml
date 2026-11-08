@@ -1,0 +1,135 @@
+# WattMosaic Engine — Home Assistant App (formerly "add-on") manifest.
+#
+# Supervisor reference: https://developers.home-assistant.io/docs/add-ons/configuration/
+#
+# Option names are the UI-facing names. addon/run.sh maps each one to the exact
+# environment variable the engine reads (see engine/wattmosaic_engine/config/settings.py):
+#
+#   ha_url                 -> WM_HA_URL
+#   ha_token               -> WM_HA_TOKEN      (fallback: SUPERVISOR_TOKEN)
+#   api_token              -> WM_API_TOKEN
+#   learning_enabled       -> WM_LEARNING_ENABLED
+#   stale_after_s          -> WM_STALE_AFTER_S
+#   inference_interval_s   -> WM_INFERENCE_INTERVAL_S
+#   log_level              -> WM_LOG_LEVEL
+#   log_json               -> WM_LOG_JSON
+#   database_path          -> WM_DATABASE_PATH
+#   retention_days_raw     -> WM_RETENTION_DAYS_RAW
+#   retention_days_aggregates -> WM_RETENTION_DAYS_AGGREGATES
+#   queue_max_size         -> WM_QUEUE_MAX_SIZE
+
+name: "WattMosaic Engine"
+version: "0.1.5"
+slug: "wattmosaic_engine"
+description: >-
+  Multi-CT load disaggregation engine for WattMosaic. Learns device-level power
+  from your multi-channel CT energy monitor and Home Assistant state changes,
+  and serves a versioned local API for the WattMosaic integration.
+arch:
+  - amd64
+  - aarch64
+# Prebuilt multi-arch image (linux/amd64 + linux/aarch64) published to GitHub
+# Container Registry by .github/workflows/app-image.yaml. No tag here: the
+# Supervisor pulls `<image>:<version>`, i.e. the exact `version` above, and
+# Docker picks the right architecture from the manifest list. Building locally
+# instead would need the whole engine package copied into this folder, which is
+# why the repository ships a prebuilt image.
+image: "ghcr.io/asxzy/wattmosaic-engine"
+url: "https://github.com/asxzy/wattmosaic"
+startup: application
+boot: auto
+init: false
+stage: experimental
+
+# The engine serves the versioned REST API (/api/v1) on 8787. Ingress gives an
+# HA-authenticated sidebar panel that proxies to that port. No host port is
+# published by default; the WattMosaic integration reaches the app over the
+# Supervisor/internal network. For a repository (app-store) install the
+# hostname is `<repository-id>-wattmosaic-engine` where the id is the first 8
+# hex chars of sha1(repository URL), e.g. f48de52e-wattmosaic-engine. A local
+# copy install instead gets `local-wattmosaic-engine`; the App announces its
+# own hostname so the user never has to derive either (see `discovery:` below).
+ingress: true
+ingress_port: 8787
+panel_title: "WattMosaic"
+panel_icon: "mdi:home-lightning-bolt"
+panel_admin: true
+
+# No host networking: the app runs on the Supervisor's internal Docker network,
+# reaches Core through the Supervisor proxy at http://supervisor/core (or
+# http://homeassistant:8123 with a user token), and is reached by the
+# integration on the Supervisor/internal network (see the hostname note above).
+host_network: false
+
+# Grants SUPERVISOR_TOKEN access to the Core REST/WebSocket API through
+# http://supervisor/core. addon/run.sh uses that proxy when ha_token is empty,
+# so the app still works without a manually pasted user token. Read-only by
+# construction: the engine never issues service calls.
+homeassistant_api: true
+hassio_api: false
+
+# App-install discovery: the app tells the Supervisor it is running for this
+# Home Assistant, and Home Assistant offers to add the integration with the
+# connection details already filled in. The Supervisor refuses any service name
+# not listed here (supervisor/api/discovery.py), so this list is the permission.
+#
+# The service name must equal the integration domain. addon/run.sh posts
+# {"service": "wattmosaic", "config": {"host": ..., "port": ...}} to
+# http://supervisor/discovery once the engine is up.
+discovery:
+  - wattmosaic
+
+# Optional host port for debugging/standalone clients. "null" = disabled; the
+# user can enable it in the app's Network section. Keep it disabled when
+# api_token is empty.
+ports:
+  8787/tcp: null
+ports_description:
+  8787/tcp: "Engine API (only needed for debugging or non-Supervisor clients)"
+
+# Supervisor watchdog. The app's gateway (addon/gateway.py) serves an
+# unauthenticated liveness endpoint /healthz on the ingress port, so the
+# watchdog can use a real HTTP check. /healthz returns 200 only when the engine
+# answers /api/v1/health with status ok|degraded.
+watchdog: "http://[HOST]:[PORT:8787]/healthz"
+
+map:
+  - type: data
+    read_only: false
+  - type: share
+    read_only: false
+
+# Cold backup: the container is stopped first so the SQLite database (WAL mode)
+# is copied consistently.
+backup: cold
+timeout: 30
+
+options:
+  ha_url: "http://homeassistant:8123"
+  ha_token: ""
+  api_token: ""
+  learning_enabled: true
+  stale_after_s: 120
+  inference_interval_s: 5
+  log_level: "INFO"
+  log_json: true
+  database_path: "/data/wattmosaic.db"
+  retention_days_raw: 30
+  retention_days_aggregates: 730
+  queue_max_size: 5000
+
+schema:
+  ha_url: url
+  ha_token: "password?"
+  # Recommended for anything reachable beyond the Supervisor network. Generate
+  # with: python -c "import secrets; print(secrets.token_urlsafe(32))"
+  api_token: "password?"
+  learning_enabled: bool
+  stale_after_s: "int(10,3600)"
+  inference_interval_s: "float(1,600)"
+  log_level: "list(DEBUG|INFO|WARNING|ERROR)"
+  log_json: bool
+  database_path: str
+  retention_days_raw: "int(1,3650)"
+  retention_days_aggregates: "int(30,36500)"
+  queue_max_size: "int(100,1000000)"

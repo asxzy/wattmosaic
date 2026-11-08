@@ -1,0 +1,92 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "event_id": {
+      "title": "Event Id",
+      "type": "string"
+    },
+    "device_id": {
+      "title": "Device Id",
+      "type": "string"
+    },
+    "entity_id": {
+      "title": "Entity Id",
+      "type": "string"
+    },
+    "event_type": {
+      "enum": [
+        "state_changed",
+        "power_change",
+        "cycle_start",
+        "stage_change",
+        "cycle_end",
+        "availability"
+      ],
+      "title": "Event Type",
+      "type": "string"
+    },
+    "previous_state": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Previous State"
+    },
+    "new_state": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "New State"
+    },
+    "attributes": {
+      "additionalProperties": true,
+      "title": "Attributes",
+      "type": "object"
+    },
+    "occurred_at": {
+      "format": "date-time",
+      "title": "Occurred At",
+      "type": "string"
+    },
+    "received_at": {
+      "format": "date-time",
+      "title": "Received At",
+      "type": "string"
+    },
+    "processed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Processed At"
+    }
+  },
+  "required": [
+    "event_id",
+    "device_id",
+    "entity_id",
+    "event_type",
+    "occurred_at"
+  ],
+  "title": "DeviceEvent",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/device_event.json",
+  "x-contract-version": "1.1.0"
+}

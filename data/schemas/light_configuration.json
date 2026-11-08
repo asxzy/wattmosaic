@@ -1,0 +1,94 @@
+{
+  "$defs": {
+    "LightType": {
+      "description": "Lamp technology \u2014 sets the dimming-to-watts relationship for lights.",
+      "enum": [
+        "led",
+        "incandescent",
+        "halogen",
+        "cfl",
+        "fluorescent",
+        "smart_bulb",
+        "unknown"
+      ],
+      "title": "LightType",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Advanced light detail \u2014 the highest-value confidence lever in a house\nwith 81 dimmable ``light.*`` entities.",
+  "properties": {
+    "light_type": {
+      "$ref": "#/$defs/LightType",
+      "default": "unknown"
+    },
+    "bulb_count": {
+      "default": 1,
+      "maximum": 200,
+      "minimum": 1,
+      "title": "Bulb Count",
+      "type": "integer"
+    },
+    "watts_per_bulb_on": {
+      "anyOf": [
+        {
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Watts Per Bulb On"
+    },
+    "standby_w": {
+      "anyOf": [
+        {
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Standby W"
+    },
+    "min_output_fraction": {
+      "anyOf": [
+        {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Min Output Fraction"
+    },
+    "dimming_curve": {
+      "items": {
+        "maxItems": 2,
+        "minItems": 2,
+        "prefixItems": [
+          {
+            "type": "number"
+          },
+          {
+            "type": "number"
+          }
+        ],
+        "type": "array"
+      },
+      "title": "Dimming Curve",
+      "type": "array"
+    }
+  },
+  "title": "LightConfiguration",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/light_configuration.json",
+  "x-contract-version": "1.1.0"
+}

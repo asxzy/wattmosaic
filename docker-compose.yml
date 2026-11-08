@@ -1,0 +1,82 @@
+# WattMosaic Engine — docker compose deployment.
+#
+#   cp .env.example .env      # set HA_URL (or HA_HOST) and HA_TOKEN
+#   docker compose up -d --build
+#   docker compose logs -f wattmosaic
+#
+# Secrets come from .env / the host environment only; nothing is committed here.
+# .env is git-ignored and .dockerignore keeps it out of the image.
+
+name: wattmosaic
+
+services:
+  engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Pin a digest for a fully reproducible build if you need one.
+        PYTHON_IMAGE: ${WM_PYTHON_IMAGE:-python:3.12-slim-bookworm}
+    image: wattmosaic-engine:${WM_IMAGE_TAG:-0.1.3}
+    container_name: wattmosaic-engine
+    restart: unless-stopped
+    init: true
+
+    env_file:
+      - .env
+    environment:
+      # Values here override .env on purpose: these are container paths and
+      # ports, not user preferences.
+      WM_DATABASE_PATH: /data/wattmosaic.db
+      WM_API_HOST: 127.0.0.1
+      WM_API_PORT: "8788"
+      WM_GATEWAY_PORT: "8787"
+      WM_GATEWAY_ENABLED: "true"
+      # Apply least privilege: the image starts as root only to fix /data
+      # ownership. Set to "false" when the volume is already owned by 10001.
+      WM_DROP_PRIVILEGES: ${WM_DROP_PRIVILEGES:-true}
+
+    ports:
+      # Only the gateway is published; the engine API stays on loopback inside
+      # the container. Bind to a specific LAN address if the host is multi-homed:
+      #   WM_BIND_ADDRESS=192.168.1.10 docker compose up -d
+      - "${WM_BIND_ADDRESS:-0.0.0.0}:${WM_GATEWAY_PORT:-8787}:8787"
+
+    volumes:
+      - wattmosaic-data:/data
+      # Optional: read-only /share mount for exports (must be writable if used).
+      # - /path/to/share:/share:rw
+
+    # --- hardening ---------------------------------------------------------
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    # /data is the single writable path (database, WAL, exports).
+    #
+    # Resource limits: scipy/NNLS inference is CPU-bound but bursty. These are
+    # generous defaults; tune to the host.
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "python3", "/app/healthcheck.py"]
+      interval: 5s
+      timeout: 8s
+      start_period: 60s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+volumes:
+  wattmosaic-data:
+    name: wattmosaic-data

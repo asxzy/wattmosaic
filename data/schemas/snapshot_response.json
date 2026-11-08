@@ -1,0 +1,387 @@
+{
+  "$defs": {
+    "ConfidenceTier": {
+      "description": "Ordered evidence grade for a device power value (ADR-0013).\n\nA *grade*, not a probability.  ``InferenceResult.confidence`` remains the\nfiner-grained engineering score; the tier answers \"what kind of evidence\nproduced this number?\" without requiring the reader to interpret decimals.",
+      "enum": [
+        "tier_0_unknown",
+        "tier_1_modelled",
+        "tier_2_inferred",
+        "tier_3_measured",
+        "tier_4_verified"
+      ],
+      "title": "ConfidenceTier",
+      "type": "string"
+    },
+    "DataQualityReport": {
+      "additionalProperties": false,
+      "properties": {
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "overall_score": {
+          "default": 0.0,
+          "title": "Overall Score",
+          "type": "number"
+        },
+        "channels": {
+          "additionalProperties": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Channels",
+          "type": "object"
+        },
+        "issues": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Issues",
+          "type": "array"
+        }
+      },
+      "title": "DataQualityReport",
+      "type": "object"
+    },
+    "InferenceResult": {
+      "additionalProperties": false,
+      "properties": {
+        "device_id": {
+          "title": "Device Id",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "power_w": {
+          "title": "Power W",
+          "type": "number"
+        },
+        "energy_kwh": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Energy Kwh"
+        },
+        "source": {
+          "$ref": "#/$defs/Source"
+        },
+        "confidence": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "model_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Id"
+        },
+        "model_version": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Version"
+        },
+        "operating_stage": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Operating Stage"
+        },
+        "stage_status": {
+          "$ref": "#/$defs/StageStatus",
+          "default": "unknown"
+        },
+        "sample_count": {
+          "default": 0,
+          "title": "Sample Count",
+          "type": "integer"
+        },
+        "quality_status": {
+          "$ref": "#/$defs/QualityStatus",
+          "default": "good"
+        },
+        "measurement_age_seconds": {
+          "default": 0.0,
+          "title": "Measurement Age Seconds",
+          "type": "number"
+        },
+        "supporting_ct_channels": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Supporting Ct Channels",
+          "type": "array"
+        },
+        "explanation": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Explanation",
+          "type": "array"
+        },
+        "provenance": {
+          "additionalProperties": true,
+          "title": "Provenance",
+          "type": "object"
+        },
+        "confidence_tier": {
+          "$ref": "#/$defs/ConfidenceTier",
+          "default": "tier_0_unknown"
+        },
+        "monitoring_level": {
+          "$ref": "#/$defs/MonitoringLevel",
+          "default": "unknown"
+        },
+        "power_behavior": {
+          "$ref": "#/$defs/PowerBehavior",
+          "default": "unknown"
+        },
+        "tier_reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Tier Reasons",
+          "type": "array"
+        },
+        "confidence_is_calibrated": {
+          "default": false,
+          "title": "Confidence Is Calibrated",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "device_id",
+        "timestamp",
+        "power_w",
+        "source",
+        "confidence"
+      ],
+      "title": "InferenceResult",
+      "type": "object"
+    },
+    "MonitoringLevel": {
+      "description": "Axis 2 \u2014 how closely does the electrical tree observe the device?",
+      "enum": [
+        "dedicated",
+        "shared",
+        "home_total_only",
+        "unmonitored",
+        "unknown"
+      ],
+      "title": "MonitoringLevel",
+      "type": "string"
+    },
+    "PowerBehavior": {
+      "description": "Axis 3 \u2014 how does power relate to the device's control state?",
+      "enum": [
+        "fixed",
+        "variable",
+        "complex",
+        "unknown"
+      ],
+      "title": "PowerBehavior",
+      "type": "string"
+    },
+    "QualityStatus": {
+      "enum": [
+        "good",
+        "degraded",
+        "stale",
+        "bad",
+        "missing"
+      ],
+      "title": "QualityStatus",
+      "type": "string"
+    },
+    "Reconciliation": {
+      "additionalProperties": false,
+      "description": "Home-level power balance.  Residual is never redistributed.",
+      "properties": {
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "topology_version": {
+          "default": 1,
+          "title": "Topology Version",
+          "type": "integer"
+        },
+        "main_power_w": {
+          "default": 0.0,
+          "title": "Main Power W",
+          "type": "number"
+        },
+        "l1_power_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "L1 Power W"
+        },
+        "l2_power_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "L2 Power W"
+        },
+        "direct_measured_w": {
+          "default": 0.0,
+          "title": "Direct Measured W",
+          "type": "number"
+        },
+        "inferred_w": {
+          "default": 0.0,
+          "title": "Inferred W",
+          "type": "number"
+        },
+        "model_estimated_w": {
+          "default": 0.0,
+          "title": "Model Estimated W",
+          "type": "number"
+        },
+        "configured_prior_w": {
+          "default": 0.0,
+          "title": "Configured Prior W",
+          "type": "number"
+        },
+        "unknown_residual_w": {
+          "default": 0.0,
+          "title": "Unknown Residual W",
+          "type": "number"
+        },
+        "reconciliation_error_w": {
+          "default": 0.0,
+          "title": "Reconciliation Error W",
+          "type": "number"
+        },
+        "reconciliation_error_ratio": {
+          "default": 0.0,
+          "title": "Reconciliation Error Ratio",
+          "type": "number"
+        },
+        "accounted_fraction": {
+          "default": 0.0,
+          "title": "Accounted Fraction",
+          "type": "number"
+        },
+        "measurement_uncertainty_w": {
+          "default": 0.0,
+          "title": "Measurement Uncertainty W",
+          "type": "number"
+        },
+        "quality_status": {
+          "$ref": "#/$defs/QualityStatus",
+          "default": "good"
+        },
+        "explanation": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Explanation",
+          "type": "array"
+        }
+      },
+      "title": "Reconciliation",
+      "type": "object"
+    },
+    "Source": {
+      "description": "How device power was obtained (measurement hierarchy, spec \u00a79.1).",
+      "enum": [
+        "direct_measured",
+        "inferred",
+        "model_estimated",
+        "configured_prior",
+        "unknown"
+      ],
+      "title": "Source",
+      "type": "string"
+    },
+    "StageStatus": {
+      "enum": [
+        "identified",
+        "probable",
+        "unknown"
+      ],
+      "title": "StageStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "timestamp": {
+      "format": "date-time",
+      "title": "Timestamp",
+      "type": "string"
+    },
+    "reconciliation": {
+      "$ref": "#/$defs/Reconciliation"
+    },
+    "results": {
+      "items": {
+        "$ref": "#/$defs/InferenceResult"
+      },
+      "title": "Results",
+      "type": "array"
+    },
+    "quality": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DataQualityReport"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "reconciliation"
+  ],
+  "title": "SnapshotResponse",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/snapshot_response.json",
+  "x-contract-version": "1.1.0"
+}

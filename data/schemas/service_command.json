@@ -1,0 +1,66 @@
+{
+  "additionalProperties": false,
+  "description": "Command sent from the HA integration to the engine.",
+  "properties": {
+    "command": {
+      "enum": [
+        "start_learning",
+        "pause_learning",
+        "resume_learning",
+        "accept_sample",
+        "reject_sample",
+        "rebuild_model",
+        "freeze_model",
+        "unfreeze_model",
+        "reset_device_model",
+        "rebuild_topology",
+        "run_diagnostics",
+        "export_device_data",
+        "set_device_configuration"
+      ],
+      "title": "Command",
+      "type": "string"
+    },
+    "device_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Device Id"
+    },
+    "sample_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Sample Id"
+    },
+    "parameters": {
+      "additionalProperties": true,
+      "title": "Parameters",
+      "type": "object"
+    },
+    "requested_at": {
+      "format": "date-time",
+      "title": "Requested At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "command"
+  ],
+  "title": "ServiceCommand",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/service_command.json",
+  "x-contract-version": "1.1.0"
+}

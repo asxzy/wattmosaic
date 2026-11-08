@@ -1,0 +1,310 @@
+{
+  "$defs": {
+    "DeviceModelParameters": {
+      "additionalProperties": false,
+      "description": "Union-style parameters; only the relevant subset is populated.",
+      "properties": {
+        "on_power_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "On Power W"
+        },
+        "off_power_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Off Power W"
+        },
+        "standby_power_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Standby Power W"
+        },
+        "startup_power_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Startup Power W"
+        },
+        "shutdown_power_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Shutdown Power W"
+        },
+        "curve": {
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "type": "array"
+          },
+          "title": "Curve",
+          "type": "array"
+        },
+        "state_map": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "State Map",
+          "type": "object"
+        },
+        "stages": {
+          "items": {
+            "$ref": "#/$defs/OperatingStage"
+          },
+          "title": "Stages",
+          "type": "array"
+        },
+        "residual_mean_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Residual Mean W"
+        },
+        "residual_std_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Residual Std W"
+        }
+      },
+      "title": "DeviceModelParameters",
+      "type": "object"
+    },
+    "ModelStatus": {
+      "enum": [
+        "pending",
+        "candidate",
+        "active",
+        "frozen",
+        "rolled_back",
+        "rejected"
+      ],
+      "title": "ModelStatus",
+      "type": "string"
+    },
+    "ModelType": {
+      "enum": [
+        "binary",
+        "dimmable",
+        "variable_speed",
+        "multi_state",
+        "composite",
+        "time_varying",
+        "residual"
+      ],
+      "title": "ModelType",
+      "type": "string"
+    },
+    "OperatingStage": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/StageStatus",
+          "default": "unknown"
+        },
+        "power_mean_w": {
+          "default": 0.0,
+          "title": "Power Mean W",
+          "type": "number"
+        },
+        "power_std_w": {
+          "default": 0.0,
+          "title": "Power Std W",
+          "type": "number"
+        },
+        "min_duration_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Duration S"
+        },
+        "max_duration_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Duration S"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Notes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "OperatingStage",
+      "type": "object"
+    },
+    "StageStatus": {
+      "enum": [
+        "identified",
+        "probable",
+        "unknown"
+      ],
+      "title": "StageStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "device_id": {
+      "title": "Device Id",
+      "type": "string"
+    },
+    "model_type": {
+      "$ref": "#/$defs/ModelType"
+    },
+    "version": {
+      "title": "Version",
+      "type": "integer"
+    },
+    "status": {
+      "$ref": "#/$defs/ModelStatus",
+      "default": "pending"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "trained_from": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Trained From"
+    },
+    "trained_to": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Trained To"
+    },
+    "sample_count": {
+      "default": 0,
+      "title": "Sample Count",
+      "type": "integer"
+    },
+    "training_quality": {
+      "default": 0.0,
+      "title": "Training Quality",
+      "type": "number"
+    },
+    "validation_metrics": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "title": "Validation Metrics",
+      "type": "object"
+    },
+    "parameters": {
+      "$ref": "#/$defs/DeviceModelParameters"
+    },
+    "confidence": {
+      "default": 0.0,
+      "title": "Confidence",
+      "type": "number"
+    },
+    "notes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Notes",
+      "type": "array"
+    }
+  },
+  "required": [
+    "device_id",
+    "model_type",
+    "version"
+  ],
+  "title": "DeviceModelVersion",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/device_model_version.json",
+  "x-contract-version": "1.1.0"
+}

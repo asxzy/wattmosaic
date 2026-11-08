@@ -1,0 +1,216 @@
+{
+  "$defs": {
+    "ConfidenceTier": {
+      "description": "Ordered evidence grade for a device power value (ADR-0013).\n\nA *grade*, not a probability.  ``InferenceResult.confidence`` remains the\nfiner-grained engineering score; the tier answers \"what kind of evidence\nproduced this number?\" without requiring the reader to interpret decimals.",
+      "enum": [
+        "tier_0_unknown",
+        "tier_1_modelled",
+        "tier_2_inferred",
+        "tier_3_measured",
+        "tier_4_verified"
+      ],
+      "title": "ConfidenceTier",
+      "type": "string"
+    },
+    "MonitoringLevel": {
+      "description": "Axis 2 \u2014 how closely does the electrical tree observe the device?",
+      "enum": [
+        "dedicated",
+        "shared",
+        "home_total_only",
+        "unmonitored",
+        "unknown"
+      ],
+      "title": "MonitoringLevel",
+      "type": "string"
+    },
+    "PowerBehavior": {
+      "description": "Axis 3 \u2014 how does power relate to the device's control state?",
+      "enum": [
+        "fixed",
+        "variable",
+        "complex",
+        "unknown"
+      ],
+      "title": "PowerBehavior",
+      "type": "string"
+    },
+    "QualityStatus": {
+      "enum": [
+        "good",
+        "degraded",
+        "stale",
+        "bad",
+        "missing"
+      ],
+      "title": "QualityStatus",
+      "type": "string"
+    },
+    "Source": {
+      "description": "How device power was obtained (measurement hierarchy, spec \u00a79.1).",
+      "enum": [
+        "direct_measured",
+        "inferred",
+        "model_estimated",
+        "configured_prior",
+        "unknown"
+      ],
+      "title": "Source",
+      "type": "string"
+    },
+    "StageStatus": {
+      "enum": [
+        "identified",
+        "probable",
+        "unknown"
+      ],
+      "title": "StageStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "device_id": {
+      "title": "Device Id",
+      "type": "string"
+    },
+    "timestamp": {
+      "format": "date-time",
+      "title": "Timestamp",
+      "type": "string"
+    },
+    "power_w": {
+      "title": "Power W",
+      "type": "number"
+    },
+    "energy_kwh": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Energy Kwh"
+    },
+    "source": {
+      "$ref": "#/$defs/Source"
+    },
+    "confidence": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Confidence",
+      "type": "number"
+    },
+    "model_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model Id"
+    },
+    "model_version": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model Version"
+    },
+    "operating_stage": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Operating Stage"
+    },
+    "stage_status": {
+      "$ref": "#/$defs/StageStatus",
+      "default": "unknown"
+    },
+    "sample_count": {
+      "default": 0,
+      "title": "Sample Count",
+      "type": "integer"
+    },
+    "quality_status": {
+      "$ref": "#/$defs/QualityStatus",
+      "default": "good"
+    },
+    "measurement_age_seconds": {
+      "default": 0.0,
+      "title": "Measurement Age Seconds",
+      "type": "number"
+    },
+    "supporting_ct_channels": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Supporting Ct Channels",
+      "type": "array"
+    },
+    "explanation": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Explanation",
+      "type": "array"
+    },
+    "provenance": {
+      "additionalProperties": true,
+      "title": "Provenance",
+      "type": "object"
+    },
+    "confidence_tier": {
+      "$ref": "#/$defs/ConfidenceTier",
+      "default": "tier_0_unknown"
+    },
+    "monitoring_level": {
+      "$ref": "#/$defs/MonitoringLevel",
+      "default": "unknown"
+    },
+    "power_behavior": {
+      "$ref": "#/$defs/PowerBehavior",
+      "default": "unknown"
+    },
+    "tier_reasons": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Tier Reasons",
+      "type": "array"
+    },
+    "confidence_is_calibrated": {
+      "default": false,
+      "title": "Confidence Is Calibrated",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "device_id",
+    "timestamp",
+    "power_w",
+    "source",
+    "confidence"
+  ],
+  "title": "InferenceResult",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/inference_result.json",
+  "x-contract-version": "1.1.0"
+}

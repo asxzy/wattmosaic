@@ -1,0 +1,113 @@
+{
+  "$defs": {
+    "Polarity": {
+      "enum": [
+        "normal",
+        "inverted"
+      ],
+      "title": "Polarity",
+      "type": "string"
+    },
+    "QualityStatus": {
+      "enum": [
+        "good",
+        "degraded",
+        "stale",
+        "bad",
+        "missing"
+      ],
+      "title": "QualityStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One observed CT or device reading.\n\n``value`` is in ``unit``; power is normalised to W before entering the\nsolver.  ``repeated`` marks a state update whose numeric value is unchanged\nfrom the previous observation \u2014 the engine must not treat it as a new\nphysical measurement.",
+  "properties": {
+    "entity_id": {
+      "title": "Entity Id",
+      "type": "string"
+    },
+    "ct_id": {
+      "title": "Ct Id",
+      "type": "string"
+    },
+    "value": {
+      "title": "Value",
+      "type": "number"
+    },
+    "unit": {
+      "default": "W",
+      "enum": [
+        "W",
+        "kW",
+        "kWh",
+        "Wh"
+      ],
+      "title": "Unit",
+      "type": "string"
+    },
+    "value_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Value W"
+    },
+    "state_timestamp": {
+      "format": "date-time",
+      "title": "State Timestamp",
+      "type": "string"
+    },
+    "received_at": {
+      "format": "date-time",
+      "title": "Received At",
+      "type": "string"
+    },
+    "physical_timestamp": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Physical Timestamp"
+    },
+    "quality": {
+      "$ref": "#/$defs/QualityStatus",
+      "default": "good"
+    },
+    "repeated": {
+      "default": false,
+      "title": "Repeated",
+      "type": "boolean"
+    },
+    "polarization": {
+      "$ref": "#/$defs/Polarity",
+      "default": "normal"
+    },
+    "sequence": {
+      "default": 0,
+      "title": "Sequence",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "entity_id",
+    "ct_id",
+    "value",
+    "state_timestamp"
+  ],
+  "title": "Measurement",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/measurement.json",
+  "x-contract-version": "1.1.0"
+}

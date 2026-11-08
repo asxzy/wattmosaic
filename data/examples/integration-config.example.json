@@ -1,0 +1,13 @@
+{
+  "engine_url": "http://a0d7b954-wattmosaic-engine:8787",
+  "api_token": "replace-with-the-same-WM_API_TOKEN",
+  "scan_interval": 30,
+  "stale_after": 120,
+  "unavailable_after": 120,
+  "topology_mode": "candidate",
+  "_comment": [
+    "Example integration config entry data. Enter these in the Home Assistant UI;",
+    "do not paste this file into .storage. The API token is redacted in diagnostics.",
+    "Topology is not configured here: it is confirmed through the options flow."
+  ]
+}

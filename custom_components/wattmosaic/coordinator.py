@@ -1,0 +1,298 @@
+"""DataUpdateCoordinator for WattMosaic.
+
+Imports Home Assistant, so this module is *not* imported by the test suite
+(``homeassistant`` is not installed on the development machine).  All of the
+decision logic it relies on lives in :mod:`custom_components.wattmosaic.util`,
+which is pure Python and fully tested.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import Any
+
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+
+from .api_client import EngineClient, EngineError
+from .const import (
+    CONF_ENERGY_ENTITIES,
+    CONF_SCAN_INTERVAL,
+    CONF_STALE_AFTER,
+    CONF_UNAVAILABLE_AFTER,
+    DEFAULT_SCAN_INTERVAL,
+    DEFAULT_STALE_AFTER,
+    DEFAULT_UNAVAILABLE_AFTER,
+    DOMAIN,
+)
+from .entity_values import merge_energy_choice
+from .util import (
+    coerce_snapshot,
+    device_entities_available,
+    is_engine_unavailable,
+    utcnow,
+)
+
+_LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class WattMosaicData:
+    """Normalised engine state used by every entity."""
+
+    snapshot: dict[str, Any] = field(default_factory=dict)
+    health: dict[str, Any] = field(default_factory=dict)
+    received_at: datetime | None = None
+    last_success: datetime | None = None
+    engine_available: bool = False
+    last_error: str | None = None
+    devices: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    @property
+    def results(self) -> dict[str, dict[str, Any]]:
+        return self.snapshot.get("results_by_id", {})
+
+    @property
+    def reconciliation(self) -> dict[str, Any]:
+        return self.snapshot.get("reconciliation", {})
+
+    @property
+    def quality(self) -> dict[str, Any] | None:
+        return self.snapshot.get("quality")
+
+    def device(self, device_id: str) -> dict[str, Any] | None:
+        return self.results.get(device_id)
+
+    def device_name(self, device_id: str) -> str:
+        meta = self.devices.get(device_id) or {}
+        name = meta.get("name") or meta.get("friendly_name")
+        return str(name) if name else device_id
+
+    def device_area(self, device_id: str) -> str | None:
+        meta = self.devices.get(device_id) or {}
+        area = meta.get("area_id")
+        return str(area) if isinstance(area, str) and area else None
+
+
+class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
+    """Polls ``/snapshot`` (every cycle) and ``/health`` (every cycle).
+
+    Failure semantics
+    -----------------
+    * A malformed body never raises: :func:`coerce_snapshot` degrades it.
+    * A transient network error inside ``unavailable_after`` keeps the last
+      snapshot but marks it stale (entities that publish *current* values go
+      ``unavailable`` while energy/status entities keep their last total).
+    * Beyond ``unavailable_after`` the coordinator raises ``UpdateFailed`` so
+      HA marks the whole entry as not ready.
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        client: EngineClient,
+    ) -> None:
+        config = {**entry.data, **entry.options}
+        self.scan_interval = int(config.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL))
+        self.stale_after = int(config.get(CONF_STALE_AFTER, DEFAULT_STALE_AFTER))
+        self.unavailable_after = int(
+            config.get(CONF_UNAVAILABLE_AFTER, DEFAULT_UNAVAILABLE_AFTER)
+        )
+        self.client = client
+        self.entry = entry
+        self._last: WattMosaicData = WattMosaicData()
+        self._device_meta: dict[str, dict[str, Any]] = {}
+        self._poll_count: int = 0
+
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=DOMAIN,
+            update_interval=timedelta(seconds=self.scan_interval),
+            config_entry=entry,
+        )
+
+    # -- device metadata ---------------------------------------------------- #
+
+    @property
+    def device_meta(self) -> dict[str, dict[str, Any]]:
+        return self._device_meta
+
+    @property
+    def device_names(self) -> dict[str, str]:
+        return {
+            device_id: str(meta.get("name") or meta.get("friendly_name") or device_id)
+            for device_id, meta in self._device_meta.items()
+        }
+
+    @property
+    def device_areas(self) -> dict[str, str]:
+        return {
+            device_id: str(meta["area_id"])
+            for device_id, meta in self._device_meta.items()
+            if isinstance(meta.get("area_id"), str) and meta["area_id"]
+        }
+
+    def device_configuration(self, device_id: str) -> dict[str, Any] | None:
+        """The engine's stated configuration for one device, if any.
+
+        ``None`` means "the engine said nothing", which is distinct from "the
+        engine said nothing is set": every opt-in decision treats missing
+        configuration as "use the default", never as "disable".
+
+        The energy opt-in is stored in this config entry rather than the engine,
+        because it is a Home Assistant concern; it is layered on top of whatever
+        the engine reported.
+        """
+        meta = self._device_meta.get(device_id) or {}
+        return merge_energy_choice(
+            meta.get("configuration"),
+            self.entry.options.get(CONF_ENERGY_ENTITIES),
+            device_id,
+        )
+
+    # -- availability ------------------------------------------------------- #
+
+    @property
+    def engine_available(self) -> bool:
+        """True when the last successful poll is within ``unavailable_after``."""
+        return not is_engine_unavailable(
+            self._last.last_success if self._last else None,
+            unavailable_after=self.unavailable_after,
+        )
+
+    @property
+    def last_success(self) -> datetime | None:
+        """Timestamp of the last successful poll (survives ``UpdateFailed``)."""
+        return self._last.last_success
+
+    @property
+    def last_error(self) -> str | None:
+        """Most recent error text (secrets already scrubbed by the client)."""
+        return self._last.last_error
+
+    def device_result(self, device_id: str) -> dict[str, Any] | None:
+        if self.data is None:
+            return None
+        return self.data.device(device_id)
+
+    def device_available(self, device_id: str, *, now: datetime | None = None) -> bool:
+        """Whether a per-device *current measurement* may be published."""
+        result = self.device_result(device_id)
+        return device_entities_available(
+            result_present=result is not None,
+            result_timestamp=result.get("timestamp") if result else None,
+            quality_status=result.get("quality_status") if result else None,
+            engine_available=self.engine_available,
+            now=now,
+            stale_after=self.stale_after,
+        )
+
+    def summary_stale(self, *, now: datetime | None = None) -> bool:
+        """Global measure of whether the snapshot itself is old."""
+        from .util import is_stale
+
+        if self.data is None:
+            return True
+        return is_stale(self.data.received_at, now=now, stale_after=self.stale_after)
+
+    # -- update ------------------------------------------------------------- #
+
+    async def _async_update_data(self) -> WattMosaicData:
+        snapshot_error: Exception | None = None
+        health: dict[str, Any] = {}
+        snapshot_raw: Any = None
+
+        snapshot_result, health_result = await asyncio.gather(
+            self.client.snapshot(),
+            self.client.health(),
+            return_exceptions=True,
+        )
+
+        if isinstance(health_result, Exception):
+            _LOGGER.debug("WattMosaic health probe failed: %s", health_result)
+        elif isinstance(health_result, dict):
+            health = health_result
+
+        if isinstance(snapshot_result, Exception):
+            snapshot_error = snapshot_result
+        else:
+            snapshot_raw = snapshot_result
+
+        now = utcnow()
+
+        if snapshot_raw is None:
+            error_text = _describe(snapshot_error)
+            if is_engine_unavailable(self._last.last_success, now=now, unavailable_after=self.unavailable_after):
+                self._last = WattMosaicData(
+                    snapshot=self._last.snapshot,
+                    health=health,
+                    received_at=self._last.received_at,
+                    last_success=self._last.last_success,
+                    engine_available=False,
+                    last_error=error_text,
+                    devices=self._device_meta,
+                )
+                raise UpdateFailed(f"engine unavailable: {error_text}")
+            # Transient: keep the previous data, but do not refresh timestamps
+            # so staleness logic naturally kicks in for current-value entities.
+            self._last = WattMosaicData(
+                snapshot=self._last.snapshot,
+                health=health or self._last.health,
+                received_at=self._last.received_at,
+                last_success=self._last.last_success,
+                engine_available=True,
+                last_error=error_text,
+                devices=self._device_meta,
+            )
+            _LOGGER.warning("WattMosaic snapshot poll failed (using cached data): %s", error_text)
+            return self._last
+
+        snapshot = coerce_snapshot(snapshot_raw)
+
+        # Device metadata (names/areas) changes rarely; refresh it periodically
+        # rather than on every poll, and never let it break an update.
+        self._poll_count += 1
+        if self._poll_count == 1 or self._poll_count % 20 == 0:
+            try:
+                from .flow_logic import normalise_device_list
+
+                raw_devices = await self.client.devices()
+                self._device_meta = {
+                    item["device_id"]: item for item in normalise_device_list(raw_devices)
+                }
+            except Exception:  # noqa: BLE001 - metadata only
+                _LOGGER.debug("WattMosaic device metadata refresh failed", exc_info=True)
+
+        received = snapshot.get("timestamp") or now
+        self._last = WattMosaicData(
+            snapshot=snapshot,
+            health=health,
+            received_at=received,
+            last_success=now,
+            engine_available=True,
+            last_error=None,
+            devices=self._device_meta,
+        )
+        return self._last
+
+    # -- service plumbing --------------------------------------------------- #
+
+    async def async_send_command(self, command: str, **kwargs: Any) -> dict[str, Any]:
+        """Forward a service command and request a refresh afterwards."""
+        result = await self.client.command(command, **kwargs)
+        await self.async_request_refresh()
+        return result
+
+
+def _describe(error: Exception | None) -> str:
+    if error is None:
+        return "unknown error"
+    if isinstance(error, EngineError):
+        return str(error)
+    return f"{type(error).__name__}: {error}"

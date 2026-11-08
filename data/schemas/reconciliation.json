@@ -1,0 +1,118 @@
+{
+  "$defs": {
+    "QualityStatus": {
+      "enum": [
+        "good",
+        "degraded",
+        "stale",
+        "bad",
+        "missing"
+      ],
+      "title": "QualityStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Home-level power balance.  Residual is never redistributed.",
+  "properties": {
+    "timestamp": {
+      "format": "date-time",
+      "title": "Timestamp",
+      "type": "string"
+    },
+    "topology_version": {
+      "default": 1,
+      "title": "Topology Version",
+      "type": "integer"
+    },
+    "main_power_w": {
+      "default": 0.0,
+      "title": "Main Power W",
+      "type": "number"
+    },
+    "l1_power_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "L1 Power W"
+    },
+    "l2_power_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "L2 Power W"
+    },
+    "direct_measured_w": {
+      "default": 0.0,
+      "title": "Direct Measured W",
+      "type": "number"
+    },
+    "inferred_w": {
+      "default": 0.0,
+      "title": "Inferred W",
+      "type": "number"
+    },
+    "model_estimated_w": {
+      "default": 0.0,
+      "title": "Model Estimated W",
+      "type": "number"
+    },
+    "configured_prior_w": {
+      "default": 0.0,
+      "title": "Configured Prior W",
+      "type": "number"
+    },
+    "unknown_residual_w": {
+      "default": 0.0,
+      "title": "Unknown Residual W",
+      "type": "number"
+    },
+    "reconciliation_error_w": {
+      "default": 0.0,
+      "title": "Reconciliation Error W",
+      "type": "number"
+    },
+    "reconciliation_error_ratio": {
+      "default": 0.0,
+      "title": "Reconciliation Error Ratio",
+      "type": "number"
+    },
+    "accounted_fraction": {
+      "default": 0.0,
+      "title": "Accounted Fraction",
+      "type": "number"
+    },
+    "measurement_uncertainty_w": {
+      "default": 0.0,
+      "title": "Measurement Uncertainty W",
+      "type": "number"
+    },
+    "quality_status": {
+      "$ref": "#/$defs/QualityStatus",
+      "default": "good"
+    },
+    "explanation": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Explanation",
+      "type": "array"
+    }
+  },
+  "title": "Reconciliation",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/reconciliation.json",
+  "x-contract-version": "1.1.0"
+}
