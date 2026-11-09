@@ -1911,6 +1911,76 @@ class TestEngineRouting:
         assert services.target_device_ids({"target": "nonsense"}) == []
 
 
+class TestIdentifierMatching:
+    """Resolving a ``device_id`` against the identifiers the integration owns.
+
+    ``owned`` mirrors the real installation: a stable and a development entry
+    publish the *same* engine ids, so ``dev_x`` exists under both.
+    """
+
+    OWNED = [
+        ("stable", "stable_dev_x"),
+        ("stable", "stable_dev_y"),
+        ("dev", "dev_dev_x"),
+        ("dev", "dev_dev_y"),
+    ]
+
+    def test_fully_qualified_id_resolves_directly(self) -> None:
+        exact, candidates = services.match_identifier_owners(
+            self.OWNED, device_id="dev_dev_x", entries=["stable", "dev"]
+        )
+        assert exact == "dev"
+        assert candidates == []
+
+    def test_fully_qualified_stable_id_resolves_directly(self) -> None:
+        exact, candidates = services.match_identifier_owners(
+            self.OWNED, device_id="stable_dev_x", entries=["stable", "dev"]
+        )
+        assert exact == "stable"
+        assert candidates == []
+
+    def test_fully_qualified_id_is_not_double_prefixed(self) -> None:
+        """The regression: rebuilding ``<entry>_<id>`` prefixes it twice.
+
+        A fully qualified id is already an identifier *value*.  Treating it as a
+        bare id builds ``dev_dev_dev_x``, which matches nothing -- so the form
+        that used to work silently stopped resolving.
+        """
+        exact, candidates = services.match_identifier_owners(
+            self.OWNED, device_id="dev_dev_x", entries=["stable", "dev"]
+        )
+        assert exact is not None, "the fully qualified form must resolve"
+        assert "dev_dev_dev_x" not in [i for _, i in self.OWNED]
+
+    def test_bare_id_present_in_both_entries_is_reported_for_both(self) -> None:
+        exact, candidates = services.match_identifier_owners(
+            self.OWNED, device_id="dev_x", entries=["stable", "dev"]
+        )
+        assert exact is None
+        assert candidates == ["stable", "dev"]
+
+    def test_bare_id_present_in_one_entry_names_it(self) -> None:
+        owned = [("stable", "stable_only_here")]
+        exact, candidates = services.match_identifier_owners(
+            owned, device_id="only_here", entries=["stable", "dev"]
+        )
+        assert exact is None
+        assert candidates == ["stable"]
+
+    def test_unknown_bare_id_yields_nothing(self) -> None:
+        exact, candidates = services.match_identifier_owners(
+            self.OWNED, device_id="dev_missing", entries=["stable", "dev"]
+        )
+        assert exact is None
+        assert candidates == []
+
+    def test_identifier_from_an_unloaded_entry_is_ignored(self) -> None:
+        exact, candidates = services.match_identifier_owners(
+            self.OWNED, device_id="dev_dev_x", entries=["dev"]
+        )
+        assert exact == "dev"
+
+
 # --------------------------------------------------------------------------- #
 # Entity definitions / contract alignment
 # --------------------------------------------------------------------------- #

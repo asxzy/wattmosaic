@@ -41,6 +41,7 @@ from .service_logic import (
     ServiceValidationError,
     build_command_payload,
     choose_entry,
+    match_identifier_owners,
     service_result_summary,
     target_device_ids,
     validate_service_call,
@@ -256,16 +257,23 @@ def _resolve_entry(
             )
 
     if device_id:
-        # A device this integration owns carries the identifier
-        # ``<config_entry_id>_<engine_device_id>``.  When the caller passes a
-        # fully qualified id, only one entry can match.  When they pass a bare
-        # engine id, every entry that publishes that id matches -- which is the
-        # normal case for a stable + development pair.  Collect all of them and
-        # let ``choose_entry`` decide, rather than returning the first.
-        for entry_id in entries:
-            identifier = (DOMAIN, f"{entry_id}_{device_id}")
-            if _device_identifier(registry, identifier) is not None:
-                candidates.append(entry_id)
+        # Collect every ``(entry, identifier)`` this integration owns, then let
+        # the pure helper decide.  It handles the fully qualified form first
+        # (which *is* an identifier value and must not be prefixed again) and
+        # otherwise reports every entry publishing the bare id, so a collision is
+        # visible instead of being resolved by load order.
+        owned = [
+            (entry_id, value)
+            for entry_id in entries
+            for device in registry.devices
+            for domain, value in device.identifiers
+            if domain == DOMAIN and value.startswith(f"{entry_id}_")
+        ]
+        exact, candidates = match_identifier_owners(
+            owned, device_id=device_id, entries=list(entries)
+        )
+        if exact is not None:
+            return exact, entries[exact]
 
     entry_id = choose_entry(list(entries), candidates, device_id=device_id)
     return entry_id, entries[entry_id]

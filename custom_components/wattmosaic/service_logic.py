@@ -102,6 +102,38 @@ def target_device_ids(data: Mapping[str, Any] | None) -> list[str]:
     return [value for value in (_clean_id(item) for item in values) if value]
 
 
+def match_identifier_owners(
+    owned: Sequence[tuple[str, str]],
+    *,
+    device_id: str,
+    entries: Sequence[str],
+) -> tuple[str | None, list[str]]:
+    """Resolve a ``device_id`` against the identifiers this integration published.
+
+    ``owned`` is every ``(entry_id, identifier)`` pair the integration owns, where
+    the identifier is ``<entry_id>_<engine_device_id>``.  Returns
+    ``(exact_entry, candidates)``:
+
+    * ``exact_entry`` is set when ``device_id`` *is* an identifier value (the
+      fully qualified form).  Only one entry can own it, so it needs no further
+      disambiguation.  This check has to come first: rebuilding a fully qualified
+      id as ``<entry_id>_<device_id>`` prefixes it a second time and matches
+      nothing, which is exactly how the fully qualified form stopped working.
+    * ``candidates`` is every entry publishing ``<entry_id>_<device_id>``.  A
+      bare engine id lands here, and normally in *both* a stable and a
+      development entry, so the caller must decide rather than take the first.
+    """
+    for entry, identifier in owned:
+        if identifier == device_id and entry in entries:
+            return entry, []
+
+    wanted = {f"{entry}_{device_id}" for entry in entries}
+    candidates = [
+        entry for entry, identifier in owned if identifier in wanted
+    ]
+    return None, list(dict.fromkeys(candidates))
+
+
 def choose_entry(
     entries: Sequence[str],
     candidates: Sequence[str],
