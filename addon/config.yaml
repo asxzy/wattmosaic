@@ -19,7 +19,7 @@
 #   queue_max_size         -> WM_QUEUE_MAX_SIZE
 
 name: "WattMosaic Engine"
-version: "0.2.0-dev5"
+version: "0.2.0-dev6"
 slug: "wattmosaic_engine"
 description: >-
   Multi-CT load disaggregation engine for WattMosaic. Learns device-level power

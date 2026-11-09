@@ -1,5 +1,33 @@
 # Release Notes
 
+## v0.2.0-dev6 — 2026-11-09 (development channel)
+
+Publishes the two accounting fixes that `v0.2.0-dev5` announced but never
+shipped: the dev5 image was built before they landed, and the release pipeline
+had no way to notice. That pipeline defect is fixed too. **This is a
+prerelease. It is installed from the `dev` branch and does not replace the
+stable integration or App.**
+
+### Fixed
+
+- **A published version could silently contain older code.** `0.2.0-dev5` was
+  built from the commit before the history-correlation and double-pole fixes.
+  The fix commit pushed to `dev` without bumping `version:` in
+  `addon/config.yaml`, so the image workflow found the tag already present,
+  published nothing, and still reported success. The live app kept running
+  pre-fix code while the Home Assistant update entity advertised `0.2.0-dev5`,
+  and the repaired commands were still rejected. Images are now stamped with
+  `org.opencontainers.image.revision`, and an existing tag is accepted only when
+  that label names the commit being built; otherwise the workflow fails with the
+  version-bump instruction instead of quietly doing nothing.
+- The two accounting fixes described under `v0.2.0-dev5` — history correlation
+  on sparse-publishing channels, and double-pole pairs being counted twice — are
+  now actually present in a published image.
+
+`1324` unit and integration tests pass. The stale-tag guard is negatively
+verified: removing the revision label or the non-zero exit makes
+`tests/integration/test_release_pipeline.py` fail.
+
 ## v0.2.0-dev5 — 2026-11-08 (development channel)
 
 Learns which fixtures sit on which circuit from observed co-movement, so a bank

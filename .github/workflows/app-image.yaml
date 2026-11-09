@@ -95,12 +95,33 @@ jobs:
             echo "${tag} does not exist yet; it will be built."
           fi
 
-      - name: Explain the skip
+      - name: Refuse a stale tag that does not match this commit
         if: steps.exists.outputs.exists == 'true' && inputs.force != true
         run: |
-          # Not an error: the tag is immutable per version by design. Remind the
-          # reader what to do instead of silently doing nothing.
-          echo "::notice::App image ${{ steps.version.outputs.version }} is already published. Bump 'version' in addon/config.yaml to release a new image, or dispatch this workflow with force=true to republish the existing one."
+          # A version tag is immutable by design, so an already-published image
+          # is normally left alone.  But "the tag exists" is not the same as
+          # "the tag contains this commit": pushing engine code without bumping
+          # `version` in addon/config.yaml used to publish nothing and report
+          # success, so the live app kept running older code while the update
+          # entity advertised the new version.  That is exactly the failure this
+          # check exists to make impossible to miss.
+          tag="ghcr.io/asxzy/wattmosaic-engine:${{ steps.version.outputs.version }}"
+          published=$(
+            docker buildx imagetools inspect "${tag}" --format '{{json .Image}}' \
+              | python -c 'import json,sys; print((json.load(sys.stdin).get("config") or {}).get("Labels", {}).get("org.opencontainers.image.revision", ""))'
+          )
+          echo "published revision: ${published:-<none>}"
+          echo "this commit:        ${{ github.sha }}"
+          if [[ -n "${published}" && "${published}" != "${{ github.sha }}" ]]; then
+            echo "::error::App image ${tag} was built from ${published}, not ${{ github.sha }}. The engine code changed without a version bump, so nothing would be published and the installed app would stay on old code. Bump 'version' in addon/config.yaml (and the integration manifest) to release the change."
+            exit 1
+          fi
+          echo "::notice::App image ${{ steps.version.outputs.version }} is already published from this commit; nothing to publish."
+
+      - name: Explain why nothing was published
+        if: steps.exists.outputs.exists == 'true' && inputs.force != true
+        run: |
+          echo "::notice::App image ${{ steps.version.outputs.version }} already exists for this commit. Bump 'version' in addon/config.yaml to release a new image, or dispatch this workflow with force=true to republish the existing one."
 
       - name: Build and push (multi-arch manifest list)
         if: steps.exists.outputs.exists == 'false' || inputs.force == true
@@ -119,6 +140,7 @@ jobs:
             org.opencontainers.image.title=WattMosaic Engine
             org.opencontainers.image.description=Multi-CT load disaggregation engine for WattMosaic
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=MIT
             org.opencontainers.image.source=https://github.com/asxzy/wattmosaic
 

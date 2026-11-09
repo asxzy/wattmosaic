@@ -2619,6 +2619,108 @@ stores only `device_id`, `zone_id` and `friendly_name` for these lights even
 with attributes requested, so curves still require live `state_changed` events.
 Per-device accuracy against household ground truth remains unverified.
 
+### 7r.8 The window is 11 days, not 24 hours — and the published dev5 was stale
+
+Two conclusions in §7r.6f were wrong, and both are corrected here.
+
+**§7r.6f said the recorder keeps ~24 h. It keeps ~11 days.** That number came
+from a probe that reused one WebSocket message id (`id: 2`) for every query. HA
+answers an out-of-order id with `id_reuse`, and the harness read the *previous*
+result — so every window past the first returned the same data and the "48 h →
+0 rows" result was an artefact of the test, not the recorder. Re-run with a
+strictly increasing id, one entity, non-overlapping day windows:
+
+| days ago | rows |
+| --- | --- |
+| 0–1 … 9–10 | 5 040–5 707 per day |
+| 11–12 and beyond | 0 |
+
+The oldest row for that channel is `2026-10-29 10:12`, a **10.89-day span**,
+61 691 rows. So `discover_placements(lookback_hours=…)` can legitimately reach
+~260 h on this install; the service's own cap is 720 h. The 24 h figure in §7r.6f
+and in the earlier harvest is superseded.
+
+**The dev App was never running dev5 — the tag was stale.** `0.2.0-dev5` was
+built from `7a0922d`. The fixes for #56/#57 landed in `69ebbfb`, which pushed to
+`dev` **without bumping `version:`**. `app-image.yaml` treats an existing tag as
+"already published", published nothing, and still exited 0. The live dev App
+therefore ran pre-fix code, which is why `discover_placements` kept returning
+`literal_error` long after the installer reported `installed_version:
+0.2.0-dev5`. Proof it was not a deployment or Docker problem: the published
+`0.2.0-dev5` image *does* contain `discover_placements` (so the command existed)
+but *does not* contain `double_pole_leg` (so #57 was still live). Pulling dev5
+locally and booting it confirmed the image is sound.
+
+Three separate confusions compounded this, and all three are now documented so
+they are not re-derived:
+
+- **`engine_version: 0.1.2` is not a build identity.** It is the literal
+  `ENGINE_VERSION` in `api/facade.py`, never bumped. `contract_version` is
+  `1.1.0` (stable) vs `1.2.0` (dev), but dev2 and dev5 share `1.2.0`, so the
+  contract cannot distinguish dev builds either. Only `sw_version` on the hassio
+  device, or the image's own labels, identify a build.
+- **Service calls do not route to the dev engine by default.** With two config
+  entries loaded, `_resolve_entry` logs *"Multiple WattMosaic engines are
+  configured and the target could not be resolved; using the first entry"* and
+  picks the **stable** engine. A bare `device_id` (e.g.
+  `dev_refoss_main_panel_…`) does **not** match: the registry identifier is
+  `(DOMAIN, f"{entry_id}_{device_id}")`, so the caller must pass the engine id,
+  which then matches the *second* clause. In practice the working call passes the
+  full `<entry_id>_<engine_device_id>` string. Every `literal_error` in the
+  earlier session was the **stable** 0.1.5 engine rejecting a command it never
+  had. This is a real product defect: the service should route by `entry_id` or
+  refuse ambiguity instead of silently targeting the first entry.
+
+**The fix, and the guard.** `0.2.0-dev6` bumps addon + manifest + `const.VERSION`
+together. The workflow now stamps `org.opencontainers.image.revision` and, when
+a tag already exists, compares it to `github.sha`: a mismatch fails the job with
+the bump instruction instead of publishing nothing. `tests/integration/
+test_release_pipeline.py` pins this; negative-verified by deleting the revision
+label and the `exit 1`, which fails two of its four tests.
+
+**90-day statistics as the wide-window path.** Long-term statistics outlive raw
+history: `mean` statistics carry hourly average power in W (`has_mean`, 3 380
+series) and `sum` statistics carry cumulative kWh (331). For the CT row,
+`period="hour"` returns 8 634 points at 365 d, 2 061 at 90 d. Harvested at 90 d:
+**38/38 CT rows and 122 non-CT power series, 43 926 hourly points**. Every CT row
+has power statistics; the two systems that start earlier (`main_load_manager_*`
+2 061 h, `refoss_main_panel_*` 819 h, `refoss_sub_panel_*` 732 h) differ only in
+when they were first recorded.
+
+**90-day energy, integrated from hourly mean power.** EV charger 751.1 kWh,
+upper-floor humidifier 421.8, main-floor furnace 182.9, server rack 173.3, lights
+CT2 154.7, upper-floor HRV 108.3, hot tub 188.3 (l1 105.9 + l2 82.4). Main-panel
+l1+l2 3 218.3 kWh; sub-panel l1+l2 1 156.4 kWh with its device rows summing to
+1 056.8 (91.4 %). Main-panel device rows sum to 1 560.0 (48.5 % of the panel —
+the mains there also feed the sub-panel). These are *statistics-derived*, so they
+are 1-hour-resolution estimates of a measured quantity, not metered device energy.
+
+**Matching: what the wider window found, and what it did not.** Statistics carry
+only `mean`/`min`/`max` per hour — no on/off states — so they cannot reproduce
+the engine's transition correlation and cannot by themselves create a placement.
+What they *can* do is test relationships:
+
+- A hand-written hot-tub template tracks **both** legs at r=1.0000, which
+  confirms the legs are the same appliance but proves nothing about level
+  dependence; it is corroboration of the pair, not independent ground truth for
+  attribution.
+- The Matter plugs show no row above |r| = 0.40, i.e. no CT row serves them. That
+  is a real negative result: they are not candidates for auto-placement.
+- **`refoss_main_panel_sauna` is very likely a duplicate of
+  `kitchen_plug_l1`.** Different hardware channels (`em:3` vs `em:9`), yet over
+  the first 524 shared hours the two rows agree to **1.15 W mean absolute
+  difference (12.8 % relative, 70.9 % of hours identical to <0.01 W)** while
+  peaking at 1 157/1 160 W. After 2026-10-28 the sauna row is identically zero at
+  all 295 points while the kitchen row still moves (37 nonzero hours). Either the
+  clamp was re-seated or the label was wrong. Left in the topology, these two
+  rows would double-count ~4.4 kWh while both were live. **Not fixed here** — it
+  is the user's declaration and correcting it is a topology write (§8).
+
+A methodological caveat that applies to every number above: hourly `mean`
+smooths sub-hour switching, so two devices that alternate within an hour
+correlate at the hour level even when they are independent. Correlations here
+are evidence, not proof, and none was used to write a device.
+
 ### 7r.7 Known limitation found while probing the dimming case
 
 The dimmer case is only fully "CT as ground truth" while **one** lamp is on. With
