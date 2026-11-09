@@ -1098,7 +1098,9 @@ def _clean_choice(value: Any, allowed: Sequence[str]) -> str | None:
     return text if text in allowed else "unknown"
 
 
-def normalise_device_configuration(user_input: Mapping[str, Any] | None) -> dict[str, Any]:
+def normalise_device_configuration(
+    user_input: Mapping[str, Any] | None, *, stored_cts: Sequence[str] | None = None
+) -> dict[str, Any]:
     """Convert one flat form submission into ``DeviceConfiguration`` fields.
 
     Only stated values are emitted: an absent field means "not stated", never a
@@ -1128,6 +1130,25 @@ def normalise_device_configuration(user_input: Mapping[str, Any] | None) -> dict
     mode_entities = parse_entity_list(data.get("mode_entity_ids"))
     if mode_entities:
         params["mode_entity_ids"] = mode_entities
+
+    #: CTs the user asserts observe this device.  Without this the engine can
+    #: only attribute a device from a CT the *channel wizard* assigned to it, and
+    #: a channel has exactly one ``device_id`` -- so "these several lamps share
+    #: this one circuit" could not be expressed at all.  The engine already reads
+    #: it (``DeviceConfiguration.monitored_by_ct_ids``); nothing in the product
+    #: sent it, which made the shared-circuit case unreachable through the UI.
+    #:
+    #: The widget is pre-filled with what is stored, so "submitted value equals
+    #: the stored value" means the user expressed no opinion and nothing must be
+    #: sent -- otherwise merely editing an unrelated field would create a
+    #: configuration row for every device someone opened.  A *different* value is
+    #: an instruction, and that includes the empty selection: leaving it empty
+    #: must clear a wrong declaration.  Swallowing empty would make a mis-declared
+    #: circuit impossible to undo, the same dead end the device link had.
+    if "monitored_by_ct_ids" in data:
+        submitted_cts = parse_entity_list(data.get("monitored_by_ct_ids"))
+        if submitted_cts != list(stored_cts or ()):
+            params["monitored_by_ct_ids"] = submitted_cts
 
     expected: dict[str, float] = {}
     for field, key in (("expected_on_w", "on_w"), ("expected_standby_w", "standby_w")):
@@ -1289,7 +1310,7 @@ def _normalise_controller(data: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def validate_device_configuration(
-    user_input: Mapping[str, Any] | None,
+    user_input: Mapping[str, Any] | None, *, stored_cts: Sequence[str] | None = None
 ) -> dict[str, str]:
     """Validate one flat form submission.  Returns ``{field: error_key}``.
 
@@ -1346,6 +1367,11 @@ def validate_device_configuration(
         if number is None or number < 0.0:
             errors[field] = "invalid_number"
 
+    for ct_id in parse_entity_list(data.get("monitored_by_ct_ids")):
+        if not _looks_like_ct_id(ct_id):
+            errors["monitored_by_ct_ids"] = "invalid_ct_id"
+            break
+
     raw_bulbs = data.get("bulb_count")
     if raw_bulbs not in (None, ""):
         bulbs = as_int(raw_bulbs)
@@ -1356,10 +1382,12 @@ def validate_device_configuration(
     # mapping as "remove this device's configuration", so a blank submission must
     # be refused rather than silently deleting what the user has not replaced.
     # The energy opt-in is integration-side, so it alone *is* something to save
-    # and must not be rejected as empty.
+    # and must not be rejected as empty.  A *changed* CT selection is also
+    # something to save, including clearing it: that is how a wrong declaration
+    # is undone.
     if (
         not errors
-        and not normalise_device_configuration(data)
+        and not normalise_device_configuration(data, stored_cts=stored_cts)
         and energy_entity_choice(data) is None
     ):
         errors["base"] = "nothing_to_save"
@@ -1374,6 +1402,17 @@ def _looks_like_entity_id(value: str) -> bool:
         return False
     domain, object_id = text.split(".", 1)
     return bool(domain) and bool(object_id) and " " not in text
+
+
+def _looks_like_ct_id(value: str) -> bool:
+    """A CT id is an engine identifier: one token, no spaces, no domain dot.
+
+    It is *not* an entity id.  Accepting ``sensor.foo`` here would silently
+    declare a channel that does not exist, and the engine drops unknown ids --
+    the user would see a saved configuration and no change in behaviour.
+    """
+    text = str(value).strip()
+    return bool(text) and " " not in text and "." not in text
 
 
 def device_configuration_command(

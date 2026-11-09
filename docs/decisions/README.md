@@ -826,6 +826,19 @@ uses a measured power sensor as ground truth for a virtual sensor.
    under `PROJECTED_CTS_KEY`, and retracts only that on removal. A CT assigned
    through the channel wizard is untouched. Disabled and unknown channels are
    never mirrored.
+5. **The declaration must be reachable from the product.** A channel carries one
+   `device_id`, so a bank of lamps on one circuit could not be described by the
+   channel wizard at all: the second assignment overwrote the first, and a branch
+   channel's `device_id` is inert even for that one device (attribution reads
+   `DeviceTopology.branch_ct_ids`, which only `monitored_by_ct_ids` writes).
+   The per-device form therefore offers the engine's CT channels as a multi-select
+   and sends `monitored_by_ct_ids`. A CT id is validated as an engine token, not
+   an entity id: the engine drops an unknown id silently, so a pasted
+   `sensor.foo` would save cleanly and change nothing. Because the picker is
+   pre-filled with the stored declaration, resubmitting it unchanged sends
+   nothing (so opening a device to edit an unrelated field does not create a
+   configuration row), while *changing* it does — including clearing it, which is
+   the only way to undo a wrong declaration.
 5. **A declared load signal makes an OFF state a constraint.** The solver already
    pinned an observed-OFF device at its standby draw, but only when a learnt
    model existed, so a switch-only shared circuit stayed permanently
@@ -853,6 +866,13 @@ or a sibling that is `unknown`/`unavailable`, still reports `unknown` and leaves
 the row in the residual. The `unknown` state deliberately blocks the rule: an
 offline sensor might be drawing.
 
+The shared case is only usable because the declaration now reaches the engine
+from the product. Nothing was missing in the engine: it accepted
+`monitored_by_ct_ids` and its tests covered the single-ON rule while the
+integration never sent the field, so the feature existed with no way to configure
+it — the same class of defect as the alias and multiplier columns that were
+dropped on every write.
+
 Amended wording: ADR-0020/0021 said only *energy* moves to the real device. That
 is superseded. The identity rule from ADR-0021 is unchanged and still load-
 bearing: every entity is created on the WattMosaic device and moved afterwards,
@@ -871,16 +891,21 @@ so a link change never re-derives an entity ID and never orphans statistics.
   100 W model bound is relaxed for the ON lamp while the OFF lamp's pin is not.
 * `tests/integration/test_device_link.py` — `BINDABLE_KEYS`, provenance
   exclusion, explicit-link precedence and validation, unlink returning the
-  entity, per-device form helpers, and that every options completion path
-  rebuilds the whole link map (Home Assistant replaces `options` wholesale).
+  entity, per-device form helpers, that the CT list reaches the engine command,
+  that a CT id is not accepted in entity-id form, that the detail step offers the
+  engine's channels and loads them on a direct visit, and that every options
+  completion path rebuilds the whole link map (Home Assistant replaces `options`
+  wholesale).
 * Negative verification: each guard was removed and the corresponding test
   fails. Removing the zero pin fails five tests; removing the declared-load
   signal fails three; skipping the CT mirror fails seven; retracting everything
-  instead of only what was projected fails the wizard-assigned case; accepting
-  disabled channels fails the disabled case; dropping `CONF_DEVICE_LINKS` from a
-  finish path fails the persistence case; narrowing `BINDABLE_KEYS` fails the
-  bindable-key case; ignoring the explicit link fails the precedence case; and
-  removing the unlink return fails the return case.
+  instead of only what was projected fails the retraction and wizard-assigned
+  cases; accepting disabled channels fails the disabled case; dropping
+  `CONF_DEVICE_LINKS` from a finish path fails the persistence case; narrowing
+  `BINDABLE_KEYS` fails the bindable-key case; ignoring the explicit link fails
+  the precedence case; removing the unlink return fails the return case; dropping
+  the CT list from the command fails two; removing CT-id validation fails one;
+  and not loading the channels on a direct visit fails one.
 * Live environment facts used: 518 devices in the registry, 460 not owned by
   WattMosaic, 81 `light.*` entities, 58 WattMosaic-owned entities excluded from
   the picker. The hot tub is two paired branch CTs (`l1`/`l2`), and the

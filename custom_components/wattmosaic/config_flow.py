@@ -254,7 +254,8 @@ _LIGHT_TYPE_LABELS = {
 
 def _device_config_schema(
     *, energy_default: bool = True, link_options: list[SelectOptionDict] | None = None,
-    link_default: str = "",
+    link_default: str = "", ct_options: list[SelectOptionDict] | None = None,
+    ct_default: list[str] | None = None,
 ) -> vol.Schema:
     """Flat form for one device's configuration.
 
@@ -269,7 +270,26 @@ def _device_config_schema(
     ``link_options`` lists the Home Assistant devices this measurement may be
     shown on.  A dropdown rather than a free-text device id because a registry id
     is opaque; the selector value is the id, the label is the name the user knows.
+
+    ``ct_options`` lists the engine's CT channels so a device can declare which
+    circuit it sits on.  This is what makes a *shared* circuit expressible: a
+    channel carries one ``device_id``, so several lamps on one CT could not be
+    described by the channel wizard alone.  A multi-select because one row may
+    cover many loads and one load may sit under nested rows.
     """
+    ct_field = (
+        SelectSelector(
+            SelectSelectorConfig(
+                options=list(ct_options or []),
+                mode=SelectSelectorMode.DROPDOWN,
+                multiple=True,
+                custom_value=False,
+            )
+        )
+        if ct_options is not None
+        else TextSelector()
+    )
+    ct_default_value: Any = list(ct_default or []) if ct_options is not None else ""
     fields: dict[Any, Any] = {
         vol.Required("device_type", default="unknown"): _enum_select(
             DEVICE_TYPES, _DEVICE_TYPE_LABELS
@@ -280,6 +300,7 @@ def _device_config_schema(
         vol.Required("monitoring", default="unknown"): _enum_select(
             MONITORING_LEVELS, _MONITORING_LABELS
         ),
+        vol.Optional("monitored_by_ct_ids", default=ct_default_value): ct_field,
         vol.Required("behavior", default="unknown"): _enum_select(
             POWER_BEHAVIORS, _BEHAVIOR_LABELS
         ),
@@ -1115,6 +1136,20 @@ class WattMosaicOptionsFlow(_AssignmentWizard, OptionsFlow):
             _LOGGER.debug("WattMosaic device list unavailable: %s", describe_engine_error(err))
         self._devices = devices
 
+        # The detail step also offers the CT channels, so a device can declare
+        # the circuit it sits on.  The channel wizard has already normalised
+        # them when this branch is reached from ``init``; a direct visit (for
+        # example after a reload) has not, so load them here as well.
+        if not self._channels:
+            try:
+                topology = await self._wizard_client().topology()
+            except Exception as err:  # noqa: BLE001 - the free-text CT field works
+                _LOGGER.debug("WattMosaic topology unavailable: %s", describe_engine_error(err))
+            else:
+                if isinstance(topology, dict):
+                    self._topology = topology
+                    self._channels = normalise_channels(topology)
+
         if user_input is not None:
             chosen = str(user_input.get("device_id") or "").strip() or str(
                 user_input.get("custom_device_id") or ""
@@ -1152,9 +1187,13 @@ class WattMosaicOptionsFlow(_AssignmentWizard, OptionsFlow):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            errors = validate_device_configuration(user_input)
+            errors = validate_device_configuration(
+                user_input, stored_cts=self._stored_monitored_cts()
+            )
             if not errors:
-                parameters = normalise_device_configuration(user_input)
+                parameters = normalise_device_configuration(
+                    user_input, stored_cts=self._stored_monitored_cts()
+                )
                 choice = energy_entity_choice(user_input)
                 if choice is not None:
                     self._energy_entities[self._device_config_device_id] = choice
@@ -1199,17 +1238,21 @@ class WattMosaicOptionsFlow(_AssignmentWizard, OptionsFlow):
                         return self._device_config_finish()
 
         link_options, suggested = self._link_candidates()
+        ct_options = self._ct_options()
         return self.async_show_form(
             step_id="device_config_details",
             data_schema=_device_config_schema(
                 energy_default=self._stored_energy_choice(),
                 link_options=link_options,
                 link_default=suggested,
+                ct_options=ct_options,
+                ct_default=self._stored_monitored_cts(),
             ),
             errors=errors,
             description_placeholders={
                 "device_id": self._device_config_device_id,
                 "link_count": str(max(len(link_options) - 1, 0)),
+                "ct_count": str(len(ct_options)),
             },
         )
 
@@ -1233,6 +1276,44 @@ class WattMosaicOptionsFlow(_AssignmentWizard, OptionsFlow):
             if isinstance(configuration, Mapping):
                 return dict(configuration)
         return None
+
+    def _ct_options(self) -> list[SelectOptionDict]:
+        """Every CT channel the engine knows, as selectable rows.
+
+        Only CTs that could actually meter a load are offered: a main feed is
+        not a load row, and offering it would invite a declaration the engine
+        drops silently.  Branch, dedicated and unclassified channels are all
+        legitimate rows for a shared circuit.
+        """
+        options: list[SelectOptionDict] = []
+        for channel in self._channels:
+            ct_id = str(channel.get("ct_id") or "")
+            if not ct_id:
+                continue
+            role = str(channel.get("ct_type") or "unknown")
+            if role == "main":
+                continue
+            label = ct_id
+            entity_id = channel.get("entity_id")
+            if isinstance(entity_id, str) and entity_id.strip():
+                label = f"{ct_id} ({entity_id.strip()})"
+            options.append(SelectOptionDict(value=ct_id, label=label))
+        return options
+
+    def _stored_monitored_cts(self) -> list[str]:
+        """CTs already declared for the device being edited.
+
+        Filtered to the channels actually offered.  A stored id that is not in
+        the picker (a main feed, or a channel since removed) would otherwise be
+        invisible yet still submitted as "unchanged", and a multi-select silently
+        drops values it has no option for.
+        """
+        configuration = self._engine_device_configuration() or {}
+        raw = configuration.get("monitored_by_ct_ids")
+        if not isinstance(raw, (list, tuple)):
+            return []
+        offered = {option["value"] for option in self._ct_options()}
+        return [str(item) for item in raw if str(item) in offered]
 
     def _link_candidates(self) -> tuple[list[SelectOptionDict], str]:
         """Home Assistant devices this measurement may be attached to.

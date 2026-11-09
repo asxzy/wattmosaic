@@ -409,3 +409,167 @@ class TestStaleLinksAreValidated:
         body = source[start:end]
         assert "DOMAIN" in body
         assert "identifiers" in body
+
+
+# --------------------------------------------------------------------------- #
+# Declaring which CTs meter a device (the shared-circuit case)
+# --------------------------------------------------------------------------- #
+
+
+class TestSharedCircuitIsExpressible:
+    """A bank of dimmers on one circuit was unreachable through the product.
+
+    The engine has always understood ``DeviceConfiguration.monitored_by_ct_ids``
+    and its tests cover the single-ON-claimant rule, but nothing in the
+    integration ever sent the field.  The channel wizard writes
+    ``CTChannel.device_id``, which holds exactly one id, so the second lamp on
+    the same circuit had nowhere to go -- the feature existed and could not be
+    configured.  These tests pin the product path, not the engine behaviour
+    (which ``test_device_attachment.py`` covers).
+    """
+
+    def test_the_form_emits_the_ct_list(self) -> None:
+        parameters = flow.normalise_device_configuration(
+            {
+                "device_type": "light",
+                "connectivity": "connected",
+                "monitoring": "shared",
+                "behavior": "variable",
+                "state_entity_ids": "light.lamp_a",
+                "monitored_by_ct_ids": "ct_lights",
+            }
+        )
+        assert parameters["monitored_by_ct_ids"] == ["ct_lights"]
+        assert parameters["monitoring"] == "shared"
+
+    def test_several_cts_are_kept_in_order_and_deduplicated(self) -> None:
+        parameters = flow.normalise_device_configuration(
+            {"monitored_by_ct_ids": "ct_lights, ct_basement ,ct_lights"}
+        )
+        assert parameters["monitored_by_ct_ids"] == ["ct_lights", "ct_basement"]
+
+    def test_an_absent_field_states_nothing(self) -> None:
+        """A caller that does not know about the field must change nothing."""
+        assert "monitored_by_ct_ids" not in flow.normalise_device_configuration(
+            {"device_type": "light"}
+        )
+
+    def test_an_unchanged_selection_states_nothing(self) -> None:
+        """The widget is pre-filled, so resubmitting it is not an instruction."""
+        assert "monitored_by_ct_ids" not in flow.normalise_device_configuration(
+            {"monitored_by_ct_ids": ["ct_lights"]}, stored_cts=["ct_lights"]
+        )
+
+    def test_clearing_the_selection_is_an_instruction(self) -> None:
+        """A wrong declaration must be removable.
+
+        The picker shows what is stored.  If empty were read as "no opinion" the
+        declaration could never be undone -- the same dead end the device link
+        had before ``_return_to_own_device``.
+        """
+        parameters = flow.normalise_device_configuration(
+            {"monitored_by_ct_ids": []}, stored_cts=["ct_lights"]
+        )
+        assert parameters == {"monitored_by_ct_ids": []}
+
+    def test_clearing_is_not_rejected_as_nothing_to_save(self) -> None:
+        errors = flow.validate_device_configuration(
+            {
+                "device_type": "unknown",
+                "connectivity": "unknown",
+                "behavior": "unknown",
+                "monitored_by_ct_ids": [],
+            },
+            stored_cts=["ct_lights"],
+        )
+        assert errors == {}
+
+    def test_resubmitting_an_empty_unchanged_form_is_still_refused(self) -> None:
+        errors = flow.validate_device_configuration(
+            {
+                "device_type": "unknown",
+                "connectivity": "unknown",
+                "behavior": "unknown",
+                "monitored_by_ct_ids": [],
+            },
+            stored_cts=[],
+        )
+        assert errors.get("base") == "nothing_to_save"
+
+    def test_an_entity_id_is_not_a_ct_id(self) -> None:
+        """Accepting an entity id would declare a channel that does not exist.
+
+        The engine drops unknown ct ids without an error, so the user would see
+        a saved configuration and no change in behaviour.
+        """
+        errors = flow.validate_device_configuration(
+            {
+                "device_type": "light",
+                "connectivity": "connected",
+                "behavior": "variable",
+                "monitored_by_ct_ids": "sensor.lights_power",
+            }
+        )
+        assert errors.get("monitored_by_ct_ids") == "invalid_ct_id"
+
+    def test_a_plain_ct_id_passes_validation(self) -> None:
+        errors = flow.validate_device_configuration(
+            {
+                "device_type": "light",
+                "connectivity": "connected",
+                "behavior": "variable",
+                "monitored_by_ct_ids": "lights_branch_ct",
+            }
+        )
+        assert "monitored_by_ct_ids" not in errors
+
+    def test_the_form_offers_the_engine_channels(self) -> None:
+        """The field must be a picker over real channels, not free text.
+
+        A registry-style free-text box invites a typo that the engine silently
+        discards.  The step therefore builds options from ``self._channels``.
+        """
+        source = _config_flow_source()
+        assert "def _ct_options(" in source
+        start = source.index("def _ct_options(")
+        end = source.index("def _stored_monitored_cts(", start)
+        body = source[start:end]
+        assert "self._channels" in body
+        # A main feed is not a load row and must not be offered.
+        assert 'role == "main"' in body or "role == 'main'" in body
+
+    def test_the_detail_step_passes_the_options_and_default(self) -> None:
+        source = _config_flow_source()
+        start = source.index("async def async_step_device_config_details(")
+        body = source[start : source.index("def _stored_device_links(", start)]
+        assert "ct_options=ct_options" in body
+        assert "ct_options = self._ct_options()" in body
+        assert "ct_default=self._stored_monitored_cts()" in body
+
+    def test_a_direct_visit_loads_the_channels(self) -> None:
+        """Entering the device branch without the wizard must still offer CTs.
+
+        Otherwise the picker is empty exactly when a user comes back to edit one
+        device -- the case the feature exists for.
+        """
+        source = _config_flow_source()
+        start = source.index("async def async_step_device_config(")
+        body = source[start : source.index("async def async_step_device_config_details(", start)]
+        assert "if not self._channels:" in body
+        assert "normalise_channels(topology)" in body
+
+    def test_a_stored_ct_is_only_prefilled_when_it_is_offered(self) -> None:
+        """A multi-select silently drops values it has no option for.
+
+        So a stored declaration must be filtered to the offered channels, or a
+        hidden main-feed id would look "unchanged" on submit and be removed.
+        """
+        source = _config_flow_source()
+        start = source.index("def _stored_monitored_cts(")
+        body = source[start : source.index("def _link_candidates(", start)]
+        assert "self._ct_options()" in body
+        assert " in offered" in body
+
+
+def _config_flow_source() -> str:
+    return (PACKAGE_DIR / "config_flow.py").read_text()

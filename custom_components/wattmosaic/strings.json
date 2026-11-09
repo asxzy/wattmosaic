@@ -136,11 +136,12 @@
       },
       "device_config_details": {
         "title": "Device configuration",
-        "description": "Describe device {device_id}. Every field is optional knowledge: a blank value means \"not stated\", never zero watts.\n\nState entities are comma-separated entity ids that prove the device is running. Mode entities are context only and never count as proof of load.\n\nDevice link shows this load's power and energy under an existing Home Assistant device instead of a WattMosaic one. {link_count} device(s) can be linked from the entities this device already declares.",
+        "description": "Describe device {device_id}. Every field is optional knowledge: a blank value means \"not stated\", never zero watts.\n\nState entities are comma-separated entity ids that prove the device is running. Mode entities are context only and never count as proof of load.\n\nCT channels name the circuit this device sits on. Select several when other loads share the same circuit: the engine then reports the row as inferred and never pretends the CT measured this device alone.\n\nDevice link shows this load's power and energy under an existing Home Assistant device instead of a WattMosaic one. {link_count} device(s) can be linked from the entities this device already declares.",
         "data": {
           "device_type": "Device type",
           "connectivity": "Home Assistant connectivity",
           "monitoring": "Monitoring level",
+          "monitored_by_ct_ids": "CT channels that meter this device",
           "behavior": "Power behaviour",
           "state_entity_ids": "State entity ids (comma separated)",
           "mode_entity_ids": "Mode entity ids (comma separated)",
@@ -157,6 +158,7 @@
         "data_description": {
           "connectivity": "connected = HA holds an entity for it; not_connected = non-smart device.",
           "monitoring": "dedicated = its own CT; shared = a circuit with other loads; home_total_only = only visible in the total; unmonitored = no CT at all.",
+          "monitored_by_ct_ids": "The CT rows that carry this load. Choose more than one only when they really are separate rows; several loads on one row is the shared-circuit case, settled by the switch states.",
           "behavior": "fixed = constant watts; variable = follows a dimmer/speed; complex = multi-state controller.",
           "bulb_count": "A five-bulb fixture at 9 W per bulb is 45 W, not 9 W.",
           "watts_per_bulb_on": "Per bulb, not per fixture.",

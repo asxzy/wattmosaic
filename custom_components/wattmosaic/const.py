@@ -11,7 +11,7 @@ from __future__ import annotations
 DOMAIN = "wattmosaic"
 NAME = "WattMosaic"
 MANUFACTURER = "WattMosaic"
-VERSION = "0.2.0-dev3"
+VERSION = "0.2.0-dev4"
 
 #: Platforms forwarded by ``async_setup_entry`` (strings, so no HA import).
 PLATFORMS: list[str] = ["sensor", "binary_sensor"]

@@ -456,3 +456,63 @@ def test_a_state_pin_is_never_relaxed_by_the_model_bound_pass() -> None:
     # The OFF lamp keeps its pin and must not be reported as relaxed.
     assert results["lamp_b"].power_w == pytest.approx(0.0)
     assert "lamp_b" not in batch.diagnostics["relaxed_bounds"]
+
+
+# --------------------------------------------------------------------------- #
+# The product path must be able to reach this behaviour
+# --------------------------------------------------------------------------- #
+
+
+def test_a_branch_channel_carries_exactly_one_device() -> None:
+    """Why the device form needs its own CT list: a channel names one device.
+
+    The channel wizard writes ``CTChannel.device_id``, which is a single id.
+    Three lamps on one circuit therefore cannot be described by the wizard at
+    all -- the second and third assignment would overwrite the first.  The
+    engine's ``DeviceConfiguration.monitored_by_ct_ids`` is the mechanism that
+    expresses many devices on one row, so the product must send it.
+    """
+    channel = CTChannel(
+        ct_id="ct_lights",
+        entity_id="sensor.lights_power",
+        ct_type=CTType.BRANCH,
+        phase=Phase.L1,
+        parent_ct_id="ct_main",
+        device_id="lamp_a",
+    )
+    assert channel.device_id == "lamp_a"
+    # There is no second slot to put lamp_b in.
+    assert not hasattr(channel, "device_ids")
+
+
+def test_declaring_a_shared_ct_gives_every_device_an_attribution_row() -> None:
+    """The declaration, not the channel, is what puts a lamp on the row."""
+    projected = _shared_topology(devs=("lamp_a", "lamp_b", "lamp_c"))
+    for device in projected.devices:
+        if device.device_id not in ("lamp_a", "lamp_b", "lamp_c"):
+            continue
+        assert "ct_lights" in device.branch_ct_ids
+
+
+def test_three_lamps_one_row_still_resolve_when_one_is_on() -> None:
+    """A bank of three lamps on one circuit: the ON one owns the whole row."""
+    results = _by_device(
+        _infer(
+            _shared_topology(devs=("lamp_a", "lamp_b", "lamp_c")),
+            {"ct_main": 500.0, "ct_lights": 200.0},
+            {"lamp_a": "off", "lamp_b": "on", "lamp_c": "off"},
+        )
+    )
+    assert results["lamp_b"].power_w == pytest.approx(200.0)
+    assert results["lamp_b"].source == Source.INFERRED
+    assert results["lamp_a"].power_w == pytest.approx(0.0)
+    assert results["lamp_c"].power_w == pytest.approx(0.0)
+
+
+def test_removing_the_declaration_retracts_the_attribution_row() -> None:
+    """Deleting the configuration must not leave a phantom row behind."""
+    topology = _shared_topology(devs=("lamp_a", "lamp_b"))
+    emptied = project_configuration(topology, [])
+    for device in emptied.devices:
+        assert not device.metadata.get(PROJECTED_CTS_KEY)
+        assert "ct_lights" not in device.branch_ct_ids

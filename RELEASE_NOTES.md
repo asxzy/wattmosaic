@@ -1,5 +1,31 @@
 # Release Notes
 
+## v0.2.0-dev4 — 2026-11-08 (development channel)
+
+Adds the missing control that makes the shared-circuit case configurable at all.
+The engine already understood it; no form ever sent it. **This is a prerelease.
+It is installed from the `dev` branch and does not replace the stable integration
+or App.**
+
+### Fixed
+
+- **A shared circuit could not be declared.** The per-device form offered
+  `monitoring: shared` but never sent the CT ids that declare it, and the channel
+  wizard's device slot holds exactly one id — so the second lamp on a circuit had
+  nowhere to go, and a branch channel's device id is inert even for that one
+  device. The device form now offers the engine's CT channels as a multi-select
+  and sends `monitored_by_ct_ids`. A CT id is validated as an engine token, not
+  an entity id: the engine drops an unknown id silently, so a pasted
+  `sensor.foo` would save cleanly and change nothing.
+- **Entering the device step directly left the CT picker empty.** The channels
+  were only normalised when the wizard had already run, so coming back to edit
+  one device — the case the feature exists for — offered nothing. The step now
+  loads the topology when it is not already loaded.
+
+`1331` tests pass and `tools/dev/verify.py` reports **11/11 gates**. Seven new
+guards were negatively verified for this change; the full table is under
+v0.2.0-dev3 below (20 guards in total for the feature).
+
 ## v0.2.0-dev3 — 2026-11-08 (development channel)
 
 A WattMosaic measurement is only useful where the appliance already is. Power
@@ -53,6 +79,13 @@ App.**
   `source` stays `inferred`, which is what the "Measurement source" field shows.
 - **A stale device link could pin an entity to a vanished device.** Links are
   re-validated on every start and fall back to entity resolution.
+- **A shared circuit could not be declared at all.** The form offered
+  `monitoring: shared` but never sent the CT ids that declare it, and the channel
+  wizard's device slot holds only one id — so the second lamp on a circuit had
+  nowhere to go and the feature existed without a way to reach it. The device
+  form now offers the engine's CT channels and sends `monitored_by_ct_ids`. A CT
+  id is validated as an engine token, not an entity id, because the engine drops
+  an unknown id silently.
 
 ### Measured
 
@@ -64,8 +97,8 @@ an attribution row and no direct measurement.
 
 ### Verification
 
-1314 tests pass; `tools/dev/verify.py` reports **11/11 gates** (10/10 required);
-`ruff check custom_components engine tests` is clean. Thirteen guards were
+1331 tests pass; `tools/dev/verify.py` reports **11/11 gates** (10/10 required);
+`ruff check custom_components engine tests` is clean. Twenty guards were
 negatively verified — each was removed and its test failed:
 
 | Guard removed | Tests that fail |
@@ -83,12 +116,38 @@ negatively verified — each was removed and its test failed:
 | `CONF_DEVICE_LINKS` on a finish path | 1 |
 | unlink returns the entity | 1 |
 | stale-link validation | 1 |
+| the CT list is emitted to the engine | 2 |
+| CT-id shape validation | 1 |
+| a direct visit loads the CT channels | 1 |
+| projection retraction | 2 |
+| an unchanged selection states nothing | 1 |
+| clearing the selection is an instruction | 3 |
+| a stored CT is only pre-filled when offered | 1 |
+
+### Verified live
+
+`0.2.0-dev3` was installed through the Marketplace and Home Assistant restarted.
+The double-pole case was then driven end to end through the options flow, not a
+scripted shortcut:
+
+- the device picker offered 461 options (460 real devices plus "keep on the
+  WattMosaic device");
+- submitting a link alone persisted it on the entry;
+- power **and** energy moved to the real appliance's page, while all nine
+  provenance entities stayed on the synthetic device;
+- entity IDs were unchanged and the energy statistic survived the move;
+- the two CTs, declared `dedicated_device`, produced `direct_measured` /
+  `tier_3_measured`, and the reported watts equalled leg 1 + leg 2 to within
+  0.06 W across six samples.
 
 ### Not yet verified
 
-The new integration code is **not deployed** to the live installation, so the
-device-link UI and the hot-tub binding have no live end-to-end confirmation.
-Per-device accuracy remains **unverified**: it needs household ground truth.
+The shared-circuit case (many switches, several CTs, one circuit) can now be
+configured but has **no live confirmation**, and it cannot be manufactured: the
+Home Assistant registry holds no circuit membership for the 157 dimmer devices,
+so assigning a fixture to a CT would be a guess. It needs the user to state which
+fixtures each CT feeds, or a switching experiment. Per-device accuracy remains
+**unverified**: it needs household ground truth.
 
 A device pinned OFF reports `unknown` / `0.0`, not a measured `0 W`, and the
 row's power stays in the residual as `unexplained_load_on_device_circuit`.

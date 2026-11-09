@@ -4,7 +4,7 @@ Authoritative, continuously updated record of planning, delegation, integration 
 verification. If it is not recorded here with evidence, it does not count as done.
 
 **Last updated:** 2026-11-08
-**Commit:** working tree on top of `fa26fe3` (`dev`, 0.2.0-dev2 published)
+**Commit:** working tree on top of `a8dd3ef` (`dev`, 0.2.0-dev4)
 
 ---
 
@@ -2194,12 +2194,138 @@ corresponding test fail:
 Full gate suite **11/11** (10 required), `ruff check custom_components engine
 tests` clean.
 
-### 7r.6 Not yet verified
+### 7r.6 Live end-to-end confirmation (Example 1, double-pole load)
 
-The new integration code has **not** been deployed to the live installation, so
-the device-link UI and the hot-tub binding have no live end-to-end confirmation
-yet. Per-device accuracy also remains **unverified**: it needs a household
-ground-truth set that only the user can supply.
+`0.2.0-dev3` was installed through the Marketplace (repository `1448895470`,
+`version: "dev"`), the manifest on disk read back `0.2.0-dev3`, and Home
+Assistant was restarted. Both entries returned to `state=loaded` with
+`supports_options: True`.
+
+The whole path was then driven through the **product surface**, not a scripted
+shortcut:
+
+1. `POST /api/config/config_entries/options/flow` reached `init`; the options
+   form is reachable at dev3.
+2. `device_config` listed all 28 engine devices.
+3. `device_config_details` offered **461** link options — 460 real devices plus
+   "keep on the WattMosaic device" — with `link_count: 460`.
+4. Submitting only a link (no engine parameters) returned `create_entry`, and
+   the entry persisted
+   `device_links: {'<engine hot tub device>': '<real hot tub device id>'}`.
+5. The channel wizard walked all 38 channels; the hot-tub pair was set to
+   `role=dedicated_device` on its engine device with phases `l1`/`l2` and
+   reciprocal pairing, committed with `confirm_uncertain: false`. Topology
+   advanced to `version: 5`, `status: candidate`.
+
+Placement after the change — the exact split the design calls for:
+
+| entity | device |
+| --- | --- |
+| `sensor.hot_tub_power_2` | the real **Hot tub** device |
+| `sensor.hot_tub_energy_2` | the real **Hot tub** device |
+| `binary_sensor.hot_tub_running_2` | the synthetic WattMosaic device |
+| `confidence`, `data_quality`, `evidence_tier`, `last_inference`, `measurement_source`, `model_validity`, `operating_stage`, `sample_count` | the synthetic WattMosaic device |
+
+Entity IDs were unchanged, and long-term statistics survived the move:
+`sensor.hot_tub_energy_2` still returned a daily `sum` of 0.083978 through the
+recorder, under the same statistic id.
+
+**Direct measurement confirmed.** `measurement_source = direct_measured`,
+`evidence_tier = tier_3_measured`, `confidence = 67.9`. The value is the sum of
+both legs, not one of them, verified over six consecutive samples:
+
+| CT leg 1 | CT leg 2 | leg sum | WattMosaic | delta |
+| --- | --- | --- | --- | --- |
+| 9.025 W | 12.573 W | 21.598 W | 21.598 W | +0.000 |
+| 9.019 W | 12.522 W | 21.541 W | 21.537 W | −0.004 |
+| 9.031 W | 12.573 W | 21.604 W | 21.546 W | −0.058 |
+| 9.020 W | 12.576 W | 21.596 W | 21.555 W | −0.041 |
+| 9.012 W | 12.515 W | 21.527 W | 21.582 W | +0.055 |
+
+The first sample taken after the commit showed +2.161 W. That was **sample
+vintage skew, not a defect**: the two CT legs had been sampled 15 s *after* the
+integration value it was compared against. Once the timestamps aligned the
+deltas fell to ±0.06 W.
+
+### 7r.6a Example 2 was unreachable through the product (defect #53)
+
+Attempting Example 2 live turned up a **fifth wiring defect of the same class as
+#48**: the engine handled shared circuits correctly and its tests proved it, but
+no integration path could declare one.
+
+The evidence, in order:
+
+1. The form offers `monitoring: shared` but `normalise_device_configuration`
+   never emitted `monitored_by_ct_ids`. Confirmed by calling it directly: a full
+   "shared circuit" submission produced
+   `{device_type, connectivity, monitoring, behavior, state_entity_ids, light}`
+   and nothing else.
+2. The channel wizard's only device slot is `CTChannel.device_id`, which holds
+   **one** id. Assigning a second lamp to the same branch CT overwrites the
+   first.
+3. `channel.device_id` on a **branch** CT is inert even for that one device.
+   `build_topology_update` mirrors only `dedicated_device` roles onto
+   `dedicated_ct_ids`; attribution for a branch row comes from
+   `DeviceTopology.branch_ct_ids`. Measured on the real functions:
+
+   | shape | attribution for `lamp_a` | for `lamp_b` |
+   | --- | --- | --- |
+   | `channel.device_id = lamp_a`, no declaration | `()` | `()` |
+   | declaration `monitored_by_ct_ids = [ct_lights]` | `(ct_lights,)` | `(ct_lights,)` |
+
+4. The live entry confirmed it: all three lighting CTs are `dedicated_device`
+   on three separate synthetic devices, and the engine reported **no device
+   configurations at all**.
+
+The fix adds the missing field to the product:
+
+- `monitored_by_ct_ids` is emitted by `normalise_device_configuration` and
+  validated as a CT id (a plain token, **not** an entity id — accepting
+  `sensor.foo` would declare a channel that does not exist, which the engine
+  drops silently).
+- The detail step offers the engine's CT channels as a multi-select
+  (`_ct_options`, main feeds excluded because a main is not a load row) and
+  pre-selects what is already stored (`_stored_monitored_cts`).
+- The device branch loads the topology when it was not already loaded, so
+  coming back to edit one device still offers CTs.
+
+Verified end to end through the real functions: a form submission now projects
+`branch_ct_ids = ['ct_lights']` onto each declaring device, and inference on that
+projection gives the ON lamp `200.0 W` / `inferred` / `tier_3_measured` with the
+OFF lamps at `0.0 W`, while two ON claimants both stay `unknown`.
+
+**Negative verification.** Each guard was removed and its test failed:
+
+| Guard removed | Test that fails |
+| --- | --- |
+| the CT list is emitted | 2 |
+| CT-id shape validation | 1 |
+| the direct visit loads channels | 1 |
+| projection retraction | 2 |
+| an unchanged selection is not resent | 1 |
+| clearing the selection clears it | 3 |
+| a stored CT is only pre-filled when offered | 1 |
+
+### 7r.6b Example 2 still needs the user's knowledge
+
+The product can now express the case, but it still has **no live confirmation**,
+and the remaining blocker is knowledge, not code:
+
+- 15 dimmer-controlled lights are on, across three lighting CTs reading 8.3 W,
+  928.0 W and 23.7 W.
+- The Home Assistant registry carries **no circuit membership**: the 157 dimmer
+  devices expose no panel, breaker or CT identifier. Area and name do not
+  determine which CT feeds which fixture.
+- Attributing a light to a CT from its name would be fabricated attribution,
+  which the project forbids.
+
+So Example 2 needs one of two things from the user: a statement of which
+fixtures each lighting CT feeds, or a switching experiment (toggle one light,
+observe which CT moves). Until then it stays **unverified** rather than
+plausible-looking.
+
+Per-device accuracy also remains **unverified** in both cases: it needs a
+household ground-truth set that only the user can supply.
 
 One deliberate gap is recorded rather than fixed: a device pinned OFF reports
 `unknown` / `0.0` rather than a measured `0 W`, and the row's power stays in the
