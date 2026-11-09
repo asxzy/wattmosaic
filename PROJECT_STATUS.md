@@ -2705,16 +2705,22 @@ What they *can* do is test relationships:
   dependence; it is corroboration of the pair, not independent ground truth for
   attribution.
 - The Matter plugs show no row above |r| = 0.40, i.e. no CT row serves them. That
-  is a real negative result: they are not candidates for auto-placement.
-- **`refoss_main_panel_sauna` is very likely a duplicate of
-  `kitchen_plug_l1`.** Different hardware channels (`em:3` vs `em:9`), yet over
-  the first 524 shared hours the two rows agree to **1.15 W mean absolute
-  difference (12.8 % relative, 70.9 % of hours identical to <0.01 W)** while
-  peaking at 1 157/1 160 W. After 2026-10-28 the sauna row is identically zero at
-  all 295 points while the kitchen row still moves (37 nonzero hours). Either the
-  clamp was re-seated or the label was wrong. Left in the topology, these two
-  rows would double-count ~4.4 kWh while both were live. **Not fixed here** — it
-  is the user's declaration and correcting it is a topology write (§8).
+  is a real negative result: they are not candidates for auto-placement.- **`refoss_main_panel_sauna` appeared to duplicate `kitchen_plug_l1`, and does
+  not.** The two rows are different hardware channels (`em:3` vs `em:9`) yet over
+  the first 524 shared hours they agreed to **1.15 W mean absolute difference
+  (12.8 % relative, 70.9 % of hours identical to <0.01 W)** while peaking near
+  1 157/1 160 W. That is close enough to look like one clamp reported twice. It
+  is not: the two channels' own hardware energy accumulators disagree on exactly
+  the days the power series matched — 2026-10-06 rose 1.651 kWh on the sauna
+  channel and 1.548 kWh on the kitchen channel, and 2026-10-07 1.244 vs 1.141 —
+  so they measured **different** circuits that happened to run at the same time
+  for the same duration (a bath fan and a sauna heater on one timer would do it).
+  After 2026-10-28 the sauna row is identically zero at all 295 points while the
+  kitchen row still moves, which is a real change in that circuit, not a relabel.
+  **No double counting is claimed, and nothing was changed.** The episode is kept
+  because it is the exact shape of a false positive: hourly `mean` agreement at
+  70 % is *not* evidence of a duplicate, and only an independent accumulator
+  settled it. This is why the correlation analysis here writes no device.
 
 A methodological caveat that applies to every number above: hourly `mean`
 smooths sub-hour switching, so two devices that alternate within an hour
