@@ -1601,6 +1601,65 @@ class TestTopologyUpdate:
         assert updated["channels"] == []
         assert updated["status"] == "candidate"
 
+    def test_demoting_a_dedicated_ct_keeps_the_device_on_its_row(self) -> None:
+        """A demoted CT still measures the circuit, so the row must move, not vanish.
+
+        Demoting ``dedicated_device`` to ``branch`` is how a user says "this
+        circuit feeds more than one fixture".  The channel loses its
+        ``device_id`` and the device loses the CT from ``dedicated_ct_ids`` --
+        but the CT still *observes* that device.  Dropping it from both lists
+        left the device with no attribution row at all: the graph resolved zero,
+        and the fixture reported nothing forever while the wizard reported
+        success.
+        """
+        topology = {
+            "version": 3,
+            "status": "candidate",
+            "channels": [
+                {"ct_id": "ct_lights", "entity_id": "sensor.lights", "name": "Lights",
+                 "ct_type": "dedicated_device", "phase": "l1", "polarity": "normal",
+                 "device_id": "lights"},
+            ],
+            "devices": [
+                {"device_id": "lights", "name": "Lights",
+                 "dedicated_ct_ids": ["ct_lights"], "branch_ct_ids": [],
+                 "phase": "l1", "topology_status": "candidate"},
+            ],
+        }
+        updated = flow.build_topology_update(
+            topology,
+            {"ct_lights": {"role": "branch", "phase": "l1", "device_id": None}},
+        )
+        channel = updated["channels"][0]
+        device = updated["devices"][0]
+        assert channel["ct_type"] == "branch"
+        assert channel["device_id"] is None
+        assert not device.get("dedicated_ct_ids")
+        assert device["branch_ct_ids"] == ["ct_lights"]
+
+    def test_making_a_dedicated_ct_a_main_does_not_attribute_it(self) -> None:
+        """A feed is a containment constraint, never a device's measurement row."""
+        topology = {
+            "version": 3,
+            "status": "candidate",
+            "channels": [
+                {"ct_id": "ct_lights", "entity_id": "sensor.lights", "name": "Lights",
+                 "ct_type": "dedicated_device", "phase": "l1", "polarity": "normal",
+                 "device_id": "lights"},
+            ],
+            "devices": [
+                {"device_id": "lights", "name": "Lights",
+                 "dedicated_ct_ids": ["ct_lights"], "branch_ct_ids": [],
+                 "phase": "l1", "topology_status": "candidate"},
+            ],
+        }
+        updated = flow.build_topology_update(
+            topology, {"ct_lights": {"role": "main", "phase": "l1", "device_id": None}}
+        )
+        device = updated["devices"][0]
+        assert not device.get("dedicated_ct_ids")
+        assert not device.get("branch_ct_ids")
+
 
 class TestDeviceCandidates:
     def test_normalises_dict_payload(self) -> None:

@@ -1,5 +1,37 @@
 # Release Notes
 
+## v0.2.0-dev9 — 2026-11-09 (development channel)
+
+One defect, found while performing the operation dev8's release notes said could
+not be performed: the wizard could demote a `dedicated_device` CT to `branch`,
+and doing so silently cut the device off from every measurement. **This is a
+prerelease. It is installed from the `dev` branch and does not replace the stable
+integration or App.**
+
+### Fixed
+
+- **Demoting a CT to `branch` orphaned its device.** The channel wizard mirrors
+  `dedicated_device` assignments onto the device's `dedicated_ct_ids`. Changing
+  the role to `branch` removed the CT from that list — and never added it to
+  `branch_ct_ids`, which is where a shared row lives. The result looked correct
+  in the UI: the channel said `branch`, the device still existed, the save
+  succeeded. Behind it the graph resolved **zero** attribution rows for that
+  device (`('ct1',)` → `()`), so the fixture would have reported nothing forever
+  while the wizard reported success. This is the shape the reclassification
+  itself needs, so it blocked the operation rather than merely complicating it.
+  A demoted CT now moves to `branch_ct_ids` and keeps measuring the circuit.
+  Turning the CT into a `main` feed or reassigning it to a different device still
+  removes it from this device's rows, which is correct: a feed is a containment
+  constraint, not a measurement.
+
+### Notes
+
+- The code comment at that site already described the intended behaviour
+  ("the device silently keeps zero attribution"); only the `dedicated_ct_ids`
+  half was ever implemented.
+- Negative verification: restoring the old block makes the new integration test
+  fail (`[] == ['ct_lights']`).
+
 ## v0.2.0-dev8 — 2026-11-09 (development channel)
 
 Discovery was calling every single-channel CT a **private measurement**. It had

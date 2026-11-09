@@ -15,6 +15,7 @@ from .const import (
     COMMAND_SET_DEVICE_CONFIGURATION,
     CONF_AUTO_PLACEMENT,
     CONNECTIVITY_LEVELS,
+    CT_ROLE_BRANCH,
     CT_ROLE_DEDICATED,
     CT_ROLE_MAIN,
     CT_ROLE_UNKNOWN,
@@ -855,6 +856,10 @@ def build_topology_update(
                 continue
             device = dict(item)
             device_id = device.get("device_id")
+            # Snapshot before the dedicated mirror rewrites it: a CT that this
+            # submission demotes must still be visible afterwards so it can move
+            # to ``branch_ct_ids`` rather than vanishing.
+            previous_dedicated = [str(c) for c in (device.get("dedicated_ct_ids") or [])]
             dedicated = [
                 ct_id
                 for ct_id, raw in assignments.items()
@@ -881,6 +886,42 @@ def build_topology_update(
                     device["dedicated_ct_ids"] = existing
                 else:
                     device.pop("dedicated_ct_ids", None)
+
+            # A CT demoted from ``dedicated_device`` to ``branch`` still measures
+            # the same circuit, so the device must keep that row as a *branch*
+            # attribution.  Dropping it from ``dedicated_ct_ids`` without adding
+            # it to ``branch_ct_ids`` leaves the device with no row at all: the
+            # graph resolves zero attribution and the fixture silently reports
+            # nothing forever.  ``branch_ct_ids`` is the mirror discovery writes
+            # for a shared circuit, so the demotion lands on that same shape.
+            branch = [str(c) for c in (device.get("branch_ct_ids") or [])]
+            for cid in previous_dedicated:
+                raw = assignments.get(cid)
+                if raw is None:
+                    continue
+                normalised = normalise_assignment(raw)
+                if normalised["role"] == CT_ROLE_BRANCH and cid not in branch:
+                    branch.append(cid)
+            # A row this submission reassigned elsewhere, or turned into a feed,
+            # no longer attributes this device.
+            retained: list[str] = []
+            for cid in branch:
+                raw = assignments.get(cid)
+                normalised = normalise_assignment(raw) if raw is not None else None
+                if normalised is not None and (
+                    normalised["role"] in (CT_ROLE_MAIN, CT_ROLE_UNKNOWN)
+                    or (
+                        normalised["role"] == CT_ROLE_DEDICATED
+                        and normalised["device_id"] is not None
+                        and normalised["device_id"] != device_id
+                    )
+                ):
+                    continue
+                retained.append(cid)
+            if retained:
+                device["branch_ct_ids"] = retained
+            else:
+                device.pop("branch_ct_ids", None)
             devices.append(device)
         topology["devices"] = devices
 

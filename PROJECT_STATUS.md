@@ -2958,6 +2958,50 @@ tests across all suites.
 
 ---
 
+### 7r.11 The wizard could demote a CT, and the device would stop measuring
+
+Found while performing the reclassification §7r.10 described as "a deliberate act
+for later". The operation turned out to be impossible through the product: the
+write path cut the device off from every measurement and reported success.
+
+The channel wizard rebuilds each device's `dedicated_ct_ids` mirror from the
+submitted assignments. Demoting a CT to `branch` correctly removes it from that
+list — the comment at the site even says the leftover id makes the graph reject
+the row "while the device silently keeps zero attribution". But only the
+`dedicated_ct_ids` half was ever implemented. Nothing added the CT to
+`branch_ct_ids`, which is where a shared row is actually stored, so the device
+was left owning no row at all.
+
+Measured on the real topology (38 channels, 25 dedicated devices), demoting
+`lights_ct1` from `dedicated_device` to `branch`:
+
+| | `dedicated_ct_ids` | `branch_ct_ids` | `attribution_ct_ids()` |
+| --- | --- | --- | --- |
+| before | `['…lights_ct1']` | `[]` | `('…lights_ct1',)` |
+| after (old code) | removed | `[]` | **`()`** |
+| after (fixed) | removed | `['…lights_ct1']` | `('…lights_ct1',)` |
+
+Nothing in the wizard showed the difference: the channel read `branch`, the
+device still existed, the save succeeded, and validation returned no errors. The
+fixture would simply have reported nothing from then on — and because the row
+still had a device, it did not even appear as an unattributed circuit.
+
+This blocked the reclassification rather than merely complicating it: `branch`
+is exactly the role being demoted to, so the one operation required was the one
+that destroyed attribution.
+
+**Fixed.** `build_topology_update` snapshots `dedicated_ct_ids` before the mirror
+rewrites it, moves any CT demoted to `branch` into `branch_ct_ids`, and drops
+branch rows this submission turned into a feed (`main`) or reassigned to another
+device. Two integration tests cover it; restoring the old block makes the
+demotion test fail (`[] == ['ct_lights']`).
+
+**Not changed.** The options flow is still one dialog per channel, so
+reclassifying five circuits means walking 38 screens. That is a usability
+problem, not a correctness one, and it is recorded here rather than fixed.
+
+---
+
 ## 8. Needs user authorization
 
 | Action | Why it needs authorization |
@@ -2970,7 +3014,7 @@ tests across all suites.
 | Applying device configurations in the live engine | Writes the topology (version bump); needs authorization |
 | Writing a household ground-truth set for per-device accuracy | Only the user knows the true wattages; without it, accuracy stays "unverified" |
 | Correcting the `upper_deck_heater_l1`/`_l2` polarity declaration | The rows read ~−1190 W while declared `normal`; whether the CTs are physically reversed or the declaration is wrong is only knowable on site, and either fix changes what those circuits report |
-| Changing the five authorised rows from `dedicated_device` to `branch` in the live config entry | Rewrites a confirmed topology (version bump) for `lights_ct1`/`ct2`/`ct3`, `upper_floor_hrv`, `soffit_plug`; also drops the bogus `lights_ct1`↔`lights_ct2` `paired_ct_id`. Discovery now emits `branch` for new installs, but an existing confirmation is not rewritten as a side effect of an upgrade. |
+| Changing the five authorised rows from `dedicated_device` to `branch` in the live config entry | Writes the stored topology (version bump) for `lights_ct1`/`ct2`/`ct3`, `upper_floor_hrv`, `soffit_plug`, and drops the bogus `lights_ct1`↔`lights_ct2` `paired_ct_id`. The engine topology is still a **candidate** (v5, `topology_confirmed: false`), so no confirmation is revoked. Discovery now emits `branch` for new installs, but an existing topology is not rewritten as a side effect of an upgrade — and the integration that must perform the write had to be fixed first (§7r.11). |
 
 ---
 

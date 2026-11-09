@@ -1,7 +1,7 @@
 {
   "domain": "wattmosaic",
   "name": "WattMosaic",
-  "version": "0.2.0-dev8",
+  "version": "0.2.0-dev9",
   "config_flow": true,
   "iot_class": "local_polling",
   "documentation": "https://github.com/asxzy/wattmosaic/blob/main/docs/integration.md",

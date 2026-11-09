@@ -128,6 +128,17 @@ Channels come from `GET /topology`. Where the engine already suggests a
 `ct1`/`ct2` sibling, that pair is **pre-selected as a suggestion** (visible in
 the dialog), not committed.
 
+**Demoting a `dedicated_device` CT to `branch` keeps the device on its row.**
+The two roles describe the same conductor; they differ only in what the user is
+willing to assert about it. A `dedicated_device` CT claims "exactly one
+appliance sits here", while `branch` says "this circuit may feed several". When
+you change the role, the channel stops carrying a `device_id` and the device's
+ownership moves from `dedicated_ct_ids` to `branch_ct_ids`, so the fixture is
+still measured on that circuit — as a shared row rather than a private reading.
+Turning the CT into a `main` feed, or reassigning it to a different device, does
+remove it from this device's attribution, because a feed is a containment
+constraint rather than a measurement.
+
 **Nesting is supported to any depth.** A `main` CT may name another `main` CT as
 its parent (utility → panel → sub-panel), and a branch may sit under any feed.
 Only the outermost feed of each branch of the tree contributes to the whole-home
