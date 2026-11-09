@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-09T17:29:43.602073+00:00",
+  "generated_at": "2026-11-09T18:08:49.948407+00:00",
   "gates": [
     {
       "name": "contract_schema_sync",
@@ -11,7 +11,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 0.2,
+      "duration_s": 0.19,
       "output_tail": "{\n  \"contract_version\": \"1.2.0\",\n  \"schemas\": 19\n}",
       "notes": "",
       "skipped_reason": ""
@@ -26,7 +26,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 0.43,
+      "duration_s": 0.41,
       "output_tail": "secret scan: clean",
       "notes": "",
       "skipped_reason": ""
@@ -44,7 +44,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 8.69,
+      "duration_s": 9.34,
       "output_tail": "........................................................................ [  8%]\n........................................................................ [ 17%]\n........................................................................ [ 26%]\n........................................................................ [ 34%]\n........................................................................ [ 43%]\n........................................................................ [ 52%]\n........................................................................ [ 60%]\n........................................................................ [ 69%]\n........................................................................ [ 78%]\n........................................................................ [ 86%]\n........................................................................ [ 95%]\n.....................................                                    [100%]",
       "notes": "",
       "skipped_reason": ""
@@ -62,7 +62,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 3.11,
+      "duration_s": 3.06,
       "output_tail": "........................................................................ [ 13%]\n........................................................................ [ 26%]\n........................................................................ [ 40%]\n........................................................................ [ 53%]\n........................................................................ [ 67%]\n........................................................................ [ 80%]\n........................................................................ [ 94%]\n..............................                                           [100%]",
       "notes": "",
       "skipped_reason": ""
@@ -80,7 +80,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 13.78,
+      "duration_s": 14.17,
       "output_tail": "...........................................................              [100%]",
       "notes": "",
       "skipped_reason": ""
@@ -98,7 +98,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 56.19,
+      "duration_s": 62.61,
       "output_tail": "........................................................                 [100%]",
       "notes": "",
       "skipped_reason": ""
@@ -129,7 +129,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 0.55,
+      "duration_s": 0.57,
       "output_tail": "{\"status\": \"up_to_date\", \"files\": 4}",
       "notes": "",
       "skipped_reason": ""
@@ -145,7 +145,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 2.74,
+      "duration_s": 3.0,
       "output_tail": "PASS  run.sh normalises log_level to upper case\nPASS  run.sh redacts tokens in --print-config\nPASS  SUPERVISOR_TOKEN fallback switches ha_url to the Core proxy\nPASS  run.sh rejects a non-numeric stale_after_s\nPASS  run.sh fails closed when no HA token is available\nPASS  healthcheck.py fails cleanly when the gateway is down\n\n== Add-on staging (build context) ==\nPASS  package_addon.sh stages a self-contained app\nPASS  staged config.yaml\nPASS  staged Dockerfile\nPASS  staged run.sh\nPASS  staged gateway.py\nPASS  staged healthcheck.py\nPASS  staged constraints.txt\nPASS  staged pyproject.toml\nPASS  staged README.md\nPASS  staged engine/wattmosaic_engine/main.py\n\n== Docker build ==\nSKIP  image build (--no-build)\n\n== Summary ==\npassed: 61  failed: 0  skipped: 3\nall checks passed",
       "notes": "",
       "skipped_reason": ""
@@ -177,7 +177,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 0.77,
+      "duration_s": 0.83,
       "output_tail": "{\n  \"ok\": true,\n  \"problems\": [],\n  \"config\": {\n    \"ha_url\": \"<redacted-url>\",\n    \"ha_token\": \"***\",\n    \"api_host\": \"<redacted-ip>\",\n    \"api_port\": 8787,\n    \"api_token\": \"***\",\n    \"database_path\": \"data/wattmosaic.db\",\n    \"learning_enabled\": true,\n    \"auto_placement\": false,\n    \"stale_after_s\": 120.0,\n    \"inference_interval_s\": 5.0,\n    \"log_level\": \"INFO\"\n  },\n  \"contract_version\": \"1.2.0\",\n  \"engine_version\": \"0.1.2\"\n}",
       "notes": "requires HA_TOKEN in environment",
       "skipped_reason": ""
