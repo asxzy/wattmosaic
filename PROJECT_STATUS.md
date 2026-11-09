@@ -4,7 +4,7 @@ Authoritative, continuously updated record of planning, delegation, integration 
 verification. If it is not recorded here with evidence, it does not count as done.
 
 **Last updated:** 2026-11-08
-**Commit:** working tree on top of `a8dd3ef` (`dev`, 0.2.0-dev4)
+**Commit:** `5c766bd` (`dev`, 0.2.0-dev4 deployed to the live installation)
 
 ---
 
@@ -2306,8 +2306,38 @@ OFF lamps at `0.0 W`, while two ON claimants both stay `unknown`.
 | clearing the selection clears it | 3 |
 | a stored CT is only pre-filled when offered | 1 |
 
-### 7r.6b Example 2 still needs the user's knowledge
+### 7r.6a-1 The new field, confirmed live on the instrumented install
 
+`0.2.0-dev4` was installed through the Marketplace (`repository: "1448895470"`,
+`version: "dev"`), the manifest on disk read back `0.2.0-dev4`, and Home
+Assistant was restarted. Both entries returned to `state=loaded` with
+`supports_options: True`.
+
+The device step was then driven through its real HTTP flow, and the field the
+fix adds was present in the rendered schema:
+
+| property | value |
+| --- | --- |
+| `description_placeholders.ct_count` | `32` |
+| selector | `select`, `multiple: true` |
+| options | 32 engine channels |
+| main feeds among the options | none |
+| the double-pole load's two CTs | both offered |
+
+So the picker offers exactly the rows a load can sit on, and a main feed cannot
+be declared as one. What the field *does* with a submission was verified through
+the real functions (§7r.6a); this run verified that the product surface reaches
+them on the live install.
+
+**Post-restart settling, observed and not a defect.** For the first samples after
+the restart the engine reported `status: degraded` / `ha_connected: false`, and
+the double-pole device read `0.0` / `unknown` / `degraded` while its CT legs were
+already fresh. Two polls later it returned `21.563` / `direct_measured` / `good`
+and held (`21.679`, `direct_measured`, `good`) with legs summing to the reported
+value. The first inference after a restart can precede the measurement window;
+the next poll resolves it.
+
+### 7r.6b Example 2 still needs the user's knowledge
 The product can now express the case, but it still has **no live confirmation**,
 and the remaining blocker is knowledge, not code:
 
