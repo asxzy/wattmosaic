@@ -331,8 +331,9 @@ class CTChannel(Model):
     # clamped on one service entrance).  Only the canonical channel contributes
     # to a total; the alias is still usable for its own device readings.
     alias_of_ct_id: str | None = None
-    # Scaling applied to the reported reading, for the Refoss "circuit
-    # multiplier" case: one CT on one leg of a 240 V load, doubled in software.
+    # Scaling applied to the reported reading, for the "circuit multiplier" case
+    # some CT monitors expose: one CT on one leg of a 240 V load, doubled in
+    # software by the monitor itself.
     #
     # Defaults to 1.0 because the monitor commonly applies the multiplier
     # itself and already publishes the full load.  Multiplying again would

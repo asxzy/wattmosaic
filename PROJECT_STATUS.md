@@ -1657,7 +1657,7 @@ The user confirmed two facts that the code must not re-derive:
 
 1. **The sub-panel is fed from the main panel — the structure is nested.** So a
    `main` CT may legitimately have a `parent_ct_id`, to any depth.
-2. **The Refoss / VElectric device already applies its circuit multiplier** and
+2. **The CT monitor already applies its circuit multiplier** and
    publishes the full load. So `measurement_multiplier` must default to `1.0` and
    must never be inferred from `phase` or `ct_type`; inferring it would double a
    circuit the device already doubled.
@@ -2040,9 +2040,9 @@ entities in the same response:
 
 | Reading | Value |
 | --- | --- |
-| `main_load_manager` L1 (raw CT) | 1128.0 W |
+| service feed L1 (raw CT) | 1128.0 W |
 | dev entry `l1_power` | 1128.0 W (exact) |
-| `main_load_manager` L2 (raw CT) | 1536.0 W |
+| service feed L2 (raw CT) | 1536.0 W |
 | dev entry `l2_power` | 1536.0 W (exact) |
 | **dev entry total** | **2664.0 W** = L1 + L2 exactly |
 | sub-panel legs (nested) | 1172.1 W — excluded |

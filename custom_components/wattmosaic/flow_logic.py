@@ -43,7 +43,7 @@ from .util import as_bool, as_float, as_int, normalise_base_url
 ENERGY_ENTITY_FIELD = "create_energy_sensor"
 
 #: Default for ``CTChannel.measurement_multiplier``.  The monitor usually applies
-#: the Refoss "circuit multiplier" itself and already publishes the full load, so
+#: its "circuit multiplier" itself and already publishes the full load, so
 #: the engine must not scale again unless the user says so per circuit.
 DEFAULT_MULTIPLIER = 1.0
 
