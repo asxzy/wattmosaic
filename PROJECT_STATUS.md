@@ -1466,6 +1466,51 @@ host IP and no time zone; the only appliance words left are public `DeviceType`
 enum values (`ev_charger`, `hot_tub`, `sauna`, ...), which are schema vocabulary
 and identify nothing.
 
+### 7f. Home Assistant reported a commit hash, and two checks had to stop lying
+
+The update entity showed `latest_version: eec273d` — a raw commit SHA — for a
+release whose every version field correctly said `0.1.5` and whose image was
+published. The cause was **missing metadata, not wrong code**: Home Assistant,
+HACS and the Marketplace resolve the displayed version from the repository's git
+tags and GitHub Releases, and this repository had created neither, so they fell
+back to the branch head. Measured: `gh api .../tags` → `0`, `.../releases` → `0`.
+
+`0.1.6` gives `main` its own release automation — a tag plus a Release created
+from `RELEASE_NOTES.md` on every version change, with stable versions published
+as "latest" and `dev` prereleases never offered to stable users — and a release
+contract gate that fails if the five version fields disagree, if the notes do not
+document the version, or if the branch carries a version of the wrong kind. Tags
+and Releases were backfilled for the versions that are still reachable and
+publishable, so stable users see a real version immediately.
+
+Two defects were found while building it, and both are the same failure: a check
+that reported success without checking.
+
+- **The version fields had drifted.** `pyproject.toml` and the engine
+  `__version__` both still said `0.1.3`, two releases behind `0.1.5`. Nothing
+  read either at runtime, which is how it went unnoticed.
+- **The stale-image guard failed open.** It logged `published revision: <none>`
+  and then "already published from this commit" on the same run. `docker buildx
+  imagetools inspect --format '{{json .Image}}'` returns a **platform-keyed**
+  object for a multi-arch manifest list, and the guard read `.config.Labels` at
+  the top level, where nothing exists. It had been disabled since the image
+  became multi-arch. The extraction now lives in `tools/dev/image_revision.py`,
+  handles both shapes, rejects a manifest list whose architectures disagree, and
+  the workflow treats an unreadable revision as an error instead of guessing.
+
+`test_manifest_consistency` pinned `manifest["version"] == "0.1.5"`, which made
+every release require editing a test for no added safety —
+`test_manifest_version_matches_const` already proves the copies agree. It now
+asserts the version's shape.
+
+**Verification.** 12/12 required gates, including a new `lint` gate.
+`check_manifests.py` asserted the version had exactly two dots, which rejected
+every legitimate dotted prerelease; it now validates SemVer 2.0.0. Negative
+verification: the release gate exits 1 on a reverted `pyproject.toml` and 0 when
+restored; the image-revision tests fail against the old top-level accessor, and
+the corrected reader returns `6c930d8` from the live `0.2.1-dev.1` manifest while
+the old one returns `''`.
+
 ---
 
 ## 8. Needs user authorization

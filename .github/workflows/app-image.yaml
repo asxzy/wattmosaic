@@ -57,6 +57,14 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history.  The stale-tag guard diffs this commit against the
+          # commit the published image was built from, and that commit is
+          # usually not the immediate parent.  With the default shallow clone
+          # `git diff "${published}"` fails, the guard cannot tell whether the
+          # runtime inputs changed, and it reports a stale tag on a push that
+          # changed nothing — the false alarm this guard exists to avoid.
+          fetch-depth: 0
 
       - name: Read the app version the Supervisor will request
         id: version
@@ -115,13 +123,31 @@ jobs:
           # run.  If nothing that enters the image changed, there is nothing to
           # republish and nothing wrong.
           tag="ghcr.io/asxzy/wattmosaic-engine:${{ steps.version.outputs.version }}"
+          # `--format '{{json .Image}}'` returns one entry *per platform* on a
+          # multi-arch manifest list, not a flat image object:
+          #
+          #   {"linux/amd64": {"config": {"Labels": {...}}}, "linux/arm64": {...}}
+          #
+          # Reading `.config.Labels` at the top level returned nothing, so
+          # `${published}` was empty and the guard took its "already published
+          # from this commit" branch unconditionally -- reporting success for an
+          # image built from a different commit.  It failed open, which is worse
+          # than not checking: it asserted the tree was fine.  The extraction
+          # lives in tools/dev/image_revision.py so it can be tested offline.
           published=$(
             docker buildx imagetools inspect "${tag}" --format '{{json .Image}}' \
-              | python -c 'import json,sys; print((json.load(sys.stdin).get("config") or {}).get("Labels", {}).get("org.opencontainers.image.revision", ""))'
+              | python tools/dev/image_revision.py
           )
           echo "published revision: ${published:-<none>}"
           echo "this commit:        ${{ github.sha }}"
-          if [[ -z "${published}" || "${published}" == "${{ github.sha }}" ]]; then
+          if [[ -z "${published}" ]]; then
+            # Do not fall through to "nothing to do" on a failed read: that is
+            # how the previous version of this step disabled itself without
+            # anyone noticing.
+            echo "::error::Could not read org.opencontainers.image.revision from ${tag}. The stale-tag guard cannot tell whether this commit's code is published, so it refuses to guess. Inspect the image manifest, then re-run."
+            exit 1
+          fi
+          if [[ "${published}" == "${{ github.sha }}" ]]; then
             echo "::notice::App image ${{ steps.version.outputs.version }} is already published from this commit; nothing to publish."
             echo "action=current" >> "$GITHUB_OUTPUT"
             exit 0
