@@ -17,15 +17,26 @@
 # and force-pushing. GitHub cannot compute a before/after diff for a push whose
 # new history shares no ancestor with the old one, so a path-filtered workflow
 # never fires - which is exactly what happened to the first release. The job
-# therefore runs on every push to main and decides for itself whether there is
-# work to do: the app version *is* the release key, and a version that is already
-# in the registry is left alone (re-pushing it would silently mutate a tag users
-# may already have pulled). Bump `version` in addon/config.yaml to publish.
+# therefore runs on every push and decides for itself whether there is work to
+# do: the app version *is* the release key, and a version that is already in the
+# registry is left alone (re-pushing it would silently mutate a tag users may
+# already have pulled). Bump `version` in addon/config.yaml to publish.
+#
+# Release channels
+# ----------------
+# `main` is the stable channel: its image tags are stable versions. `dev` is the
+# development channel: its image tags carry a prerelease suffix (``-dev1``).
+# Both branches share this one workflow because the tag is the version field,
+# not the branch name; the branch only decides *which* version string was
+# committed. The Supervisor reaches the dev channel by pinning the repository
+# URL to the branch (``...#dev``), which gives it a different repository id and
+# therefore a separate app slug, /data volume and sidebar entry - so installing
+# a dev build cannot overwrite a stable one.
 name: App image
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "dev"]
   workflow_dispatch:
     inputs:
       force:
@@ -84,12 +95,67 @@ jobs:
             echo "${tag} does not exist yet; it will be built."
           fi
 
-      - name: Explain the skip
+      - name: Refuse a stale tag that does not match this commit
         if: steps.exists.outputs.exists == 'true' && inputs.force != true
+        id: stale
         run: |
-          # Not an error: the tag is immutable per version by design. Remind the
-          # reader what to do instead of silently doing nothing.
-          echo "::notice::App image ${{ steps.version.outputs.version }} is already published. Bump 'version' in addon/config.yaml to release a new image, or dispatch this workflow with force=true to republish the existing one."
+          # A version tag is immutable by design, so an already-published image
+          # is normally left alone.  But "the tag exists" is not the same as
+          # "the tag contains this code": pushing engine changes without bumping
+          # `version` in addon/config.yaml used to publish nothing and report
+          # success, so the live app kept running older code while the update
+          # entity advertised the new version.  That is the failure this check
+          # exists to make impossible to miss.
+          #
+          # The test is *runtime inputs*, not "HEAD == published revision".
+          # This workflow runs on every push (there is no `paths:` filter, for
+          # the reason in the header), so a docs-only commit has a different SHA
+          # while building to a byte-identical image.  Comparing SHAs made every
+          # such commit fail -- a false alarm that trained people to ignore a red
+          # run.  If nothing that enters the image changed, there is nothing to
+          # republish and nothing wrong.
+          tag="ghcr.io/asxzy/wattmosaic-engine:${{ steps.version.outputs.version }}"
+          published=$(
+            docker buildx imagetools inspect "${tag}" --format '{{json .Image}}' \
+              | python -c 'import json,sys; print((json.load(sys.stdin).get("config") or {}).get("Labels", {}).get("org.opencontainers.image.revision", ""))'
+          )
+          echo "published revision: ${published:-<none>}"
+          echo "this commit:        ${{ github.sha }}"
+          if [[ -z "${published}" || "${published}" == "${{ github.sha }}" ]]; then
+            echo "::notice::App image ${{ steps.version.outputs.version }} is already published from this commit; nothing to publish."
+            echo "action=current" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Does anything that enters the image differ between the published
+          # revision and this commit?  This is the same set of paths the
+          # Dockerfile copies, plus the build inputs it resolves against.
+          runtime_paths=(
+            engine
+            addon/constraints.txt
+            addon/run.sh
+            addon/gateway.py
+            addon/healthcheck.py
+            addon/discovery.py
+            Dockerfile
+            pyproject.toml
+            README.md
+          )
+          if git cat-file -e "${published}^{commit}" 2>/dev/null \
+             && git diff --quiet "${published}" "${{ github.sha }}" -- "${runtime_paths[@]}"; then
+            echo "action=identical" >> "$GITHUB_OUTPUT"
+            echo "::notice::Commit ${{ github.sha }} changes no runtime input of the engine image. ${tag} was built from ${published} and is byte-identical for these sources, so nothing is republished."
+            exit 0
+          fi
+
+          echo "action=stale" >> "$GITHUB_OUTPUT"
+          echo "::error::App image ${tag} was built from ${published}, but this commit changes engine runtime inputs. The engine code changed without a version bump, so nothing would be published and the installed app would stay on old code. Bump 'version' in addon/config.yaml (and the integration manifest, const.py, pyproject.toml and the engine __init__.py) to release the change."
+          exit 1
+
+      - name: Explain why nothing was published
+        if: steps.exists.outputs.exists == 'true' && inputs.force != true && steps.stale.outputs.action != 'identical'
+        run: |
+          echo "::notice::App image ${{ steps.version.outputs.version }} already exists for this commit. Bump 'version' in addon/config.yaml to release a new image, or dispatch this workflow with force=true to republish the existing one."
 
       - name: Build and push (multi-arch manifest list)
         if: steps.exists.outputs.exists == 'false' || inputs.force == true
@@ -108,6 +174,7 @@ jobs:
             org.opencontainers.image.title=WattMosaic Engine
             org.opencontainers.image.description=Multi-CT load disaggregation engine for WattMosaic
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=MIT
             org.opencontainers.image.source=https://github.com/asxzy/wattmosaic
 

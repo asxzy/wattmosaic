@@ -113,3 +113,20 @@ jobs:
         with:
           category: integration
           ignore: brands
+
+  release:
+    # The release contract: every place that states a version agrees, the
+    # current version is documented, and the branch carries a version of its
+    # own kind (stable on main, prerelease on dev).  This is the gate that
+    # would have caught fifteen published versions with no git tag behind them.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Version fields agree and the current version is documented
+        run: python tools/dev/check_release.py
+      - name: This branch carries a version of its own kind
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
+        run: python tools/dev/check_release.py --channel "${{ github.ref_name }}"
