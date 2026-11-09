@@ -389,6 +389,18 @@
     },
     "engine_rejected": {
       "message": "The engine rejected the command: {detail}"
+    },
+    "engine_not_configured": {
+      "message": "WattMosaic is not configured."
+    },
+    "engine_ambiguous": {
+      "message": "Several WattMosaic engines are configured; specify a device_id to choose one."
+    },
+    "ambiguous_target": {
+      "message": "The target device belongs to more than one WattMosaic engine. Use the fully qualified '<config_entry_id>_<engine_device_id>' or pick the Home Assistant device instead."
+    },
+    "unknown_target": {
+      "message": "The target device is not owned by any WattMosaic engine."
     }
   },
   "entity": {

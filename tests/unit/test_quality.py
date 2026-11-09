@@ -197,6 +197,94 @@ def test_polarity_and_phase_penalties() -> None:
     assert any("phase_unknown" in i for i in issues)
 
 
+def test_a_load_row_declared_normal_but_negative_is_reported() -> None:
+    """A load cannot consume negative power: the CT is reversed or the declaration is wrong.
+
+    Left unreported, the value is clipped to zero downstream and the circuit
+    silently vanishes from every total while still claiming good quality.  This
+    is the real case found in the reference installation: two branch rows read
+    about -1270 W while declared ``normal``.
+    """
+    aligner = _healthy_aligner({"heater": [-1271.0, -1270.0, -1271.0]})
+    topology = Topology(
+        channels=[
+            CTChannel(
+                ct_id="heater",
+                entity_id="sensor.heater",
+                ct_type=CTType.BRANCH,
+                phase=Phase.L1,
+                polarity=Polarity.NORMAL,
+            )
+        ]
+    )
+    _, report = _evaluate(aligner, topology=topology, at_offset=30)
+    issues = report.channels["heater"]["issues"]
+    assert any("polarity_inconsistent" in i for i in issues)
+    assert any("negative" in i for i in issues)
+
+
+@pytest.mark.parametrize("ct_type", [CTType.BRANCH, CTType.DEDICATED_DEVICE])
+def test_every_load_row_type_is_checked(ct_type: CTType) -> None:
+    aligner = _healthy_aligner({"row": [-50.0, -50.0, -50.0]})
+    topology = Topology(
+        channels=[
+            CTChannel(
+                ct_id="row",
+                entity_id="sensor.row",
+                ct_type=ct_type,
+                phase=Phase.L1,
+                polarity=Polarity.NORMAL,
+            )
+        ]
+    )
+    _, report = _evaluate(aligner, topology=topology, at_offset=30)
+    assert any("polarity_inconsistent" in i for i in report.channels["row"]["issues"])
+
+
+def test_a_main_row_may_report_negative_power_without_a_polarity_penalty() -> None:
+    """Negative power on a main is real export, not a reversed CT.
+
+    Penalising it would flag every exporting installation as defective, so the
+    new check is scoped to load rows only.
+    """
+    aligner = _healthy_aligner({"main": [-900.0, -905.0, -900.0]})
+    topology = Topology(
+        channels=[
+            CTChannel(
+                ct_id="main",
+                entity_id="sensor.main",
+                ct_type=CTType.MAIN,
+                phase=Phase.L1,
+                polarity=Polarity.NORMAL,
+            )
+        ]
+    )
+    _, report = _evaluate(aligner, topology=topology, at_offset=30)
+    assert not any(
+        "polarity_inconsistent" in i for i in report.channels["main"]["issues"]
+    )
+
+
+def test_an_inverted_load_row_with_a_negative_value_is_not_flagged() -> None:
+    """A correctly declared reversed CT must not be reported as a defect."""
+    aligner = _healthy_aligner({"row": [-400.0, -401.0, -400.0]})
+    topology = Topology(
+        channels=[
+            CTChannel(
+                ct_id="row",
+                entity_id="sensor.row",
+                ct_type=CTType.BRANCH,
+                phase=Phase.L1,
+                polarity=Polarity.INVERTED,
+            )
+        ]
+    )
+    _, report = _evaluate(aligner, topology=topology, at_offset=30)
+    assert not any(
+        "polarity_inconsistent" in i for i in report.channels["row"]["issues"]
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Energy domain
 # --------------------------------------------------------------------------- #

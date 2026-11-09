@@ -12,6 +12,7 @@ unit-tested logic lives in pure-Python modules (``util``, ``api_client``,
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 import voluptuous as vol
@@ -39,7 +40,9 @@ from .service_logic import (
     ConfirmationRequired,
     ServiceValidationError,
     build_command_payload,
+    choose_entry,
     service_result_summary,
+    target_device_ids,
     validate_service_call,
 )
 
@@ -173,40 +176,99 @@ def _device_identifier(registry: Any, identifier: tuple[str, str]) -> Any:
     return None
 
 
-def _resolve_entry(hass: HomeAssistant, device_id: str | None) -> tuple[str, dict[str, Any]]:
+def _device_by_id(registry: Any, device_id: str) -> Any:
+    """The registry device with this HA device id, or ``None``.
+
+    Iterated rather than looked up through a mapping for the same compatibility
+    reason as :func:`_device_identifier`.
+    """
+    for device in registry.devices:
+        if getattr(device, "id", None) == device_id:
+            return device
+    return None
+
+
+def _engine_device_id(
+    hass: HomeAssistant, entry_id: str, ha_device_id: str
+) -> str | None:
+    """The engine device id this entry published for an HA registry device.
+
+    Devices created by this integration carry ``<entry_id>_<engine_device_id>``,
+    so the prefix is stripped to recover the id the engine actually knows.
+    Returns ``None`` for a device that does not belong to ``entry_id``.
+    """
+    registry = dr.async_get(hass)
+    device = _device_by_id(registry, ha_device_id)
+    if device is None or device.config_entry_id != entry_id:
+        return None
+    prefix = f"{entry_id}_"
+    for domain, value in device.identifiers:
+        if domain == DOMAIN and value.startswith(prefix):
+            return value[len(prefix) :]
+    return None
+
+
+def _resolve_entry(
+    hass: HomeAssistant,
+    device_id: str | None,
+    target_ids: Sequence[str] = (),
+) -> tuple[str, dict[str, Any]]:
     """Pick the config entry (single-entry installs are the common case).
 
-    With several engines configured, ``device_id`` is matched against the HA
-    device registry.  Devices created by this integration use the identifier
-    ``<entry_id>_<engine_device_id>``, so the suffix is what we match on.
+    With several engines configured, the target must identify exactly one of
+    them.  Accepted forms, in order:
+
+    * a **fully qualified** ``<config_entry_id>_<engine_device_id>`` identifier,
+      unambiguous by construction;
+    * an **HA device registry id** from ``target.device`` -- that names exactly
+      one entry;
+    * a **bare engine id** matched against the devices this integration owns.
+
+    A bare engine id is *not* unique in practice: a stable and a development App
+    publish the same engine ids, so the same ``dev_...`` string exists in both
+    entries.  :func:`choose_entry` therefore raises instead of picking one, which
+    is what the old fallback silently did.  Reaching the wrong engine produces a
+    plausible answer to a command it never received, and that is worse than an
+    error.
     """
     entries: dict[str, Any] = hass.data.get(DOMAIN, {})
     if not entries:
-        raise HomeAssistantError("WattMosaic is not configured")
+        raise ServiceValidationError("engine_not_configured", "WattMosaic is not configured")
 
     if len(entries) == 1:
         entry_id, data = next(iter(entries.items()))
         return entry_id, data
 
+    registry = dr.async_get(hass)
+    candidates: list[str] = []
+
+    # A target picked in Home Assistant is a registry id, which belongs to one
+    # entry by definition.  It takes precedence over a bare engine id because
+    # the user picked that exact device.
+    for target in target_ids:
+        device = _device_by_id(registry, target)
+        if device is not None and device.config_entry_id in entries:
+            return device.config_entry_id, entries[device.config_entry_id]
+        if device is not None and device.config_entry_id is None:
+            raise ServiceValidationError(
+                "unknown_target",
+                f"device {target!r} is not owned by any WattMosaic engine",
+            )
+
     if device_id:
-        registry = dr.async_get(hass)
+        # A device this integration owns carries the identifier
+        # ``<config_entry_id>_<engine_device_id>``.  When the caller passes a
+        # fully qualified id, only one entry can match.  When they pass a bare
+        # engine id, every entry that publishes that id matches -- which is the
+        # normal case for a stable + development pair.  Collect all of them and
+        # let ``choose_entry`` decide, rather than returning the first.
         for entry_id in entries:
             identifier = (DOMAIN, f"{entry_id}_{device_id}")
             if _device_identifier(registry, identifier) is not None:
-                return entry_id, entries[entry_id]
-        # Also honour an exact engine identifier if a user passed it directly.
-        # A device now belongs to a single config entry, so ``config_entry_id``
-        # is the non-deprecated form (``config_entries`` is removed in 2027.10).
-        device = _device_identifier(registry, (DOMAIN, device_id))
-        if device is not None and device.config_entry_id in entries:
-            return device.config_entry_id, entries[device.config_entry_id]
+                candidates.append(entry_id)
 
-    _LOGGER.warning(
-        "Multiple WattMosaic engines are configured and the target could not be "
-        "resolved; using the first entry"
-    )
-    entry_id, data = next(iter(entries.items()))
-    return entry_id, data
+    entry_id = choose_entry(list(entries), candidates, device_id=device_id)
+    return entry_id, entries[entry_id]
 
 
 def _placement_parameters(
@@ -250,8 +312,31 @@ async def _async_handle_service(
             translation_placeholders={"service": service},
         ) from err
 
-    _, entry_data = _resolve_entry(hass, validated.get("device_id"))
+    target_ids = target_device_ids(data)
+    try:
+        entry_id, entry_data = _resolve_entry(
+            hass, validated.get("device_id"), target_ids
+        )
+    except ServiceValidationError as err:
+        # Routing ambiguity is a user-facing error, never a silent fallback to
+        # whichever engine happened to load first: reaching the wrong engine
+        # returns a plausible answer to a command it never received.
+        raise HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key=err.key,
+        ) from err
+
     client: EngineClient = entry_data["client"]
+
+    # The engine only knows its own device ids, never Home Assistant's.  A target
+    # picked in the UI therefore has to be translated back to the engine id this
+    # entry published for it; forwarding the registry id would make the engine
+    # report "not found" for a device the user just selected.
+    if target_ids and not validated.get("device_id"):
+        resolved = _engine_device_id(hass, entry_id, target_ids[0])
+        if resolved is not None:
+            validated["device_id"] = resolved
+
     payload = build_command_payload(service, validated)
     if service == SERVICE_DISCOVER_PLACEMENTS:
         payload["parameters"] = _placement_parameters(

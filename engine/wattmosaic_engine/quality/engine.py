@@ -607,6 +607,28 @@ class DataQualityEngine:
                     "CT configured inverted but value is positive",
                     issues=issues,
                 )
+            # The reverse case: a load row declared ``normal`` that reports a
+            # negative value.  A load cannot consume negative average power, so
+            # either the CT is reversed or the declaration is wrong.  Left
+            # unreported, the value is clipped to zero by the direct path and the
+            # circuit silently disappears from every total while claiming
+            # ``quality: good``.
+            #
+            # A *main* row is excluded on purpose: negative power there is real
+            # export / reverse flow and is reported as such, not a defect.
+            ct_type_value = getattr(cfg.ct_type, "value", cfg.ct_type)
+            if (
+                polarity_value == Polarity.NORMAL.value
+                and ct_type_value in ("branch", "dedicated_device")
+                and ch.value_w < 0
+            ):
+                result.penalize(
+                    t.polarity_penalty,
+                    "polarity_inconsistent",
+                    f"load row configured normal but value is negative ({ch.value_w:.1f} W); "
+                    "the CT is reversed or the polarity declaration is wrong",
+                    issues=issues,
+                )
             if phase_value == Phase.UNKNOWN.value:
                 result.penalize(
                     t.phase_unknown_penalty, "phase_unknown", "topology phase unconfirmed", issues=issues

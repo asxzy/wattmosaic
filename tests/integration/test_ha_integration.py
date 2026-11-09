@@ -1826,6 +1826,91 @@ class TestServiceValidation:
         assert services.service_result_summary(None) == "no result"
 
 
+class TestEngineRouting:
+    """Which engine receives a service call when several are configured.
+
+    Two Apps can run side by side (a stable release and a development build),
+    and both publish the *same* engine device ids.  Routing by bare engine id
+    therefore cannot be assumed unique: a silent "use the first entry" fallback
+    sends the command to an engine the user did not target and returns a
+    plausible answer from it, which is worse than refusing.
+    """
+
+    def test_single_engine_needs_no_target(self) -> None:
+        assert services.choose_entry(["only"], [], device_id=None) == "only"
+
+    def test_single_engine_does_not_reject_an_unknown_device(self) -> None:
+        # With one engine there is nothing to confuse it with; the engine itself
+        # reports an unknown id precisely, which is more useful than a guess here.
+        assert services.choose_entry(["only"], [], device_id="dev_nope") == "only"
+
+    def test_no_engine_is_an_error(self) -> None:
+        with pytest.raises(services.ServiceValidationError) as excinfo:
+            services.choose_entry([], [], device_id="dev_x")
+        assert excinfo.value.key == "engine_not_configured"
+
+    def test_fully_qualified_target_routes_to_its_entry(self) -> None:
+        assert (
+            services.choose_entry(["stable", "dev"], ["dev"], device_id="dev_x")
+            == "dev"
+        )
+
+    def test_bare_id_present_in_one_entry_routes_there(self) -> None:
+        assert (
+            services.choose_entry(["stable", "dev"], ["stable"], device_id="dev_x")
+            == "stable"
+        )
+
+    def test_bare_id_present_in_both_entries_is_ambiguous(self) -> None:
+        # This is the real installation: 28 of 30 engine ids exist in both
+        # entries.  Picking one would be a coin flip.
+        with pytest.raises(services.ServiceValidationError) as excinfo:
+            services.choose_entry(
+                ["stable", "dev"], ["stable", "dev"], device_id="dev_x"
+            )
+        assert excinfo.value.key == "ambiguous_target"
+        assert "dev_x" in str(excinfo.value)
+
+    def test_duplicate_candidate_is_not_ambiguous(self) -> None:
+        # The same entry reported twice is still one owner.
+        assert (
+            services.choose_entry(["stable", "dev"], ["dev", "dev"], device_id="dev_x")
+            == "dev"
+        )
+
+    def test_multi_engine_without_target_is_ambiguous(self) -> None:
+        with pytest.raises(services.ServiceValidationError) as excinfo:
+            services.choose_entry(["stable", "dev"], [], device_id=None)
+        assert excinfo.value.key == "engine_ambiguous"
+
+    def test_unknown_target_with_several_engines_is_an_error(self) -> None:
+        with pytest.raises(services.ServiceValidationError) as excinfo:
+            services.choose_entry(["stable", "dev"], [], device_id="dev_missing")
+        assert excinfo.value.key == "unknown_target"
+        assert "dev_missing" in str(excinfo.value)
+
+    def test_routing_never_falls_back_to_the_first_entry(self) -> None:
+        """The defect this replaces: first entry wins when nothing matched."""
+        for device_id in (None, "dev_missing", "dev_x"):
+            with pytest.raises(services.ServiceValidationError):
+                services.choose_entry(["stable", "dev"], [], device_id=device_id)
+
+    def test_target_device_ids_reads_ha_target(self) -> None:
+        assert services.target_device_ids(
+            {"target": {"device_id": "dabfb081"}}
+        ) == ["dabfb081"]
+        assert services.target_device_ids(
+            {"target": {"device_id": ["a", "b"]}}
+        ) == ["a", "b"]
+
+    def test_target_device_ids_tolerates_missing_or_blank(self) -> None:
+        assert services.target_device_ids({}) == []
+        assert services.target_device_ids(None) == []
+        assert services.target_device_ids({"target": {}}) == []
+        assert services.target_device_ids({"target": {"device_id": "  "}}) == []
+        assert services.target_device_ids({"target": "nonsense"}) == []
+
+
 # --------------------------------------------------------------------------- #
 # Entity definitions / contract alignment
 # --------------------------------------------------------------------------- #

@@ -6,7 +6,7 @@ are unit-tested directly.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from .const import (
@@ -73,6 +73,96 @@ def _clean_id(value: Any) -> str | None:
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
+
+
+def target_device_ids(data: Mapping[str, Any] | None) -> list[str]:
+    """Home Assistant device ids supplied through the ``target`` selector.
+
+    ``services.yaml`` documents ``target.device`` support, but Home Assistant
+    only expands ``target`` into ``device_id`` for services that declare the
+    selector; for these it arrives as a nested mapping.  The values are HA
+    *registry* ids (``dabfb08...``), not engine ids, so they are a routing key
+    only and must never be forwarded to an engine as a device id.
+
+    Returns an empty list when no target was given, so callers can treat
+    "no target" and "target that does not resolve" differently.
+    """
+    if not isinstance(data, Mapping):
+        return []
+    target = data.get("target")
+    if not isinstance(target, Mapping):
+        return []
+    raw = target.get("device_id")
+    if isinstance(raw, str):
+        values = [raw]
+    elif isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+        values = [str(item) for item in raw]
+    else:
+        return []
+    return [value for value in (_clean_id(item) for item in values) if value]
+
+
+def choose_entry(
+    entries: Sequence[str],
+    candidates: Sequence[str],
+    *,
+    device_id: str | None,
+) -> str:
+    """Choose which configured engine should serve one service call.
+
+    ``entries`` is every loaded config entry; ``candidates`` is the subset whose
+    device registry says the call's target belongs to them (already reduced to
+    one mechanism by the caller).  With one engine configured there is nothing
+    to decide.  With several, the target has to identify exactly one of them.
+
+    The important property is that this **never guesses**.  The previous
+    behaviour fell back to whichever entry happened to be first, which meant a
+    bare engine device id silently reached the wrong engine: both a stable and a
+    development App publish the same engine ids, so ``dev_...`` matched both and
+    the first won.  The caller then got a plausible-looking answer from an engine
+    that never received the command -- worse than an error, because the mistake
+    is invisible.
+
+    Raises
+    ------
+    ServiceValidationError
+        ``engine_not_configured`` when nothing is loaded, ``engine_ambiguous``
+        when several engines are loaded and no target was given,
+        ``ambiguous_target`` when the target exists in more than one entry, and
+        ``unknown_target`` when it exists in none.
+    """
+    if not entries:
+        raise ServiceValidationError("engine_not_configured", "WattMosaic is not configured")
+
+    if len(entries) == 1:
+        # A single engine cannot be confused with another.  A bad target is
+        # still forwarded so the engine reports it precisely; refusing here
+        # would hide which identifier the engine actually knows.
+        return entries[0]
+
+    unique = list(dict.fromkeys(candidates))
+    if len(unique) == 1:
+        return unique[0]
+
+    if len(unique) > 1:
+        raise ServiceValidationError(
+            "ambiguous_target",
+            f"device_id {device_id!r} exists in more than one WattMosaic engine "
+            f"({', '.join(unique)}); pass the fully qualified "
+            "'<config_entry_id>_<engine_device_id>' or the Home Assistant device",
+        )
+
+    if device_id is None:
+        raise ServiceValidationError(
+            "engine_ambiguous",
+            f"{len(entries)} WattMosaic engines are configured; specify device_id "
+            "to choose one",
+        )
+
+    raise ServiceValidationError(
+        "unknown_target",
+        f"device_id {device_id!r} does not belong to any WattMosaic engine",
+    )
 
 
 def validate_service_call(

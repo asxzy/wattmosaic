@@ -1,5 +1,62 @@
 # Release Notes
 
+## v0.2.0-dev7 — 2026-11-09 (development channel)
+
+Three defects found by replaying the full 11-day history against every declarable
+entity. One was a double-count in the correlation itself; the other two were
+failures to *report* a problem that already existed. **This is a prerelease. It
+is installed from the `dev` branch and does not replace the stable integration or
+App.**
+
+### Fixed
+
+- **One step could be paid twice.** Two fixtures on one circuit driven by one
+  scene each see the row rise by the sum of both, so each independently explains
+  the whole step and each is credited the whole step. No single candidate looks
+  wrong; the row is simply counted twice once they are summed. On the reference
+  install `light.gym_gym_pot_lights_2` and `light.gym_gym_suana_pot_lights`
+  toggled 12/12 together (median 0.55 s) yet each was credited ~86 W from a row
+  averaging 26.5 W. Fixtures that share a row but switch independently overlap
+  only a few percent, so timing separates the two cases: two candidates on one
+  row are now withheld when at least 80 % of one side's transitions have a
+  partner within 5 s. **Both** are withheld — choosing which fixture owns the
+  step would be a guess. Over the 11-day replay this withholds exactly the two
+  scene-driven pairs and leaves the independent ones untouched, taking accepted
+  candidates from 19 to 15. They remain reportable as `unresolved` so the wiring
+  can be declared by hand.
+- **A service call could silently reach the wrong engine.** With a stable and a
+  development App both configured, `_resolve_entry` fell back to the first entry
+  whenever the target did not resolve. Both Apps publish the same engine device
+  ids (28 of 30 collide), so a bare id matched both and the stable engine won:
+  probes returned contract `1.1.0` for a bare id and `1.2.0` only for the fully
+  qualified identifier. `target.device` from the UI was ignored outright, because
+  it is an HA registry id and never an identifier value. Routing now refuses
+  rather than guessing — `engine_ambiguous`, `ambiguous_target` or
+  `unknown_target` — and a device picked in the UI is translated back to the
+  engine id the entry published, so it reaches the engine that owns it.
+- **A load row declared `normal` that reads negative was never flagged.** Two
+  branch rows report 245 negative readings and zero positive (about −1190 W)
+  while declared `polarity: normal`. The quality engine only checked the inverse
+  case, so these passed silently; downstream the direct path clips them to 0 W
+  and the circuit vanishes from every total while still claiming good quality.
+  The check is now symmetric for `branch` and `dedicated_device` rows. A `main`
+  row is excluded deliberately: negative power there is real export, and flagging
+  it would mark every exporting installation defective. The rows are currently
+  inert for reporting, so no published number was wrong — but the defect was one
+  declaration away from being invisible loss.
+
+### Notes
+
+- The reversed reading is the hardware's own classification: the Refoss
+  accumulators report `this_month_return_energy` 0.956/0.961 kWh against
+  `this_month_energy` 0.0, i.e. the meter itself calls that flow return.
+  Correcting the declaration is a user decision and is not done here.
+- `1344` unit and integration tests pass. Each fix is negatively verified:
+  disabling the co-toggle filter accepts both gym fixtures at 80 W each;
+  restoring the first-entry fallback fails 6 routing tests; removing the polarity
+  check hides the real −1210 W reading, and extending it to mains flags
+  legitimate export.
+
 ## v0.2.0-dev6 — 2026-11-09 (development channel)
 
 Publishes the two accounting fixes that `v0.2.0-dev5` announced but never

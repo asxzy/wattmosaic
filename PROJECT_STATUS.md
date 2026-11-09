@@ -2752,6 +2752,82 @@ Deliberately not changed here: clamping Level 3 by the row would alter every
 model-estimated device in the product, not just this feature, and it needs its
 own negative verification. It is recorded as the next engine task.
 
+### 7r.9 Three defects the full-window run exposed
+
+The 11-day replay over all 409 declarable entities produced 19 accepted
+candidates. Checking them against the install surfaced three separate defects,
+only one of which was in the correlation algorithm itself.
+
+**One step paid twice (engine).** Two fixtures on one circuit driven by one scene
+each see the row rise by the *sum* of both, so each independently "explains" the
+whole step and each is credited the whole step. The per-entity guards only ever
+asked whether *this* entity singles out a row; none asked whether *another*
+entity claims the same row from the same physical event. The error is invisible
+in any single candidate and appears only when the candidates are summed.
+
+Live proof before the fix: `light.gym_gym_pot_lights_2` and
+`light.gym_gym_suana_pot_lights` toggle **12/12 together** (median 0.55 s, max
+2.0 s) yet each was credited ~86 W from a row averaging 26.5 W — together 6.5×
+the row. `light.kitchen_kitchen_island_lights` and
+`light.kitchen_kitchen_pot_lights` overlap 77 %/88 %. The HRV sockets, which are
+genuinely independent, overlap only 6 %.
+
+The discriminator is timing, not wattage: a scene fires every member within a
+couple of seconds, while independent loads on one circuit switch minutes apart.
+`CO_TOGGLE_S = 5.0` and `CO_TOGGLE_SHARE = 0.8` withhold **both** fixtures when
+one side's transitions coincide with the other's. Picking one would be a guess
+about which fixture owns the step. On the 11-day replay this withholds exactly
+the two scene-driven pairs, taking accepted candidates **19 → 15**; the four
+independent pairs are untouched. Negative-verified: disabling the filter accepts
+both gym fixtures at 80 W each.
+
+**Routing silently reached the wrong engine (integration).** With two config
+entries loaded, `_resolve_entry` fell back to the first entry whenever the target
+did not resolve, logging a warning. Worse than reported: **28 of 30 engine device
+ids exist in both entries** (the stable and dev Apps publish the same ids), so a
+bare `dev_...` id matched both and the stable engine won. Probes returned
+`contract_version: 1.1.0` for a bare id and `1.2.0` only for the fully qualified
+`<entry_id>_<engine_device_id>`. `target.device` from the UI was silently ignored
+as well — it is an HA registry id, never an identifier value, so it matched
+nothing and fell through to the same fallback.
+
+`choose_entry` now refuses instead of guessing: one engine is returned directly;
+several engines require the target to name exactly one, otherwise
+`engine_ambiguous`, `ambiguous_target` or `unknown_target` is raised. `target`
+is read and the registry id is translated back to the engine id the entry
+published, so a device picked in the UI reaches the engine that owns it. Guarded
+by 12 tests in `tests/integration/test_ha_integration.py::TestEngineRouting`;
+negative-verified by restoring the old first-entry fallback, which fails 6 of
+them.
+
+**A load row declared `normal` that reads negative was never flagged (engine).**
+`refoss_main_panel_upper_deck_heater_l1`/`_l2` report **245 negative rows and
+zero positive** (min −1271/−1287 W, mean −1193/−1188 W) while declared
+`polarity: normal`. The quality engine only checked the inverse case
+(`inverted` + positive), so `normal` + negative passed silently. Downstream the
+direct path clips it to 0 W and the circuit disappears from every total while
+still claiming good quality. The rows are currently inert for reporting — no
+device attributes to them and no other row nests under them — so no published
+number was wrong, but the defect was one declaration away from being invisible
+double-loss.
+
+The check is now symmetric for **load** rows (`branch`, `dedicated_device`). A
+**main** row is excluded on purpose: negative power there is real export, and
+flagging it would mark every exporting installation defective. Verified against
+the real 245 readings, which now raise
+`polarity_inconsistent (load row configured normal but value is negative …)`.
+Both directions are negative-verified: removing the guard hides the real case,
+and extending it to mains flags legitimate export.
+
+The underlying cause of that reversed reading is the hardware's own
+classification: the Refoss accumulators report `this_month_return_energy`
+0.956/0.961 kWh while `this_month_energy` is 0.0, i.e. the meter itself calls
+that flow **return**. The rows have been flat zero since 2026-11-06 19:14, so the
+reversal is historical; correcting the declaration is a user decision, and it is
+recorded in §8 rather than changed here.
+
+`1344` unit and integration tests pass.
+
 ---
 
 ## 8. Needs user authorization
@@ -2765,6 +2841,7 @@ own negative verification. It is recorded as the next engine task.
 | Long real-data run for accuracy validation | Occupies the live system; needs consent plus ground truth |
 | Applying device configurations in the live engine | Writes the topology (version bump); needs authorization |
 | Writing a household ground-truth set for per-device accuracy | Only the user knows the true wattages; without it, accuracy stays "unverified" |
+| Correcting the `upper_deck_heater_l1`/`_l2` polarity declaration | The rows read ~−1190 W while declared `normal`; whether the CTs are physically reversed or the declaration is wrong is only knowable on site, and either fix changes what those circuits report |
 
 ---
 
