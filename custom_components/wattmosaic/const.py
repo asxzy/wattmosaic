@@ -11,7 +11,7 @@ from __future__ import annotations
 DOMAIN = "wattmosaic"
 NAME = "WattMosaic"
 MANUFACTURER = "WattMosaic"
-VERSION = "0.2.0-dev2"
+VERSION = "0.2.0-dev3"
 
 #: Platforms forwarded by ``async_setup_entry`` (strings, so no HA import).
 PLATFORMS: list[str] = ["sensor", "binary_sensor"]
@@ -44,6 +44,14 @@ CONF_CONFIGURE_DEVICE = "configure_device"
 #: Per-device opt-out of the energy entity: ``{device_id: bool}``.
 #: Absent or true means "create it" (the behaviour before the option existed).
 CONF_ENERGY_ENTITIES = "energy_entities"
+#: Per-device link to an existing Home Assistant device:
+#: ``{engine_device_id: ha_device_id}``.
+#:
+#: This is what makes WattMosaic *augment* an appliance that is already in Home
+#: Assistant instead of showing its measurements under a parallel synthetic
+#: device.  It is a Home Assistant placement decision, so it lives in the config
+#: entry and never travels to the engine.
+CONF_DEVICE_LINKS = "device_links"
 
 # --------------------------------------------------------------------------- #
 # Defaults

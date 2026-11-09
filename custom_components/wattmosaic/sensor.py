@@ -31,6 +31,7 @@ from .const import (
 from .coordinator import WattMosaicCoordinator
 from .entity_defs import DEVICE_SENSORS, GLOBAL_SENSORS
 from .entity_values import (
+    BINDABLE_KEYS,
     RECONCILIATION_KEYS,
     binding_device_entity_ids,
     binding_update,
@@ -274,14 +275,18 @@ class WattMosaicDeviceSensor(_WattMosaicBase, RestoreEntity):
             via_device=(DOMAIN, f"engine_{entry.entry_id}"),
             suggested_area=coordinator.device_areas.get(device_id),
         )
-        if self._key == "energy":
+        # The *measurement* entities are placed on the user's real device when a
+        # declared state entity resolves to one (ADR-0021/0023).  Diagnostic
+        # entities stay here on the inferred-load device so provenance remains
+        # inspectable in one place and never masquerades as hardware telemetry.
+        if self._key in BINDABLE_KEYS:
             self._adopt_registered_device()
         self._energy: float | None = None
 
     # -- device binding ---------------------------------------------------- #
 
     def _adopt_registered_device(self) -> None:
-        """Keep an existing energy entity on the device it was already bound to.
+        """Keep an already-bound measurement entity on the device it was on.
 
         Only relevant when the entity registry already holds this unique id, so
         the entity ID is fixed and Home Assistant will not derive it again.
@@ -315,23 +320,48 @@ class WattMosaicDeviceSensor(_WattMosaicBase, RestoreEntity):
         self._attr_device_info = None
         self.device_entry = device_entry
 
+    def _linkable(self, device_id: str) -> bool:
+        """Whether a stored link still names a usable, non-WattMosaic device.
+
+        A link is a user declaration, not a guarantee: the device can be deleted
+        (or re-created with a new id) long after the options entry was saved.
+        Validating here keeps a stale link from pinning an entity to a device
+        that no longer exists, and keeps both entity-derived and declared targets
+        subject to the same "never host on our own device" rule.
+        """
+        from homeassistant.helpers import device_registry as dr
+
+        device_entry = dr.async_get(self.hass).async_get(device_id)
+        if device_entry is None:
+            return False
+        return not any(identifier[0] == DOMAIN for identifier in device_entry.identifiers)
+
     def _binding_target(self) -> str | None:
-        """The real HA device this energy entity should be displayed on, if any.
+        """The real HA device this measurement entity should be displayed on, if any.
 
         A load inferred from a CT often already has a Home Assistant device: the
-        smart plug, the thermostat, the EV charger.  Showing the energy sensor
-        there lets the user add it to the Energy Dashboard from the device it
-        describes.
+        smart plug, the thermostat, the EV charger, the Lutron dimmer.  Showing
+        the power and energy sensors there is what makes WattMosaic augment an
+        existing device instead of inventing a parallel one.
 
-        Only energy is bound.  Power/source/diagnostic entities stay on the
-        synthetic "Inferred load" device so inference provenance remains
-        inspectable in one place and never masquerades as hardware telemetry.
+        Only ``BINDABLE_KEYS`` move.  Source, confidence, evidence tier, sample
+        count and the other diagnostics stay on the synthetic "Inferred load"
+        device so inference provenance remains inspectable in one place and never
+        masquerades as hardware telemetry.
 
         This only *resolves* the target; the move itself happens after the
         entity has been registered (see ``_bind_real_device``).
         """
-        if self._key != "energy":
+        if self._key not in BINDABLE_KEYS:
             return None
+        explicit = self.coordinator.explicit_device_link(self._device_id)
+        if explicit is not None:
+            # A declared link names the device directly, so no registry lookup is
+            # needed and no ambiguity between sibling entities can arise.  It is
+            # validated first: the device may have been deleted from Home
+            # Assistant since the link was stored, and writing a stale id would
+            # fail the registry update (or, worse, point at a reused id).
+            return explicit if self._linkable(explicit) else None
         configuration = self.coordinator.device_configuration(self._device_id)
         candidates = binding_device_entity_ids(configuration)
         if not candidates:
@@ -355,7 +385,7 @@ class WattMosaicDeviceSensor(_WattMosaicBase, RestoreEntity):
 
     @callback
     def _bind_real_device(self) -> None:
-        """Move an already-registered energy entity to the resolved device.
+        """Move an already-registered measurement entity to the resolved device.
 
         This runs *after* Home Assistant has created the entity registry entry,
         never before.  Entity IDs are derived from the device an entity is
@@ -373,6 +403,12 @@ class WattMosaicDeviceSensor(_WattMosaicBase, RestoreEntity):
         """
         target = self._binding_target()
         if target is None:
+            # No real device resolves any more.  That happens when the user
+            # clears a link or removes the state entity that justified one.
+            # Without this branch the entity would stay on the old device
+            # forever: the move is the only thing that writes ``device_id``, and
+            # "nothing to do" previously meant "leave it where it is".
+            self._return_to_own_device()
             return
         from homeassistant.helpers import entity_registry as er
 
@@ -385,6 +421,26 @@ class WattMosaicDeviceSensor(_WattMosaicBase, RestoreEntity):
         if update is None:
             return
         entity_reg.async_update_entity(self.entity_id, **update)
+
+    @callback
+    def _return_to_own_device(self) -> None:
+        """Move a measurement entity back onto its WattMosaic device.
+
+        Only touches an entity that is currently somewhere else, so an entity
+        that was never bound is left alone and no registry write happens on a
+        normal reload.  The entity ID never changes: only ``device_id`` is
+        written (see :func:`binding_update`).
+        """
+        from homeassistant.helpers import entity_registry as er
+
+        entity_reg = er.async_get(self.hass)
+        current = entity_reg.async_get(self.entity_id)
+        if current is None or current.device_id is None:
+            return
+        own = self.coordinator.device_id_for_identifier(self._device_identifier)
+        if own is None or current.device_id == own:
+            return
+        entity_reg.async_update_entity(self.entity_id, device_id=own)
 
     # -- lifecycle --------------------------------------------------------- #
 

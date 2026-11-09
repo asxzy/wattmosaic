@@ -136,7 +136,7 @@
       },
       "device_config_details": {
         "title": "Device configuration",
-        "description": "Describe device {device_id}. Every field is optional knowledge: a blank value means \"not stated\", never zero watts.\n\nState entities are comma-separated entity ids that prove the device is running. Mode entities are context only and never count as proof of load.",
+        "description": "Describe device {device_id}. Every field is optional knowledge: a blank value means \"not stated\", never zero watts.\n\nState entities are comma-separated entity ids that prove the device is running. Mode entities are context only and never count as proof of load.\n\nDevice link shows this load's power and energy under an existing Home Assistant device instead of a WattMosaic one. {link_count} device(s) can be linked from the entities this device already declares.",
         "data": {
           "device_type": "Device type",
           "connectivity": "Home Assistant connectivity",
@@ -151,7 +151,8 @@
           "watts_per_bulb_on": "Watts per bulb at full output (W)",
           "controller_mode_entity_id": "Controller mode entity",
           "controller_load_entity_ids": "Controller load entities (comma separated)",
-          "create_energy_sensor": "Create an energy (kWh) entity"
+          "create_energy_sensor": "Create an energy (kWh) entity",
+          "ha_device_id": "Home Assistant device"
         },
         "data_description": {
           "connectivity": "connected = HA holds an entity for it; not_connected = non-smart device.",
@@ -161,7 +162,8 @@
           "watts_per_bulb_on": "Per bulb, not per fixture.",
           "controller_mode_entity_id": "Context only: it never proves the appliance draws power.",
           "controller_load_entity_ids": "Entities that do prove runtime when active.",
-          "create_energy_sensor": "Adds a total-increasing energy sensor for this load, attached to the physical device when its state entity belongs to one. Turn this off for loads you do not want in the Energy Dashboard."
+          "create_energy_sensor": "Adds a total-increasing energy sensor for this load, attached to the linked device (or to the device its state entity belongs to when no link is chosen). Turn this off for loads you do not want in the Energy Dashboard.",
+          "ha_device_id": "The device whose page should show this load's power and energy. Choose the top entry to keep the measurement on its own WattMosaic device. Only devices that own one of the declared state entities are offered."
         }
       },
       "channels": {
@@ -383,6 +385,7 @@
           "direct_measured": "Directly measured",
           "inferred": "Inferred",
           "model_estimated": "Model estimated",
+          "configured_prior": "Configured value — stated, not measured",
           "unknown": "Unknown"
         }
       },
@@ -395,7 +398,7 @@
           "tier_0_unknown": "Unknown — no usable evidence",
           "tier_1_modelled": "Modelled — configured prior",
           "tier_2_inferred": "Inferred — solved from CTs",
-          "tier_3_measured": "Measured — dedicated CT",
+          "tier_3_measured": "Measured — CT row or corroborated share",
           "tier_4_verified": "Verified — CT plus load signal"
         }
       },

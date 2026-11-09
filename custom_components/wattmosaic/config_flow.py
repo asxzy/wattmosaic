@@ -48,6 +48,7 @@ from .const import (
     CONF_BASE_URL,
     CONF_CONFIGURE_DEVICE,
     CONF_CT_ASSIGNMENTS,
+    CONF_DEVICE_LINKS,
     CONF_ENERGY_ENTITIES,
     CONF_SCAN_INTERVAL,
     CONF_STALE_AFTER,
@@ -69,10 +70,13 @@ from .const import (
     NAME,
     POWER_BEHAVIORS,
 )
+from .entity_values import binding_device_entity_ids
 from .flow_logic import (
+    DEVICE_LINK_FIELD,
     ENERGY_ENTITY_FIELD,
     MAX_MULTIPLIER,
     MIN_MULTIPLIER,
+    apply_device_link,
     apply_nesting_candidates,
     assignment_defaults,
     assignment_store,
@@ -82,8 +86,10 @@ from .flow_logic import (
     descendant_ids,
     device_candidates,
     device_configuration_command,
+    device_link_choice,
     discovered_base_url,
     energy_entity_choice,
+    linked_device_id,
     mapping_summary,
     normalise_assignment,
     normalise_channels,
@@ -246,7 +252,10 @@ _LIGHT_TYPE_LABELS = {
 }
 
 
-def _device_config_schema(*, energy_default: bool = True) -> vol.Schema:
+def _device_config_schema(
+    *, energy_default: bool = True, link_options: list[SelectOptionDict] | None = None,
+    link_default: str = "",
+) -> vol.Schema:
     """Flat form for one device's configuration.
 
     Every numeric field is optional: an absent value means "not stated", and the
@@ -256,39 +265,52 @@ def _device_config_schema(*, energy_default: bool = True) -> vol.Schema:
     the form always submits the checkbox, so showing an unconditional default of
     ``True`` would silently re-enable an entity the user deliberately turned off
     the moment they edited any other field on the same device.
+
+    ``link_options`` lists the Home Assistant devices this measurement may be
+    shown on.  A dropdown rather than a free-text device id because a registry id
+    is opaque; the selector value is the id, the label is the name the user knows.
     """
-    return vol.Schema(
-        {
-            vol.Required("device_type", default="unknown"): _enum_select(
-                DEVICE_TYPES, _DEVICE_TYPE_LABELS
-            ),
-            vol.Required("connectivity", default="unknown"): _enum_select(
-                CONNECTIVITY_LEVELS, _CONNECTIVITY_LABELS
-            ),
-            vol.Required("monitoring", default="unknown"): _enum_select(
-                MONITORING_LEVELS, _MONITORING_LABELS
-            ),
-            vol.Required("behavior", default="unknown"): _enum_select(
-                POWER_BEHAVIORS, _BEHAVIOR_LABELS
-            ),
-            vol.Optional("state_entity_ids", default=""): TextSelector(),
-            vol.Optional("mode_entity_ids", default=""): TextSelector(),
-            vol.Optional("expected_on_w"): _watts_selector(),
-            vol.Optional("expected_standby_w"): _watts_selector(),
-            # Light detail is always shown but only sent when the device type
-            # allows it; it is the strongest confidence lever for lamps.
-            vol.Optional("bulb_count"): _count_selector(),
-            vol.Optional("light_type", default="unknown"): _enum_select(
-                LIGHT_TYPES, _LIGHT_TYPE_LABELS
-            ),
-            vol.Optional("watts_per_bulb_on"): _watts_selector(),
-            vol.Optional("controller_mode_entity_id", default=""): TextSelector(),
-            vol.Optional("controller_load_entity_ids", default=""): TextSelector(),
-            # Integration-side: whether to create the kWh entity for this load.
-            # Defaults on, matching powercalc's `create_energy_sensor`.
-            vol.Optional(ENERGY_ENTITY_FIELD, default=energy_default): BooleanSelector(),
-        }
-    )
+    fields: dict[Any, Any] = {
+        vol.Required("device_type", default="unknown"): _enum_select(
+            DEVICE_TYPES, _DEVICE_TYPE_LABELS
+        ),
+        vol.Required("connectivity", default="unknown"): _enum_select(
+            CONNECTIVITY_LEVELS, _CONNECTIVITY_LABELS
+        ),
+        vol.Required("monitoring", default="unknown"): _enum_select(
+            MONITORING_LEVELS, _MONITORING_LABELS
+        ),
+        vol.Required("behavior", default="unknown"): _enum_select(
+            POWER_BEHAVIORS, _BEHAVIOR_LABELS
+        ),
+        vol.Optional("state_entity_ids", default=""): TextSelector(),
+        vol.Optional("mode_entity_ids", default=""): TextSelector(),
+        vol.Optional("expected_on_w"): _watts_selector(),
+        vol.Optional("expected_standby_w"): _watts_selector(),
+        # Light detail is always shown but only sent when the device type
+        # allows it; it is the strongest confidence lever for lamps.
+        vol.Optional("bulb_count"): _count_selector(),
+        vol.Optional("light_type", default="unknown"): _enum_select(
+            LIGHT_TYPES, _LIGHT_TYPE_LABELS
+        ),
+        vol.Optional("watts_per_bulb_on"): _watts_selector(),
+        vol.Optional("controller_mode_entity_id", default=""): TextSelector(),
+        vol.Optional("controller_load_entity_ids", default=""): TextSelector(),
+        # Integration-side: whether to create the kWh entity for this load.
+        # Defaults on, matching powercalc's `create_energy_sensor`.
+        vol.Optional(ENERGY_ENTITY_FIELD, default=energy_default): BooleanSelector(),
+    }
+    if link_options is not None:
+        fields[
+            vol.Optional(DEVICE_LINK_FIELD, default=link_default)
+        ] = SelectSelector(
+            SelectSelectorConfig(
+                options=link_options,
+                mode=SelectSelectorMode.DROPDOWN,
+                custom_value=False,
+            )
+        )
+    return vol.Schema(fields)
 
 
 def _settings_schema(defaults: dict[str, Any]) -> vol.Schema:
@@ -975,6 +997,7 @@ class WattMosaicOptionsFlow(_AssignmentWizard, OptionsFlow):
         self._settings: dict[str, int] = settings_defaults(None)
         self._device_config_device_id: str = ""
         self._energy_entities: dict[str, bool] = {}
+        self._device_links: dict[str, str] = {}
         self._init_wizard({}, [], {})
 
     # -- hooks ------------------------------------------------------------- #
@@ -1007,6 +1030,7 @@ class WattMosaicOptionsFlow(_AssignmentWizard, OptionsFlow):
                 CONF_TOPOLOGY_CONFIRMED: confirmed,
                 CONF_TOPOLOGY_VERSION: version,
                 CONF_ENERGY_ENTITIES: self._merged_energy_choices(),
+                CONF_DEVICE_LINKS: self._merged_device_links(),
             },
         )
 
@@ -1080,6 +1104,17 @@ class WattMosaicOptionsFlow(_AssignmentWizard, OptionsFlow):
         """
         errors: dict[str, str] = {}
 
+        # Fetch before branching: the detail step needs each device's reported
+        # configuration to decide which Home Assistant devices may host it, and
+        # submitting the picker goes straight there.  Fetching only on render
+        # meant the very first visit to the detail step had no candidates.
+        devices: list[dict[str, Any]] = []
+        try:
+            devices = normalise_device_list(await self._wizard_client().devices())
+        except Exception as err:  # noqa: BLE001 - the free-text id still works
+            _LOGGER.debug("WattMosaic device list unavailable: %s", describe_engine_error(err))
+        self._devices = devices
+
         if user_input is not None:
             chosen = str(user_input.get("device_id") or "").strip() or str(
                 user_input.get("custom_device_id") or ""
@@ -1089,12 +1124,6 @@ class WattMosaicOptionsFlow(_AssignmentWizard, OptionsFlow):
             else:
                 self._device_config_device_id = chosen
                 return await self.async_step_device_config_details()
-
-        devices: list[dict[str, Any]] = []
-        try:
-            devices = normalise_device_list(await self._wizard_client().devices())
-        except Exception as err:  # noqa: BLE001 - the free-text id still works
-            _LOGGER.debug("WattMosaic device list unavailable: %s", describe_engine_error(err))
 
         schema = vol.Schema(
             {
@@ -1129,9 +1158,17 @@ class WattMosaicOptionsFlow(_AssignmentWizard, OptionsFlow):
                 choice = energy_entity_choice(user_input)
                 if choice is not None:
                     self._energy_entities[self._device_config_device_id] = choice
+                link = device_link_choice(user_input)
+                has_link_opinion = link is not None
+                if not parameters and not has_link_opinion:
+                    # The form expressed no engine-side knowledge and no link, so
+                    # there is nothing to save or send.
+                    return self._device_config_finish()
                 if not parameters:
-                    # The form expressed no engine-side knowledge, only the
-                    # local energy choice; there is nothing to send.
+                    # Only the local decisions changed: store them and finish.
+                    self._device_links = apply_device_link(
+                        self._stored_device_links(), self._device_config_device_id, link
+                    )
                     return self._device_config_finish()
                 command_body = device_configuration_command(
                     self._device_config_device_id, parameters
@@ -1153,18 +1190,136 @@ class WattMosaicOptionsFlow(_AssignmentWizard, OptionsFlow):
                         }
                         errors = self._errors
                     else:
+                        if has_link_opinion:
+                            self._device_links = apply_device_link(
+                                self._stored_device_links(),
+                                self._device_config_device_id,
+                                link,
+                            )
                         return self._device_config_finish()
 
+        link_options, suggested = self._link_candidates()
         return self.async_show_form(
             step_id="device_config_details",
             data_schema=_device_config_schema(
-                energy_default=self._stored_energy_choice()
+                energy_default=self._stored_energy_choice(),
+                link_options=link_options,
+                link_default=suggested,
             ),
             errors=errors,
             description_placeholders={
                 "device_id": self._device_config_device_id,
+                "link_count": str(max(len(link_options) - 1, 0)),
             },
         )
+
+    def _stored_device_links(self) -> dict[str, str]:
+        """The link map already saved for this entry."""
+        raw = {**self._entry.data, **self._entry.options}.get(CONF_DEVICE_LINKS)
+        return apply_device_link(raw, "", None)
+
+    def _engine_device_configuration(self) -> dict[str, Any] | None:
+        """The engine's configuration for the device being edited, if known.
+
+        Read from the coordinator's cached ``/devices`` payload rather than
+        issuing a request inside the form-render path: the options flow runs
+        between polls and must not block on a network round trip that could
+        delay the form.
+        """
+        for device in self._devices:
+            if str(device.get("device_id")) != self._device_config_device_id:
+                continue
+            configuration = device.get("configuration")
+            if isinstance(configuration, Mapping):
+                return dict(configuration)
+        return None
+
+    def _link_candidates(self) -> tuple[list[SelectOptionDict], str]:
+        """Home Assistant devices this measurement may be attached to.
+
+        Two groups, in this order:
+
+        1. Devices that already own an entity the user declared as evidence for
+           *this* engine device.  These are the likely hosts, so they come first
+           and are what the form pre-selects.
+        2. Every other real Home Assistant device.
+
+        The second group is needed because the most common case has no declared
+        state entity at all: a hot tub on its own CT may have no switch, yet the
+        user still wants its power on the hot tub's device page.  Restricting the
+        list to declared entities made linking impossible there.
+
+        Devices owned by this integration are never offered: they are the
+        synthetic inferred-load devices, and a measurement must not be shown on
+        the host that exists only to describe it.
+
+        This is a suggestion list, never an automatic choice: nothing is linked
+        until the user selects a device and submits.
+        """
+        options = [SelectOptionDict(value="", label="— keep on the WattMosaic device —")]
+        from homeassistant.helpers import device_registry as dr
+        from homeassistant.helpers import entity_registry as er
+
+        entity_reg = er.async_get(self.hass)
+        device_reg = dr.async_get(self.hass)
+        current = linked_device_id(
+            self._stored_device_links(), self._device_config_device_id
+        )
+
+        def _owns_us(device_entry: Any) -> bool:
+            return any(identifier[0] == DOMAIN for identifier in device_entry.identifiers)
+
+        def _label(device_entry: Any, fallback: str) -> str:
+            name = device_entry.name_by_user or device_entry.name or fallback
+            if device_entry.manufacturer:
+                return f"{name} ({device_entry.manufacturer})"
+            return name
+
+        # Group 1: hosts of the entities this device already declares.
+        preferred: list[str] = []
+        configuration = self._engine_device_configuration()
+        for entity_id in binding_device_entity_ids(configuration):
+            registry_entry = entity_reg.async_get(entity_id)
+            if registry_entry is None or registry_entry.device_id is None:
+                continue
+            device_id = registry_entry.device_id
+            if device_id in preferred:
+                continue
+            device_entry = device_reg.async_get(device_id)
+            if device_entry is None or _owns_us(device_entry):
+                continue
+            preferred.append(device_id)
+            options.append(
+                SelectOptionDict(value=device_id, label=_label(device_entry, device_id))
+            )
+
+        # Group 2: every other real device, so a load with no switch can still be
+        # attached to the appliance it measures.  ``registry.devices`` is
+        # *iterated* rather than used as a mapping: Home Assistant deprecates the
+        # mapping-style view for custom integrations, and iteration is the
+        # supported form on both the minimum and current versions (see
+        # ``__init__.py``).
+        others: list[tuple[str, str, str]] = []
+        for device_entry in device_reg.devices:
+            if device_entry.id in preferred or _owns_us(device_entry):
+                continue
+            label = _label(device_entry, device_entry.id)
+            others.append((label.lower(), device_entry.id, label))
+        for _, device_id, label in sorted(others):
+            options.append(SelectOptionDict(value=device_id, label=label))
+
+        suggestion = current if current in {o["value"] for o in options} else ""
+        if current and not suggestion:
+            # The stored link is still valid even when the device registry no
+            # longer lists it at render time.  Show it so saving another field
+            # cannot silently drop the link.
+            device_entry = device_reg.async_get(current)
+            if device_entry is not None:
+                options.append(
+                    SelectOptionDict(value=current, label=_label(device_entry, current))
+                )
+                suggestion = current
+        return options, suggestion
 
     def _device_config_finish(self) -> ConfigFlowResult:
         """Persist options without disturbing the stored topology bookkeeping."""
@@ -1177,8 +1332,20 @@ class WattMosaicOptionsFlow(_AssignmentWizard, OptionsFlow):
                 CONF_TOPOLOGY_CONFIRMED: config.get(CONF_TOPOLOGY_CONFIRMED, False),
                 CONF_TOPOLOGY_VERSION: config.get(CONF_TOPOLOGY_VERSION),
                 CONF_ENERGY_ENTITIES: self._merged_energy_choices(),
+                CONF_DEVICE_LINKS: self._merged_device_links(),
             },
         )
+
+    def _merged_device_links(self) -> dict[str, str]:
+        """The full link map, for ``async_create_entry``.
+
+        Same wholesale-replacement rule as the energy choices: Home Assistant
+        replaces ``options`` entirely, so a path that omits this key would delete
+        every link the user had declared for every device.
+        """
+        stored = self._stored_device_links()
+        stored.update(self._device_links)
+        return stored
 
     def _merged_energy_choices(self) -> dict[str, bool]:
         """The full opt-in map, for ``async_create_entry``.

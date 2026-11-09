@@ -66,6 +66,10 @@ services = importlib.import_module(f"{PACKAGE_NAME}.service_logic")
 entity_values = importlib.import_module(f"{PACKAGE_NAME}.entity_values")
 entity_defs = importlib.import_module(f"{PACKAGE_NAME}.entity_defs")
 
+#: The engine contract is the source of truth for every enum the integration
+#: mirrors.  Imported here so a contract value added without the entity
+#: definition is caught rather than silently reported as ``unknown``.
+from wattmosaic_engine.contracts import Source  # noqa: E402
 
 NOW = datetime(2026, 11, 5, 12, 0, 0, tzinfo=UTC)
 
@@ -1862,8 +1866,12 @@ class TestEntityDefinitions:
         assert entity_defs.DEVICE_BINARY_SENSORS["running"]["device_class"] == "running"
 
     def test_enum_options_match_contract(self) -> None:
+        # Every enum field must mirror the contract, not a hand-kept subset:
+        # ``configured_prior`` was missing here even though the engine really
+        # returns it as a ``Source``.  An enum sensor whose option list omits the
+        # value it is given reports ``unknown`` for a legitimate measurement.
         assert entity_defs.DEVICE_SENSORS["source"]["options"] == [
-            "direct_measured", "inferred", "model_estimated", "unknown"
+            source.value for source in Source
         ]
         assert entity_defs.DEVICE_SENSORS["data_quality"]["options"] == [
             "good", "degraded", "stale", "bad", "missing"

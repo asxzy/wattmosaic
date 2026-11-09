@@ -36,7 +36,16 @@ DEVICE_SENSORS: dict[str, dict[str, Any]] = {
         "state_class": None,
         "unit": None,
         "icon": "mdi:source-branch",
-        "options": ["direct_measured", "inferred", "model_estimated", "unknown"],
+        # Mirrors ``contracts.Source`` exactly.  ``configured_prior`` is a real
+        # engine source (a user-stated watt value proved by a declared load
+        # signal), so omitting it declared a state domain the engine can leave.
+        "options": [
+            "direct_measured",
+            "inferred",
+            "model_estimated",
+            "configured_prior",
+            "unknown",
+        ],
     },
     "confidence": {
         "name": "Confidence",

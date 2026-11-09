@@ -20,6 +20,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .api_client import EngineClient, EngineError
 from .const import (
+    CONF_DEVICE_LINKS,
     CONF_ENERGY_ENTITIES,
     CONF_SCAN_INTERVAL,
     CONF_STALE_AFTER,
@@ -29,7 +30,7 @@ from .const import (
     DEFAULT_UNAVAILABLE_AFTER,
     DOMAIN,
 )
-from .entity_values import merge_energy_choice
+from .entity_values import explicit_device_link, merge_energy_choice
 from .util import (
     coerce_snapshot,
     device_entities_available,
@@ -155,6 +156,37 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
             self.entry.options.get(CONF_ENERGY_ENTITIES),
             device_id,
         )
+
+    def explicit_device_link(self, device_id: str) -> str | None:
+        """The Home Assistant device the user linked to this engine device.
+
+        A declaration in the config entry, not something the engine knows: the
+        engine has no concept of a Home Assistant device id, and sending one over
+        the API would make a placement decision look like electrical knowledge.
+        """
+        return explicit_device_link(
+            {**self.entry.data, **self.entry.options}.get(CONF_DEVICE_LINKS),
+            device_id,
+        )
+
+    def device_id_for_identifier(
+        self, identifier: tuple[str, str]
+    ) -> str | None:
+        """The HA device id this integration registered for ``identifier``.
+
+        Used to move a measurement entity back onto its own WattMosaic device
+        when no real device resolves any more.  Looked up from the registry
+        rather than remembered, because the id is Home Assistant's, not ours.
+        """
+        from homeassistant.helpers import device_registry as dr
+
+        registry = dr.async_get(self.hass)
+        # ``registry.devices`` is iterated, not used as a mapping: the mapping
+        # view is deprecated for custom integrations (see ``__init__.py``).
+        for device in registry.devices:
+            if identifier in device.identifiers:
+                return device.id
+        return None
 
     # -- availability ------------------------------------------------------- #
 

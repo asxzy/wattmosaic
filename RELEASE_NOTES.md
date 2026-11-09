@@ -1,5 +1,109 @@
 # Release Notes
 
+## v0.2.0-dev3 — 2026-11-08 (development channel)
+
+A WattMosaic measurement is only useful where the appliance already is. Power
+**and** energy now attach to the user's existing Home Assistant device, and a
+declared switch can settle a shared circuit. **This is a prerelease. It is
+installed from the `dev` branch and does not replace the stable integration or
+App.**
+
+### Added
+
+- **Power and energy on the real device.** The per-device configuration step now
+  offers a Home Assistant device. Selecting one moves the load's power *and*
+  energy entities onto that device's page. Source, confidence, evidence tier,
+  sample count and the other diagnostics stay on the synthetic "Inferred load"
+  device: a model's self-assessment must not look like telemetry from the
+  appliance.
+- **The picker reaches every real device.** Candidates are the devices that own
+  a declared state entity first, then the rest of the registry (a hot tub on its
+  own CT usually has no switch). Devices owned by WattMosaic are never offered.
+- **Clearing a link moves the entity back.** Dropping a link or removing the
+  state entity that justified it returns the measurement to its own WattMosaic
+  device. Only `device_id` is written; the entity ID never changes, so long-term
+  statistics are not orphaned.
+
+### Fixed
+
+- **A declared CT never reached attribution.** `project_configuration` recorded
+  the CTs only in `metadata["monitored_by_ct_ids"]`, which the matrix graph never
+  reads. Declaring "this CT measures that device" therefore changed nothing — no
+  direct measurement, no attribution row. Declared CTs are now mirrored onto the
+  device's `dedicated_ct_ids` or `branch_ct_ids`, with exactly what was added
+  recorded so removal retracts only that and leaves wizard-assigned CTs intact.
+- **A switch-only shared circuit could never be identified.** The OFF pin
+  required a learnt model, so a bank of dimmers on one circuit stayed
+  permanently unidentifiable even though the state said which lamps were dark.
+  A declared load entity is evidence in its own right and now triggers the pin.
+- **An OFF device could be credited power it was not drawing.** The cap was
+  `max(off_tolerance, 2 × standby)`, which is still positive with no stated
+  standby, so the solver's least-norm tie-break split a row 190/10 and gave 10 W
+  to a lamp the user said was off. A device with no stated standby is now pinned
+  at zero; a stated standby is honoured (196/4 for a 3 W standby).
+- **The relaxation pass could widen a state pin.** It exists because a learnt
+  model's bound may be wrong; a state declaration is not a prior. State-pinned
+  devices are excluded, and `relaxed_bounds` now names only what was widened.
+- **`source` could not report `configured_prior`.** The integration's enum
+  omitted a value the engine really returns, so a stated value reported
+  `unknown`. The options now derive from the contract.
+- **"Measured — dedicated CT" was wrong for a shared row.** The engine promotes a
+  corroborated shared-channel estimate to tier 3, but the label claimed a
+  dedicated CT. It now reads "Measured — CT row or corroborated share";
+  `source` stays `inferred`, which is what the "Measurement source" field shows.
+- **A stale device link could pin an entity to a vanished device.** Links are
+  re-validated on every start and fall back to entity resolution.
+
+### Measured
+
+The projection was exercised against the live installation's real topology. The
+hot tub is two paired branch CTs; 600 W + 600 W projected to 1 200 W, and a `2.0`
+circuit multiplier applied once gave 2 400 W. Declaring the pair as
+`dedicated_device` yields a direct measurement; declaring it as `branch` yields
+an attribution row and no direct measurement.
+
+### Verification
+
+1314 tests pass; `tools/dev/verify.py` reports **11/11 gates** (10/10 required);
+`ruff check custom_components engine tests` is clean. Thirteen guards were
+negatively verified — each was removed and its test failed:
+
+| Guard removed | Tests that fail |
+| --- | --- |
+| CT mirror onto the device list | 8 |
+| retraction limited to projected CTs | 1 |
+| disabled-channel exclusion | 1 |
+| OFF pin on a declared load signal | 3 |
+| zero pin | 5 |
+| state pin excluded from relaxation | 1 |
+| `relaxed_bounds` reports what was relaxed | 1 |
+| `configured_prior` in the source enum | 1 |
+| `BINDABLE_KEYS` | 1 |
+| explicit-link precedence | 2 |
+| `CONF_DEVICE_LINKS` on a finish path | 1 |
+| unlink returns the entity | 1 |
+| stale-link validation | 1 |
+
+### Not yet verified
+
+The new integration code is **not deployed** to the live installation, so the
+device-link UI and the hot-tub binding have no live end-to-end confirmation.
+Per-device accuracy remains **unverified**: it needs household ground truth.
+
+A device pinned OFF reports `unknown` / `0.0`, not a measured `0 W`, and the
+row's power stays in the residual as `unexplained_load_on_device_circuit`.
+Reporting a hard zero would claim a measurement the engine did not make.
+
+A separate, pre-existing limitation was found while probing the dimming case:
+with two or more lamps on one row the system is genuinely unidentifiable and the
+engine falls back to `model_estimated`, which is **not** clamped by the CT row.
+Three dimmers whose models say 100/60/40 W report 200 W on a 120 W row. The
+value is labelled `model_estimated` (never `inferred` or `direct_measured`) and
+`reconciliation_error_w` exposes the mismatch, so it is not hidden — but it must
+not be described as a measurement. Clamping it is a separate engine task; it
+would change every model-estimated device in the product and needs its own
+negative verification.
+
 ## v0.2.0-dev2 — 2026-11-08 (development channel)
 
 Installing the dev build on the live installation exposed that the nested-feed

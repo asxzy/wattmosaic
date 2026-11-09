@@ -767,3 +767,121 @@ removed from `config.yaml`; `test_config_flow_has_the_hassio_discovery_step`
 fails when the step is renamed; the publisher's `SUPERVISOR_TOKEN` test fails
 when it raises instead of skipping outside the Supervisor; and the shared-host
 tests fail if either side's rule changes without the other.
+
+---
+
+## ADR-0023 — Attach measurements to the existing device, and let a declared switch settle a shared row
+
+**Status:** Accepted · 2026-11-08 · Supersedes the "energy only" part of ADR-0020/0021
+
+**Context.** Two ordinary installations showed that a measurement is not useful
+unless it lands where the appliance already is.
+
+*One CT, one appliance.* A 240 V hot tub has two hot legs and a monitor that
+reports the circuit twice (two CTs, or one circuit multiplier). Once the user
+declares "these CTs measure that device", the device's page should show its
+watts and kWh. Before this change only the kWh entity moved, so the hot tub page
+showed an energy meter with no power reading, and the W reading sat on a
+synthetic "Inferred load" device next to it.
+
+*Many appliances, one circuit.* A bank of smart dimmers shares one lighting
+circuit. Each dimmer is a device in Home Assistant with a `light` entity whose
+on/off state and brightness are known. The CT measures the circuit, not the
+lamp. Two lamps on at once are genuinely not separable by linear algebra, but a
+lamp that is *positively off* is drawing nothing: the single lamp that is on owns
+the row.
+
+powercalc, the reference model, resolves an existing `DeviceEntry` and sets
+`entity.device_entry` (or patches the registry after registration); it never
+creates a device. Precedence is `sensor_config[CONF_DEVICE]` →
+`config_entry.data[CONF_DEVICE]` → `source_entity.device_entry`. Its "measured"
+strategy is a passthrough of an already-measured sensor; it has no strategy that
+uses a measured power sensor as ground truth for a virtual sensor.
+
+**Decision.**
+
+1. **Power and energy both attach to the real device.** `BINDABLE_KEYS` is
+   exactly `{power, energy}`. Every other entity — `source`, `confidence`,
+   `confidence_tier`, `sample_count`, `model_validity`, `operating_stage`,
+   `last_inference`, `data_quality` — stays on the synthetic inferred-load
+   device. Provenance is a statement about the inference, not about the
+   hardware; showing a model's self-assessment on the appliance page would
+   present it as telemetry from the appliance.
+2. **An explicit link wins, entity-derived resolution is the fallback.** The
+   link is `{engine_device_id: ha_device_id}` in the config entry
+   (`CONF_DEVICE_LINKS`). It never travels to the engine: the engine has no
+   concept of a Home Assistant device id, and sending one would make a display
+   decision look like electrical knowledge. An installation that never opens the
+   new step is unchanged, because the entity-derived path stays.
+3. **The link is validated on every start.** A stored id can name a device that
+   was deleted or replaced, or one this integration owns. An unusable link falls
+   back to entity resolution, and clearing a link moves the entity back onto its
+   WattMosaic device — binding is the only thing that writes `device_id`, so
+   "no target" must mean "return", not "leave it where it last was".
+4. **Declaration is projected into attribution.** `DeviceConfiguration.
+   monitored_by_ct_ids` previously wrote only `metadata[monitored_by_ct_ids]`,
+   which the matrix graph never reads. It now mirrors the CTs onto
+   `DeviceTopology.dedicated_ct_ids` (a `dedicated_device` role) or
+   `branch_ct_ids` (a branch or unclassified role), records exactly what it added
+   under `PROJECTED_CTS_KEY`, and retracts only that on removal. A CT assigned
+   through the channel wizard is untouched. Disabled and unknown channels are
+   never mirrored.
+5. **A declared load signal makes an OFF state a constraint.** The solver already
+   pinned an observed-OFF device at its standby draw, but only when a learnt
+   model existed, so a switch-only shared circuit stayed permanently
+   unidentifiable. A *declared* load entity is evidence in its own right
+   (ADR-0012), so the pin fires on that too. An undeclared state key still proves
+   nothing.
+6. **An OFF device with no stated standby is pinned at zero.** The old cap was
+   `max(off_tolerance, 2 × standby)`, which let the solver's least-norm tie-break
+   invent a share: two lamps on one row split 190/10 and credited 10 W to a lamp
+   the user declared off. With no evidence of any draw the cap is the smallest
+   positive float. A stated standby is honoured and still measured rather than
+   assumed.
+7. **A state pin is never relaxed.** The model-bound relaxation pass widens a
+   bound only when the CT rows disagree with a *model*. A state constraint is
+   evidence, not a prior, and widening it would reintroduce the fabricated
+   attribution the pin exists to remove. The diagnostics report only what was
+   actually relaxed.
+
+**Consequences.** A hot tub with a declared CT pair now reports its measured
+watts on the hot tub page, and its `source` stays `direct_measured`. A bank of
+dimmers on one circuit reports per-lamp watts when exactly one is on and the rest
+are positively off; `source` is `inferred` and the tier is 3 ("a declared load
+signal corroborates a shared-channel estimate"), never 4. Two lamps on at once,
+or a sibling that is `unknown`/`unavailable`, still reports `unknown` and leaves
+the row in the residual. The `unknown` state deliberately blocks the rule: an
+offline sensor might be drawing.
+
+Amended wording: ADR-0020/0021 said only *energy* moves to the real device. That
+is superseded. The identity rule from ADR-0021 is unchanged and still load-
+bearing: every entity is created on the WattMosaic device and moved afterwards,
+so a link change never re-derives an entity ID and never orphans statistics.
+
+**Verification.**
+
+* `tests/unit/test_device_attachment.py` — declared dedicated CT becomes a
+  direct measurement (`direct=500.0`); declared branch CT becomes an inference
+  row and not a measurement; removal retracts the projection and returns
+  `attribution_ct_ids == ()`; a wizard-assigned CT survives a removal; a disabled
+  channel is never attributed; a single ON claimant owns the row at 200.0 W with
+  `source=inferred`; the OFF device receives under 1e-6 W; a stated 3 W standby
+  yields 196/4; two ON, both OFF, one `unavailable` and one missing state each
+  report `unknown`; removing the declared signal restores `unknown`; and a stale
+  100 W model bound is relaxed for the ON lamp while the OFF lamp's pin is not.
+* `tests/integration/test_device_link.py` — `BINDABLE_KEYS`, provenance
+  exclusion, explicit-link precedence and validation, unlink returning the
+  entity, per-device form helpers, and that every options completion path
+  rebuilds the whole link map (Home Assistant replaces `options` wholesale).
+* Negative verification: each guard was removed and the corresponding test
+  fails. Removing the zero pin fails five tests; removing the declared-load
+  signal fails three; skipping the CT mirror fails seven; retracting everything
+  instead of only what was projected fails the wizard-assigned case; accepting
+  disabled channels fails the disabled case; dropping `CONF_DEVICE_LINKS` from a
+  finish path fails the persistence case; narrowing `BINDABLE_KEYS` fails the
+  bindable-key case; ignoring the explicit link fails the precedence case; and
+  removing the unlink return fails the return case.
+* Live environment facts used: 518 devices in the registry, 460 not owned by
+  WattMosaic, 81 `light.*` entities, 58 WattMosaic-owned entities excluded from
+  the picker. The hot tub is two paired branch CTs (`l1`/`l2`), and the
+  projection was exercised against that exact shape (1 200 W from 600 + 600).

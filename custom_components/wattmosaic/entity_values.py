@@ -154,6 +154,19 @@ def engine_device_available(engine_available: bool) -> bool:
 #: matches the behaviour before the option existed and powercalc's default.
 ENERGY_ENABLED_KEY = "create_energy_sensor"
 
+#: Entity keys that describe *the measured load itself* and therefore belong on
+#: the real Home Assistant device when one can be resolved.
+#:
+#: ``power`` and ``energy`` are physical quantities of the appliance; a user
+#: looking at their hot tub's page should see its watts and kWh there.  Every
+#: other key is about how WattMosaic reached the number (``source``,
+#: ``confidence``, ``confidence_tier``, ``sample_count``, ``model_validity``,
+#: ``operating_stage``, ``last_inference``, ``data_quality``).  Those stay on the
+#: synthetic inferred-load device: they are inference provenance, and putting
+#: them on the appliance would present a model's self-assessment as if it were
+#: telemetry from the hardware.
+BINDABLE_KEYS: frozenset[str] = frozenset({"power", "energy"})
+
 
 def energy_enabled(device_config: Mapping[str, Any] | None) -> bool:
     """Whether an energy entity should exist for this engine device.
@@ -199,8 +212,32 @@ def merge_energy_choice(
     return merged or None
 
 
+def explicit_device_link(
+    stored_links: Any,
+    device_id: str,
+) -> str | None:
+    """The HA device id the user linked to this engine device, if any.
+
+    An explicit link is the unambiguous form: several devices can share one
+    branch CT (a bank of Lutron dimmers), and several entities can belong to the
+    same appliance.  Resolving a host from an entity's registry entry works only
+    when the entity happens to be a member of the intended device; a declaration
+    names the device directly and is therefore preferred.
+
+    Returns ``None`` for "not linked", never for "linked to nothing": an empty
+    or non-string value is ignored so a half-written options entry cannot detach
+    a measurement by accident.
+    """
+    if not isinstance(stored_links, Mapping):
+        return None
+    value = stored_links.get(device_id)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
 def binding_device_entity_ids(device_config: Mapping[str, Any] | None) -> list[str]:
-    """Entities that justify attaching energy to a *real* Home Assistant device.
+    """Entities that justify attaching a measurement to a *real* HA device.
 
     Only entities the user explicitly declared as runtime evidence for *this*
     device count.  The engine's own output entities are never candidates: they
@@ -278,6 +315,7 @@ def binding_update(
 
 
 __all__ = [
+    "BINDABLE_KEYS",
     "ENERGY_ENABLED_KEY",
     "RECONCILIATION_KEYS",
     "binding_device_entity_ids",
@@ -285,6 +323,7 @@ __all__ = [
     "device_values",
     "energy_enabled",
     "engine_device_available",
+    "explicit_device_link",
     "global_values",
     "merge_energy_choice",
     "resolve_binding_target",

@@ -75,6 +75,12 @@ from wattmosaic_engine.electrical.window import CoercedWindow, coerce_window
 #: unexplained load.
 OFF_ATTRIBUTION_TOLERANCE_W = 15.0
 
+#: A device the state declares OFF, with no stated standby draw, is pinned at
+#: zero.  The bounded solver requires ``lower < upper`` strictly, so the cap is
+#: the smallest positive float that still behaves as zero at any realistic watt
+#: magnitude rather than a literal ``0.0``.
+_PINNED_ZERO_W = 1e-9
+
 #: Relative tolerance when comparing a solved value with a modelled value.
 MODEL_MATCH_REL_TOL = 0.40
 
@@ -705,15 +711,48 @@ class DisaggregationEngine:
             # An explicitly OFF device is a *state constraint*: it cannot draw
             # more than its standby power.  Pinning it is what makes a shared
             # branch identifiable (the other device then owns the remainder).
-            # It is an upper bound, not an equality, so a genuine standby draw
-            # is still measured rather than assumed.
-            if _is_off(states.get(did), state_overrides.get(did)) and view is not None:
+            #
+            # The cap is derived from evidence, never from the solver's freedom:
+            #
+            # * a model or configuration that states a standby draw allows that
+            #   draw (plus the measurement tolerance) -- the device may genuinely
+            #   consume it while "off";
+            # * no stated standby means no evidence of *any* draw, so the cap is
+            #   exactly zero.
+            #
+            # Without the second rule the row was only bounded and the solve was
+            # under-determined: two devices on one branch CT returned an
+            # arbitrary 190/10 split and credited 10 W to a lamp the user had
+            # declared off.  Adding a tolerance floor "so standby can be
+            # measured" fabricated attribution out of the solver's least-norm
+            # tie-break, which is the one thing this project never does.
+            #
+            # A declared load signal is evidence in its own right (ADR-0012), so
+            # the constraint must not require a learnt model.  Without this, a
+            # shared circuit where every device is modelled only by its switch
+            # stayed permanently unidentifiable -- the state told us which lamps
+            # were dark and the engine ignored it.  The requirement is a
+            # *declared* load entity: an undeclared state key proves nothing.
+            cfg = configs.get(did)
+            has_load_signal = bool(cfg is not None and cfg.load_entity_ids)
+            if _is_off(states.get(did), state_overrides.get(did)) and (
+                view is not None or has_load_signal
+            ):
                 standby = 0.0
-                if view.params.standby_power_w is not None:
-                    standby = abs(float(view.params.standby_power_w))
-                elif view.params.off_power_w is not None:
-                    standby = abs(float(view.params.off_power_w))
-                upper.append(max(self.off_tolerance_w, 2.0 * standby))
+                if view is not None:
+                    if view.params.standby_power_w is not None:
+                        standby = abs(float(view.params.standby_power_w))
+                    elif view.params.off_power_w is not None:
+                        standby = abs(float(view.params.off_power_w))
+                if standby <= 0.0 and cfg is not None and cfg.expected_standby_w is not None:
+                    standby = abs(float(cfg.expected_standby_w))
+                # No evidence of any draw means the cap really is zero.  The
+                # bounded solver requires a strictly positive interval, so an
+                # exact zero is expressed as the smallest representable cap and
+                # the device is reported as pinned at zero.
+                upper.append(
+                    2.0 * standby if standby > 0.0 else _PINNED_ZERO_W
+                )
                 state_pinned.append(did)
                 continue
             # A model bound is a *prior*, never a cap on a measurement.  When
@@ -761,9 +800,16 @@ class DisaggregationEngine:
             # If a model bound made the fit materially worse than the CT rows
             # allow, relax the bound and refit.  The measurement is trusted over
             # the learnt model, and the relaxation is recorded explicitly.
+            #
+            # A *state* constraint is never relaxed.  "This lamp is off" is
+            # evidence, not a model prior, and the refit exists because the
+            # solver's least-norm tie-break otherwise invents a share for an
+            # unobserved device.  Relaxing it would reintroduce exactly the
+            # fabricated attribution the pin was added to prevent.
             if solve_result.at_upper_bound:
+                relaxable = set(solve_result.at_upper_bound) - set(state_pinned)
                 relaxed = [
-                    None if did in set(solve_result.at_upper_bound) else u
+                    None if did in relaxable else u
                     for did, u in zip(all_ids, upper, strict=False)
                 ]
                 if any(u is not None for u in relaxed[:n_sub]):
@@ -785,8 +831,12 @@ class DisaggregationEngine:
                         0.98 * solve_result.weighted_residual_norm
                     ):
                         diagnostics["warnings"].append("model_upper_bound_relaxed")
+                        # Report only what was actually relaxed.  A state-pinned
+                        # device keeps its cap even when another device in the
+                        # same solve gets a wider bound, so listing it here
+                        # would claim evidence was overridden when it was not.
                         diagnostics.setdefault("relaxed_bounds", []).extend(
-                            solve_result.at_upper_bound
+                            sorted(relaxable)
                         )
                         solve_result = relaxed_result
         else:

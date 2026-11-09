@@ -42,6 +42,11 @@ from .util import as_bool, as_float, as_int, normalise_base_url
 #: it is stored in the config entry, never sent to the engine.
 ENERGY_ENTITY_FIELD = "create_energy_sensor"
 
+#: Form field that links an engine device to an existing Home Assistant device.
+#: Integration-side only: the engine has no concept of an HA device id, and
+#: sending one would make a display decision look like electrical knowledge.
+DEVICE_LINK_FIELD = "ha_device_id"
+
 #: Default for ``CTChannel.measurement_multiplier``.  The monitor usually applies
 #: its "circuit multiplier" itself and already publishes the full load, so
 #: the engine must not scale again unless the user says so per circuit.
@@ -1172,6 +1177,78 @@ def stored_energy_choice(
     if not isinstance(stored, Mapping):
         return default
     return as_bool(stored.get(device_id), default=default)
+
+
+# --------------------------------------------------------------------------- #
+# Device attachment (link an engine device to an existing HA device)
+# --------------------------------------------------------------------------- #
+
+
+def device_link_choice(user_input: Mapping[str, Any] | None) -> str | None:
+    """The HA device the form links, or ``None`` when it stated nothing.
+
+    An empty string is a real instruction: it *unlinks*.  Distinguishing it from
+    "field absent" matters because the form always submits the selector, and
+    collapsing both to ``None`` would make a device impossible to unlink.
+    """
+    data = user_input or {}
+    if DEVICE_LINK_FIELD not in data:
+        return None
+    value = data.get(DEVICE_LINK_FIELD)
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def apply_device_link(
+    stored_links: Any,
+    device_id: str,
+    choice: str | None,
+) -> dict[str, str]:
+    """The full link map with one device's link set, changed or removed.
+
+    Home Assistant replaces an entry's ``options`` wholesale, so every
+    completion path must rebuild the *whole* map.  A partial map would silently
+    detach every other device the user had linked.
+
+    ``choice is None`` means "no opinion" and leaves the map untouched; ``""``
+    removes the link; anything else sets it.
+    """
+    links: dict[str, str] = {}
+    if isinstance(stored_links, Mapping):
+        for key, value in stored_links.items():
+            text_id = str(key).strip()
+            text_device = str(value or "").strip()
+            if text_id and text_device:
+                links[text_id] = text_device
+    if choice is None:
+        return links
+    if not choice:
+        links.pop(str(device_id), None)
+    else:
+        links[str(device_id)] = choice
+    return links
+
+
+def linked_device_id(stored_links: Any, device_id: str) -> str:
+    """The already-stored link for one device, or ``""`` when unlinked."""
+    if not isinstance(stored_links, Mapping):
+        return ""
+    value = stored_links.get(device_id)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def device_link_established(
+    engine_device_id: str,
+    ha_device_id: str,
+) -> bool:
+    """Whether a link names a usable Home Assistant device.
+
+    A blank device id is not a link, and an engine device cannot host its own
+    measurement: that would make the inferred load the parent of the entity that
+    describes it.
+    """
+    return bool(engine_device_id.strip()) and bool(ha_device_id.strip())
 
 
 def _normalise_light(data: Mapping[str, Any], device_type: str) -> dict[str, Any]:

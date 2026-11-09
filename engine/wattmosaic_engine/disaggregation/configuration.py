@@ -85,6 +85,10 @@ CONNECTIVITY_KEY = "connectivity"
 CONFIG_KEY = "device_config"
 #: Evidence-derived runtime entities (never rewritten by configuration).
 STATE_ENTITIES_KEY = "state_entity_ids"
+#: CT ids this module mirrored onto the device's own measurement lists from
+#: ``DeviceConfiguration.monitored_by_ct_ids``.  Recorded so a configuration
+#: change can retract exactly what it added instead of guessing.
+PROJECTED_CTS_KEY = "projected_ct_ids"
 
 #: Dimming is assumed linear in output unless a measured curve is supplied.
 #: Documented simplification, never presented as a fitted model.
@@ -408,10 +412,23 @@ def project_configuration(
         else list(configurations)
     )
     by_id = {c.device_id: c for c in items}
+    channels = topology.channel_map()
     devices: list[DeviceTopology] = []
     for device in topology.devices:
         config = by_id.get(device.device_id)
         metadata = dict(device.metadata or {})
+        dedicated = list(device.dedicated_ct_ids)
+        branch = list(device.branch_ct_ids)
+        # Retract CTs a previous projection added for this device.  Only ids this
+        # module put there are removed, so a CT the user assigned through the
+        # channel wizard (``build_topology_update`` mirrors dedicated CTs itself)
+        # survives untouched.
+        previously = metadata.get(PROJECTED_CTS_KEY)
+        if isinstance(previously, list):
+            added = {str(c) for c in previously}
+            dedicated = [c for c in dedicated if c not in added]
+            branch = [c for c in branch if c not in added]
+            metadata.pop(PROJECTED_CTS_KEY, None)
         if config is None:
             # A configuration removal must clear the projection, not leave a
             # stale mode or monitoring level behind.
@@ -447,7 +464,45 @@ def project_configuration(
                 metadata["monitored_by_ct_ids"] = list(config.monitored_by_ct_ids)
             else:
                 metadata.pop("monitored_by_ct_ids", None)
-        devices.append(device.model_copy(update={"metadata": metadata}))
+            # A declaration is not just metadata: the measurement matrix reads
+            # ``DeviceTopology.dedicated_ct_ids`` / ``branch_ct_ids`` and
+            # ``TopologyGraph`` derives every attribution row from them.  Writing
+            # only ``metadata["monitored_by_ct_ids"]`` left the graph unchanged,
+            # so declaring "this CT measures that device" produced no direct
+            # measurement at all -- the exact case a user configures by hand.
+            for cid in config.monitored_by_ct_ids:
+                channel = channels.get(cid)
+                if channel is None or not channel.enabled:
+                    # Unknown or disabled channels are dropped by
+                    # ``effective_config`` as well; never invent an attribution.
+                    continue
+                if channel.ct_type == CTType.DEDICATED_DEVICE:
+                    # A dedicated CT may only name its own device.  A dedicated CT
+                    # assigned elsewhere is a conflict, not an attribution.
+                    if channel.device_id not in (None, device.device_id):
+                        continue
+                    if cid not in dedicated:
+                        dedicated.append(cid)
+                elif channel.ct_type != CTType.MAIN:
+                    # A branch role (or an unclassified channel the user declared)
+                    # becomes a branch attribution row for this device.
+                    if cid not in branch:
+                        branch.append(cid)
+                else:
+                    continue
+                if cid not in metadata.setdefault(PROJECTED_CTS_KEY, []):
+                    metadata[PROJECTED_CTS_KEY].append(cid)
+            if not metadata.get(PROJECTED_CTS_KEY):
+                metadata.pop(PROJECTED_CTS_KEY, None)
+        devices.append(
+            device.model_copy(
+                update={
+                    "metadata": metadata,
+                    "dedicated_ct_ids": dedicated,
+                    "branch_ct_ids": branch,
+                }
+            )
+        )
     return topology.model_copy(update={"devices": devices, "version": topology.version + 1})
 
 
