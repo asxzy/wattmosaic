@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-09T18:08:49.948407+00:00",
+  "generated_at": "2026-11-09T19:27:25.391105+00:00",
   "gates": [
     {
       "name": "contract_schema_sync",
@@ -11,7 +11,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 0.19,
+      "duration_s": 0.17,
       "output_tail": "{\n  \"contract_version\": \"1.2.0\",\n  \"schemas\": 19\n}",
       "notes": "",
       "skipped_reason": ""
@@ -26,7 +26,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 0.41,
+      "duration_s": 0.38,
       "output_tail": "secret scan: clean",
       "notes": "",
       "skipped_reason": ""
@@ -44,8 +44,8 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 9.34,
-      "output_tail": "........................................................................ [  8%]\n........................................................................ [ 17%]\n........................................................................ [ 26%]\n........................................................................ [ 34%]\n........................................................................ [ 43%]\n........................................................................ [ 52%]\n........................................................................ [ 60%]\n........................................................................ [ 69%]\n........................................................................ [ 78%]\n........................................................................ [ 86%]\n........................................................................ [ 95%]\n.....................................                                    [100%]",
+      "duration_s": 9.21,
+      "output_tail": "........................................................................ [  8%]\n........................................................................ [ 17%]\n........................................................................ [ 25%]\n........................................................................ [ 34%]\n........................................................................ [ 42%]\n........................................................................ [ 51%]\n........................................................................ [ 59%]\n........................................................................ [ 68%]\n........................................................................ [ 76%]\n........................................................................ [ 85%]\n........................................................................ [ 93%]\n.....................................................                    [100%]",
       "notes": "",
       "skipped_reason": ""
     },
@@ -62,7 +62,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 3.06,
+      "duration_s": 3.32,
       "output_tail": "........................................................................ [ 13%]\n........................................................................ [ 26%]\n........................................................................ [ 40%]\n........................................................................ [ 53%]\n........................................................................ [ 67%]\n........................................................................ [ 80%]\n........................................................................ [ 94%]\n..............................                                           [100%]",
       "notes": "",
       "skipped_reason": ""
@@ -80,7 +80,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 14.17,
+      "duration_s": 15.52,
       "output_tail": "...........................................................              [100%]",
       "notes": "",
       "skipped_reason": ""
@@ -98,7 +98,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 62.61,
+      "duration_s": 55.31,
       "output_tail": "........................................................                 [100%]",
       "notes": "",
       "skipped_reason": ""
@@ -113,8 +113,23 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 0.11,
+      "duration_s": 0.09,
       "output_tail": "manifest validation: ok",
+      "notes": "",
+      "skipped_reason": ""
+    },
+    {
+      "name": "release_valid",
+      "command": [
+        "python",
+        "tools/dev/check_release.py"
+      ],
+      "required": true,
+      "timeout": 900,
+      "status": "PASS",
+      "returncode": 0,
+      "duration_s": 0.06,
+      "output_tail": "version: 0.2.0-dev10\nrelease checks: clean",
       "notes": "",
       "skipped_reason": ""
     },
@@ -129,7 +144,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 0.57,
+      "duration_s": 0.51,
       "output_tail": "{\"status\": \"up_to_date\", \"files\": 4}",
       "notes": "",
       "skipped_reason": ""
@@ -145,7 +160,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 3.0,
+      "duration_s": 3.36,
       "output_tail": "PASS  run.sh normalises log_level to upper case\nPASS  run.sh redacts tokens in --print-config\nPASS  SUPERVISOR_TOKEN fallback switches ha_url to the Core proxy\nPASS  run.sh rejects a non-numeric stale_after_s\nPASS  run.sh fails closed when no HA token is available\nPASS  healthcheck.py fails cleanly when the gateway is down\n\n== Add-on staging (build context) ==\nPASS  package_addon.sh stages a self-contained app\nPASS  staged config.yaml\nPASS  staged Dockerfile\nPASS  staged run.sh\nPASS  staged gateway.py\nPASS  staged healthcheck.py\nPASS  staged constraints.txt\nPASS  staged pyproject.toml\nPASS  staged README.md\nPASS  staged engine/wattmosaic_engine/main.py\n\n== Docker build ==\nSKIP  image build (--no-build)\n\n== Summary ==\npassed: 61  failed: 0  skipped: 3\nall checks passed",
       "notes": "",
       "skipped_reason": ""
@@ -160,7 +175,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 0.04,
+      "duration_s": 0.06,
       "output_tail": "hacs validation notes:\n  - brand/icon@2x.png present (HiDPI icon)\nhacs validation: ok",
       "notes": "",
       "skipped_reason": ""
@@ -177,14 +192,14 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 0.83,
+      "duration_s": 1.27,
       "output_tail": "{\n  \"ok\": true,\n  \"problems\": [],\n  \"config\": {\n    \"ha_url\": \"<redacted-url>\",\n    \"ha_token\": \"***\",\n    \"api_host\": \"<redacted-ip>\",\n    \"api_port\": 8787,\n    \"api_token\": \"***\",\n    \"database_path\": \"data/wattmosaic.db\",\n    \"learning_enabled\": true,\n    \"auto_placement\": false,\n    \"stale_after_s\": 120.0,\n    \"inference_interval_s\": 5.0,\n    \"log_level\": \"INFO\"\n  },\n  \"contract_version\": \"1.2.0\",\n  \"engine_version\": \"0.1.2\"\n}",
       "notes": "requires HA_TOKEN in environment",
       "skipped_reason": ""
     }
   ],
-  "required_total": 10,
-  "required_passed": 10,
+  "required_total": 11,
+  "required_passed": 11,
   "required_failed": [],
   "required_skipped": [],
   "all_required_pass": true

@@ -97,14 +97,23 @@ jobs:
 
       - name: Refuse a stale tag that does not match this commit
         if: steps.exists.outputs.exists == 'true' && inputs.force != true
+        id: stale
         run: |
           # A version tag is immutable by design, so an already-published image
           # is normally left alone.  But "the tag exists" is not the same as
-          # "the tag contains this commit": pushing engine code without bumping
+          # "the tag contains this code": pushing engine changes without bumping
           # `version` in addon/config.yaml used to publish nothing and report
           # success, so the live app kept running older code while the update
-          # entity advertised the new version.  That is exactly the failure this
-          # check exists to make impossible to miss.
+          # entity advertised the new version.  That is the failure this check
+          # exists to make impossible to miss.
+          #
+          # The test is *runtime inputs*, not "HEAD == published revision".
+          # This workflow runs on every push (there is no `paths:` filter, for
+          # the reason in the header), so a docs-only commit has a different SHA
+          # while building to a byte-identical image.  Comparing SHAs made every
+          # such commit fail -- a false alarm that trained people to ignore a red
+          # run.  If nothing that enters the image changed, there is nothing to
+          # republish and nothing wrong.
           tag="ghcr.io/asxzy/wattmosaic-engine:${{ steps.version.outputs.version }}"
           published=$(
             docker buildx imagetools inspect "${tag}" --format '{{json .Image}}' \
@@ -112,14 +121,39 @@ jobs:
           )
           echo "published revision: ${published:-<none>}"
           echo "this commit:        ${{ github.sha }}"
-          if [[ -n "${published}" && "${published}" != "${{ github.sha }}" ]]; then
-            echo "::error::App image ${tag} was built from ${published}, not ${{ github.sha }}. The engine code changed without a version bump, so nothing would be published and the installed app would stay on old code. Bump 'version' in addon/config.yaml (and the integration manifest) to release the change."
-            exit 1
+          if [[ -z "${published}" || "${published}" == "${{ github.sha }}" ]]; then
+            echo "::notice::App image ${{ steps.version.outputs.version }} is already published from this commit; nothing to publish."
+            echo "action=current" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-          echo "::notice::App image ${{ steps.version.outputs.version }} is already published from this commit; nothing to publish."
+
+          # Does anything that enters the image differ between the published
+          # revision and this commit?  This is the same set of paths the
+          # Dockerfile copies, plus the build inputs it resolves against.
+          runtime_paths=(
+            engine
+            addon/constraints.txt
+            addon/run.sh
+            addon/gateway.py
+            addon/healthcheck.py
+            addon/discovery.py
+            Dockerfile
+            pyproject.toml
+            README.md
+          )
+          if git cat-file -e "${published}^{commit}" 2>/dev/null \
+             && git diff --quiet "${published}" "${{ github.sha }}" -- "${runtime_paths[@]}"; then
+            echo "action=identical" >> "$GITHUB_OUTPUT"
+            echo "::notice::Commit ${{ github.sha }} changes no runtime input of the engine image. ${tag} was built from ${published} and is byte-identical for these sources, so nothing is republished."
+            exit 0
+          fi
+
+          echo "action=stale" >> "$GITHUB_OUTPUT"
+          echo "::error::App image ${tag} was built from ${published}, but this commit changes engine runtime inputs. The engine code changed without a version bump, so nothing would be published and the installed app would stay on old code. Bump 'version' in addon/config.yaml (and the integration manifest, const.py, pyproject.toml and the engine __init__.py) to release the change."
+          exit 1
 
       - name: Explain why nothing was published
-        if: steps.exists.outputs.exists == 'true' && inputs.force != true
+        if: steps.exists.outputs.exists == 'true' && inputs.force != true && steps.stale.outputs.action != 'identical'
         run: |
           echo "::notice::App image ${{ steps.version.outputs.version }} already exists for this commit. Bump 'version' in addon/config.yaml to release a new image, or dispatch this workflow with force=true to republish the existing one."
 

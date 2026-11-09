@@ -396,6 +396,55 @@ integration refuses to run against an incompatible contract rather than
 misinterpreting data. Upgrade the integration and app together when the contract
 version changes.
 
+### Releasing
+
+A release is a **git tag** plus a **GitHub Release**. Home Assistant, HACS and
+the Marketplace resolve the displayed version from those two things, not from a
+file in the tree: with no tag and no Release they fall back to the branch head
+and show a raw commit SHA. That is the state this repository was in until
+`0.2.0-dev10`, and it is why an installed integration could report `eec273d`
+while every version field correctly said `0.2.0-dev9`.
+
+Bump the version in **all five** places, then push to `main` or `dev`:
+
+| File | Field |
+| --- | --- |
+| `custom_components/wattmosaic/manifest.json` | `version` (canonical — what Home Assistant reads) |
+| `custom_components/wattmosaic/const.py` | `VERSION` |
+| `addon/config.yaml` | `version` (the App image tag) |
+| `pyproject.toml` | `version` |
+| `engine/wattmosaic_engine/__init__.py` | `__version__` |
+
+Add a `## v<version>` section to `RELEASE_NOTES.md`. Run
+`python tools/dev/check_release.py`; it fails if any of the five disagree, if the
+notes do not cover the version, or if the branch carries a version of the wrong
+kind.
+
+The workflows then do the rest, independently and idempotently:
+
+- `.github/workflows/app-image.yaml` publishes
+  `ghcr.io/asxzy/wattmosaic-engine:<version>` as a multi-arch manifest list. It
+  only builds when the tag does not exist yet.
+- `.github/workflows/release.yaml` creates the annotated `v<version>` tag and the
+  GitHub Release, taking the body from `RELEASE_NOTES.md`. It waits until the
+  image is pullable before publishing, because a Release is a claim that the
+  version can be installed.
+
+Channels are decided by the version string, not the branch:
+
+- `main` carries `X.Y.Z` and publishes as **latest**.
+- `dev` carries `X.Y.Z-devN` and publishes with `--prerelease --latest=false`, so
+  a development build is never offered to someone tracking stable.
+
+A commit that does not change the version is **not** a release: both workflows
+notice the tag already exists and exit successfully with a notice. A red run
+there would be a false alarm, and a false alarm teaches people to ignore the
+signal.
+
+Tags are immutable. To correct a release, delete and recreate the tag and
+Release deliberately — never rely on a republish to change what an existing tag
+means, because users may already have pulled it.
+
 ---
 
 ## 9. Uninstall

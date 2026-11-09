@@ -1,5 +1,56 @@
 # Release Notes
 
+## v0.2.0-dev10 — 2026-11-09 (development channel)
+
+Home Assistant was showing this integration's version as a **commit hash**
+(`eec273d`), not `0.2.0-dev9`. The code was correct: every version field said
+`0.2.0-dev9` and the matching image had been published for each of the fifteen
+releases. What was missing was **metadata**. Home Assistant, HACS and the
+Marketplace do not read a version out of the tree — they read the repository's
+git tags and GitHub Releases, and this repository had never created a single one
+of either. With nothing to resolve, they fell back to the branch head and
+displayed its commit SHA. **This is a prerelease. It is installed from the `dev`
+branch and does not replace the stable integration or App.**
+
+### Added
+
+- **A release pipeline.** `.github/workflows/release.yaml` runs on `main` and
+  `dev` and, when the version changes, creates an annotated `v<version>` tag and
+  a GitHub Release whose body is taken from this file. The tag is derived from
+  `manifest.json`, so the version a user is offered and the version in the tree
+  cannot disagree. Stable versions (`X.Y.Z`) publish as "latest"; `-devN`
+  versions publish with `--prerelease --latest=false`, so a development build can
+  never be offered to someone tracking stable.
+- **A release-contract gate,** `tools/dev/check_release.py`, in CI and in
+  `tools/dev/verify.py`. It checks that `manifest.json`, `const.py`,
+  `addon/config.yaml`, `pyproject.toml` and the engine's `__version__` all state
+  the same version; that `RELEASE_NOTES.md` documents it; that a candidate tag
+  matches the tree; and that `main` carries only stable versions while `dev`
+  carries only prereleases.
+
+### Fixed
+
+- **The version fields had silently drifted, and nothing noticed.** The gate
+  found two on its first run: `pyproject.toml` was still `0.2.0-dev4` (five
+  releases behind) and `engine/wattmosaic_engine/__init__.py` was `0.1.3` (three
+  releases behind). Both are now checked, so neither can drift again.
+- **A documentation-only push turned the App-image run red.** That workflow runs
+  on every push because the repository history is replaced rather than appended,
+  so a path filter can never be trusted — but its stale-tag check compared the
+  published commit SHA against `HEAD`. A commit that touched only
+  `PROJECT_STATUS.md` therefore failed while building a byte-identical image.
+  The check now compares the paths that actually enter the image, so a docs-only
+  push reports "nothing to rebuild" instead of an error, and a real engine change
+  without a version bump still fails.
+
+### Backfill
+
+Tags and Releases are created for the history that is still reachable and
+publishable. `0.1.0` and `0.1.1`/`0.1.2` are **not** tagged: the `0.1.0` commits
+are reachable only from a local branch that holds real household data, and
+`0.1.1`/`0.1.2` were never committed to this repository's history. Tagging them
+would publish either a household inventory or a tag with no code behind it.
+
 ## v0.2.0-dev9 — 2026-11-09 (development channel)
 
 One defect, found while performing the operation dev8's release notes said could

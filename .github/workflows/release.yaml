@@ -1,0 +1,205 @@
+# Tag and publish a release for the current version.
+#
+# Why this exists
+# ---------------
+# Home Assistant, HACS and the built-in Marketplace do not read a version out of
+# the tree. They read the repository's **git tags** and **GitHub Releases**, and
+# when neither exists they fall back to the branch head and display a raw commit
+# SHA. That is what happened here: fifteen versions shipped with a correct
+# `manifest.json` and a published container image, but no tag and no release, so
+# the update entity reported `0.2.0-dev9` as `latest_version: eec273d`.
+#
+# Channels
+# --------
+# `main` is the stable channel and carries `X.Y.Z`. `dev` is the development
+# channel and carries `X.Y.Z-devN`. Both branches use this one workflow because
+# a tag is derived from the version string, not from the branch: the branch only
+# decides which kind of version was committed.
+#
+# A tag names a *release*, not a commit
+# -------------------------------------
+# Pushing a documentation or tooling change does not bump the version, so this
+# workflow runs, finds `v<version>` already tagged, and exits with a notice. It
+# must not fail: the version is still the released one, and failing would make
+# every later commit red for a reason that is not a defect. The App-image
+# workflow used to fail exactly this way.
+#
+# Don't advertise what cannot be installed
+# ----------------------------------------
+# The Release is the "this version is installable" claim. Before it is created,
+# the matching image is required to exist in GHCR, because the Supervisor pulls
+# `ghcr.io/asxzy/wattmosaic-engine:<version>` for the App. A release with no
+# image behind it is a broken update prompt.
+name: Release
+
+on:
+  push:
+    branches: ["main", "dev"]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Recreate the Release even if the tag already exists"
+        type: boolean
+        default: false
+
+# Two branches must never race to create different releases, and a backfill
+# dispatch must not collide with a push. Serialise per branch.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      # `contents: write` creates the tag and the Release. No other scope is
+      # needed, and nothing here reads a secret beyond the automatic token.
+      contents: write
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: the release contract is checked against the tree, and
+          # an existing tag may point at an earlier commit on this branch.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Read the version this commit claims
+        id: version
+        run: |
+          version=$(python -c 'import json,pathlib; print(json.loads(pathlib.Path("custom_components/wattmosaic/manifest.json").read_text())["version"])')
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+          if [[ "${version}" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version: ${version}"
+
+      - name: The tree must describe the version it is about to be tagged as
+        run: |
+          python tools/dev/check_release.py --tag "v${{ steps.version.outputs.version }}"
+
+      - name: The branch must carry a version of its own kind
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
+        run: |
+          python tools/dev/check_release.py --channel "${{ github.ref_name }}"
+
+      - name: Is this version already tagged?
+        id: tag
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            at=$(git rev-list -n1 "${tag}")
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "at=${at}" >> "$GITHUB_OUTPUT"
+            echo "${tag} already exists at ${at}."
+          elif git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "at=remote" >> "$GITHUB_OUTPUT"
+            echo "${tag} exists on the remote but was not fetched."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "${tag} does not exist yet."
+          fi
+
+      - name: Nothing to release
+        if: steps.tag.outputs.exists == 'true' && inputs.force != true
+        run: |
+          # A tag names a release, not a commit.  This branch is still on the
+          # version that was already released, so there is genuinely nothing to
+          # do -- and a red run here would be a false alarm on every later
+          # commit on the branch.
+          echo "::notice::v${{ steps.version.outputs.version }} is already tagged (${{ steps.tag.outputs.at }}). This commit does not change the version, so no new release is published. Bump the version to release."
+
+      - name: The image for this version must be pullable
+        if: steps.tag.outputs.exists == 'false' || inputs.force == true
+        run: |
+          tag="ghcr.io/asxzy/wattmosaic-engine:${{ steps.version.outputs.version }}"
+          # The App-image workflow publishes on the same push.  Wait for it
+          # rather than racing it, but keep the wait bounded so a genuinely
+          # broken publish fails here instead of hanging forever.
+          for attempt in $(seq 1 90); do
+            if docker buildx imagetools inspect "${tag}" >/dev/null 2>&1; then
+              echo "${tag} is published."
+              exit 0
+            fi
+            echo "attempt ${attempt}/90: ${tag} not published yet; waiting 20s"
+            sleep 20
+          done
+          echo "::error::${tag} was never published. A Release would tell users there is an update they cannot install. Check the 'App image' workflow for this commit, then re-run this one."
+          exit 1
+
+      - name: Create the tag
+        if: steps.tag.outputs.exists == 'false' || inputs.force == true
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "::notice::${tag} already exists locally; leaving it in place."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Annotated: the tag carries who created it and when, which a
+          # lightweight tag pointing at a commit does not.
+          git tag -a "${tag}" -m "WattMosaic ${tag#v}" "${{ github.sha }}"
+          git push origin "refs/tags/${tag}"
+
+      - name: Assemble the Release body
+        if: steps.tag.outputs.exists == 'false' || inputs.force == true
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          {
+            python tools/dev/check_release.py --notes-for "${version}"
+            echo ""
+            echo "---"
+            echo ""
+            echo "**Integration:** \`${version}\` (install from the \`${{ github.ref_name }}\` channel)"
+            echo ""
+            echo "**App image:** \`ghcr.io/asxzy/wattmosaic-engine:${version}\`"
+          } > release-body.md
+          head -20 release-body.md
+
+      - name: Publish the Release
+        if: steps.tag.outputs.exists == 'false' || inputs.force == true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          channel_flags=()
+          if [[ "${{ steps.version.outputs.prerelease }}" == "true" ]]; then
+            # A `-devN` version is not a stable release.  `--prerelease` keeps it
+            # out of the "latest" slot, so a dev build can never be offered to
+            # someone tracking stable.
+            channel_flags+=(--prerelease --latest=false)
+          else
+            channel_flags+=(--latest)
+          fi
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            # The tag is immutable and the body is derived from the tree, so an
+            # existing Release is refreshed rather than duplicated.
+            echo "::notice::Release ${tag} already exists; updating its body."
+            gh release edit "${tag}" \
+              --title "${tag}" --notes-file release-body.md "${channel_flags[@]}"
+          else
+            gh release create "${tag}" --verify-tag \
+              --title "${tag}" --notes-file release-body.md "${channel_flags[@]}"
+          fi
+
+      - name: Report what happened
+        run: |
+          echo "## Release" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- version: \`${{ steps.version.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- tag: \`${{ steps.version.outputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- channel: \`${{ github.ref_name }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- prerelease: \`${{ steps.version.outputs.prerelease }}\`" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "${{ steps.tag.outputs.exists }}" == "true" && "${{ inputs.force }}" != "true" ]]; then
+            echo "- action: **skipped**, the version is already released" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- action: tag created and Release published" >> "$GITHUB_STEP_SUMMARY"
+          fi

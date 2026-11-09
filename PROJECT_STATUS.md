@@ -3055,6 +3055,68 @@ a device's entity ("A device's state entity is not guessed; link it in the
 integration wizard"), so correlation cannot begin until `state_entity_ids` are
 declared. That is §8, and no code change can substitute for it.
 
+### 7r.13 Home Assistant reported a commit hash, because no release ever existed
+
+The update entity read `installed_version: "dev"`, `latest_version: "eec273d"` —
+a raw commit SHA. The diagnosis was **not** that a version field was wrong. All
+five version fields said `0.2.0-dev9`, and every release had its matching GHCR
+image (`0.1.0`–`0.1.5`, `0.2.0-dev1`–`dev9`). The repository had **zero git tags
+and zero GitHub Releases**, which is what Home Assistant, HACS and the
+Marketplace actually resolve a version from. With none to resolve they fall back
+to the branch head and display its SHA. **The code was right; the metadata had
+never been created.**
+
+Measured before any change:
+
+| Evidence | Value |
+| --- | --- |
+| `gh api repos/asxzy/wattmosaic/tags` | `0` |
+| `gh api repos/asxzy/wattmosaic/releases` | `0` |
+| `update.wattmosaic` | `installed_version: "dev"`, `latest_version: "eec273d"` |
+| GHCR image tags | 14, `0.1.0`…`0.2.0-dev9`, each with an amd64 manifest |
+
+**Two real drifts found by the new gate on its first run**, which no existing
+check covered:
+
+| Field | Was | Why it mattered |
+| --- | --- | --- |
+| `pyproject.toml` `version` | `0.2.0-dev4` | Five releases stale. Shipped in every image, wrong every time. |
+| `engine/wattmosaic_engine/__init__.py` `__version__` | `0.1.3` | Three releases stale, and never read at runtime — which is why it drifted unnoticed. |
+
+`ENGINE_VERSION` in `api/facade.py` was **not** touched. It is deliberately
+frozen at `0.1.2` and is not a build identity (the OCI revision is); the
+release version is not that constant.
+
+**A false failure, fixed.** The App-image workflow runs on every push (no
+`paths:` filter can be trusted when history is replaced rather than appended),
+but its stale-tag guard compared the published commit SHA against `HEAD`. A
+commit that changed only `PROJECT_STATUS.md` (`9bd8cef`) therefore failed while
+building a byte-identical image — measured: `git diff 7d06fd1..9bd8cef` touches
+no runtime input. The guard now compares the paths the Dockerfile actually
+copies. A docs-only push is a notice; a real engine change without a version
+bump still fails.
+
+**What was built:** `tools/dev/check_release.py` (version agreement across five
+fields, notes coverage, tag↔tree match, channel kind) wired into `verify.py` as
+required gate `release_valid` and into CI as its own job; and
+`.github/workflows/release.yaml`, which tags and publishes on `main` and `dev`,
+refuses to publish a Release whose image is not pullable, and marks `-devN`
+releases `--prerelease --latest=false`.
+
+**What is deliberately not backfilled.** `0.1.0` is reachable only from
+`local-only-history`, and its commits track nine real household data files
+(`data/ha_environment_audit.json`, `data/entity_inventory.json`,
+`data/device_inventory.json`, …). `0.1.1` and `0.1.2` were never committed to
+this repository. Tagging `0.1.0` would publish a household inventory; tagging
+`0.1.1`/`0.1.2` would publish tags with no code behind them. Neither is a
+release. Audited: `origin/dev` (24 commits) and `origin/main` (1 commit) carry
+**zero** tracked live-data files, so the backfilled tags are safe.
+
+**Negative verification:** the gate exits 1 with all five fields printed when
+`pyproject.toml` is reverted to `0.2.0-dev4`, and returns to 0 when restored;
+`--channel main` rejects a `-dev` version; `--tag v0.1.5` against the `dev` tree
+rejects a tag that describes a different tree.
+
 ---
 
 ## 8. Needs user authorization

@@ -85,6 +85,7 @@ def gates() -> list[Gate]:
         Gate("simulation_tests", ["python", "-m", "pytest", "tests/simulation", "-q"]),
         Gate("end_to_end_tests", ["python", "-m", "pytest", "tests/end_to_end", "-q"]),
         Gate("manifest_valid", ["python", "tools/dev/check_manifests.py"]),
+        Gate("release_valid", ["python", "tools/dev/check_release.py"]),
         Gate("docs_fresh", ["python", "tools/dev/render_validation_docs.py", "--check"]),
         Gate("deployment_valid", ["bash", "scripts/validate_addon.sh", "--no-build"]),
         Gate("hacs_valid", ["python", "tools/dev/check_hacs.py"]),
