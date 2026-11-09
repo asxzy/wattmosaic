@@ -64,6 +64,21 @@ MIN_AGREEMENT = 0.8
 #: A row that responds to at least this share of an entity's transitions, when
 #: another row responds too, is not discriminating.  Both are withheld.
 AMBIGUITY_SHARE = 0.5
+#: Two fixtures on one row that toggle within this many seconds of each other
+#: are one physical event (a scene, a Zigbee group, a three-way switch), not two
+#: independent loads.  Both are withheld: each would otherwise be credited the
+#: *whole* step the other caused, which is the double-counting failure this
+#: module exists to prevent.
+#:
+#: 5 s is chosen from the installation: fixtures driven by one scene switch
+#: report within 2 s of each other (median 0.55 s), while fixtures that merely
+#: share a circuit are separated by minutes.  A gap that wide cannot be bridged
+#: by scheduling jitter, so the bound is not tuned to one household's latency.
+CO_TOGGLE_S = 5.0
+#: Share of two entities' transitions that must coincide before they are treated
+#: as one event.  Below this they are independent fixtures that happen to share a
+#: row, which is exactly the case this must keep working.
+CO_TOGGLE_SHARE = 0.8
 #: Samples older than this are ignored: circuit wiring changes and bulbs get
 #: replaced, so a very old correlation is not evidence about today.
 MAX_AGE_S = 60 * 60 * 24 * 14
@@ -432,8 +447,95 @@ def correlate(
         )
 
     return CorrelationReport(
-        candidates=tuple(candidates), unresolved=unresolved, skipped=skipped
+        candidates=_withhold_co_toggling(candidates, by_entity, unresolved),
+        unresolved=unresolved,
+        skipped=skipped,
     )
+
+
+def _withhold_co_toggling(
+    candidates: list[CtCandidate],
+    by_entity: Mapping[str, list[EntityObservation]],
+    unresolved: dict[str, str],
+) -> tuple[CtCandidate, ...]:
+    """Drop fixtures on one row that toggle together, because one step paid twice.
+
+    The per-entity guards above ask whether *this entity* singles out a row.  They
+    never ask the converse: whether *another entity* claims the same row from the
+    same physical event.  Two fixtures on one circuit driven by one scene (a
+    double-gang switch, a Zigbee group, two lights on one motion rule) each see
+    the row rise by the sum of both, so each independently "explains" the whole
+    step and each is credited the whole step.  Summed, the row is counted twice
+    and the error is not visible in any single candidate.
+
+    The discriminator is timing, not wattage: two loads that genuinely share a
+    circuit switch at unrelated instants, while one scene fires every member
+    within a couple of seconds.  So two candidates on the same row are withheld
+    only when at least :data:`CO_TOGGLE_SHARE` of one's transitions coincide with
+    one of the other's within :data:`CO_TOGGLE_S`.
+
+    Withholding both is deliberate.  Picking one would be a guess about which
+    fixture the step belongs to, and this module does not guess.  The pair stays
+    reportable as ``unresolved`` so the user can declare the wiring by hand.
+    """
+    if len(candidates) < 2:
+        return tuple(candidates)
+
+    def instants(entity_id: str) -> list[datetime]:
+        out: list[datetime] = []
+        previous: bool | None = None
+        for observation in sorted(by_entity.get(entity_id) or [], key=lambda o: o.at):
+            is_on = observation.was_on
+            if previous is not None and is_on != previous:
+                out.append(observation.at)
+            previous = is_on
+        return out
+
+    by_row: dict[str, list[CtCandidate]] = {}
+    for candidate in candidates:
+        by_row.setdefault(candidate.ct_id, []).append(candidate)
+
+    withheld: set[str] = set()
+    for ct_id, group in by_row.items():
+        if len(group) < 2:
+            continue
+        times = {c.entity_id: instants(c.entity_id) for c in group}
+        for index, first in enumerate(group):
+            for second in group[index + 1 :]:
+                a = times.get(first.entity_id) or []
+                b = times.get(second.entity_id) or []
+                if not a or not b:
+                    continue
+                # Each entity's own share of transitions that have a partner in
+                # the other list, then the larger of the two.  Dividing a count
+                # taken from one list by the length of the other would be
+                # meaningless, and a scene that fires only a subset must still
+                # trip the guard when that subset is all of the quieter side.
+                def matched(source: list[datetime], target: list[datetime]) -> float:
+                    if not source:
+                        return 0.0
+                    hits = sum(
+                        1
+                        for at in source
+                        if any(
+                            abs((at - other).total_seconds()) <= CO_TOGGLE_S
+                            for other in target
+                        )
+                    )
+                    return hits / len(source)
+
+                share = max(matched(a, b), matched(b, a))
+                if share < CO_TOGGLE_SHARE:
+                    continue
+                for entity_id in (first.entity_id, second.entity_id):
+                    withheld.add(entity_id)
+                    unresolved[entity_id] = (
+                        f"co_toggles_with_another_fixture_on_{ct_id}"
+                    )
+
+    if not withheld:
+        return tuple(candidates)
+    return tuple(c for c in candidates if c.entity_id not in withheld)
 
 
 def observations_from_history(
@@ -681,6 +783,8 @@ def _parse_stamp(value: Any) -> datetime | None:
 __all__ = [
     "AMBIGUITY_SHARE",
     "CANDIDATE_DOMAINS",
+    "CO_TOGGLE_S",
+    "CO_TOGGLE_SHARE",
     "CorrelationReport",
     "CtCandidate",
     "EntityObservation",

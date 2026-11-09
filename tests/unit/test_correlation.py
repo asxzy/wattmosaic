@@ -138,6 +138,101 @@ def test_a_single_ct_load_needs_no_siblings_to_be_placed() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Refusal case 6: one step paid twice -- two fixtures, one physical event
+# --------------------------------------------------------------------------- #
+
+
+def _co_toggling_pair(
+    *,
+    offset_s: float,
+    watts_each: float,
+    cycles: int = 3,
+) -> list[EntityObservation]:
+    """Two fixtures that a single scene switches on and off together.
+
+    The row rises by ``2 * watts_each`` because both loads are on the same
+    circuit, so each fixture on its own "explains" the whole step.
+    """
+    observations = []
+    for index in range(cycles):
+        at = T0 + timedelta(minutes=10 * index)
+        off_row = {"ct1": BASELINE_W}
+        on_row = {"ct1": BASELINE_W + 2 * watts_each}
+        for position, name in enumerate(
+            ("light.gym_pot_lights", "light.gym_sauna_lights")
+        ):
+            # Only the second fixture is offset, so ``offset_s`` is the gap
+            # between the two toggles and not a delay of both.
+            shifted = at + timedelta(seconds=offset_s if position else 0.0)
+            observations += [
+                EntityObservation(name, shifted, True, off_row, on_row),
+                EntityObservation(
+                    name,
+                    shifted + timedelta(minutes=1),
+                    False,
+                    on_row,
+                    off_row,
+                ),
+            ]
+    return observations
+
+
+def test_fixtures_switched_by_one_scene_are_withheld_not_counted_twice() -> None:
+    """Two lights on one row that always toggle together are one event.
+
+    Each sees the row rise by both loads, so each would be credited the whole
+    step and the row would be counted twice.  Neither is placed; both are
+    reported so the user can declare the wiring by hand.
+    """
+    report = _correlate(_co_toggling_pair(offset_s=0.5, watts_each=40.0))
+
+    assert report.candidates == ()
+    assert report.unresolved["light.gym_pot_lights"].startswith("co_toggles_with_another_fixture_on_ct1")
+    assert report.unresolved["light.gym_sauna_lights"].startswith("co_toggles_with_another_fixture_on_ct1")
+
+
+def test_fixtures_sharing_a_row_but_switching_independently_are_both_placed() -> None:
+    """The guard is about simultaneity, not about sharing a circuit.
+
+    Bar pots and laundry lights on CT1 switch minutes apart, so each step is
+    that fixture's own and both placements are correct.  This is the case the
+    guard must not break.
+    """
+    observations = []
+    for index in range(3):
+        observations += _cycle(
+            "light.basement_basement_bar_pot_lights", watts=BAR_POTS_W, minute=10 * index
+        )
+        observations += _cycle(
+            "light.basement_laundry_basement_laundry_main_lights",
+            watts=LAUNDRY_W,
+            minute=10 * index + 3,
+        )
+
+    report = _correlate(observations)
+    assert len(report.candidates) == 2
+    assert {c.entity_id for c in report.candidates} == {
+        "light.basement_basement_bar_pot_lights",
+        "light.basement_laundry_basement_laundry_main_lights",
+    }
+
+
+def test_a_scene_offset_beyond_the_co_toggle_window_is_independent() -> None:
+    """The bound is explicit: outside :data:`CO_TOGGLE_S` the two are separate.
+
+    Without this the guard could not be distinguished from "never place two
+    fixtures on one row", which would break the case above.
+    """
+    from wattmosaic_engine.ingestion.correlation import CO_TOGGLE_S
+
+    report = _correlate(
+        _co_toggling_pair(offset_s=CO_TOGGLE_S + 30.0, watts_each=40.0)
+    )
+
+    assert len(report.candidates) == 2
+
+
+# --------------------------------------------------------------------------- #
 # Refusal case 1: one coincidence is not evidence
 # --------------------------------------------------------------------------- #
 
