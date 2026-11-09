@@ -3201,6 +3201,56 @@ inputs: correcting the drift changes the image, so mutating the published
 no added safety (`test_manifest_version_matches_const` already proves the copies
 agree); it now asserts the shape.
 
+### 7r.13d The stale-image guard had been failing open, and said so in its own log
+
+The step that refuses to republish an already-used version tag logged:
+
+```
+published revision: <none>
+this commit:        f680db3476428f2d23e372983a12c1ea7ee7b556
+##[notice]App image 0.2.1-dev.1 is already published from this commit; nothing to publish.
+```
+
+`<none>` and "published from this commit" cannot both be true. The image was
+built from `6c930d8`; the push was `f680db3`. The guard read nothing and then
+**failed open** — its `[[ -z "${published}" ]]` branch took the success path.
+
+Cause, measured against the live registry: `docker buildx imagetools inspect
+--format '{{json .Image}}'` returns a **platform-keyed** object on a multi-arch
+manifest list, not a flat image object:
+
+```json
+{"linux/amd64": {"config": {"Labels": {"...revision": "6c930d8..."}}},
+ "linux/arm64": {"config": {"Labels": {"...revision": "6c930d8..."}}}}
+```
+
+The old one-liner read `.config.Labels` **at the top level**, which is absent, so
+it printed `''`. Reproduced directly: the old accessor returns `''` against the
+real `0.2.1-dev.1` manifest. It had been silently disabled since the image became
+multi-arch.
+
+A check that fails open is worse than no check, because it asserts the tree is
+fine. Fixed by moving the extraction to `tools/dev/image_revision.py` (testable
+offline against a recorded shape, 13 tests) and making the workflow treat an
+unreadable revision as an error it refuses to guess around:
+
+- both response shapes are handled (flat for one platform, keyed for many);
+- a manifest list whose architectures disagree on the revision is rejected
+  (exit 1) instead of averaging;
+- malformed JSON and an unexpected shape are rejected (exit 2);
+- an empty revision is returned as empty, and the caller errors rather than
+  treating "cannot tell" as "matches".
+
+The checkout is now `fetch-depth: 0`. The guard diffs against the commit the
+image was built from, which is usually not the parent; on a shallow clone
+`git diff "${published}"` fails and the guard would report a stale tag on a push
+that changed nothing — the exact false alarm it exists to avoid.
+
+Negative verification: the new tests fail against the old accessor (pinned by
+`test_the_top_level_label_read_that_failed_is_empty`), and the corrected reader
+returns `6c930d8` from the real published manifest while the old one returns
+`''`.
+
 ---
 
 ## 8. Needs user authorization
