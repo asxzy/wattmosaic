@@ -12,6 +12,7 @@ negative tests prove the rule fires rather than merely existing.
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import sys
 from pathlib import Path
@@ -57,21 +58,25 @@ def _write_tree(root: Path, version: str, notes_version: str | None = None) -> N
     component = root / "custom_components" / "wattmosaic"
     component.mkdir(parents=True, exist_ok=True)
     (component / "manifest.json").write_text(
-        '{\n  "domain": "wattmosaic",\n  "version": "%s"\n}\n' % version
+        json.dumps({"domain": "wattmosaic", "version": version}, indent=2) + "\n"
     )
-    (component / "const.py").write_text('VERSION = "%s"\nCONTRACT_VERSION = "1.2.0"\n' % version)
+    (component / "const.py").write_text(
+        f'VERSION = "{version}"\nCONTRACT_VERSION = "1.2.0"\n'
+    )
     addon = root / "addon"
     addon.mkdir(exist_ok=True)
-    (addon / "config.yaml").write_text('name: "WattMosaic Engine"\nversion: "%s"\n' % version)
+    (addon / "config.yaml").write_text(
+        f'name: "WattMosaic Engine"\nversion: "{version}"\n'
+    )
     (root / "pyproject.toml").write_text(
-        '[project]\nname = "wattmosaic-engine"\nversion = "%s"\n' % version
+        f'[project]\nname = "wattmosaic-engine"\nversion = "{version}"\n'
     )
     engine = root / "engine" / "wattmosaic_engine"
     engine.mkdir(parents=True, exist_ok=True)
-    (engine / "__init__.py").write_text('__version__ = "%s"\n' % version)
+    (engine / "__init__.py").write_text(f'__version__ = "{version}"\n')
     documented = notes_version if notes_version is not None else version
     (root / "RELEASE_NOTES.md").write_text(
-        "# Release Notes\n\n## v%s — 2026-11-09\n\nSomething changed.\n" % documented
+        f"# Release Notes\n\n## v{documented} — 2026-11-09\n\nSomething changed.\n"
     )
 
 

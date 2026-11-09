@@ -80,6 +80,10 @@ def gates() -> list[Gate]:
     return [
         Gate("contract_schema_sync", ["python", "tools/dev/export_schemas.py"]),
         Gate("secret_scan", ["python", "tools/dev/check_secrets.py"]),
+        # CI lints before it tests.  Without this gate the harness could report
+        # "all required gates pass" for a tree CI then rejects on style, which
+        # is exactly what happened to the release-contract test file.
+        Gate("lint", ["ruff", "check", "engine", "tools", "tests"]),
         Gate("unit_tests", ["python", "-m", "pytest", "tests/unit", "-q"]),
         Gate("integration_tests", ["python", "-m", "pytest", "tests/integration", "-q"]),
         Gate("simulation_tests", ["python", "-m", "pytest", "tests/simulation", "-q"]),

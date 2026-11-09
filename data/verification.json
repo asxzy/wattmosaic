@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-09T20:06:56.085757+00:00",
+  "generated_at": "2026-11-09T20:16:56.610010+00:00",
   "gates": [
     {
       "name": "contract_schema_sync",
@@ -11,7 +11,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 0.17,
+      "duration_s": 0.2,
       "output_tail": "{\n  \"contract_version\": \"1.1.0\",\n  \"schemas\": 19\n}",
       "notes": "",
       "skipped_reason": ""
@@ -26,8 +26,26 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 0.33,
+      "duration_s": 0.34,
       "output_tail": "secret scan: clean",
+      "notes": "",
+      "skipped_reason": ""
+    },
+    {
+      "name": "lint",
+      "command": [
+        "ruff",
+        "check",
+        "engine",
+        "tools",
+        "tests"
+      ],
+      "required": true,
+      "timeout": 900,
+      "status": "PASS",
+      "returncode": 0,
+      "duration_s": 0.06,
+      "output_tail": "All checks passed!",
       "notes": "",
       "skipped_reason": ""
     },
@@ -44,7 +62,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 8.16,
+      "duration_s": 8.24,
       "output_tail": "........................................................................ [ 11%]\n........................................................................ [ 22%]\n........................................................................ [ 33%]\n........................................................................ [ 45%]\n........................................................................ [ 56%]\n........................................................................ [ 67%]\n........................................................................ [ 78%]\n........................................................................ [ 90%]\n...............................................................          [100%]",
       "notes": "",
       "skipped_reason": ""
@@ -62,7 +80,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 2.38,
+      "duration_s": 2.56,
       "output_tail": "........................................................................ [ 17%]\n........................................................................ [ 34%]\n........................................................................ [ 51%]\n........................................................................ [ 68%]\n........................................................................ [ 86%]\n..........................................................               [100%]",
       "notes": "",
       "skipped_reason": ""
@@ -80,7 +98,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 12.92,
+      "duration_s": 13.14,
       "output_tail": "...........................................................              [100%]",
       "notes": "",
       "skipped_reason": ""
@@ -98,7 +116,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 45.22,
+      "duration_s": 45.3,
       "output_tail": "........................................................                 [100%]",
       "notes": "",
       "skipped_reason": ""
@@ -113,7 +131,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 0.06,
+      "duration_s": 0.08,
       "output_tail": "manifest validation: ok",
       "notes": "",
       "skipped_reason": ""
@@ -128,7 +146,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 0.05,
+      "duration_s": 0.06,
       "output_tail": "version: 0.1.6\nrelease checks: clean",
       "notes": "",
       "skipped_reason": ""
@@ -144,7 +162,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 0.43,
+      "duration_s": 0.47,
       "output_tail": "{\"status\": \"up_to_date\", \"files\": 4}",
       "notes": "",
       "skipped_reason": ""
@@ -160,7 +178,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 4.24,
+      "duration_s": 2.4,
       "output_tail": "PASS  run.sh normalises log_level to upper case\nPASS  run.sh redacts tokens in --print-config\nPASS  SUPERVISOR_TOKEN fallback switches ha_url to the Core proxy\nPASS  run.sh rejects a non-numeric stale_after_s\nPASS  run.sh fails closed when no HA token is available\nPASS  healthcheck.py fails cleanly when the gateway is down\n\n== Add-on staging (build context) ==\nPASS  package_addon.sh stages a self-contained app\nPASS  staged config.yaml\nPASS  staged Dockerfile\nPASS  staged run.sh\nPASS  staged gateway.py\nPASS  staged healthcheck.py\nPASS  staged constraints.txt\nPASS  staged pyproject.toml\nPASS  staged README.md\nPASS  staged engine/wattmosaic_engine/main.py\n\n== Docker build ==\nSKIP  image build (--no-build)\n\n== Summary ==\npassed: 61  failed: 0  skipped: 3\nall checks passed",
       "notes": "",
       "skipped_reason": ""
@@ -192,14 +210,14 @@
       "timeout": 900,
       "status": "FAIL",
       "returncode": 2,
-      "duration_s": 0.29,
+      "duration_s": 0.34,
       "output_tail": "{\n  \"ok\": false,\n  \"problems\": [\n    \"HA token is not configured (HA_TOKEN)\"\n  ],\n  \"config\": {\n    \"ha_url\": \"<redacted-url>\",\n    \"ha_token\": \"\",\n    \"api_host\": \"<redacted-ip>\",\n    \"api_port\": 8787,\n    \"api_token\": \"\",\n    \"database_path\": \"data/wattmosaic.db\",\n    \"learning_enabled\": true,\n    \"stale_after_s\": 120.0,\n    \"inference_interval_s\": 5.0,\n    \"log_level\": \"INFO\"\n  },\n  \"contract_version\": \"1.1.0\",\n  \"engine_version\": \"0.1.2\"\n}",
       "notes": "requires HA_TOKEN in environment",
       "skipped_reason": ""
     }
   ],
-  "required_total": 11,
-  "required_passed": 11,
+  "required_total": 12,
+  "required_passed": 12,
   "required_failed": [],
   "required_skipped": [],
   "all_required_pass": true
