@@ -284,9 +284,53 @@ def test_discovery_does_not_fuse_three_separate_lighting_circuits() -> None:
         "three lighting circuits were treated as double-pole legs: "
         f"{[(c.ct_id, c.paired_ct_id) for c in lights]}"
     )
-    assert all(c.ct_type == CTType.DEDICATED_DEVICE for c in lights)
+    # A single CT measures one conductor, not one appliance.  ``dedicated_device``
+    # would assert exactly one device on the row, which discovery cannot know:
+    # three such rows in the reference installation each resolved several
+    # independent fixtures.  ``branch`` is the claim the evidence supports, and
+    # it is also what lets auto-placement consider the row at all.
+    assert all(c.ct_type == CTType.BRANCH for c in lights)
     # Every lighting circuit keeps its own leg in the ct id, so ids stay distinct.
     assert len({c.ct_id for c in lights}) == 3
+
+
+def test_a_single_channel_circuit_is_not_declared_a_private_measurement() -> None:
+    """The misclassification that hid 14 placeable fixtures.
+
+    ``dedicated_device`` means "exactly one logical device".  Discovery's only
+    evidence against that is "this channel was not part of a ct1/ct2 pair", which
+    is equally true of every one-CT lighting circuit.  On the reference install
+    ``lights_ct1`` was declared dedicated while resolving **seven** independent
+    fixtures, and ``lights_ct2`` peaked at 221% of what its three claimants
+    summed to -- proof the row carried loads nobody had declared.
+
+    The consequence was not cosmetic: ``plan_placements`` refuses a
+    ``dedicated_device`` row as another device's measurement, so every accepted
+    candidate was refused and auto-placement could never create anything.
+    """
+    topology = _discover()
+    singles = [
+        c
+        for c in topology.channels
+        if c.ct_type not in (CTType.MAIN,)
+        and c.paired_ct_id is None
+        and "circuit" not in c.entity_id
+    ]
+    assert singles, "fixture should contain a single-channel non-pair load"
+    for channel in singles:
+        assert CTType(channel.ct_type) is CTType.BRANCH, (
+            f"{channel.ct_id} is a shared circuit but was declared "
+            f"{channel.ct_type}"
+        )
+        assert channel.device_id is None, (
+            "a shared branch row must not name one device as its owner"
+        )
+    owners = {d.device_id: d for d in topology.devices}
+    for device in owners.values():
+        assert not device.dedicated_ct_ids or all(
+            ct in {c.ct_id for c in topology.channels if CTType(c.ct_type) is CTType.DEDICATED_DEVICE}
+            for ct in device.dedicated_ct_ids
+        )
 
 
 def test_discovery_ignores_an_isolated_smart_plug() -> None:

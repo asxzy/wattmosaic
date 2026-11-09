@@ -1,6 +1,21 @@
 {
-  "generated_at": "2026-11-09T07:33:26.601864+00:00",
+  "generated_at": "2026-11-09T16:54:52.068263+00:00",
   "gates": [
+    {
+      "name": "contract_schema_sync",
+      "command": [
+        "python",
+        "tools/dev/export_schemas.py"
+      ],
+      "required": true,
+      "timeout": 900,
+      "status": "PASS",
+      "returncode": 0,
+      "duration_s": 0.17,
+      "output_tail": "{\n  \"contract_version\": \"1.2.0\",\n  \"schemas\": 19\n}",
+      "notes": "",
+      "skipped_reason": ""
+    },
     {
       "name": "secret_scan",
       "command": [
@@ -11,8 +26,80 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 0.36,
+      "duration_s": 0.4,
       "output_tail": "secret scan: clean",
+      "notes": "",
+      "skipped_reason": ""
+    },
+    {
+      "name": "unit_tests",
+      "command": [
+        "python",
+        "-m",
+        "pytest",
+        "tests/unit",
+        "-q"
+      ],
+      "required": true,
+      "timeout": 900,
+      "status": "PASS",
+      "returncode": 0,
+      "duration_s": 8.77,
+      "output_tail": "........................................................................ [  8%]\n........................................................................ [ 17%]\n........................................................................ [ 26%]\n........................................................................ [ 34%]\n........................................................................ [ 43%]\n........................................................................ [ 52%]\n........................................................................ [ 60%]\n........................................................................ [ 69%]\n........................................................................ [ 78%]\n........................................................................ [ 86%]\n........................................................................ [ 95%]\n.....................................                                    [100%]",
+      "notes": "",
+      "skipped_reason": ""
+    },
+    {
+      "name": "integration_tests",
+      "command": [
+        "python",
+        "-m",
+        "pytest",
+        "tests/integration",
+        "-q"
+      ],
+      "required": true,
+      "timeout": 900,
+      "status": "PASS",
+      "returncode": 0,
+      "duration_s": 2.36,
+      "output_tail": "........................................................................ [ 13%]\n........................................................................ [ 27%]\n........................................................................ [ 40%]\n........................................................................ [ 54%]\n........................................................................ [ 67%]\n........................................................................ [ 81%]\n........................................................................ [ 94%]\n............................                                             [100%]",
+      "notes": "",
+      "skipped_reason": ""
+    },
+    {
+      "name": "simulation_tests",
+      "command": [
+        "python",
+        "-m",
+        "pytest",
+        "tests/simulation",
+        "-q"
+      ],
+      "required": true,
+      "timeout": 900,
+      "status": "PASS",
+      "returncode": 0,
+      "duration_s": 13.07,
+      "output_tail": "...........................................................              [100%]",
+      "notes": "",
+      "skipped_reason": ""
+    },
+    {
+      "name": "end_to_end_tests",
+      "command": [
+        "python",
+        "-m",
+        "pytest",
+        "tests/end_to_end",
+        "-q"
+      ],
+      "required": true,
+      "timeout": 900,
+      "status": "PASS",
+      "returncode": 0,
+      "duration_s": 48.67,
+      "output_tail": "........................................................                 [100%]",
       "notes": "",
       "skipped_reason": ""
     },
@@ -26,8 +113,24 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 0.06,
+      "duration_s": 0.07,
       "output_tail": "manifest validation: ok",
+      "notes": "",
+      "skipped_reason": ""
+    },
+    {
+      "name": "docs_fresh",
+      "command": [
+        "python",
+        "tools/dev/render_validation_docs.py",
+        "--check"
+      ],
+      "required": true,
+      "timeout": 900,
+      "status": "PASS",
+      "returncode": 0,
+      "duration_s": 0.44,
+      "output_tail": "{\"status\": \"up_to_date\", \"files\": 4}",
       "notes": "",
       "skipped_reason": ""
     },
@@ -42,7 +145,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 2.18,
+      "duration_s": 2.15,
       "output_tail": "PASS  run.sh normalises log_level to upper case\nPASS  run.sh redacts tokens in --print-config\nPASS  SUPERVISOR_TOKEN fallback switches ha_url to the Core proxy\nPASS  run.sh rejects a non-numeric stale_after_s\nPASS  run.sh fails closed when no HA token is available\nPASS  healthcheck.py fails cleanly when the gateway is down\n\n== Add-on staging (build context) ==\nPASS  package_addon.sh stages a self-contained app\nPASS  staged config.yaml\nPASS  staged Dockerfile\nPASS  staged run.sh\nPASS  staged gateway.py\nPASS  staged healthcheck.py\nPASS  staged constraints.txt\nPASS  staged pyproject.toml\nPASS  staged README.md\nPASS  staged engine/wattmosaic_engine/main.py\n\n== Docker build ==\nSKIP  image build (--no-build)\n\n== Summary ==\npassed: 61  failed: 0  skipped: 3\nall checks passed",
       "notes": "",
       "skipped_reason": ""
@@ -61,10 +164,27 @@
       "output_tail": "hacs validation notes:\n  - brand/icon@2x.png present (HiDPI icon)\nhacs validation: ok",
       "notes": "",
       "skipped_reason": ""
+    },
+    {
+      "name": "config_valid",
+      "command": [
+        "python",
+        "-m",
+        "wattmosaic_engine.main",
+        "--check-config"
+      ],
+      "required": false,
+      "timeout": 900,
+      "status": "PASS",
+      "returncode": 0,
+      "duration_s": 0.6,
+      "output_tail": "{\n  \"ok\": true,\n  \"problems\": [],\n  \"config\": {\n    \"ha_url\": \"<redacted-url>\",\n    \"ha_token\": \"***\",\n    \"api_host\": \"<redacted-ip>\",\n    \"api_port\": 8787,\n    \"api_token\": \"***\",\n    \"database_path\": \"data/wattmosaic.db\",\n    \"learning_enabled\": true,\n    \"auto_placement\": false,\n    \"stale_after_s\": 120.0,\n    \"inference_interval_s\": 5.0,\n    \"log_level\": \"INFO\"\n  },\n  \"contract_version\": \"1.2.0\",\n  \"engine_version\": \"0.1.2\"\n}",
+      "notes": "requires HA_TOKEN in environment",
+      "skipped_reason": ""
     }
   ],
-  "required_total": 4,
-  "required_passed": 4,
+  "required_total": 10,
+  "required_passed": 10,
   "required_failed": [],
   "required_skipped": [],
   "all_required_pass": true

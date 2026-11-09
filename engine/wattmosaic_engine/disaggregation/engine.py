@@ -554,6 +554,7 @@ class DisaggregationEngine:
         )
         x_fit = system["x"]
         at_upper = system.get("at_upper_bound", set())
+        declared_ceiling_hit = system.get("declared_ceiling_hit", set())
         ident: Identifiability = system["identifiability"]
         diagnostics["solver"] = system["solve_result"].as_dict()
         diagnostics["identifiability"] = ident.as_dict()
@@ -595,6 +596,7 @@ class DisaggregationEngine:
                     identifiable=did not in ident.unidentifiable,
                     ambiguous=did in ambiguous_devices,
                     fit_at_ceiling=did in at_upper,
+                    declared_ceiling_hit=did in declared_ceiling_hit,
                     state_overrides=state_overrides.get(did),
                     config=configs.get(did),
                 )
@@ -727,10 +729,6 @@ class DisaggregationEngine:
                 mask[i] = False
                 if cid not in excluded:
                     excluded[cid] = "direct_only_row"
-        active_mask = mask & row_has_support
-        if not np.any(active_mask):
-            diagnostics["warnings"].append("no_usable_measurement_rows")
-        active_idx = np.flatnonzero(active_mask)
 
         upper: list[float | None] = []
         prior: list[float] = []
@@ -797,6 +795,41 @@ class DisaggregationEngine:
             else:
                 upper.append(float(view.upper_bound_w))
 
+        # A shared row carries loads nobody declared, and the solver has no way
+        # to tell that surplus from a claimant's own draw: whichever column has
+        # the widest bound absorbs it.  Measured on the reference installation,
+        # ``lights_ct2`` peaked at 1 036 W while its three fixtures declared
+        # 243.6 / 112.3 / 112.7 W; with one fixture ON and its siblings
+        # positively OFF the whole row was credited to that one lamp -- 4.25x its
+        # declared draw, graded ``tier_3_measured``.
+        #
+        # A *declared* wattage is the one bound that can prevent this.  Like a
+        # state pin, it is user evidence rather than a learnt prior, so it is
+        # never widened by the relaxation pass below.  On a solo row the CT is
+        # still a direct observation of the device and the measurement wins.
+        declared_bound: list[str] = []
+        for k, did in enumerate(sub_ids):
+            cfg = configs.get(did)
+            if cfg is None or cfg.config_ceiling_w is None:
+                continue
+            j = solve_cols[k]
+            if _is_solo_row(matrix, j):
+                continue
+            if did in state_pinned:
+                continue
+            # The declaration wins over a learnt model's bound: both are
+            # evidence, but only the model's is explicitly revisable, and the
+            # user's stated wattage is the stronger claim.
+            upper[k] = float(cfg.config_ceiling_w)
+            declared_bound.append(did)
+        if declared_bound:
+            diagnostics["declared_ceiling_applied"] = sorted(declared_bound)
+
+        active_mask = mask & row_has_support
+        if not np.any(active_mask):
+            diagnostics["warnings"].append("no_usable_measurement_rows")
+        active_idx = np.flatnonzero(active_mask)
+
         # A slack has no model, but it is still bounded by physics: because
         # every device power is >= 0, the unknown part of a main row cannot
         # exceed that row's measured value.  A finite bound also keeps the
@@ -838,8 +871,17 @@ class DisaggregationEngine:
             # solver's least-norm tie-break otherwise invents a share for an
             # unobserved device.  Relaxing it would reintroduce exactly the
             # fabricated attribution the pin was added to prevent.
+            #
+            # A *declared* ceiling is treated the same way, for the same reason:
+            # the user said what the fixture draws, so a shared row reading more
+            # than that is evidence of undeclared load on the circuit, not
+            # evidence that the declaration was wrong.
             if solve_result.at_upper_bound:
-                relaxable = set(solve_result.at_upper_bound) - set(state_pinned)
+                relaxable = (
+                    set(solve_result.at_upper_bound)
+                    - set(state_pinned)
+                    - set(declared_bound)
+                )
                 relaxed = [
                     None if did in relaxable else u
                     for did, u in zip(all_ids, upper, strict=False)
@@ -910,6 +952,40 @@ class DisaggregationEngine:
         x = x_direct.copy()
         for k, j in enumerate(solve_cols):
             x[j] = float(solve_result.x[k]) if k < len(solve_result.x) else 0.0
+
+        # A declared ceiling "binds" only when it is both active *and* the row
+        # still carries power the solve could not place.  A lamp that genuinely
+        # draws exactly its declared wattage also sits at its upper bound, and
+        # that is a measurement, not a cap.  The difference is the residual: with
+        # unexplained power on the row, the number the solver returned is the
+        # declaration; with none, the row really did measure that much.
+        declared_ceiling_hit: set[str] = set()
+        if declared_bound and active_idx.size:
+            x_dev = np.array(
+                [float(solve_result.x[k]) for k in range(len(solve_result.x))],
+                dtype=float,
+            )
+            predicted = A_aug @ x_dev
+            for did in declared_bound:
+                k = sub_ids.index(did)
+                if did not in solve_result.at_upper_bound:
+                    continue
+                for row_index in active_idx:
+                    if abs(float(A_sub[row_index, k])) <= 0.0:
+                        continue
+                    leftover = float(y_sub[row_index] - predicted[row_index])
+                    tolerance = max(
+                        3.0,
+                        3.0 * float(matrix.row_sigma[row_index])
+                        if row_index < len(matrix.row_sigma)
+                        else 3.0,
+                    )
+                    if leftover > tolerance:
+                        declared_ceiling_hit.add(did)
+                        break
+        if declared_ceiling_hit:
+            diagnostics["declared_ceiling_hit"] = sorted(declared_ceiling_hit)
+
         return {
             "x": {d: float(x[idx[d]]) for d in device_ids},
             "index": idx,
@@ -918,6 +994,11 @@ class DisaggregationEngine:
             "active_rows": [matrix.row_channel_ids[i] for i in active_idx],
             "state_pinned": state_pinned,
             "at_upper_bound": set(solve_result.at_upper_bound),
+            # Devices whose value is the *declared* wattage rather than an
+            # observation: the row carried power beyond what the declaration
+            # allows, so the surplus is undeclared load.  Callers must not grade
+            # such a value as a measurement.
+            "declared_ceiling_hit": declared_ceiling_hit,
         }
 
     # ------------------------------------------------------------------ #
@@ -982,6 +1063,7 @@ class DisaggregationEngine:
         identifiable: bool,
         ambiguous: bool,
         fit_at_ceiling: bool = False,
+        declared_ceiling_hit: bool = False,
         state_overrides: Mapping[str, str] | None = None,
         config: EffectiveConfig | None = None,
     ) -> InferenceResult:
@@ -1229,7 +1311,21 @@ class DisaggregationEngine:
         shared_attribution_blocked = config is not None and config.shared_unmodelled
         if shared_attribution_blocked:
             explanation.append("shared_circuit_not_individually_measured")
-        if identifiable and not stale and fit > 0.0 and not shared_attribution_blocked:
+        # A fit pinned at the device's *declared* wattage is not a measurement of
+        # the device.  The solver reached the user's own number because the row
+        # carried more power than the declaration allows, so the surplus is
+        # undeclared load and the honest answer is the declaration itself, graded
+        # as a configured prior -- never "a CT measured it".
+        declared_bound_blocked = declared_ceiling_hit and config is not None
+        if declared_bound_blocked:
+            explanation.append("declared_wattage_bounds_row_attribution")
+        if (
+            identifiable
+            and not stale
+            and fit > 0.0
+            and not shared_attribution_blocked
+            and not declared_bound_blocked
+        ):
             if _is_off(state, state_overrides) and (fit_at_ceiling or fit > off_tolerance):
                 # The circuit carries power, but this device says OFF.  Do not
                 # invent an attribution; preserve it as unknown residual.

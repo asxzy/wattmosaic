@@ -2857,6 +2857,107 @@ remains the only way to verify this layer.
 
 ---
 
+### 7r.10 Discovery called a circuit an appliance, and the engine paid a whole row to one fixture
+
+Two defects, in sequence: the first enabled auto-placement, the second was
+exposed by it. Both are engine code, so both ship in the App image.
+
+**Discovery asserted a fact only a person can supply.** `discovery.py` emitted
+`CTType.DEDICATED_DEVICE` for every single-channel load. The only discriminator
+in that branch was "this channel was not part of a `ct1`/`ct2` leg pair", which
+every one-CT lighting circuit passes. On this installation the three rows
+classified that way resolved **7, 3 and 2** independent fixtures, and one peaked
+at 221 % of what its claimants summed to. The classification was not evidence —
+it was an assumption wearing the same clothes as a user declaration, which is
+exactly what the standing rule forbids.
+
+It was also the sole blocker for auto-placement, because `plan_placements`
+refuses a `dedicated_device` row as "already another device's measurement". The
+`dev5` run accepted **0 of 15** correlated fixtures; all 15 were refused for this
+reason and nothing else.
+
+The fallback now emits `CTType.BRANCH`: one conductor, zero or more devices. The
+device is still emitted (topology validity, immediate visibility) but owns the
+row via `branch_ct_ids`, carries `shared_circuit: True`, and the channel carries
+no `device_id`. `dedicated_device` now comes only from a declaration. Verified
+against the real registry: `branch: 32, main: 6`, 28 devices, and
+`plan_placements` gives **accepted 15 / refused 0**.
+
+**The corrected topology credited a whole row to one named lamp.** With the five
+authorised rows as branch circuits and the 15 placements applied, `lights_ct2` at
+its observed 1 036 W peak resolved to the one ON fixture at **1036.00 W** — its
+declared draw is 243.6 W, and its two siblings were positively OFF. It was graded
+`source=inferred`, `tier_3_measured` ("Measured — CT row or corroborated share"),
+and the reconciliation reported `residual = −1057.0 W`. The same shape appeared
+on every authorised row:
+
+| Row | Peak W | Claimants' declared W | Credited to one fixture |
+| --- | --- | --- | --- |
+| `lights_ct1` | 331 | 502 | 66 % (within claims) |
+| `lights_ct2` | 1 036 | 469 | **221 %** |
+| `lights_ct3` | 153 | 61 | **250 %** |
+| `soffit_plug` | 198 | 49 | **402 %** |
+| `upper_floor_hrv` | 322 | 149 | **217 %** |
+
+This was pre-existing, not introduced by the reclassification: the identical
+solve happens on a `dedicated_device` row, where it is correct by construction.
+What the reclassification changed is that a **branch** row could now do it to a
+**named** fixture. That is the fabrication the standing rules forbid, and it
+would have shipped as a plausible permanent number.
+
+Two candidate fixes were measured and rejected before the third was adopted:
+
+* *Add a slack to every branch row.* Three 156 W lamps on a 468 W row collapsed
+  to 117 W each and the solver reported an infeasible problem. The row is
+  genuinely separable while the reading is within what the claimants could draw.
+* *Exclude a row whose reading exceeds the sum of its claimants' ceilings.* This
+  works, and was implemented and measured — but only when every claimant states
+  a wattage. Discovery's structural placeholder devices (`dev_<ct_id>`, one per
+  circuit, no configuration) have none, so the rule never fired on precisely the
+  rows that needed it.
+
+**Adopted: a declared wattage is a non-relaxable upper bound.** `EffectiveConfig`
+already had `config_ceiling_w` (`expected_on_w + tolerance`), defined since 0.1.5
+and never read. It is now applied as the solver upper bound for every configured
+claimant that is not alone on its row and not state-pinned, and the
+model-relaxation pass excludes it — like a state pin, a declaration is user
+evidence, not a revisable prior. A solo row is exempt: there the CT is a direct
+observation and the measurement wins.
+
+The grading had to change with it. A value clamped at the declaration and then
+reported `tier_3_measured` is the same lie in a quieter form: nothing measured
+it, the row read *more* than the declaration allows, which is why the cap was
+applied. When the bound binds **and leaves power unexplained**, the result is now
+`configured_prior` / `tier_1_modelled` with
+`declared_wattage_bounds_row_attribution`. Reaching the ceiling with the row fully
+explained is a real measurement and stays `tier_3_measured` — a 150 W lamp on a
+165 W row is measured, not capped.
+
+Verified on the real corrected topology: all five peak cases now report
+`configured_prior` / `tier_1_modelled` at the declared step (243.61 / 49.21 /
+74.85 / 20.02 / 139.29 W) instead of absorbing the row. Negative verification:
+disabling the downgrade made the grading test fail (`inferred` instead of
+`configured_prior`); removing the ceiling restored the 1 036 W credit to the
+243.6 W lamp.
+
+**Not changed.** The stored configuration of the confirmed installation still
+declares 26 `dedicated_device` rows. Rewriting a confirmed topology is a
+deliberate act, not a side effect of an image upgrade, so this release changes
+only what discovery *emits* for a new install and what the engine *does* with a
+branch row. Updating the five authorised rows to `role: branch` (and dropping the
+bogus `lights_ct1`↔`lights_ct2` pair) is step 5 of the install, recorded in §8.
+
+`1361` unit and integration tests pass (`1355` + 6 new:
+`test_a_shared_row_cannot_credit_more_than_the_declared_wattage`,
+`test_a_shared_row_within_the_declared_wattage_is_still_measured`,
+`test_a_declared_ceiling_is_never_relaxed`,
+`test_a_capped_value_is_never_graded_as_measured`,
+`test_a_value_at_the_ceiling_with_no_surplus_is_still_measured`, and the
+single-channel discovery test). All 10 required gates pass; `1361 + 115`
+tests across all suites.
+
+---
+
 ## 8. Needs user authorization
 
 | Action | Why it needs authorization |
@@ -2869,6 +2970,7 @@ remains the only way to verify this layer.
 | Applying device configurations in the live engine | Writes the topology (version bump); needs authorization |
 | Writing a household ground-truth set for per-device accuracy | Only the user knows the true wattages; without it, accuracy stays "unverified" |
 | Correcting the `upper_deck_heater_l1`/`_l2` polarity declaration | The rows read ~−1190 W while declared `normal`; whether the CTs are physically reversed or the declaration is wrong is only knowable on site, and either fix changes what those circuits report |
+| Changing the five authorised rows from `dedicated_device` to `branch` in the live config entry | Rewrites a confirmed topology (version bump) for `lights_ct1`/`ct2`/`ct3`, `upper_floor_hrv`, `soffit_plug`; also drops the bogus `lights_ct1`↔`lights_ct2` `paired_ct_id`. Discovery now emits `branch` for new installs, but an existing confirmation is not rewritten as a side effect of an upgrade. |
 
 ---
 

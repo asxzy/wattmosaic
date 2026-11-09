@@ -37,6 +37,12 @@ for a 3 000 W service. The topology model exists to make that impossible.
 | `dedicated_device` | exactly one logical device | yes (Level 1) |
 | `unknown` | unverified | no (validation warning) |
 
+`branch` is the honest default for a single-channel CT. One CT measures one
+*conductor*, not one appliance, so discovery cannot assert `dedicated_device` —
+that requires knowing the circuit feeds exactly one load, which only a person
+can state. `dedicated_device` is therefore only ever produced from a
+declaration (ADR-0025).
+
 **Containment** is `child.parent_ct_id == parent`. `TopologyGraph` indexes it,
 detects cycles, and refuses to build rows for inconsistent input.
 
@@ -253,6 +259,41 @@ Crucially, the slack is added **only when the siblings are unmodelled**
 (`EffectiveConfig.shared_unmodelled`). A shared row whose other occupants are
 all modelled devices stays solvable; adding a slack there would discard a
 legitimate multi-device separation.
+
+#### 4.2.2 A declared wattage bounds its device (ADR-0025)
+
+A slack protects the **sum** on a row. It does nothing for a row whose claimants
+are all configured, and that is where the most damaging error appears: a row
+reading far more than its claimants declare.
+
+Measured on an instrumented installation, one lighting row peaked at 1 036 W
+while its three fixtures declared 243.6 / 112.3 / 112.7 W. With one fixture ON
+and its siblings positively OFF, the solver handed the whole row to that one
+lamp — 4.25× its declared draw — and graded it `tier_3_measured`.
+
+Adding a slack unconditionally is not the answer: it collapses a legitimate
+separation (three 156 W lamps on a 468 W row became 117 W each, and the solver
+reported an infeasible problem). The row is genuinely separable while the
+reading is within what the claimants could draw.
+
+So a **declared wattage is a non-relaxable upper bound** on a shared row:
+
+* `EffectiveConfig.config_ceiling_w` (`expected_on_w + tolerance`) is applied as
+  the solver's upper bound for every configured claimant that is not alone on
+  its row and not state-pinned;
+* the relaxation pass — which exists so a stale *model* bound can be widened —
+  never widens it. Like a state pin, a declaration is user evidence, not a
+  revisable prior;
+* a solo row is exempt, because there the CT is a direct observation of the
+  device and the measurement wins.
+
+When the bound *binds and leaves power unexplained* the result is downgraded:
+the number is the user's declaration, not an observation, so it is reported as
+`configured_prior` / `tier_1_modelled` with
+`declared_wattage_bounds_row_attribution` in the explanation. Reaching the
+ceiling with the row fully explained is still a real measurement and stays
+`tier_3_measured`. Diagnostics record `declared_ceiling_applied` and
+`declared_ceiling_hit`.
 
 ### 4.3 State constraints (not estimates)
 

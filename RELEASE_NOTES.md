@@ -1,5 +1,58 @@
 # Release Notes
 
+## v0.2.0-dev8 — 2026-11-09 (development channel)
+
+Discovery was calling every single-channel CT a **private measurement**. It had
+no evidence for that — the only test was "this channel is not a `ct1`/`ct2`
+pair", which every one-CT lighting circuit passes — and the claim was the sole
+reason 15 correlated fixtures could not be placed. Reclassifying exposed a real
+fabrication behind it, which this release also fixes. **This is a prerelease. It
+is installed from the `dev` branch and does not replace the stable integration or
+App.**
+
+### Fixed
+
+- **A single CT is a circuit, not an appliance.** `discovery.py` emitted
+  `CTType.DEDICATED_DEVICE` for every single-channel load and created a device
+  that claimed the row as its own measurement. On the reference installation the
+  three lighting rows declared this way each resolved 7, 3 and 2 independent
+  fixtures, and one peaked at 221 % of what its claimants summed to. The
+  fallback now emits `branch`: the circuit may feed zero or more devices, which
+  is what a single conductor actually establishes. The device is still created
+  so the circuit is visible and the topology validates, but it owns the row as a
+  shared circuit (`branch_ct_ids`, `shared_circuit: True`) and no channel
+  carries a `device_id`. Only a declaration produces `dedicated_device`. This
+  alone takes auto-placement from **0 accepted / 15 refused** to **15 accepted /
+  0 refused**.
+- **A whole shared row could be credited to one fixture.** With the corrected
+  topology, one lighting row peaked at 1 036 W while its three fixtures declared
+  243.6 / 112.3 / 112.7 W. One fixture ON, its siblings positively OFF, and the
+  solver handed that lamp the entire row — 4.25× its declared draw, graded
+  `tier_3_measured`. The same shape appeared on other circuits at 402 %, 250 %
+  and 217 % of their claimants' declared draw. This was pre-existing; the
+  reclassification is what made it reach a named fixture on a branch row. A
+  declared wattage is now a **non-relaxable upper bound** on a shared row:
+  applied to every configured claimant that is not alone on its row and not
+  state-pinned, and never widened by the model-relaxation pass. When it binds
+  and leaves power unexplained the value is reported as `configured_prior` /
+  `tier_1_modelled` with `declared_wattage_bounds_row_attribution` — the surplus
+  is undeclared load, not that lamp's draw. Reaching the ceiling with the row
+  fully explained is still a real measurement.
+- **An ambiguous match could reach the wrong engine and report success.** See
+  v0.2.0-dev7 for the routing fix; nothing here changes that path.
+
+### Notes
+
+- `config_ceiling_w` existed since 0.1.5 and was never read. It is now the
+  mechanism above, which is why the safeguard needed no new contract field.
+- Adding a slack to every branch row was measured and **rejected**: three 156 W
+  lamps on a 468 W row collapsed to 117 W each and the solver reported an
+  infeasible problem. The row is genuinely separable while the reading is within
+  what the claimants could draw.
+- The stored configuration of a *confirmed* installation is not rewritten by
+  this release. A topology that already declares a single-channel row
+  `dedicated_device` keeps that declaration until it is changed deliberately.
+
 ## v0.2.0-dev7 — 2026-11-09 (development channel)
 
 Three defects found by replaying the full 11-day history against every declarable
@@ -14,16 +67,16 @@ App.**
   scene each see the row rise by the sum of both, so each independently explains
   the whole step and each is credited the whole step. No single candidate looks
   wrong; the row is simply counted twice once they are summed. On the reference
-  install `light.gym_gym_pot_lights_2` and `light.gym_gym_suana_pot_lights`
-  toggled 12/12 together (median 0.55 s) yet each was credited ~86 W from a row
-  averaging 26.5 W. Fixtures that share a row but switch independently overlap
-  only a few percent, so timing separates the two cases: two candidates on one
-  row are now withheld when at least 80 % of one side's transitions have a
-  partner within 5 s. **Both** are withheld — choosing which fixture owns the
-  step would be a guess. Over the 11-day replay this withholds exactly the two
-  scene-driven pairs and leaves the independent ones untouched, taking accepted
-  candidates from 19 to 15. They remain reportable as `unresolved` so the wiring
-  can be declared by hand.
+  install two scene-driven fixtures on one lighting row toggled 12/12 together
+  (median 0.55 s) yet each was credited ~86 W from a row averaging 26.5 W.
+  Fixtures that share a row but switch independently overlap only a few percent,
+  so timing separates the two cases: two candidates on one row are now withheld
+  when at least 80 % of one side's transitions have a partner within 5 s.
+  **Both** are withheld — choosing which fixture owns the step would be a guess.
+  Over the 11-day replay this withholds exactly the two scene-driven pairs and
+  leaves the independent ones untouched, taking accepted candidates from 19 to
+  15. They remain reportable as `unresolved` so the wiring can be declared by
+  hand.
 - **A service call could silently reach the wrong engine.** With a stable and a
   development App both configured, `_resolve_entry` fell back to the first entry
   whenever the target did not resolve. Both Apps publish the same engine device

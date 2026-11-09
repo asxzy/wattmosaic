@@ -316,7 +316,9 @@ def discover_candidate_topology(
                 )
 
         # Loads: a resolvable leg pair is one double-pole device, anything else is
-        # a single-load circuit.
+        # a single-channel circuit.  "Single channel" is *not* evidence of a
+        # single device: a lighting circuit with one CT routinely feeds many
+        # fixtures.  See the classification note on the fallback branch below.
         for entity_id, local in sorted(locals_by_entity.items()):
             if entity_id in consumed:
                 continue
@@ -387,29 +389,54 @@ def discover_candidate_topology(
                 local_stem = f"{stem}_ct{leg}"
             ct_id = f"{slug}_{local_stem}"
             device_id = f"dev_{ct_id}"
+            # A single CT measures one *conductor*, not one appliance.  Calling it
+            # ``dedicated_device`` asserts that exactly one logical device sits on
+            # it, and discovery has no evidence for that: the only discriminator
+            # available here is "this channel was not part of a ct1/ct2 pair",
+            # which is true of every one-CT lighting circuit in existence.  That
+            # assertion was wrong on the reference installation -- three lighting
+            # rows declared ``dedicated`` each resolved 7, 3 and 2 independent
+            # fixtures, and one peaked at 221% of what its claimants summed to.
+            #
+            # ``branch`` states the truth discovery can actually support: a
+            # circuit that may contain zero or more devices.  It also makes the
+            # row usable, because a ``dedicated_device`` row is refused by
+            # auto-placement as "already another device's measurement".
+            #
+            # The device is still emitted, so the topology passes validation and
+            # the circuit is visible immediately; it simply owns the row as a
+            # *shared* circuit rather than as a private measurement.  A person
+            # who knows the circuit feeds one appliance can still declare it
+            # dedicated in the wizard, which is the only source of that fact.
             channels.append(
                 _channel(
                     entity_id,
-                    ct_type=CTType.DEDICATED_DEVICE,
+                    ct_type=CTType.BRANCH,
                     ct_id=ct_id,
                     phase=_phase_for_leg(leg),
                     enabled=enabled,
                     panel=panel,
                     attributes=attributes_by_entity.get(entity_id),
-                    evidence=["single-channel load on a multi-channel monitor"],
-                    device_id=device_id,
+                    evidence=[
+                        "single-channel circuit on a multi-channel monitor",
+                        "may feed zero or more fixtures; not a private measurement",
+                    ],
                 )
             )
             devices.append(
                 DeviceTopology(
                     device_id=device_id,
                     name=_display_name(local_stem, slug),
-                    dedicated_ct_ids=[ct_id],
+                    branch_ct_ids=[ct_id],
                     phase=_phase_for_leg(leg),
                     topology_status=TopologyStatus.CANDIDATE,
                     metadata={
-                        "note": "single channel; requires confirmation",
+                        "note": (
+                            "single CT on one conductor; the circuit may feed "
+                            "several fixtures -- requires confirmation"
+                        ),
                         "requires_confirmation": True,
+                        "shared_circuit": True,
                     },
                 )
             )

@@ -1102,3 +1102,91 @@ refusal is the ownership guard doing its job, not a defect.
   +13.39 W on that row. Real history produced 700+ CT rows and row noise
   0.039 / 0.958 / 0.061 W, and recovered the larger fixture at 19.59 W on /
   19.54 W off at `min_corroborations=2`.
+
+---
+
+## ADR-0025 — A single-channel CT is a branch circuit, and a declared wattage bounds what that row may credit
+
+**Status:** Accepted · 2026-11-09 · Extends ADR-0023 and ADR-0024
+
+**Context.** Discovery classified every single-channel load as
+`CTType.DEDICATED_DEVICE`. The only discriminator was "this channel was not part
+of a `ct1`/`ct2` leg pair", which is true of every one-CT lighting circuit in
+existence. The classification was not evidence; it was an assumption that looked
+like knowledge.
+
+It mattered in two ways. It made a discovery heuristic indistinguishable from a
+user declaration — the product asserted "a private measurement" where the
+engineer had never said so. And it was the sole blocker for auto-placement: a
+`dedicated_device` row is refused as "already another device's measurement", so
+`plan_placements` accepted 0 of 15 correlated fixtures. Reclassifying the
+fallback to `branch` produced 15 accepted, 0 refused.
+
+But reclassifying exposed a real fabrication. With a lighting row as a branch
+circuit carrying three configured fixtures that declared 243.6 / 112.3 / 112.7 W,
+a row at its observed 1 036 W peak, one fixture ON and its siblings positively
+OFF, the solver credited the entire row to the one ON lamp — 4.25× its declared
+draw — and labelled it `tier_3_measured`. The same shape appeared on other
+circuits at 402 %, 250 % and 217 % of their claimants' declared draw.
+
+This was pre-existing: the same over-attribution happens on a
+`dedicated_device` row, except there it is correct by construction. The
+reclassification only made it possible for a *branch* row to do it to a
+*named* fixture.
+
+**Decision.**
+
+1. **Discovery emits `branch` for a single-channel circuit.** One CT measures
+   one conductor, not one appliance. The device is still emitted so the
+   topology validates and the circuit is visible, but it owns the row as
+   `branch_ct_ids` with `shared_circuit: True` metadata and no channel
+   `device_id`. `dedicated_device` comes only from a declaration.
+
+2. **A declared wattage is a non-relaxable upper bound on a shared row.**
+   `EffectiveConfig.config_ceiling_w` is applied as the solver upper bound for
+   every configured claimant that is not alone on its row and not state-pinned.
+   The relaxation pass — which exists so a stale *model* bound can be widened —
+   never widens it: a declaration is user evidence, not a revisable prior. A
+   solo row is exempt, because there the CT is a direct observation.
+
+3. **A capped value is graded as a declaration.** When the bound binds and the
+   row still carries unexplained power, the result is `configured_prior` /
+   `tier_1_modelled` with `declared_wattage_bounds_row_attribution`. Reaching
+   the ceiling with the row fully explained is a real measurement and stays
+   `tier_3_measured`.
+
+**Rejected alternatives.**
+
+* *Add a slack to every branch row.* Measured: three 156 W lamps on a 468 W row
+  collapsed to 117 W each and the solver reported an infeasible problem. The row
+  is genuinely separable while the reading is within the claimants' sum.
+* *Exclude the row whenever it exceeds the claimants' ceilings.* The same
+  measurement works, but only when every claimant states a wattage; discovery's
+  structural placeholder devices have none, so the rule silently never fires on
+  exactly the rows that need it. The upper bound applies per device and does not
+  depend on the placeholder's silence.
+* *Treat the placeholder as zero.* "No wattage stated" and "declares no load"
+  are not the same claim, and the engine cannot distinguish a user's unstated
+  lamp from discovery's placeholder.
+
+**Consequences.** The 15 correlated fixtures can be placed. Every attribution on
+a shared row is bounded by what the user said the fixture draws, so undeclared
+load stays in the residual instead of becoming a plausible-looking permanent
+number. Discovery no longer asserts a fact only a person can supply.
+
+**Verification.**
+
+* `tests/unit/test_topology_bootstrap.py` — the three separate lighting
+  circuits are no longer fused into one dedicated device and all three classify
+  as `branch`; a single-channel circuit is not declared a private measurement.
+* `tests/unit/test_device_attachment.py` — a 1 036 W row with a 150 W declared
+  claimant is capped; the same row within the declaration is still measured; a
+  declared ceiling is never relaxed; a capped value is graded
+  `configured_prior`/`tier_1_modelled`; reaching the ceiling with no surplus
+  stays `tier_3_measured`.
+* Negative verification: disabling the `declared_ceiling_hit` downgrade made the
+  grading test fail (`inferred` instead of `configured_prior`).
+* Live topology (post-reclassification, 32 `branch` / 6 `main`, 28 devices, 15
+  placements): all five shared-row peak cases report `configured_prior` /
+  `tier_1_modelled` at the declared step (243.61 / 49.21 / 74.85 / 20.02 /
+  139.29 W) instead of absorbing the row.

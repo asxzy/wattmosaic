@@ -516,3 +516,145 @@ def test_removing_the_declaration_retracts_the_attribution_row() -> None:
     for device in emptied.devices:
         assert not device.metadata.get(PROJECTED_CTS_KEY)
         assert "ct_lights" not in device.branch_ct_ids
+
+
+# --------------------------------------------------------------------------- #
+# A declared wattage bounds what a shared row may credit
+# --------------------------------------------------------------------------- #
+
+
+def _shared_topology_with_watts(
+    watts: dict[str, float],
+    *,
+    on: str | None = None,
+) -> Topology:
+    """Shared circuit whose lamps state a full-on wattage."""
+    topology = _shared_topology(devs=tuple(watts))
+    return project_configuration(
+        topology,
+        [
+            DeviceConfiguration(
+                device_id=device_id,
+                monitoring=MonitoringLevel.SHARED,
+                connectivity=HaConnectivity.CONNECTED,
+                monitored_by_ct_ids=["ct_lights"],
+                state_entity_ids=[f"light.{device_id}"],
+                expected=ExpectedPower(on_w=float(on_w)),
+            )
+            for device_id, on_w in watts.items()
+        ],
+    )
+
+
+def test_a_shared_row_cannot_credit_more_than_the_declared_wattage() -> None:
+    """The most damaging error: a whole circuit reported as one lamp.
+
+    Measured on the reference installation, ``lights_ct2`` peaked at 1 036 W
+    while its three fixtures declared 243.6 / 112.3 / 112.7 W.  With one fixture
+    ON and its siblings positively OFF the solver handed that one lamp the
+    entire row -- 4.25x what the user said it draws -- and graded it
+    ``tier_3_measured``.  The surplus is load nobody declared, and nothing in
+    the row says it belongs to the lamp that happens to be on.
+
+    A declared wattage is user evidence, so it bounds the attribution instead of
+    being overridden by the measurement.
+    """
+    topology = _shared_topology_with_watts({"lamp_a": 150.0, "lamp_b": 100.0, "lamp_c": 100.0})
+    batch = _infer(
+        topology,
+        {"ct_main": 1036.0, "ct_lights": 1036.0},
+        {"lamp_a": "on", "lamp_b": "off", "lamp_c": "off"},
+    )
+    results = _by_device(batch)
+    assert results["lamp_a"].power_w <= 150.0 * 1.25 + 1e-6, (
+        "a 1 036 W row was credited to a lamp declared at 150 W"
+    )
+    assert "declared_ceiling_applied" in batch.diagnostics
+
+
+def test_a_shared_row_within_the_declared_wattage_is_still_measured() -> None:
+    """The safeguard must not destroy a legitimate single-claimant measurement."""
+    topology = _shared_topology_with_watts({"lamp_a": 150.0, "lamp_b": 100.0})
+    batch = _infer(
+        topology,
+        {"ct_main": 150.0, "ct_lights": 150.0},
+        {"lamp_a": "on", "lamp_b": "off"},
+    )
+    results = _by_device(batch)
+    assert results["lamp_a"].power_w == pytest.approx(150.0, abs=1.0)
+    assert results["lamp_a"].source == Source.INFERRED
+
+
+def test_a_declared_ceiling_is_never_relaxed() -> None:
+    """A stale *model* bound may be widened; a stated wattage may not.
+
+    The relaxation pass exists because a learnt model can be out of date.  A
+    declared wattage is not a model: if the row reads more than the fixture
+    draws, the difference is undeclared load on the circuit, not a wrong
+    declaration.
+    """
+    from wattmosaic_engine.contracts import DeviceModelParameters, ModelStatus, ModelType
+    from wattmosaic_engine.electrical.models import ModelView
+
+    topology = _shared_topology_with_watts({"lamp_a": 100.0, "lamp_b": 100.0})
+    view = ModelView(
+        device_id="lamp_a",
+        model_id="m_a",
+        model_type=ModelType.BINARY,
+        version=1,
+        status=ModelStatus.ACTIVE,
+        params=DeviceModelParameters(on_power_w=100.0),
+        upper_bound_w=90.0,
+        estimated_power_w=100.0,
+    )
+    batch = DisaggregationEngine().infer(
+        _window({"ct_main": 500.0, "ct_lights": 500.0}),
+        device_states={"lamp_a": "on", "lamp_b": "off"},
+        models={"lamp_a": view},
+        topology=topology,
+    )
+    results = _by_device(batch)
+    assert results["lamp_a"].power_w <= 100.0 * 1.25 + 1e-6
+    assert "lamp_a" not in (batch.diagnostics.get("relaxed_bounds") or [])
+
+
+def test_a_capped_value_is_never_graded_as_measured() -> None:
+    """A value pinned at the declared wattage is the declaration, not a reading.
+
+    This is the trap that made the earlier safeguard only half-honest.  The
+    solver clamps the lamp at its declared ceiling and the numbers then agree
+    with the user's own statement, so it is tempting to grade the result
+    ``tier_3_measured``.  Nothing measured it: the CT row read *more* than the
+    declaration allows, which is exactly why the cap was applied.  The surplus is
+    undeclared load, and the device's value is a configured prior.
+    """
+    topology = _shared_topology_with_watts({"lamp_a": 150.0, "lamp_b": 100.0, "lamp_c": 100.0})
+    batch = _infer(
+        topology,
+        {"ct_main": 1036.0, "ct_lights": 1036.0},
+        {"lamp_a": "on", "lamp_b": "off", "lamp_c": "off"},
+    )
+    result = _by_device(batch)["lamp_a"]
+    assert result.source == Source.CONFIGURED_PRIOR
+    assert result.confidence_tier == ConfidenceTier.TIER_1_MODELLED
+    assert "declared_wattage_bounds_row_attribution" in result.explanation
+    assert "constrained_nnls_fit" not in result.explanation
+
+
+def test_a_value_at_the_ceiling_with_no_surplus_is_still_measured() -> None:
+    """Sitting at the declared wattage is only suspicious if power is left over.
+
+    A 150 W lamp on a row reading 165 W reaches its upper bound and the row is
+    fully explained.  That is the CT measuring the lamp at its declared draw, and
+    demoting it would hide a real measurement.
+    """
+    topology = _shared_topology_with_watts({"lamp_a": 150.0, "lamp_b": 100.0})
+    batch = _infer(
+        topology,
+        {"ct_main": 165.0, "ct_lights": 165.0},
+        {"lamp_a": "on", "lamp_b": "off"},
+    )
+    result = _by_device(batch)["lamp_a"]
+    assert result.source == Source.INFERRED
+    assert result.confidence_tier == ConfidenceTier.TIER_3_MEASURED
+    assert "declared_ceiling_hit" not in batch.diagnostics
