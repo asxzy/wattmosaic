@@ -3002,6 +3002,61 @@ problem, not a correctness one, and it is recorded here rather than fixed.
 
 ---
 
+### 7r.12 The five-row reclassification, performed on the live install
+
+Run on 2026-11-09 through the product's own options flow (38 channel dialogs,
+submitted over the authenticated API), after `0.2.0-dev9` was confirmed loaded
+(`diagnostics.integration.version == "0.2.0-dev9"`). A config-entry reload was
+**not** sufficient to load it — reloading re-runs `async_setup_entry` from the
+module already in `sys.modules`, so the version stayed `0.2.0-dev7` and the fixed
+`build_topology_update` was not the code in memory. A Core restart was required.
+
+**What changed** (topology v5 → **v6**, status **`candidate`**,
+`topology_confirmed: false`):
+
+| | before | after |
+| --- | --- | --- |
+| `main` | 6 | 6 |
+| `branch` | 6 | **11** |
+| `dedicated_device` | 26 | **21** |
+| `lights_ct1` ↔ `ct2` pair | present | absent |
+| `bar_fridge_1` ↔ `bar_fridge_2` pair | present | absent |
+
+Five channels (`lights_ct1/ct2/ct3`, `upper_floor_hrv`, `soffit_plug`) moved to
+`branch` with `device_id` cleared; each device kept its row via
+`branch_ct_ids`, verified by `TopologyGraph.attribution_ct_ids()` returning the
+same single row before and after for all five. **Exactly 14 channel field changes
+and nothing else** — every other channel's role, phase, polarity, device, pair,
+parent, alias and enabled flag is byte-identical. `energy_entities` and
+`device_links` were preserved (1 each), and the topology was **not** confirmed:
+the wizard's `confirm_uncertain` was left false, so the 22 unknown-phase channels
+were not silently blessed.
+
+**A second conflict surfaced, outside the authorized scope.** The wizard refused
+*the whole submission* with `pair_crosses_devices: bar_fridge_1:bar_fridge_2`
+(both directions): the two CTs are each other's partner *and* each names its own
+device. Measured first — the pair was already inert (`double_pole_leg` → `None`
+both ways, attribution one row each, identical before and after) — so it was
+dropped rather than merged, which resolved the conflict without altering what
+either fridge circuit reports. The alternative (they really are two legs of one
+240 V load) would have required merging two devices, which is a different
+declaration the user did not make. This was authorized explicitly before writing.
+
+**Verified after the write:** engine topology v6 `candidate`, 38 channels, 28
+devices; roles `main 6 / branch 11 / dedicated 21`; the five rows report
+`branch` with no `device_id` and no pair; both fridge CTs unpaired. Device data
+still exports for the reclassified rows (`direct_measured`, unchanged).
+
+**The remaining gate is user knowledge, not code.** `discover_placements` now
+finds **32** candidate rows (it previously found 0 because oversized
+`dedicated_device` rows were refused) but resolves **0 state entities**: the
+engine holds no device configuration at all. Discovery deliberately never guesses
+a device's entity ("A device's state entity is not guessed; link it in the
+integration wizard"), so correlation cannot begin until `state_entity_ids` are
+declared. That is §8, and no code change can substitute for it.
+
+---
+
 ## 8. Needs user authorization
 
 | Action | Why it needs authorization |
@@ -3014,7 +3069,16 @@ problem, not a correctness one, and it is recorded here rather than fixed.
 | Applying device configurations in the live engine | Writes the topology (version bump); needs authorization |
 | Writing a household ground-truth set for per-device accuracy | Only the user knows the true wattages; without it, accuracy stays "unverified" |
 | Correcting the `upper_deck_heater_l1`/`_l2` polarity declaration | The rows read ~−1190 W while declared `normal`; whether the CTs are physically reversed or the declaration is wrong is only knowable on site, and either fix changes what those circuits report |
-| Changing the five authorised rows from `dedicated_device` to `branch` in the live config entry | Writes the stored topology (version bump) for `lights_ct1`/`ct2`/`ct3`, `upper_floor_hrv`, `soffit_plug`, and drops the bogus `lights_ct1`↔`lights_ct2` `paired_ct_id`. The engine topology is still a **candidate** (v5, `topology_confirmed: false`), so no confirmation is revoked. Discovery now emits `branch` for new installs, but an existing topology is not rewritten as a side effect of an upgrade — and the integration that must perform the write had to be fixed first (§7r.11). |
+| Declaring `state_entity_ids` for the five reclassified rows (and the rest) | With the rows now `branch`, this is the only remaining gate on auto placement: the engine holds **no** device configuration at all, so `discover_placements` sees 32 rows and **0** state entities and cannot correlate. Discovery deliberately never guesses a device's entity, so only the user can supply this (§7r.12). |
+
+**Completed with authorization.** The five-row reclassification was performed on
+the live config entry on 2026-11-09 (see §7r.12). The row that used to sit here is
+retained below for the record.
+
+| Action | Why it needed authorization |
+| --- | --- |
+| Changing the five authorised rows from `dedicated_device` to `branch` in the live config entry | Writes the stored topology (version bump) for `lights_ct1`/`ct2`/`ct3`, `upper_floor_hrv`, `soffit_plug`, and drops the bogus `lights_ct1`↔`lights_ct2` `paired_ct_id`. The engine topology is still a **candidate** (v5, `topology_confirmed: false`), so no confirmation is revoked. Discovery now emits `branch` for new installs, but an existing topology is not rewritten as a side effect of an upgrade — and the integration that must perform the write had to be fixed first (§7r.11). **Done 2026-11-09: topology v5 → v6, still `candidate`, `topology_confirmed: false`.** |
+| Dropping the inert `bar_fridge_1` ↔ `bar_fridge_2` pair | The options flow rejected every submission with `pair_crosses_devices` because both CTs are paired *and* each names its own device (ADR-0010 amendment). The pair was already inert (`double_pole_leg` → `None` both ways) and attribution is byte-identical without it, so dropping it resolved the conflict without touching either device. |
 
 ---
 
