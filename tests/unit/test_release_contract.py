@@ -12,6 +12,7 @@ negative tests prove the rule fires rather than merely existing.
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -19,6 +20,14 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 CHECKER = ROOT / "tools" / "dev" / "check_release.py"
+
+#: The SemVer 2.0.0 grammar, duplicated here on purpose: an ordering test that
+#: reused the checker's own regex could not detect a wrong grammar.
+CHECKER_SEMVER = re.compile(
+    r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)"
+    r"(?:-(?P<pre>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+    r"(?:\+(?P<build>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
+)
 
 
 def _load_checker():
@@ -230,4 +239,100 @@ def test_the_release_body_stops_at_the_next_section(checker, tmp_path):
     body = checker.notes_section("1.0.0")
     assert body == "New.\n"
     assert "Old." not in body
+
+
+def test_a_glued_prerelease_counter_is_rejected(checker, tmp_path):
+    """The exact defect: ``0.2.0-dev10`` sorts BELOW ``0.2.0-dev9``.
+
+    SemVer compares an identifier containing letters lexically, so the tenth
+    dev build becomes invisible to any updater that orders by version.  The
+    repository shipped dev1..dev9 before this was noticed; dev10 would have been
+    the release that silently never installed.
+    """
+    _retarget(checker, tmp_path)
+    _write_tree(tmp_path, "0.2.0-dev10")
+    checker.check_version_fields()
+    assert any("glues a 2-digit counter" in message for message in checker.ERRORS)
+
+
+def test_a_single_digit_glued_counter_is_a_warning_not_an_error(checker, tmp_path):
+    """``-dev9`` orders correctly today; it is a trap, not a defect yet."""
+    _retarget(checker, tmp_path)
+    _write_tree(tmp_path, "0.2.0-dev9")
+    checker.check_version_fields()
+    assert checker.ERRORS == []
+    assert any("glued counter" in message for message in checker.NOTES_OUT)
+
+
+def test_a_dot_separated_counter_is_accepted(checker, tmp_path):
+    _retarget(checker, tmp_path)
+    _write_tree(tmp_path, "0.2.1-dev.10")
+    checker.check_version_fields()
+    assert checker.ERRORS == []
+    assert checker.NOTES_OUT == []
+
+
+def test_a_purely_numeric_prerelease_is_accepted(checker, tmp_path):
+    _retarget(checker, tmp_path)
+    _write_tree(tmp_path, "0.2.0-1")
+    checker.check_version_fields()
+    assert checker.ERRORS == []
+    assert checker.NOTES_OUT == []
+
+
+def test_a_plain_stable_version_has_no_prerelease_problem(checker, tmp_path):
+    _retarget(checker, tmp_path)
+    _write_tree(tmp_path, "1.2.3")
+    checker.check_version_fields()
+    assert checker.ERRORS == []
+    assert checker.NOTES_OUT == []
+
+
+def test_a_glued_counter_tag_is_rejected(checker, tmp_path):
+    _retarget(checker, tmp_path)
+    _write_tree(tmp_path, "0.2.0-dev10")
+    checker.check_tag("v0.2.0-dev10")
+    assert any("glues a 2-digit counter" in message for message in checker.ERRORS)
+
+
+def test_the_dot_separated_counter_actually_orders_above_the_previous():
+    """Pin the arithmetic, not just the shape.
+
+    If this ever fails, the whole ``-dev.N`` channel stops incrementing, which
+    is the defect this file exists to prevent.
+    """
+
+    def semver_key(version: str):
+        match = CHECKER_SEMVER.match(version)
+        assert match is not None, version
+        core = tuple(int(match.group(k)) for k in ("major", "minor", "patch"))
+        pre = match.group("pre")
+        if pre is None:
+            return core + ((1,),)
+        parts = tuple(
+            (0, int(x), "") if x.isdigit() else (1, 0, x) for x in pre.split(".")
+        )
+        return core + ((0, parts),)
+
+    assert semver_key("0.2.1-dev.10") > semver_key("0.2.1-dev.9")
+    assert semver_key("0.2.1-dev.2") > semver_key("0.2.1-dev.1")
+    assert semver_key("0.2.1") > semver_key("0.2.1-dev.10")
+    # And the form that broke it, which single digits hide:
+    assert semver_key("0.2.0-dev10") < semver_key("0.2.0-dev9")
+    assert semver_key("0.2.0-dev9") > semver_key("0.2.0-dev8")
+    # Escaping an existing glued series needs a new core version: turning the
+    # separator into a dot is not sufficient on its own.
+    assert semver_key("0.2.1-dev.1") > semver_key("0.2.0-dev9")
+
+
+def test_the_real_tree_does_not_use_a_glued_counter():
+    """Guard the repository's own version, not a fixture."""
+    module = _load_checker()
+    module.ERRORS = []
+    module.NOTES_OUT = []
+    module.check_version_fields()
+    module.check_notes_cover_current()
+    assert module.ERRORS == [], module.ERRORS
+
+
 

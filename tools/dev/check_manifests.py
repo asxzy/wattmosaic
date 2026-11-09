@@ -8,6 +8,7 @@ Run: python tools/dev/check_manifests.py
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -15,6 +16,14 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 ERRORS: list[str] = []
+
+#: SemVer 2.0.0.  Shared shape with tools/dev/check_release.py; kept separate so
+#: this validator has no import dependency on the release checker.
+SEMVER = re.compile(
+    r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)"
+    r"(?:-(?P<pre>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+    r"(?:\+(?P<build>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
+)
 
 
 def check_integration() -> None:
@@ -36,8 +45,15 @@ def check_integration() -> None:
         ERRORS.append("manifest domain must be 'wattmosaic'")
     if manifest.get("config_flow") is not True:
         ERRORS.append("manifest config_flow must be true")
-    if str(manifest.get("version", "")).count(".") != 2:
-        ERRORS.append("manifest version must be semver x.y.z")
+    # SemVer 2.0.0, not "two dots".  Counting dots rejected every legitimate
+    # dotted prerelease (``0.2.1-dev.1``) while accepting malformed versions the
+    # grammar rejects -- the check has to be the grammar, because the version is
+    # also a git tag and a container tag.
+    if not SEMVER.match(str(manifest.get("version", ""))):
+        ERRORS.append(
+            "manifest version must be SemVer 2.0.0 (x.y.z, optionally with a "
+            "-prerelease and +build suffix)"
+        )
     if "requirements" in manifest and "aiohttp" in json.dumps(manifest.get("requirements", [])):
         ERRORS.append("must not declare aiohttp as a requirement (HA provides it)")
 

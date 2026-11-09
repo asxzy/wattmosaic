@@ -1,6 +1,6 @@
 # Release Notes
 
-## v0.2.0-dev10 — 2026-11-09 (development channel)
+## v0.2.1-dev.1 — 2026-11-09 (development channel)
 
 Home Assistant was showing this integration's version as a **commit hash**
 (`eec273d`), not `0.2.0-dev9`. The code was correct: every version field said
@@ -30,6 +30,18 @@ branch and does not replace the stable integration or App.**
 
 ### Fixed
 
+- **The dev channel stopped incrementing at `dev10`, and nothing said so.**
+  SemVer 2.0.0 compares a prerelease identifier that contains letters
+  **lexically**, so `0.2.0-dev10` sorts *below* `0.2.0-dev9`. An updater that
+  orders releases by version therefore keeps offering `dev9` as the newest
+  release and never installs `dev10` — even though the tag, the Release and the
+  image all exist. This was found by building it and watching Home Assistant
+  resolve `latest_version: v0.2.0-dev9` twice, including after a probe release
+  created with the newest timestamp was ignored. That probe is the evidence:
+  ordering is by SemVer, not by date, so the numbering had to change.
+  The counter is now its own numeric identifier (`-dev.1`, `-dev.2`, …), which
+  compares numerically and keeps incrementing. `check_release.py` rejects the
+  glued form (`-dev10`) so this cannot be reintroduced.
 - **The version fields had silently drifted, and nothing noticed.** The gate
   found two on its first run: `pyproject.toml` was still `0.2.0-dev4` (five
   releases behind) and `engine/wattmosaic_engine/__init__.py` was `0.1.3` (three

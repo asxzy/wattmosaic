@@ -3103,6 +3103,52 @@ required gate `release_valid` and into CI as its own job; and
 refuses to publish a Release whose image is not pullable, and marks `-devN`
 releases `--prerelease --latest=false`.
 
+### 7r.13a A release that existed but could never be installed
+
+With tags and Releases in place, Home Assistant still resolved
+`latest_version: v0.2.0-dev9` — and it kept doing so after `v0.2.0-dev10` was
+published with a **newer** creation timestamp. Two explanations fit: ordering by
+creation date, or ordering by version. They are not equivalent, and only one is
+fixable in code, so it was settled with a probe rather than assumed:
+
+| Probe | Result |
+| --- | --- |
+| Publish `v0.2.0-dev10` at 19:31, reload the marketplace entry | `latest_version: v0.2.0-dev9` |
+| Recreate `v0.2.0-dev8` at 19:40 (newest `published_at`) | `latest_version: v0.2.0-dev9` |
+| Create `v0.2.0-1` at 19:43 (newest `created_at` of all) | `latest_version: v0.2.0-dev9` |
+
+The third probe is decisive: a release **newer than every other** was ignored.
+Ordering is by **SemVer**, not by date.
+
+Under SemVer 2.0.0, a prerelease identifier containing letters is compared
+**lexically**, so `dev10 < dev9`. The consequence is not cosmetic:
+`0.2.0-dev10` sorts below `0.2.0-dev9`, so the updater keeps offering `dev9` and
+**never installs dev10**. The tag, the Release and the image all exist and
+nothing reports an error — the update entity says "up to date" while the build
+is unreachable. `dev1`–`dev9` had hidden this for nine releases because single
+digits happen to sort correctly.
+
+Measured ordering (`dev9` as reference):
+
+| Version | Orders above `0.2.0-dev9`? |
+| --- | --- |
+| `0.2.0-dev10` | **no** — the defect |
+| `0.2.0-dev.10` | **no** — swapping the separator is not enough; `"dev" < "dev9"` |
+| `0.2.0-dev99` | yes, but the same trap returns at `dev100` |
+| `0.2.1-dev.1` | yes — a new core version, then a numeric identifier |
+
+So the channel moves to **`0.2.1-dev.1`**: a new core version to clear the
+published `dev9`, and a dot-separated counter that compares numerically forever.
+`check_release.py` now rejects a glued counter of two or more digits, and warns
+on a single-digit one before it becomes a trap.
+
+**A second validator was wrong in the opposite direction.** `check_manifests.py`
+asserted the version had exactly two dots, which rejected every legitimate
+dotted prerelease (and accepted malformed versions the grammar refuses). It now
+validates SemVer 2.0.0 properly. Negative-verified against `1.2`, `a.b.c`, a
+four-part version, `01.2.3` and the empty string (all rejected).
+
+
 **What is deliberately not backfilled.** `0.1.0` is reachable only from
 `local-only-history`, and its commits track nine real household data files
 (`data/ha_environment_audit.json`, `data/entity_inventory.json`,

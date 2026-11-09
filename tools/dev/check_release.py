@@ -30,7 +30,21 @@ For a **release ref** (``vX.Y.Z`` or ``vX.Y.Z-suffix``):
    ``pyproject.toml`` must all state that exact version;
 3. ``RELEASE_NOTES.md`` must contain a ``## vX.Y.Z`` section for it;
 4. a ``-suffix`` tag (dev/rc) must NOT be published as a stable GitHub Release,
-   and a plain ``X.Y.Z`` tag must.
+   and a plain ``X.Y.Z`` tag must;
+5. a prerelease counter must be a **separate numeric identifier**
+   (``-dev.10``), never glued to the word (``-dev10``).
+
+Rule 5 is not style.  SemVer 2.0.0 compares a prerelease identifier that
+contains letters **lexically**, so ``0.2.0-dev9 > 0.2.0-dev10``.  A channel
+numbered ``dev1, dev2, ... dev10`` therefore *disappears* at ``dev10``: the
+updater offers ``dev9`` as the newest release and the last build is never
+installed.  Splitting the counter into its own numeric identifier makes
+``0.2.1-dev.10 > 0.2.1-dev.9`` true by the same rule.
+
+Escaping an already-published glued series also needs a **new core version**:
+``0.2.1-dev.10`` still sorts below ``0.2.0-dev9``, because the comparison reaches
+the identifier ``"dev"`` vs ``"dev9"`` first.  That is why this repository moved
+to ``0.2.1-dev.1`` rather than ``0.2.0-dev.10``.
 
 For an **ordinary commit** (no tag), the same version fields must at least agree
 with each other, and ``RELEASE_NOTES.md`` must document the current version.
@@ -183,6 +197,10 @@ def check_version_fields() -> str | None:
         if value and not SEMVER.match(value):
             error(f"{name} version {value!r} is not valid SemVer 2.0.0")
 
+    # Checked once on the canonical version; every field must equal it anyway.
+    if versions["manifest.json"]:
+        check_prerelease_numbering(versions["manifest.json"])
+
     # The manifest is what Home Assistant reads, so it wins as the canonical
     # version when reporting.
     return versions["manifest.json"]
@@ -214,6 +232,8 @@ def check_tag(tag: str) -> None:
             f"RELEASE_NOTES.md has no '## v{tag_version}' section. "
             "Every released version must be documented before it is tagged."
         )
+
+    check_prerelease_numbering(tag_version)
 
     if semver.group("pre"):
         note(f"{tag_version} is a prerelease; it must be tagged, not released as 'latest'")
@@ -287,6 +307,61 @@ def check_channel(channel: str) -> None:
         note(f"{current} is a prerelease, as required on the dev channel")
     else:
         note(f"{current} is stable, as required on the main channel")
+
+
+def check_prerelease_numbering(version: str) -> None:
+    """A prerelease counter must not be glued to the word once it is two digits.
+
+    SemVer 2.0.0 compares an identifier containing letters **lexically**:
+
+        "dev10" < "dev9"        (true, and surprising)
+        "dev9"  > "dev8"        (also true -- single digits appear fine)
+
+    So a channel numbered ``-dev1, -dev2, ... -dev9`` looks healthy and then
+    *disappears* at ``-dev10``: every updater keeps offering ``-dev9`` as the
+    newest release, the new build is never installed, and nothing is logged.
+    The tag, the Release and the image all exist; the update entity just says
+    "up to date".
+
+    Only a counter of two or more digits is already broken, so only that is an
+    error.  A single-digit glued counter is still ordered correctly today, but
+    it is a trap that springs at the tenth release, so it is reported as a note
+    rather than silently accepted.
+
+    The fix is the standard SemVer form: make the counter its own numeric
+    identifier (``-dev.10``).  Numeric identifiers compare numerically, so it
+    increments forever.  Note that changing only the separator is not enough to
+    overtake an existing glued release -- ``-dev.10`` still compares below
+    ``-dev9`` because ``"dev" < "dev9"`` -- so the *core* version must move too
+    when escaping an already-published glued series.
+    """
+    match = SEMVER.match(version)
+    if match is None or not match.group("pre"):
+        return
+
+    for identifier in match.group("pre").split("."):
+        if identifier.isdigit():
+            continue
+        glued = re.fullmatch(r"([A-Za-z][A-Za-z0-9-]*?)(\d+)", identifier)
+        if glued is None:
+            continue
+        stem, counter = glued.group(1), glued.group(2)
+        if len(counter) >= 2:
+            error(
+                f"version {version!r} glues a {len(counter)}-digit counter to the "
+                f"word ({identifier!r}). SemVer compares an identifier containing "
+                f"letters lexically, so '{identifier}' sorts BELOW "
+                f"'{stem}{int(counter) - 1}' and the updater would never offer it. "
+                f"Write the counter as its own numeric identifier: '{stem}.{counter}' "
+                "(and move the core version past the last published glued release)."
+            )
+            return
+        note(
+            f"version {version!r} uses the glued counter {identifier!r}. It orders "
+            f"correctly at one digit, but at '{stem}10' it would sort below "
+            f"'{stem}9'. Prefer '{stem}.{counter}' for the next release."
+        )
+        return
 
 
 def check_notes_cover_current() -> None:

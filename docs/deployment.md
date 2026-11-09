@@ -402,7 +402,7 @@ A release is a **git tag** plus a **GitHub Release**. Home Assistant, HACS and
 the Marketplace resolve the displayed version from those two things, not from a
 file in the tree: with no tag and no Release they fall back to the branch head
 and show a raw commit SHA. That is the state this repository was in until
-`0.2.0-dev10`, and it is why an installed integration could report `eec273d`
+`0.2.1-dev.1`, and it is why an installed integration could report `eec273d`
 while every version field correctly said `0.2.0-dev9`.
 
 Bump the version in **all five** places, then push to `main` or `dev`:
@@ -433,8 +433,15 @@ The workflows then do the rest, independently and idempotently:
 Channels are decided by the version string, not the branch:
 
 - `main` carries `X.Y.Z` and publishes as **latest**.
-- `dev` carries `X.Y.Z-devN` and publishes with `--prerelease --latest=false`, so
-  a development build is never offered to someone tracking stable.
+- `dev` carries `X.Y.Z-dev.N` and publishes with `--prerelease --latest=false`,
+  so a development build is never offered to someone tracking stable.
+
+The counter must be a **separate numeric identifier**, `-dev.2`, `-dev.3`. Do not
+write `-dev2` glued to the word: SemVer 2.0.0 compares an identifier containing
+letters lexically, so `0.2.0-dev10` sorts *below* `0.2.0-dev9` and an updater
+will keep offering `dev9` forever. This is not theoretical — it happened here,
+and the only visible symptom was an update entity that said "up to date".
+`check_release.py` rejects the glued form.
 
 A commit that does not change the version is **not** a release: both workflows
 notice the tag already exists and exit successfully with a notice. A red run
