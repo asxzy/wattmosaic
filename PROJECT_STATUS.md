@@ -3163,6 +3163,44 @@ release. Audited: `origin/dev` (24 commits) and `origin/main` (1 commit) carry
 `--channel main` rejects a `-dev` version; `--tag v0.1.5` against the `dev` tree
 rejects a tag that describes a different tree.
 
+### 7r.13b The harness was greener than CI, and that is why the first push failed
+
+The first `dev` push after this work went red in CI with six `UP031` lint errors
+in `test_release_contract.py` — percent-formatting, caught by `ruff`. The gate
+suite had reported **12/12 required gates PASS** on the same tree minutes
+earlier. Both were true, and that is the defect: `verify.py` never ran `ruff`.
+It ran only the tests, which is the step CI performs *after* lint. A harness that
+can pass while CI fails is worse than no harness, because it is believed.
+
+Measured, not assumed: `ruff check engine tools tests` exits 1 on that commit
+with 6 findings; adding a `lint` gate to `verify.py` makes the same tree fail the
+harness too, and the fixed tree passes both at 12/12.
+
+Fixed by (a) rewriting the fixtures as f-strings and building `manifest.json`
+with `json.dumps`, and (b) adding a required `lint` gate **first** in
+`verify.py`, mirroring CI's order. The harness now fails where CI fails.
+
+### 7r.13c Both channels now name a version
+
+| Channel | Entity | Before | After |
+| --- | --- | --- | --- |
+| stable integration | `update.wattmosaic` (latest stable release) | `eec273d` | `v0.1.6` |
+| dev integration | `update.wattmosaic`, dev release | `eec273d` | `v0.2.1-dev.1` |
+| stable App | `update.wattmosaic_engine_update` | `0.1.5` | `0.1.5` |
+| dev App | `update.wattmosaic_engine_update_2` | `0.2.0-dev8` | `0.2.1-dev.1` |
+
+`v0.1.6` is marked **Latest**; every `dev` release is marked prerelease, and
+`gh api .../releases/latest` resolves to `0.1.6`, so a stable install is never
+offered a development build.
+
+`main` gained its own copy of the tooling in the same pass. It needed version
+`0.1.6` because `pyproject.toml` and the engine `__version__` are image build
+inputs: correcting the drift changes the image, so mutating the published
+`v0.1.5` tag was not an option. `main` also had a test pinning
+`manifest["version"] == "0.1.5"`, which turned every release into a test edit for
+no added safety (`test_manifest_version_matches_const` already proves the copies
+agree); it now asserts the shape.
+
 ---
 
 ## 8. Needs user authorization
