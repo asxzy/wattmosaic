@@ -1914,28 +1914,29 @@ class TestEngineRouting:
 class TestIdentifierMatching:
     """Resolving a ``device_id`` against the identifiers the integration owns.
 
-    ``owned`` mirrors the real installation: a stable and a development entry
+    ``OWNED`` mirrors the real installation: a stable and a development entry
     publish the *same* engine ids, so ``dev_x`` exists under both.
     """
 
     OWNED = [
-        ("stable", "stable_dev_x"),
-        ("stable", "stable_dev_y"),
-        ("dev", "dev_dev_x"),
-        ("dev", "dev_dev_y"),
+        ("wattmosaic", "stable_dev_x"),
+        ("wattmosaic", "stable_dev_y"),
+        ("wattmosaic", "dev_dev_x"),
+        ("wattmosaic", "dev_dev_y"),
     ]
 
-    def test_fully_qualified_id_resolves_directly(self) -> None:
-        exact, candidates = services.match_identifier_owners(
-            self.OWNED, device_id="dev_dev_x", entries=["stable", "dev"]
+    def _match(self, device_id: str, entries=("stable", "dev")):
+        return services.match_identifier_owners(
+            self.OWNED, device_id=device_id, entries=list(entries)
         )
+
+    def test_fully_qualified_id_resolves_directly(self) -> None:
+        exact, candidates = self._match("dev_dev_x")
         assert exact == "dev"
         assert candidates == []
 
     def test_fully_qualified_stable_id_resolves_directly(self) -> None:
-        exact, candidates = services.match_identifier_owners(
-            self.OWNED, device_id="stable_dev_x", entries=["stable", "dev"]
-        )
+        exact, candidates = self._match("stable_dev_x")
         assert exact == "stable"
         assert candidates == []
 
@@ -1946,39 +1947,82 @@ class TestIdentifierMatching:
         bare id builds ``dev_dev_dev_x``, which matches nothing -- so the form
         that used to work silently stopped resolving.
         """
-        exact, candidates = services.match_identifier_owners(
-            self.OWNED, device_id="dev_dev_x", entries=["stable", "dev"]
-        )
+        exact, _ = self._match("dev_dev_x")
         assert exact is not None, "the fully qualified form must resolve"
-        assert "dev_dev_dev_x" not in [i for _, i in self.OWNED]
+        assert "dev_dev_dev_x" not in [value for _, value in self.OWNED]
 
     def test_bare_id_present_in_both_entries_is_reported_for_both(self) -> None:
-        exact, candidates = services.match_identifier_owners(
-            self.OWNED, device_id="dev_x", entries=["stable", "dev"]
-        )
+        exact, candidates = self._match("dev_x")
         assert exact is None
         assert candidates == ["stable", "dev"]
 
     def test_bare_id_present_in_one_entry_names_it(self) -> None:
-        owned = [("stable", "stable_only_here")]
         exact, candidates = services.match_identifier_owners(
-            owned, device_id="only_here", entries=["stable", "dev"]
+            [("wattmosaic", "stable_only_here")],
+            device_id="only_here",
+            entries=["stable", "dev"],
         )
         assert exact is None
         assert candidates == ["stable"]
 
     def test_unknown_bare_id_yields_nothing(self) -> None:
-        exact, candidates = services.match_identifier_owners(
-            self.OWNED, device_id="dev_missing", entries=["stable", "dev"]
-        )
+        exact, candidates = self._match("dev_missing")
         assert exact is None
         assert candidates == []
 
     def test_identifier_from_an_unloaded_entry_is_ignored(self) -> None:
+        exact, _ = self._match("dev_dev_x", entries=("dev",))
+        assert exact == "dev"
+
+    def test_a_three_element_identifier_does_not_crash_the_scan(self) -> None:
+        """The live 500: HomeKit stores ``("homekit", id, "homekit.bridge")``.
+
+        Unpacking every registry identifier as a pair raises
+        ``ValueError: too many values to unpack``, which turned a routing error
+        into an opaque 500 for *any* lookup on an installation with a HomeKit
+        bridge.  Such identifiers must be skipped, not fatal.
+        """
+        owned = [
+            ("homekit", "homekit-bridge-id", "homekit.bridge"),
+            ("wattmosaic", "dev_dev_x"),
+        ]
         exact, candidates = services.match_identifier_owners(
-            self.OWNED, device_id="dev_dev_x", entries=["dev"]
+            owned, device_id="dev_dev_x", entries=["stable", "dev"]
         )
         assert exact == "dev"
+        assert candidates == []
+
+    def test_a_malformed_identifier_does_not_crash_the_scan(self) -> None:
+        owned = [("wattmosaic",), ("wattmosaic", None), "nonsense", (1, 2)]
+        exact, candidates = services.match_identifier_owners(
+            owned, device_id="dev_x", entries=["stable", "dev"]
+        )
+        assert exact is None
+        assert candidates == []
+
+    def test_identifier_pair_normalises_any_length(self) -> None:
+        assert services.identifier_pair(("wattmosaic", "x")) == ("wattmosaic", "x")
+        assert services.identifier_pair(("homekit", "x", "bridge")) == (
+            "homekit",
+            "x",
+        )
+        assert services.identifier_pair(("wattmosaic",)) == (None, None)
+        assert services.identifier_pair("wattmosaic") == (None, None)
+        assert services.identifier_pair(None) == (None, None)
+
+    def test_an_identifier_claimed_by_two_entries_is_not_treated_as_exact(self) -> None:
+        """A value matching two entry prefixes must not be resolved by luck.
+
+        Entry ids are opaque strings, so one can be a prefix of another
+        (``x`` and ``x_y``).  ``x_y_dev`` starts with both ``x_`` and ``x_y_``,
+        so picking the shorter match would be exactly the load-order guess the
+        routing fix exists to remove.
+        """
+        owned = [("wattmosaic", "x_y_dev")]
+        exact, _ = services.match_identifier_owners(
+            owned, device_id="x_y_dev", entries=["x", "x_y"]
+        )
+        assert exact is None, "two owners must not be resolved by prefix length"
 
 
 # --------------------------------------------------------------------------- #

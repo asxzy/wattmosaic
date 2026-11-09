@@ -12,6 +12,7 @@ from typing import Any
 from .const import (
     APPLY_CONFIRMATION_SERVICES,
     DESTRUCTIVE_SERVICES,
+    DOMAIN,
     SERVICE_ACCEPT_SAMPLE,
     SERVICE_DISCOVER_PLACEMENTS,
     SERVICE_EXPORT_DEVICE_DATA,
@@ -102,36 +103,69 @@ def target_device_ids(data: Mapping[str, Any] | None) -> list[str]:
     return [value for value in (_clean_id(item) for item in values) if value]
 
 
+def identifier_pair(identifier: Any) -> tuple[str | None, str | None]:
+    """``(domain, value)`` from a device-registry identifier of any length.
+
+    A registry identifier is documented as a ``(domain, value)`` pair, but Home
+    Assistant does not enforce the length: the HomeKit controller stores
+    three-element tuples such as ``("homekit", "<id>", "homekit.bridge")``.
+    Unpacking ``for domain, value in device.identifiers`` therefore raises
+    ``ValueError: too many values to unpack`` for *every* device lookup on an
+    installation that has any HomeKit bridge -- which is what happened live,
+    turning a routing error into an opaque 500.
+
+    Only the first two elements carry the meaning this integration needs, so
+    extra elements are ignored rather than treated as an error.  Malformed or
+    non-string entries yield ``(None, None)`` so one bad device cannot break a
+    lookup over the whole registry.
+    """
+    if not isinstance(identifier, (tuple, list)) or len(identifier) < 2:
+        return None, None
+    domain, value = identifier[0], identifier[1]
+    if not isinstance(domain, str) or not isinstance(value, str):
+        return None, None
+    return domain, value
+
+
 def match_identifier_owners(
-    owned: Sequence[tuple[str, str]],
+    identifiers: Sequence[Any],
     *,
     device_id: str,
     entries: Sequence[str],
 ) -> tuple[str | None, list[str]]:
     """Resolve a ``device_id`` against the identifiers this integration published.
 
-    ``owned`` is every ``(entry_id, identifier)`` pair the integration owns, where
-    the identifier is ``<entry_id>_<engine_device_id>``.  Returns
-    ``(exact_entry, candidates)``:
+    ``identifiers`` is every raw device-registry identifier the integration
+    owns; each is normalised through :func:`identifier_pair`, so a three-element
+    HomeKit tuple cannot crash the scan.  A published value is
+    ``<entry_id>_<engine_device_id>``, so the owning entry is derived from the
+    value itself rather than assumed.  Returns ``(exact_entry, candidates)``:
 
     * ``exact_entry`` is set when ``device_id`` *is* an identifier value (the
-      fully qualified form).  Only one entry can own it, so it needs no further
-      disambiguation.  This check has to come first: rebuilding a fully qualified
-      id as ``<entry_id>_<device_id>`` prefixes it a second time and matches
-      nothing, which is exactly how the fully qualified form stopped working.
+      fully qualified form).  This check has to come first: rebuilding a fully
+      qualified id as ``<entry_id>_<device_id>`` prefixes it a second time and
+      matches nothing, which is exactly how the fully qualified form stopped
+      working.  If more than one entry claims it the value is not treated as
+      exact, because that would be a guess.
     * ``candidates`` is every entry publishing ``<entry_id>_<device_id>``.  A
       bare engine id lands here, and normally in *both* a stable and a
       development entry, so the caller must decide rather than take the first.
     """
-    for entry, identifier in owned:
-        if identifier == device_id and entry in entries:
-            return entry, []
+    values: list[str] = []
+    for raw in identifiers:
+        domain, value = identifier_pair(raw)
+        if domain == DOMAIN and value is not None:
+            values.append(value)
 
-    wanted = {f"{entry}_{device_id}" for entry in entries}
-    candidates = [
-        entry for entry, identifier in owned if identifier in wanted
-    ]
-    return None, list(dict.fromkeys(candidates))
+    if device_id in values:
+        owners = [
+            entry for entry in entries if device_id.startswith(f"{entry}_")
+        ]
+        if len(owners) == 1:
+            return owners[0], []
+
+    candidates = [entry for entry in entries if f"{entry}_{device_id}" in values]
+    return None, candidates
 
 
 def choose_entry(

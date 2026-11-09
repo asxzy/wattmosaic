@@ -41,6 +41,7 @@ from .service_logic import (
     ServiceValidationError,
     build_command_payload,
     choose_entry,
+    identifier_pair,
     match_identifier_owners,
     service_result_summary,
     target_device_ids,
@@ -203,7 +204,8 @@ def _engine_device_id(
     if device is None or device.config_entry_id != entry_id:
         return None
     prefix = f"{entry_id}_"
-    for domain, value in device.identifiers:
+    for identifier in device.identifiers:
+        domain, value = identifier_pair(identifier)
         if domain == DOMAIN and value.startswith(prefix):
             return value[len(prefix) :]
     return None
@@ -257,17 +259,18 @@ def _resolve_entry(
             )
 
     if device_id:
-        # Collect every ``(entry, identifier)`` this integration owns, then let
-        # the pure helper decide.  It handles the fully qualified form first
-        # (which *is* an identifier value and must not be prefixed again) and
-        # otherwise reports every entry publishing the bare id, so a collision is
-        # visible instead of being resolved by load order.
+        # Collect every identifier this integration owns, then let the pure
+        # helper decide.  It normalises each one (the registry also holds
+        # three-element HomeKit tuples, which must not be unpacked as pairs),
+        # handles the fully qualified form first -- it *is* an identifier value
+        # and must not be prefixed again -- and otherwise reports every entry
+        # publishing the bare id, so a collision is visible instead of being
+        # resolved by load order.
         owned = [
-            (entry_id, value)
-            for entry_id in entries
+            identifier
             for device in registry.devices
-            for domain, value in device.identifiers
-            if domain == DOMAIN and value.startswith(f"{entry_id}_")
+            for identifier in device.identifiers
+            if identifier_pair(identifier)[0] == DOMAIN
         ]
         exact, candidates = match_identifier_owners(
             owned, device_id=device_id, entries=list(entries)
