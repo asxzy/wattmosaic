@@ -2518,6 +2518,107 @@ signature and are documented in the test module: a sample stamped *exactly* on a
 transition carries the old value (the "before" lookup is a strict `<`), and a
 recording that fills the off interval with on watts leaves no step to measure.
 
+### 7r.6e A pair is one load, and two devices are not one load (defect #57 closed)
+
+Found while computing per-device energy from 24 h of recorded history. The
+history work itself is read-only (§7r.6f), but it exercised the engine against
+the live topology and turned up a silent double count.
+
+**The defect.** `paired_ct_id` is documented as "the other leg of a single
+double-pole load". Nothing enforced that. The discovery heuristic pairs any two
+channels whose ids end `_ct1`/`_ct2` (`_is_genuine_pair` only counts legs, it
+does not look at the device), and `validate_assignments` checked reciprocity but
+never ownership. `resolve_direct` and `TopologyGraph.attribution_ct_ids` then
+summed the declared partner **unconditionally**, so two independent circuits,
+each already its own device, each reported the other's power as well.
+
+This was live. On the running install two lighting CT rows — separate devices
+declared as a pair — both advanced their integration energy entities to
+**5.0904 kWh** over the same window, and two bar-fridge rows both to
+**0.3628 / 0.3627 kWh**. Honest totals for that window are 5.145 kWh of lighting
+and 0.377 kWh of bar fridge, so the live numbers were roughly double.
+
+**The fix.** One rule, in one place: `TopologyGraph.double_pole_leg(ct_id)`
+returns the partner only when it exists, is enabled, and names the **same
+`device_id`**. `attribution_ct_ids`, `most_specific_branch_group` and
+`resolve_direct` all use it. `validate_assignments` now rejects the pairing at
+the point of entry with `pair_crosses_devices`, so a user cannot create it by
+hand. A genuine double-pole load (both legs on one device — the hot tub) is
+unchanged.
+
+**Negative verification.** With the guard removed, the two new engine tests fail
+showing the live symptom exactly (256.4 W reported for a device whose own row is
+17.7 W), and the wizard test fails to raise `pair_crosses_devices`. Restored:
+1435 tests pass, `ruff` clean, 11/11 gates. The genuine-pair tests were written
+at the same time and pass in both directions, so the fix cannot be "achieved" by
+dropping all pairing.
+
+**Consequence for the live install.** The running engine still carries the old
+code, so its lighting and bar-fridge energy entities remain doubled until a dev
+build is deployed. The topology declaration itself is wrong and should be
+corrected in the wizard once a build that rejects it is installed.
+
+### 7r.6f What 24 h of recorded history actually yields
+
+With the engine unable to run `discover_placements` (the integration is
+`0.2.0-dev5`, the engine is still `0.1.2`), the analysis was done locally
+against the recorder, read-only: all 38 CT rows and 409 candidate runtime
+entities over 24 h, 175 003 rows, harvested over the same WebSocket transport
+the engine uses.
+
+**Defect #56 blocked all of it, and is fixed.** `observations_from_history`
+abandoned an observation unless *every* CT row had a reading on both sides of
+the transition. Nine of the 32 reporting rows publish only on change — one had
+8 samples in 24 h — so **1629 observations collapsed to 0** and history
+correlation could never run on a real install. A row that did not report is now
+*absent* from the observation rather than fatal to it; only an observation with
+no measured row at all is dropped. Negative-verified: restoring the
+all-or-nothing rule makes the new test yield 0 observations.
+
+**Measured device energy (the honest win).** 26 `dedicated_device` rows are one
+CT on one device, so their own history *is* the device's power. Trapezoid over
+elapsed time with a gap rule (4× the row's median sampling interval), grouped by
+`device_id` so a double-pole pair is summed once:
+
+| Device | kWh / 24 h |
+| --- | --- |
+| EV charger | 47.81 |
+| Upper-floor humidifier | 22.34 |
+| Server rack | 5.80 |
+| Lights CT2 | 5.73 |
+| Main-floor furnace | 5.44 |
+| Upper-floor AC | 4.78 |
+| Hot tub (l1+l2) | 3.76 |
+| Main-floor plug | 3.07 |
+| … 18 more | 12.6 |
+| **Total measured** | **112.1** |
+
+Service feed 124.59 kWh, measured devices + shared circuits 113.11 kWh,
+**residual 11.49 kWh (9.2 %)**, which stays unattributed. Accounting reconciles
+in both directions: main-panel devices 71.51 kWh against 81.85 kWh of main-panel
+own load, sub-panel devices 40.60 kWh against 44.70 kWh of sub-panel feed.
+
+**Independent corroboration.** A hand-written template sensor for the same
+appliance — not a WattMosaic entity — rose **3.772 kWh** over the window against
+the CT rows' **3.764 kWh**, 0.2 % apart. The trapezoid is also insensitive to
+method: held-value (ZOH) integration over the same series differs by 0.077 kWh in
+total, and the recorder stores no `unavailable`/`unknown` rows for these
+channels, so a long gap is a *held* value, not an outage.
+
+**Fixture-level attribution yields nothing, and that is correct.** 1629
+observations from 137 entities, **0 accepted**: `too_few_corroborations` 111,
+`ambiguous_rows` 17, `inconsistent_with_row` 5, `no_row_responded` 4. The
+recorder keeps ~24 h, so most lights show 2–3 transitions against a 3-pair
+minimum, and the ambiguous cases are genuinely ambiguous at this granularity —
+one kitchen lamp's edges co-move with an EV charger (+117 W), an outdoor plug
+(−167 W) and the row above it (+534 W) on the same transitions. Refusing is the
+correct answer, not a defect.
+
+**What cannot be done from history.** Dimmer level→watts curves: the recorder
+stores only `device_id`, `zone_id` and `friendly_name` for these lights even
+with attributes requested, so curves still require live `state_changed` events.
+Per-device accuracy against household ground truth remains unverified.
+
 ### 7r.7 Known limitation found while probing the dimming case
 
 The dimmer case is only fully "CT as ground truth" while **one** lamp is on. With

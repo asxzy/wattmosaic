@@ -376,12 +376,11 @@ class TopologyGraph:
         pool = deepest or candidates
         ordered = sorted(pool)
         if dev.double_pole:
-            # Keep both legs of a verified pair.
-            legs = [
-                cid
-                for cid in ordered
-                if self._channels[cid].paired_ct_id in ordered
-            ]
+            # Keep both legs of a verified pair -- but only when the partner is
+            # genuinely this device's other leg.  ``ordered`` is already scoped
+            # to this device's own branch CTs, so a pair pointing outside it is
+            # a cross-device pairing and is left alone.
+            legs = [cid for cid in ordered if self.double_pole_leg(cid) in ordered]
             if legs:
                 return tuple(legs)
         return (ordered[0],)
@@ -390,13 +389,38 @@ class TopologyGraph:
         group = self.most_specific_branch_group(device_id)
         return group[0] if group else None
 
+    def double_pole_leg(self, ct_id: str) -> str | None:
+        """The other leg of *this same device*, or ``None``.
+
+        ``paired_ct_id`` is documented as "the other leg of a single double-pole
+        load", but the field is free text and nothing upstream enforces it: two
+        independent circuits whose CTs happen to be named ``..._ct1``/``..._ct2``
+        get paired by the discovery heuristic, and a user can pair any two
+        channels by hand.  Summing such a pair makes **each** device report the
+        other's power as well, so every consumer of the pair must check that the
+        partner actually belongs to the same device before treating it as a leg.
+
+        A partner is only a leg when it exists, is enabled, and names the same
+        ``device_id`` (both ``None`` counts as the same, for branch pairs that
+        have no device yet).
+        """
+        channel = self._channels.get(ct_id)
+        if channel is None or not channel.paired_ct_id:
+            return None
+        partner = self._channels.get(channel.paired_ct_id)
+        if partner is None or not self.is_enabled(partner.ct_id):
+            return None
+        if partner.device_id != channel.device_id:
+            return None
+        return partner.ct_id
+
     def attribution_ct_ids(self, device_id: str) -> tuple[str, ...]:
         """CTs that carry this device's power *once* (its measurement rows)."""
         dedicated = self.dedicated_channel_for(device_id)
         if dedicated is not None:
             out = [dedicated.ct_id]
-            partner = dedicated.paired_ct_id
-            if partner and partner in self._channels and self.is_enabled(partner):
+            partner = self.double_pole_leg(dedicated.ct_id)
+            if partner is not None:
                 out.append(partner)
             return tuple(out)
         return self.most_specific_branch_group(device_id)

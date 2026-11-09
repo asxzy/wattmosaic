@@ -508,7 +508,6 @@ def observations_from_history(
 
             before: dict[str, float] = {}
             after: dict[str, float] = {}
-            complete = True
             for ct_id, readings in ordered_rows.items():
                 prior_at = None
                 prior_value = None
@@ -525,17 +524,21 @@ def observations_from_history(
                         next_at, next_value = stamp, value
                         break
                 if prior_at is None or next_at is None:
-                    complete = False
-                    break
+                    continue
                 if (at - prior_at).total_seconds() > window_s:
-                    complete = False
-                    break
+                    continue
                 if (next_at - at).total_seconds() > window_s:
-                    complete = False
-                    break
+                    continue
                 before[ct_id] = float(prior_value)
                 after[ct_id] = float(next_value)
-            if not complete or not before or not after:
+            # A row that did not report around this transition is *absent* from
+            # the observation, not a row that failed to move.  Discarding the
+            # whole observation because one row was quiet would throw away every
+            # other row's valid measurement, and on a real installation many
+            # channels publish only on change: one such row would make history
+            # correlation impossible.  Only an observation with no measured row
+            # at all carries no information.
+            if not before or not after:
                 continue
             out.append(
                 EntityObservation(

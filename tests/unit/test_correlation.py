@@ -951,3 +951,80 @@ def test_a_candidate_with_no_positive_step_cannot_be_placed() -> None:
 
     assert plan.accepted == ()
     assert "not positive" in plan.refused["light.ghost"]
+
+
+def test_a_quiet_row_does_not_discard_the_other_rows_evidence() -> None:
+    """Defect #56: one silent channel made history correlation impossible.
+
+    ``observations_from_history`` used to abandon an observation unless *every*
+    CT row had a reading on both sides of the transition.  On a real
+    installation many channels publish only on change -- one had 8 samples in a
+    24 h window -- so every observation was dropped and correlation could never
+    run at all: 1629 observations collapsed to zero.
+
+    A row that did not report is *absent* from the observation.  It is not a row
+    that failed to move, and its silence says nothing about the other rows.
+    """
+    switch = "light.pots"
+    states = {switch: [(T0, "off")]}
+    on_intervals: list[tuple[datetime, datetime]] = []
+    for cycle in range(3):
+        on_at = T0 + timedelta(minutes=10 * cycle + 5)
+        off_at = on_at + timedelta(minutes=2)
+        states[switch].append((on_at, "on"))
+        states[switch].append((off_at, "off"))
+        on_intervals.append((on_at, off_at))
+
+    def lit(at: datetime) -> bool:
+        return any(start <= at < end for start, end in on_intervals)
+
+    # One continuous poll stream, offset from every transition instant so no
+    # sample lands exactly on one (an at-instant reading is the *new* value).
+    answering = [
+        (T0 + timedelta(seconds=17 + 30 * step), BASELINE_W + (40.0 if lit(T0 + timedelta(seconds=17 + 30 * step)) else 0.0))
+        for step in range(0, 110)
+    ]
+    # ``ct2`` publishes only twice, hours away from every transition: it is
+    # inside the row set but has nothing to say about any of them.
+    quiet = [(T0 + timedelta(hours=3), 12.0), (T0 + timedelta(hours=4), 13.0)]
+
+    observations = observations_from_history(
+        entity_states=states,
+        row_readings={"ct1": answering, "ct2": quiet},
+        entity_levels={},
+    )
+
+    assert len(observations) == 6, observations
+    # The silent row is simply not part of the measurement.
+    for observation in observations:
+        assert set(observation.before_w) == {"ct1"}
+        assert set(observation.after_w) == {"ct1"}
+
+    report = correlate(observations, now=T0 + timedelta(hours=1))
+    assert [c.ct_id for c in report.candidates] == ["ct1"]
+    assert report.candidates[0].typical_w == pytest.approx(40.0)
+
+
+def test_an_observation_with_no_measured_row_at_all_is_dropped() -> None:
+    """The complement of the rule above: silence from *every* row is no data.
+
+    Keeping such an observation would put an entity into the unresolved list
+    with "no row responded" for a transition nothing actually observed.
+    """
+    switch = "light.pots"
+    states = {
+        switch: [
+            (T0, "off"),
+            (T0 + timedelta(minutes=10), "on"),
+        ]
+    }
+    # Only one reading, far from the transition, on the single row.
+    far = [(T0 + timedelta(hours=5), BASELINE_W)]
+
+    observations = observations_from_history(
+        entity_states=states,
+        row_readings={"ct1": far},
+        entity_levels={},
+    )
+
+    assert observations == []

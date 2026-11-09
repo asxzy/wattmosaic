@@ -147,7 +147,7 @@ system. Documented as an open ambiguity.
 
 ## ADR-0010 — Double-pole loads are one logical device
 
-**Status:** Accepted · 2026-11-05
+**Status:** Accepted · 2026-11-05, amended 2026-11-09
 
 **Context.** Several loads appear as channels named `*_ct1` / `*_ct2`, one leg
 per phase. Naming alone does not prove they are a pair.
@@ -155,8 +155,24 @@ per phase. Naming alone does not prove they are a pair.
 **Decision.** A paired CT set is one `DeviceTopology` with `double_pole=true` and
 `phase=BOTH`. Its power is the sum of both legs, modelled once.
 
+**Amendment — a pair belongs to one device, and only the engine may assume it.**
+`paired_ct_id` is free text: the discovery heuristic pairs any two channels whose
+ids end `_ct1`/`_ct2`, and a user can pair anything. Summing a declared pair
+unconditionally meant that two *independent* circuits, each already its own
+device, each reported the other's power as well. That happened on a real install
+and was visible in the integration's own energy entities: two separate lighting
+devices both reached 5.0904 kWh over the same window.
+
+A partner is therefore the other leg only when it exists, is enabled, and names
+the **same `device_id`** (`TopologyGraph.double_pole_leg`). `attribution_ct_ids`,
+`most_specific_branch_group` and `resolve_direct` all consult it, and
+`validate_assignments` rejects the pairing at entry with `pair_crosses_devices`.
+The alternative — dropping pairing altogether — would halve a genuine 240 V
+load, so the rule is ownership, not the absence of a declaration.
+
 **Consequences.** Prevents treating a 240 V appliance as two appliances and
-prevents double counting.
+prevents double counting. A cross-device declaration is now an error the user
+sees, rather than silent duplicate attribution.
 
 ---
 

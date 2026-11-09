@@ -684,9 +684,21 @@ def validate_assignments(
             if other is None:
                 errors.append(f"pair_missing:{ct_id}:{pair}")
             else:
-                other_pair = normalise_assignment(other)["paired_ct_id"]
-                if other_pair != ct_id:
+                other_assignment = normalise_assignment(other)
+                if other_assignment["paired_ct_id"] != ct_id:
                     errors.append(f"pair_not_reciprocal:{ct_id}:{pair}")
+                elif (
+                    role == CT_ROLE_DEDICATED
+                    and other_assignment["role"] == CT_ROLE_DEDICATED
+                    and device
+                    and other_assignment["device_id"]
+                    and other_assignment["device_id"] != device
+                ):
+                    # A pair is the two legs of ONE double-pole load.  Pairing
+                    # two different devices would make each report the other's
+                    # power as well: the engine sums a declared pair, so the
+                    # same watts would be attributed to both.
+                    errors.append(f"pair_crosses_devices:{ct_id}:{pair}")
         if phase == "both" and not pair:
             errors.append(f"both_needs_pair:{ct_id}")
 

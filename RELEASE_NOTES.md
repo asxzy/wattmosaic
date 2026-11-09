@@ -34,6 +34,21 @@ replace the stable integration or App.**
 
 ### Fixed
 
+- **History correlation could never run on a real install.** An observation was
+  abandoned unless *every* CT row had a reading on both sides of the transition.
+  Many channels publish only on change — one had 8 samples in 24 h — so on a
+  real installation 1629 observations collapsed to 0 and the feature silently
+  did nothing. A row that did not report is now absent from the observation
+  rather than fatal to it; only an observation with no measured row at all is
+  dropped.
+- **Two circuits paired as one double-pole load were counted twice.** A pair is
+  the two legs of *one* device, but nothing enforced it: the discovery heuristic
+  pairs anything named `..._ct1`/`..._ct2`, and the engine summed the declared
+  partner unconditionally. Two devices declared as a pair therefore each reported
+  the other's power as well. The live integration's own energy entities showed
+  it — two separate lighting devices both reached 5.0904 kWh. A partner is now a
+  leg only when it names the same device, and the wizard rejects the pairing at
+  entry.
 - **Demoting a dedicated CT left a stale owner.** The channel became a branch
   row while the placeholder still declared the CT as its own, which the graph
   rejected as a type mismatch. The mirror is now rebuilt rather than only
@@ -42,7 +57,7 @@ replace the stable integration or App.**
   `on` and dimmed moved the CT row while nothing recorded why, so the level was
   invisible to inference. A level change is now a real event.
 
-`1428` tests pass and `tools/dev/verify.py` reports **11/11 gates**. Twenty-four
+`1435` tests pass and `tools/dev/verify.py` reports **11/11 gates**. Twenty-four
 new guards were negatively verified for this change; three clauses that no test
 could distinguish were removed instead of kept. See ADR-0024.
 

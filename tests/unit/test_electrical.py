@@ -1042,3 +1042,73 @@ def test_confidence_penalties_reduce_score():
     assert stale.score < clean.score
     assert "stale" in stale.penalties
     assert "ambiguous" in stale.penalties
+
+
+def test_a_pair_spanning_two_devices_is_not_summed_into_either() -> None:
+    """Defect #57: two circuits paired as if they were one double-pole load.
+
+    ``paired_ct_id`` means "the other leg of a single double-pole load", but the
+    field is free text: the discovery heuristic pairs anything named
+    ``..._ct1``/``..._ct2``, and a user can pair any two channels by hand.  The
+    engine used to sum a declared pair unconditionally, so two independent
+    circuits -- each already its own device -- reported **each other's power as
+    well**: the same watts attributed twice, and no error anywhere.
+
+    A pair is only a double-pole leg when the partner names the same device.
+    """
+    topo = Topology(
+        channels=[
+            _ch("lights_ct1", CTType.DEDICATED_DEVICE, phase=Phase.L1,
+                device="lights_1", pair="lights_ct2"),
+            _ch("lights_ct2", CTType.DEDICATED_DEVICE, phase=Phase.L2,
+                device="lights_2", pair="lights_ct1"),
+        ],
+        devices=[
+            DeviceTopology(device_id="lights_1", dedicated_ct_ids=["lights_ct1"], phase=Phase.L1),
+            DeviceTopology(device_id="lights_2", dedicated_ct_ids=["lights_ct2"], phase=Phase.L2),
+        ],
+        status=TopologyStatus.CONFIRMED,
+    )
+    graph = build_graph(topo)
+    window = ObservationWindow.from_values(T0, {"lights_ct1": 17.7, "lights_ct2": 238.7})
+    readings = resolve_direct(window, graph)
+
+    assert readings["lights_1"].power_w == pytest.approx(17.7)
+    assert readings["lights_2"].power_w == pytest.approx(238.7)
+    # Neither device may claim the other's row.
+    assert readings["lights_1"].ct_ids == ("lights_ct1",)
+    assert readings["lights_2"].ct_ids == ("lights_ct2",)
+
+
+def test_a_genuine_double_pole_pair_still_sums_both_legs() -> None:
+    """The complement of defect #57: a real pair must keep working.
+
+    Both legs belong to the same device, so the sum *is* the device's power.
+    Dropping the partner here would report half the load.
+    """
+    graph = build_graph(_dedicated_topology())
+    window = ObservationWindow.from_values(
+        T0, {"ct_tv": 0.0, "ct_tub_l1": 1200.0, "ct_tub_l2": 1300.0}
+    )
+    readings = resolve_direct(window, graph)
+
+    assert readings["tub"].power_w == pytest.approx(2500.0)
+    assert set(readings["tub"].ct_ids) == {"ct_tub_l1", "ct_tub_l2"}
+
+
+def test_attribution_never_borrows_a_cross_device_partner() -> None:
+    """The same rule at the topology level, which feeds totals and nesting."""
+    topo = Topology(
+        channels=[
+            _ch("fridge_1", CTType.DEDICATED_DEVICE, device="fridge_1", pair="fridge_2"),
+            _ch("fridge_2", CTType.DEDICATED_DEVICE, device="fridge_2", pair="fridge_1"),
+        ],
+        devices=[
+            DeviceTopology(device_id="fridge_1", dedicated_ct_ids=["fridge_1"]),
+            DeviceTopology(device_id="fridge_2", dedicated_ct_ids=["fridge_2"]),
+        ],
+        status=TopologyStatus.CONFIRMED,
+    )
+    graph = build_graph(topo)
+    assert graph.attribution_ct_ids("fridge_1") == ("fridge_1",)
+    assert graph.attribution_ct_ids("fridge_2") == ("fridge_2",)

@@ -71,8 +71,11 @@ def resolve_direct(
         if ch is None:
             continue
         ct_ids = [ch.ct_id]
-        partner = ch.paired_ct_id
-        if partner and partner in topology.channels and topology.is_enabled(partner):
+        # Only a partner that belongs to *this* device is the other leg of a
+        # double-pole load.  A pair spanning two devices would otherwise make
+        # each device report the sum of both circuits.
+        partner = topology.double_pole_leg(ch.ct_id)
+        if partner is not None:
             ct_ids.append(partner)
 
         legs: dict[str, float | None] = {}

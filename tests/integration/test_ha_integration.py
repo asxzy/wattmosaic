@@ -1443,6 +1443,52 @@ class TestAssignmentValidation:
         errors = flow.validate_assignments({"ct_a": {"role": "branch", "phase": "both"}})
         assert any(e.startswith("both_needs_pair") for e in errors)
 
+    def test_pair_spanning_two_devices_is_rejected(self) -> None:
+        """Defect #57: a pair is the two legs of ONE double-pole load.
+
+        The engine sums a declared pair.  Pairing two *different* devices would
+        therefore make each of them report the other's power as well, silently
+        attributing the same watts twice.  The wizard must refuse the pairing
+        rather than let it reach the engine.
+        """
+        errors = flow.validate_assignments(
+            {
+                "lights_ct1": {
+                    "role": "dedicated_device",
+                    "phase": "l1",
+                    "device_id": "lights_1",
+                    "paired_ct_id": "lights_ct2",
+                },
+                "lights_ct2": {
+                    "role": "dedicated_device",
+                    "phase": "l2",
+                    "device_id": "lights_2",
+                    "paired_ct_id": "lights_ct1",
+                },
+            }
+        )
+        assert any(e.startswith("pair_crosses_devices") for e in errors)
+
+    def test_pair_of_one_device_is_accepted(self) -> None:
+        """The complement: a genuine double-pole load is still allowed."""
+        errors = flow.validate_assignments(
+            {
+                "hot_tub_l1": {
+                    "role": "dedicated_device",
+                    "phase": "l1",
+                    "device_id": "hot_tub",
+                    "paired_ct_id": "hot_tub_l2",
+                },
+                "hot_tub_l2": {
+                    "role": "dedicated_device",
+                    "phase": "l2",
+                    "device_id": "hot_tub",
+                    "paired_ct_id": "hot_tub_l1",
+                },
+            }
+        )
+        assert errors == []
+
     def test_unknown_channel_rejected(self) -> None:
         errors = flow.validate_assignments(
             {"nope": {"role": "branch", "phase": "l1"}},
