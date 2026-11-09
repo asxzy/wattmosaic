@@ -2826,7 +2826,34 @@ that flow **return**. The rows have been flat zero since 2026-11-06 19:14, so th
 reversal is historical; correcting the declaration is a user decision, and it is
 recorded in §8 rather than changed here.
 
-`1344` unit and integration tests pass.
+**A HomeKit identifier made every routing error an opaque 500 (integration).**
+Found by exercising the deployed integration, not by the tests. The routing
+rewrite iterated every identifier in the device registry and unpacked each as a
+`(domain, value)` pair. Home Assistant documents that shape but does not enforce
+it: the HomeKit controller stores **three**-element tuples such as
+`("homekit", "<id>", "homekit.bridge")`. Two such devices exist on this
+installation, so *every* `device_id` lookup raised
+`ValueError: too many values to unpack (expected 2, got 3)`. The correct
+`ambiguous_target` refusal came back as a bare `500 Internal Server Error` with
+nothing in the response, and the same unpacking sat in `_engine_device_id`, so
+the UI `target` path was one HomeKit device away from the same failure.
+
+`identifier_pair` now normalises any identifier to `(domain, value)` and returns
+`(None, None)` for malformed or non-string entries, so one bad device cannot
+break a scan over the whole registry. `match_identifier_owners` derives the
+owning entry from the identifier value instead of pairing every identifier with
+every entry, and a value claimed by two entry prefixes stays unresolved rather
+than being decided by prefix length. Both guards are negative-verified. Checked
+against the live registry (449 identifiers, two HomeKit triples): the fully
+qualified dev and stable ids resolve, a bare id reports both owners, an unknown
+id reports none.
+
+This is the second defect in this section that the test suite could not have
+caught, because the suite cannot import Home Assistant and therefore never sees
+real registry contents. Both were found by probing the deployed system, which
+remains the only way to verify this layer.
+
+`1355` unit and integration tests pass.
 
 ---
 

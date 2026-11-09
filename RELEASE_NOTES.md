@@ -57,6 +57,20 @@ App.**
   check hides the real −1210 W reading, and extending it to mains flags
   legitimate export.
 
+### Follow-up, same day
+
+- **A HomeKit device identifier turned every routing error into an opaque 500.**
+  The routing code unpacked each device-registry identifier as a
+  `(domain, value)` pair. Home Assistant does not enforce that length — the
+  HomeKit controller stores three-element tuples — and this installation has two
+  of them, so every `device_id` lookup raised `ValueError: too many values to
+  unpack`. A correct `ambiguous_target` refusal surfaced as
+  `500 Internal Server Error` with an empty body. Identifiers are now normalised
+  to their first two elements with malformed entries skipped, so one bad device
+  cannot break a lookup over the whole registry. Found by probing the deployed
+  system; the suite cannot import Home Assistant and never sees real registry
+  contents. `1355` tests pass.
+
 ## v0.2.0-dev6 — 2026-11-09 (development channel)
 
 Publishes the two accounting fixes that `v0.2.0-dev5` announced but never
