@@ -119,7 +119,11 @@
           "scan_interval": "Scan interval (seconds)",
           "stale_after": "Stale after (seconds)",
           "unavailable_after": "Unavailable after (seconds)",
-          "configure_device": "Configure one device"
+          "configure_device": "Configure one device",
+          "auto_placement": "Automatically create devices"
+        },
+        "data_description": {
+          "auto_placement": "Watch recorded history for switches that repeatedly, unambiguously track one CT row, and create a device for the fixture. Off by default. Rows measured as a single device, and devices you configured yourself, are never changed."
         }
       },
       "device_config": {
@@ -340,6 +344,20 @@
         "parameters": {
           "name": "Parameters",
           "description": "Optional export options passed to the engine."
+        }
+      }
+    },
+    "discover_placements": {
+      "name": "Discover device placements",
+      "description": "Learn which fixtures sit on which CT row from recorded history. Analysis is read-only; apply: true creates the devices and requires confirm: true. Rows measured as one device, and devices you configured yourself, are never changed.",
+      "fields": {
+        "parameters": {
+          "name": "Parameters",
+          "description": "lookback_hours (0.1-720, default 24) and apply (default false)."
+        },
+        "confirm": {
+          "name": "Confirm",
+          "description": "Must be true when apply is true."
         }
       }
     }

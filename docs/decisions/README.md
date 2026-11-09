@@ -910,3 +910,179 @@ so a link change never re-derives an entity ID and never orphans statistics.
   WattMosaic, 81 `light.*` entities, 58 WattMosaic-owned entities excluded from
   the picker. The hot tub is two paired branch CTs (`l1`/`l2`), and the
   projection was exercised against that exact shape (1 200 W from 600 + 600).
+
+---
+
+## ADR-0024 — Circuit membership may be learned from co-movement, but only when it is unambiguous and the user asked
+
+**Status:** Accepted · 2026-11-08 · Extends ADR-0023
+
+**Context.** ADR-0023 let a *declared* switch settle a shared row: the user says
+which circuit a lamp is on, and exactly one lamp being positively ON while its
+siblings are positively OFF credits the row to that lamp.
+
+That still requires the user to enumerate the fixtures. A real installation has
+81 `light.*` entities across three floors, and the bank of dimmers on a single
+circuit is a fraction of them. Asking a person to map every one to a CT row
+is not a workflow; it is a data-entry job, and the half-finished result is worse
+than nothing because an unlinked dimmer is simply invisible.
+
+The tempting shortcut is to let the engine guess from co-movement. That is also
+the fastest way to attribute a real household's power to the wrong appliance and
+never notice: a correlation that is wrong produces a plausible, self-consistent
+number forever. powercalc takes the other road and never creates devices at all.
+
+**Decision.**
+
+1. **Correlation is a pure function with no side effects.**
+   `ingestion/correlation.py` maps observations to candidates and writes
+   nothing: no registry, no names, no I/O, no database. A test can read a verdict
+   without a topology, and the write path cannot accidentally acquire evidence.
+2. **Every clause is a refusal, not a score.** A candidate exists only when all
+   of these hold, and each failure is reported with its own reason:
+   * the switch **actually moved** — a row that wanders while the entity sat
+     still proves nothing about that entity;
+   * the row moved beyond `max(MIN_RESPONSE_W, MIN_RESPONSE_SIGMAS × row noise)`,
+     where the noise is that row's own median absolute difference, so a quiet row
+     needs less absolute movement than a busy one;
+   * the **direction agrees** — turning on must raise the row;
+   * at least `MIN_CORROBORATIONS = 3` independent on/off **pairs** agree;
+   * at least `MIN_AGREEMENT = 80%` of the entity's usable transitions are
+     explained by that row;
+   * **no competing row** responds on `AMBIGUITY_SHARE = 50%` or more of the same
+     transitions;
+   * observations older than `MAX_AGE_S` (14 days) are ignored (wiring changes,
+     bulbs get replaced);
+   * only `light`/`switch`/`fan`/`input_boolean` are candidates — a mode-only
+     domain proves nothing about load (ADR-0012) — and `unavailable`/`unknown`
+     are not transitions (ADR-0015).
+3. **A corroboration is one on/off pair, not two edges.** Counting the rising and
+   falling edge separately would let a *single* toggle satisfy a minimum of 3 and
+   defeat the guard entirely. A pair counts when either of its two transitions
+   was explained by the row.
+4. **The measured step is the load, and the baseline is never attributed.** A
+   transition that raised the row by 19.57 W places a 19.57 W load on it; any
+   standing load on the same row stays in the residual (ADR-0006). This is what
+   keeps a CT's own unmodelled third load out of the fixture.
+5. **A dimmer records watts per level, not one full-on number.** When the
+   control entity reported `brightness`, each cycle contributes
+   `(level, watts)` — measured only on the **off** edge, so one cycle is one point
+   and the two halves of a single toggle cannot corroborate each other. `on` with
+   no brightness yields *nothing*, which is "no dimming evidence", never "100%".
+   The curve is held in `LightConfiguration.dimming_curve` as a fraction of
+   full-on (a fixture description) and converted to watts once, in
+   `_measured_curve()`, using the stated full-on value. Without that value the
+   curve is dropped rather than reporting fractions as watts.
+6. **A created device claims a *prior*, not the row.** The placement carries the
+   correlated step as `expected.on_w`, is `MonitoringLevel.SHARED`, and reports
+   `configured_prior` / `tier_1_modelled`. It deliberately does not become the
+   row's owner, so the whole-row rule cannot over-report several fixtures on one
+   circuit. Live dimming interpolates the measured curve; with no reported level
+   the flat full-on value is used, and the reason says which.
+7. **Creation is opt-in, separate from acceptance, and never overrides a person.**
+   `plan_placements` refuses: a `main` row; a row owned by a dedicated
+   measurement (the whole row is already one device — creating a second claimant
+   double-counts the circuit, and the reported remedy is to convert it to a shared
+   circuit, never an automatic demotion); an entity the user configured
+   (`is_user_asserted`); and a non-positive step. `configured_by="auto"` means an
+   auto placement is never user knowledge and never raises a tier.
+   `merge_placements` replaces auto placements wholesale on each run — so a
+   fixture that stops correlating is withdrawn — while touching no user row.
+   Auto placements are excluded from the "already configured" check, or a second
+   run would treat its own output as a user declaration and withdraw the device
+   it just created.
+8. **The write happens only on explicit consent.** The engine flag
+   (`auto_placement`, `WM_AUTO_PLACEMENT`) defaults to **off**; the integration
+   stores the user's choice (`CONF_AUTO_PLACEMENT`) and states `apply` on every
+   call; `apply: true` additionally requires `confirm: true` at the service
+   layer. Analysis without `apply` is always allowed because it changes nothing.
+   An explicit `apply` in the request beats the stored option, so a caller asking
+   to analyse only never gets writes.
+9. **History is enough for a first build; live events carry the rest.** The
+   recorder is queried read-only. Home Assistant's recorder stores only
+   `device_id`, `zone_id` and `friendly_name` per row for these lights even with
+   attributes requested, so a dimmer's level→watts curve cannot be learned from
+   history on this installation — it is learned from live `state_changed` events,
+   which do carry `brightness`. A brightness-only change is therefore a real
+   event: dropping it as "attribute churn" made the level invisible while the row
+   moved for no recorded reason.
+
+**Consequences.** A bank of eight dimmers on one circuit can be mapped from a
+day of history instead of a manual form, and each lamp's energy entity lands on
+its own real device (ADR-0023). Every attribution remains labelled `inferred`;
+the tier stays 1 and the provenance is visible. Two fixtures measured on a real
+circuit recovered their steps exactly at 100 % agreement, and a dimmer measured
+at 40 % → 8.1 W and 100 % → 19.9 W reports 8.10 W at 40 %, 14.00 W at 70 %
+(interpolated) and 19.90 W when the level is not reported.
+
+What this does **not** establish: per-device accuracy against household ground
+truth, which is unverifiable here and stays unverified. Six lighting rows in
+the live installation are declared as dedicated single-device measurements, so
+auto-creation refuses them until each is converted to a shared circuit; that
+refusal is the ownership guard doing its job, not a defect.
+
+**Verification.**
+
+* `tests/unit/test_correlation.py` — two fixtures measured on a real circuit
+  (19.57 W and 13.39 W on a row with an 8.35 W standing load and 0.039 W noise)
+  recovered with 3 corroborations and 100 % agreement; a single coincidence, a step inside the
+  noise floor, a row moving the wrong way, two equal rows, a lone dominant row, a
+  mode-only domain, `unavailable` blips, a transition with no reading on either
+  side, an inconsistent switch (4 of 6 transitions, still 3 pairs), a competing
+  partial response, stale observations, and a burst inside the dedup gap each
+  refuse with their own reason; a dimmer learns `[(0.4, 8.1), (1.0, 19.9)]` from
+  off edges only and reports full-on watts as `typical_w`.
+* `tests/unit/test_auto_placement.py` — materialisation on the declared row with
+  the phase inherited from that row, removal deleting it, two fixtures on one row
+  both materialising, an owned row refusing with the conversion message and still
+  being credited exactly once at 28.00 W `direct_measured`, conversion to a branch
+  unblocking it, a curve scaled from fractions to watts, 40 % → 8 W and
+  70 % → 14 W interpolation, no level → full-on with a distinct reason, a
+  malformed level degrading to "not reported", and an out-of-range level held at
+  the measured endpoint.
+* `tests/integration/test_ha_integration.py` — the opt-in fails closed for a
+  missing, false, string, numeric and nonsense value and enables only on explicit
+  consent; analysis needs no confirmation; `apply: true` without `confirm: true`
+  is refused; an explicit request beats the stored option; the service returns
+  its response; and it is not in the globally destructive set.
+* `tests/unit/test_discover_placements.py` — the orchestration between
+  correlation, placement and the recorder, against a real `Database`: analysis
+  alone writes nothing; `apply=None` follows the stored option while an explicit
+  `apply=False` overrides it; an explicit `apply=True` writes the devices with
+  `topology_version` advancing; the created device is materialised and inherits
+  the row's phase; a second run neither duplicates nor withdraws; a dimmer
+  records a curve from recorded brightness while a switch without levels gets
+  none; history is requested with attributes; a main row that *does* track a
+  switch is refused at correlation (not merely filtered later); an undeclared
+  entity is never requested and never placed, including when the source
+  over-returns; no history and no declared entities are reported with a reason
+  rather than as a clean empty result; and the command rejects a non-numeric or
+  out-of-range lookback.
+* Negative verification: each guard was removed and a test failed — response
+  threshold, agreement floor, ambiguity guard, pair counting, mode-domain filter,
+  age filter, dedup gap, direction check, non-transition filter, stale-reading
+  window, main-row refusal, owned-row refusal, user-declaration precedence,
+  auto-not-user-asserted, zero-step refusal, withdraw-only-auto, materialisation
+  blocker, curve-requires-full-on, opt-in default, apply confirmation, the
+  response-service list, the orchestration's own opt-in/`apply` handling, the
+  attribute request, the empty-history reason, main-row exclusion from the
+  correlation inputs, the declared-entity history request, and the
+  over-returning-source re-filter. Three clauses were found *not* load-bearing
+  during this and were removed rather than kept as unprovable protection: a
+  second curve gate in `_measured_level` (duplicating `configured_power`'s), a
+  level clamp there (duplicating `interpolate_curve`'s, which is tested), and a
+  second level filter in `discover_placements` (levels are only read for
+  entities the filtered state map yielded, so no test could distinguish it).
+
+  Writing those tests also exposed a fixture trap worth recording, because it
+  looks exactly like a regression: `observations_from_history` uses a strict
+  `<` for the "before" reading, so a synthetic recording that polls on the same
+  cadence as it toggles emits a sample *exactly* on each transition carrying the
+  old value, and every measured step is zero. A helper that fills the "off"
+  interval with "on" watts fails the same way. Both produce
+  `unresolved: no_row_responded` and nothing else.
+* Live field evidence: 32 CT channels; a lighting row with an 8.35 ±0.02 W
+  standing load and fifteen fixtures off; two fixtures measured at +19.57 W and
+  +13.39 W on that row. Real history produced 700+ CT rows and row noise
+  0.039 / 0.958 / 0.061 W, and recovered the larger fixture at 19.59 W on /
+  19.54 W off at `min_corroborations=2`.

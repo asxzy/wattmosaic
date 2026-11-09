@@ -311,6 +311,38 @@ def _state_power(model: ModelView | None, state: str | None) -> float | None:
     return value
 
 
+def _measured_level(
+    metadata: Mapping[str, object] | None, device_id: str
+) -> float | None:
+    """Measured dimmer output for one device, or ``None`` when not reported.
+
+    The facade collects each device's control value from its declared state
+    entity and publishes it under ``metadata["device_levels"]``.  This reads it
+    back per device and refuses anything that is not a finite number: a level is
+    a fraction of full scale, and a malformed one must degrade to "not reported"
+    rather than to some arbitrary wattage.
+
+    Range handling is deliberately *not* repeated here.  ``interpolate_curve``
+    already clamps to the measured points -- because extrapolating past what was
+    observed would invent watts -- and that behaviour is tested there.  A second
+    clamp here could drift from it, and neither copy would be provably
+    load-bearing.
+    """
+    levels = (metadata or {}).get("device_levels")
+    if not isinstance(levels, Mapping):
+        return None
+    raw = levels.get(device_id)
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
+
+
 def _stage_for(model: ModelView | None, power_w: float) -> tuple[str | None, StageStatus]:
     if model is None or not model.params.stages:
         return (model.stage if model else None), StageStatus.UNKNOWN
@@ -970,6 +1002,10 @@ class DisaggregationEngine:
         # labels it: the user has stated that siblings share the circuit, so the
         # row is an upper bound rather than an observation (ADR-0011 rule 2).
         direct_is_ours = config is None or config.allows_direct_measurement
+        # Measured dimmer output for *this* device, when the control entity
+        # reported one.  ``None`` means "not reported", never "full brightness":
+        # a light that is merely ``on`` must not be read as 100 % output.
+        level = _measured_level(window.metadata, device_id)
 
         def finish(
             result: InferenceResult,
@@ -1354,7 +1390,9 @@ class DisaggregationEngine:
         prior_power = None
         prior_reason = ""
         if config is not None and not state_off:
-            resolved = configured_power(config, state, state_is_on=state_on)
+            resolved = configured_power(
+                config, state, state_is_on=state_on, level=level
+            )
             if resolved is not None:
                 prior_power, prior_reason = resolved
         if prior_power is not None and prior_power > 0.0:

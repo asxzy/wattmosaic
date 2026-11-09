@@ -28,11 +28,13 @@ from .const import (
     DOMAIN,
     PLATFORMS,
     RESPONSE_SERVICES,
+    SERVICE_DISCOVER_PLACEMENTS,
     SERVICE_START_LEARNING,
     SERVICES,
 )
 from .coordinator import WattMosaicCoordinator
 from .entity_migration import async_migrate_entity_ids
+from .flow_logic import placement_request_parameters
 from .service_logic import (
     ConfirmationRequired,
     ServiceValidationError,
@@ -207,6 +209,25 @@ def _resolve_entry(hass: HomeAssistant, device_id: str | None) -> tuple[str, dic
     return entry_id, data
 
 
+def _placement_parameters(
+    hass: HomeAssistant,
+    entry_data: dict[str, Any],
+    parameters: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge the user's stored auto-placement choice into the request.
+
+    The decision itself is made by ``flow_logic.placement_request_parameters``
+    (pure and tested); this only finds the live config entry so a toggle takes
+    effect on the next call without a reload.
+    """
+    coordinator = entry_data.get("coordinator")
+    entry = getattr(coordinator, "entry", None)
+    config: dict[str, Any] = {}
+    if entry is not None:
+        config = {**entry.data, **entry.options}
+    return placement_request_parameters(config, parameters)
+
+
 async def _async_handle_service(
     hass: HomeAssistant,
     service: str,
@@ -232,6 +253,10 @@ async def _async_handle_service(
     _, entry_data = _resolve_entry(hass, validated.get("device_id"))
     client: EngineClient = entry_data["client"]
     payload = build_command_payload(service, validated)
+    if service == SERVICE_DISCOVER_PLACEMENTS:
+        payload["parameters"] = _placement_parameters(
+            hass, entry_data, payload.get("parameters") or {}
+        )
 
     try:
         result = await client.command(

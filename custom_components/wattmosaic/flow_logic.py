@@ -13,6 +13,7 @@ from typing import Any
 
 from .const import (
     COMMAND_SET_DEVICE_CONFIGURATION,
+    CONF_AUTO_PLACEMENT,
     CONNECTIVITY_LEVELS,
     CT_ROLE_DEDICATED,
     CT_ROLE_MAIN,
@@ -236,6 +237,38 @@ def normalise_settings(data: Mapping[str, Any]) -> dict[str, int]:
         "unavailable_after": as_int(data.get("unavailable_after"))
         or defaults["unavailable_after"],
     }
+
+
+def auto_placement_enabled(config: Mapping[str, Any] | None) -> bool:
+    """Whether the user has opted in to WattMosaic creating devices by itself.
+
+    Off unless explicitly enabled, and only ``True`` counts.  A missing key, a
+    string, or any other value is *not* consent: this flag authorises a write to
+    the configuration store, so the default has to fail closed.
+    """
+    config = config or {}
+    return as_bool(config.get(CONF_AUTO_PLACEMENT), default=False)
+
+
+def placement_request_parameters(
+    config: Mapping[str, Any] | None,
+    parameters: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Add the user's stored auto-placement choice to a request.
+
+    The engine's own flag is an environment variable fixed at launch, so it
+    cannot reflect a checkbox the user just ticked.  The integration therefore
+    states the decision explicitly on every call.
+
+    An explicit ``apply`` in the request always wins: a caller who asked for
+    analysis only must not get writes because a stored option says so.  When it
+    is absent the stored option decides, and the engine still refuses to write if
+    neither grants permission -- two independent no's are better than one.
+    """
+    merged = dict(parameters or {})
+    if merged.get("apply") is None:
+        merged["apply"] = auto_placement_enabled(config)
+    return merged
 
 
 # --------------------------------------------------------------------------- #
@@ -795,6 +828,13 @@ def build_topology_update(
 
     # Mirror dedicated CTs onto device topology entries (engine contract:
     # DeviceTopology.dedicated_ct_ids).
+    #
+    # This is a *mirror*, not an append-only note.  A CT the user demotes from
+    # ``dedicated_device`` to ``branch`` no longer belongs to the device that used
+    # to own it, and leaving the id behind makes the graph reject it
+    # ("dedicated CT ... has type BRANCH, not dedicated_device") while the device
+    # silently keeps zero attribution.  So every device's mirrored list is
+    # rebuilt from the assignment that is being submitted, not merged into.
     raw_devices = topology.get("devices")
     if isinstance(raw_devices, list):
         devices: list[dict[str, Any]] = []
@@ -809,10 +849,26 @@ def build_topology_update(
                 if normalise_assignment(raw)["role"] == CT_ROLE_DEDICATED
                 and normalise_assignment(raw)["device_id"] == device_id
             ]
+            # Channels this wizard step did not touch keep whatever they had, so
+            # a partial submission cannot drop a mapping the user made earlier.
             if dedicated:
                 device["dedicated_ct_ids"] = dedicated
                 if str(device.get("topology_status") or "candidate") == "candidate":
                     device.setdefault("metadata", {})
+            else:
+                # The device may still have a dedicated CT from an untouched
+                # channel; drop only ids this submission demoted.
+                existing = [
+                    str(c)
+                    for c in (device.get("dedicated_ct_ids") or [])
+                    if assignments.get(str(c)) is None
+                    or normalise_assignment(assignments[str(c)])["role"]
+                    == CT_ROLE_DEDICATED
+                ]
+                if existing:
+                    device["dedicated_ct_ids"] = existing
+                else:
+                    device.pop("dedicated_ct_ids", None)
             devices.append(device)
         topology["devices"] = devices
 

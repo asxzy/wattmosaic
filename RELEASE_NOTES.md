@@ -1,5 +1,51 @@
 # Release Notes
 
+## v0.2.0-dev5 — 2026-11-08 (development channel)
+
+Learns which fixtures sit on which circuit from observed co-movement, so a bank
+of dimmers on one CT row no longer requires a manual map — and a dimmer records
+the watts it draws at each brightness level rather than a single full-on number.
+**This is a prerelease. It is installed from the `dev` branch and does not
+replace the stable integration or App.**
+
+### Added
+
+- **Circuit membership from history.** The engine can now watch recorded history
+  for a switch that repeatedly tracks one CT row and place the fixture there.
+  A candidate requires the switch to have moved, the row to move beyond its own
+  measured noise in the expected direction, at least three independent on/off
+  *pairs*, at least 80 % agreement, and no competing row. Anything less is
+  reported as `unknown` with the reason. Rows measuring the whole installation,
+  rows already owned by a single device, and devices you configured yourself are
+  never touched.
+- **Dimmer watts per level.** When brightness is reported, each cycle records
+  `(level, watts)` and the engine interpolates the measured curve at
+  attribution time. A light at 40 % reports its watts at 40 %, not its full-on
+  value. Without a reported level the full-on value is used and the reason says
+  so.
+- **An opt-in that fails closed.** "Automatically create devices" is off by
+  default. Analysing history is always allowed; creating devices requires the
+  option *and* `confirm: true` on the new `wattmosaic.discover_placements`
+  service.
+- **Devices that only a declaration defines are materialised.** A fixture behind
+  a circuit has no channel of its own and previously produced no topology row,
+  so its configuration was saved and silently did nothing. It now inherits the
+  phase from its CT row and disappears when the declaration is removed.
+
+### Fixed
+
+- **Demoting a dedicated CT left a stale owner.** The channel became a branch
+  row while the placeholder still declared the CT as its own, which the graph
+  rejected as a type mismatch. The mirror is now rebuilt rather than only
+  appended.
+- **A brightness change was dropped as attribute churn.** A dimmer that stayed
+  `on` and dimmed moved the CT row while nothing recorded why, so the level was
+  invisible to inference. A level change is now a real event.
+
+`1428` tests pass and `tools/dev/verify.py` reports **11/11 gates**. Twenty-four
+new guards were negatively verified for this change; three clauses that no test
+could distinguish were removed instead of kept. See ADR-0024.
+
 ## v0.2.0-dev4 — 2026-11-08 (development channel)
 
 Adds the missing control that makes the shared-circuit case configurable at all.

@@ -89,6 +89,10 @@ class EngineConfig:
     #: database has none.  Disabling it leaves a fresh install with nothing to
     #: infer, which ``/health`` now reports instead of failing silently.
     topology_bootstrap: bool = True
+    #: Create devices for fixtures whose circuit membership was learned from
+    #: observed co-movement (ADR-0024).  Off by default: it writes device
+    #: configurations, and a write must be something the user asked for.
+    auto_placement: bool = False
     log_level: str = "INFO"
     log_json: bool = True
 
@@ -138,6 +142,7 @@ class EngineConfig:
         cfg.topology_bootstrap = _bool(
             get("WM_TOPOLOGY_BOOTSTRAP", default="true"), True
         )
+        cfg.auto_placement = _bool(get("WM_AUTO_PLACEMENT", default="false"), False)
         cfg.log_level = (get("WM_LOG_LEVEL", "LOG_LEVEL", default="INFO") or "INFO").upper()
         cfg.log_json = _bool(get("WM_LOG_JSON"), True)
         return cfg
@@ -165,6 +170,7 @@ class EngineConfig:
             "api_token": ("***" if self.api_token else ""),
             "database_path": self.database_path,
             "learning_enabled": self.learning_enabled,
+            "auto_placement": self.auto_placement,
             "stale_after_s": self.stale_after_s,
             "inference_interval_s": self.inference_interval_s,
             "log_level": self.log_level,

@@ -181,3 +181,27 @@ export_device_data:
       required: false
       selector:
         object:
+
+discover_placements:
+  name: Discover device placements
+  description: >-
+    Learn which fixtures sit on which CT row from recorded history. Analysis is
+    read-only and always allowed. Setting "Apply" to true creates the devices,
+    which requires confirm to be true; it is also refused unless "Automatically
+    create devices" is enabled in the integration options. Rows measured as one
+    device, and devices you configured yourself, are never changed.
+  fields:
+    parameters:
+      name: Parameters
+      description: >-
+        Options: lookback_hours (0.1-720, default 24) and apply (default false).
+        Without apply only the learned placements and refusals are returned.
+      required: false
+      selector:
+        object:
+    confirm:
+      name: Confirm
+      description: Must be true when apply is true. Creating devices cannot be undone automatically.
+      required: false
+      selector:
+        boolean:

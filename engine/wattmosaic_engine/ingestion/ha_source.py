@@ -48,6 +48,7 @@ from ..contracts import (
     QualityStatus,
     utcnow,
 )
+from .correlation import level_from_attributes
 from .normalize import (
     canonical_unit,
     entity_allowed,
@@ -74,6 +75,13 @@ READ_ONLY_COMMANDS = frozenset(
         "config/floor_registry/list",
         "subscribe_events",
         "render_template",
+        # Read-only recorder queries.  The first build of the CT/switch
+        # correlation (ADR-0024) needs past transitions, not just the current
+        # snapshot: a correlation cannot be established from one instant, and
+        # waiting days for live transitions would leave the feature unusable on
+        # a fresh installation.  Neither command writes anything.
+        "history/history_during_period",
+        "logbook/get_events",
     }
 )
 
@@ -364,6 +372,46 @@ class HASource:
             self._states_cache = result
             return list(result)
         return list(self._states_cache)
+
+    async def history(
+        self,
+        entity_ids: Iterable[str],
+        *,
+        start: datetime,
+        end: datetime | None = None,
+        include_attributes: bool = False,
+    ) -> dict[str, Any]:
+        """Recorder history for these entities, as HA returns it.
+
+        Read-only, and the only way to see a transition that happened before the
+        engine was running.  Returns an empty mapping when the recorder is not
+        available or the query fails: the caller treats that as "no history",
+        never as "no change", so a missing recorder cannot manufacture evidence.
+
+        ``include_attributes`` asks the recorder for attribute payloads.  Dimmer
+        output lives in attributes, so learning a level→watts curve requires it;
+        a plain switch correlation does not, and omitting them keeps the response
+        small.  Note that many integrations store only ``device_id`` and
+        ``friendly_name`` per row regardless, so an empty attribute payload is a
+        normal answer and never an error.
+        """
+        wanted = [str(entity_id) for entity_id in entity_ids if entity_id]
+        if not wanted or not self.connected:
+            return {}
+        try:
+            result = await self._request(
+                "history/history_during_period",
+                start_time=start.isoformat(),
+                end_time=(end or utcnow()).isoformat(),
+                entity_ids=wanted,
+                minimal_response=not include_attributes,
+                no_attributes=not include_attributes,
+                significant_changes_only=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - recorder may not be enabled
+            log.debug("history query failed: %s", exc)
+            return {}
+        return result if isinstance(result, dict) else {}
 
     async def registries(self) -> dict[str, Any]:
         """Return entity/device/area/floor registries (cached)."""
@@ -736,7 +784,14 @@ class HASource:
         # Non-measurement (state-bearing) entities produce device events.
         previous_state = old_state.get("state") if isinstance(old_state, dict) else None
         changed = previous_state != raw_value
-        if changed or initial:
+        # A brightness change on a light that stays ``on`` is a real observation
+        # of how much power the fixture is drawing now.  Dropping it as
+        # "attribute churn" is why a dimmer's level was invisible to inference:
+        # the row moved, the state did not, and nothing recorded why.  The event
+        # still carries the same state on both sides; only the attributes differ,
+        # which is exactly the information being preserved.
+        level_changed = not changed and self._level_changed(old_state, new_state)
+        if changed or level_changed or initial:
             await self._emit_device_event(
                 entity_id,
                 old_state,
@@ -745,6 +800,23 @@ class HASource:
                 or parse_state_timestamp(fired_at)
                 or utcnow(),
             )
+
+    @staticmethod
+    def _level_changed(
+        old_state: dict[str, Any] | None, new_state: dict[str, Any] | None
+    ) -> bool:
+        """True when only the reported output level moved.
+
+        Compared as parsed fractions, not raw attribute numbers, so a change of
+        representation (``brightness: 255`` → ``brightness_pct: 100``) is not two
+        events about the same 100 %.  Either side missing a level yields ``False``:
+        "was not reported" is not a change to a known value.
+        """
+        if not isinstance(old_state, dict) or not isinstance(new_state, dict):
+            return False
+        before = level_from_attributes(old_state.get("attributes"))
+        after = level_from_attributes(new_state.get("attributes"))
+        return before is not None and after is not None and before != after
 
     async def _emit_measurement(
         self,
@@ -810,8 +882,14 @@ class HASource:
         device_id = meta.get("device_id") or entity_id
         new_value = new_state.get("state") if isinstance(new_state, dict) else None
         old_value = old_state.get("state") if isinstance(old_state, dict) else None
-        if new_value == old_value and event_type == "state_changed":
-            # Attribute-only update for a non-measurement entity: not an event.
+        if (
+            new_value == old_value
+            and event_type == "state_changed"
+            and not self._level_changed(old_state, new_state)
+        ):
+            # Attribute-only update with no change in runtime *or* output level:
+            # not an event.  A changed level is kept, because it is the only way
+            # inference learns how much a dimmer draws after it has been dimmed.
             return
         attributes = new_state.get("attributes") if isinstance(new_state, dict) else None
         event = DeviceEvent(

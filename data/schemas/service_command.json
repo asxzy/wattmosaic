@@ -16,7 +16,8 @@
         "rebuild_topology",
         "run_diagnostics",
         "export_device_data",
-        "set_device_configuration"
+        "set_device_configuration",
+        "discover_placements"
       ],
       "title": "Command",
       "type": "string"

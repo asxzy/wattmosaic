@@ -1743,6 +1743,7 @@ class TestServiceValidation:
             "rebuild_topology",
             "run_diagnostics",
             "export_device_data",
+            "discover_placements",
         }
 
     def test_command_payload_shape(self) -> None:
@@ -2336,3 +2337,102 @@ class TestReferenceHouseholdAudit:
         by_id = {c["ct_id"]: c for c in channels}
         pair = flow.suggested_pair(by_id["panel_a_water_heater_ct1_power"], channels)
         assert pair == "panel_a_water_heater_ct2_power"
+
+
+# --------------------------------------------------------------------------- #
+# Auto placement: opt-in and apply confirmation (ADR-0024)
+# --------------------------------------------------------------------------- #
+
+
+class TestAutoPlacementOptIn:
+    """Creating devices by inference is off unless the user says otherwise."""
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            None,
+            {},
+            {"auto_placement": False},
+            {"auto_placement": "false"},
+            {"auto_placement": 0},
+            {"auto_placement": "nonsense"},
+        ],
+    )
+    def test_absent_or_unclear_is_off(self, config: Any) -> None:
+        """A flag that authorises a write must fail closed."""
+        assert flow.auto_placement_enabled(config) is False
+
+    @pytest.mark.parametrize(
+        "value", [True, "true", "yes", "on", 1]
+    )
+    def test_explicit_consent_enables(self, value: Any) -> None:
+        assert flow.auto_placement_enabled({"auto_placement": value}) is True
+
+    def test_analysis_needs_no_confirm(self) -> None:
+        """Reading history changes nothing, so it is always allowed."""
+        validated = services.validate_service_call(
+            const.SERVICE_DISCOVER_PLACEMENTS, {}
+        )
+        assert validated["confirm"] is False
+        assert validated["parameters"] == {}
+
+    def test_apply_without_confirm_is_refused(self) -> None:
+        with pytest.raises(services.ConfirmationRequired) as excinfo:
+            services.validate_service_call(
+                const.SERVICE_DISCOVER_PLACEMENTS,
+                {"parameters": {"apply": True}},
+            )
+        assert excinfo.value.key == "confirmation_required"
+
+    def test_apply_with_confirm_passes(self) -> None:
+        validated = services.validate_service_call(
+            const.SERVICE_DISCOVER_PLACEMENTS,
+            {"parameters": {"apply": True}, "confirm": True},
+        )
+        assert validated["confirm"] is True
+        assert validated["parameters"] == {"apply": True}
+
+    def test_apply_false_needs_no_confirm(self) -> None:
+        """An explicit decline is not a write, so the gate must not fire."""
+        validated = services.validate_service_call(
+            const.SERVICE_DISCOVER_PLACEMENTS, {"parameters": {"apply": False}}
+        )
+        assert validated["confirm"] is False
+
+    def test_the_service_returns_its_response(self) -> None:
+        """Without this the learned placements would be invisible to the caller."""
+        assert services.service_returns_response(const.SERVICE_DISCOVER_PLACEMENTS)
+
+    def test_the_service_is_not_globally_destructive(self) -> None:
+        """Gating the whole service would block the read-only analysis."""
+        assert const.SERVICE_DISCOVER_PLACEMENTS not in const.DESTRUCTIVE_SERVICES
+
+
+class TestPlacementRequestParameters:
+    """The stored opt-in is stated on every call; an explicit request wins."""
+
+    def test_disabled_option_sends_apply_false(self) -> None:
+        assert flow.placement_request_parameters({}, {}) == {"apply": False}
+
+    def test_enabled_option_sends_apply_true(self) -> None:
+        assert flow.placement_request_parameters(
+            {"auto_placement": True}, {}
+        ) == {"apply": True}
+
+    def test_explicit_analysis_wins_over_a_stored_opt_in(self) -> None:
+        """A caller who asked to analyse only must not get writes."""
+        assert flow.placement_request_parameters(
+            {"auto_placement": True}, {"apply": False}
+        ) == {"apply": False}
+
+    def test_other_parameters_are_preserved(self) -> None:
+        assert flow.placement_request_parameters(
+            {"auto_placement": True}, {"lookback_hours": 72}
+        ) == {"lookback_hours": 72, "apply": True}
+
+    def test_an_explicit_apply_true_survives_a_disabled_option(self) -> None:
+        # A user who passes confirm: true has consented even with the option off;
+        # the engine still records the write as explicit.
+        assert flow.placement_request_parameters(
+            {"auto_placement": False}, {"apply": True}
+        ) == {"apply": True}

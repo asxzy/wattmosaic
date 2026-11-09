@@ -201,7 +201,8 @@
           "enum": [
             "user",
             "import",
-            "default"
+            "default",
+            "auto"
           ],
           "title": "Configured By",
           "type": "string"

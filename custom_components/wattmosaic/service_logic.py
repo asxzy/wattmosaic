@@ -10,8 +10,10 @@ from collections.abc import Mapping
 from typing import Any
 
 from .const import (
+    APPLY_CONFIRMATION_SERVICES,
     DESTRUCTIVE_SERVICES,
     SERVICE_ACCEPT_SAMPLE,
+    SERVICE_DISCOVER_PLACEMENTS,
     SERVICE_EXPORT_DEVICE_DATA,
     SERVICE_FREEZE_MODEL,
     SERVICE_REBUILD_MODEL,
@@ -96,6 +98,19 @@ def validate_service_call(
     if service in DESTRUCTIVE_SERVICES and confirm is not True:
         raise ConfirmationRequired(service)
 
+    parameters = data.get("parameters") or {}
+    if not isinstance(parameters, Mapping):
+        raise ServiceValidationError("invalid_parameters", "'parameters' must be a mapping")
+
+    if (
+        service in APPLY_CONFIRMATION_SERVICES
+        and parameters.get("apply") is True
+        and confirm is not True
+    ):
+        # Analysis is read-only and always allowed; only writing devices needs
+        # consent, so the gate follows the parameter rather than the service.
+        raise ConfirmationRequired(service)
+
     device_id = _clean_id(data.get("device_id"))
     sample_id = _clean_id(data.get("sample_id"))
 
@@ -135,7 +150,11 @@ def service_is_destructive(service: str) -> bool:
 
 
 def service_returns_response(service: str) -> bool:
-    return service in (SERVICE_RUN_DIAGNOSTICS, SERVICE_EXPORT_DEVICE_DATA)
+    return service in (
+        SERVICE_RUN_DIAGNOSTICS,
+        SERVICE_EXPORT_DEVICE_DATA,
+        SERVICE_DISCOVER_PLACEMENTS,
+    )
 
 
 def build_command_payload(

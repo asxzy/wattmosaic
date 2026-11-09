@@ -578,9 +578,23 @@ class DeviceConfiguration(Model):
 
     # -- bookkeeping -------------------------------------------------------
     #: Where the configuration came from, for audit.  ``user`` is the only
-    #: value that may raise a confidence tier.
-    configured_by: Literal["user", "import", "default"] = "user"
+    #: value that may raise a confidence tier.  ``auto`` is a correlation the
+    #: engine derived from observed co-movement (ADR-0024): it is stored exactly
+    #: like a user declaration so attribution behaves the same, but it never
+    #: counts as the user having asserted anything, and it is always retractable
+    #: without touching what the user wrote.
+    configured_by: Literal["user", "import", "default", "auto"] = "user"
     notes: list[str] = Field(default_factory=list)
+
+    @property
+    def is_user_asserted(self) -> bool:
+        """True only for a declaration a person actually made.
+
+        Anything the engine inferred for itself -- including auto-discovered
+        placement -- must not be presented as user knowledge or used to promote
+        evidence, however good the correlation looked.
+        """
+        return self.configured_by == "user"
 
     @field_validator("device_id")
     @classmethod
@@ -870,6 +884,7 @@ class ServiceCommand(Model):
         "run_diagnostics",
         "export_device_data",
         "set_device_configuration",
+        "discover_placements",
     ]
     device_id: str | None = None
     sample_id: str | None = None

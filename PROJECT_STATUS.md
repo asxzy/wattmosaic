@@ -2337,7 +2337,83 @@ and held (`21.679`, `direct_measured`, `good`) with legs summing to the reported
 value. The first inference after a restart can precede the measurement window;
 the next poll resolves it.
 
-### 7r.6b Example 2 still needs the user's knowledge
+### 7r.6b Measured circuit membership (basement, one fixture at a time)
+
+The registry carries no circuit membership, so it was measured instead: one
+fixture switched on alone, sampled on all three lighting CTs for 90 s, then
+switched back off and confirmed to return to baseline. Nothing was inferred
+from a name.
+
+Baseline with every basement light off:
+
+| CT | reading | noise |
+| --- | --- | --- |
+| CT1 | 8.35 W | ±0.02 |
+| CT2 | 929.5 W | ±2.5 |
+| CT3 | 23.72 W | ±0.01 |
+
+| fixture | CT1 | CT2 | CT3 | verdict |
+| --- | --- | --- | --- | --- |
+| Basement Bar Pot Lights | 8.36 → **27.92** → 8.40 | unchanged | unchanged | **CT1**, 19.57 W |
+| Basement Laundry Lights | 8.42 → **21.81** → 8.42 | unchanged | unchanged | **CT1**, 13.39 W |
+
+Two fixtures therefore share CT1, and CT1 also carries a **standing 8.4 W** with
+every basement fixture off — a third, unmodelled load on that row. That standing
+load is exactly the "residual is preserved, not assigned" case: the row is not
+fully explained by the fixtures that are known.
+
+Only basement fixtures were switched. The main and upper floors are occupied, so
+nothing outside the basement was touched, and every switch action asked for
+approval first.
+
+### 7r.6c Example 2 needs a device per fixture, and none exists (defects #54/#55)
+
+Having real circuit membership exposed what the earlier fix did not cover. The
+measured map cannot be entered through the product, for two independent reasons.
+
+**#54 — a configuration for a device absent from `topology.devices` is
+discarded, while the write reports success.** `project_configuration` iterates
+`for device in topology.devices`, so a configuration whose `device_id` is not
+already a topology device matches nothing and vanishes. The topology version is
+still incremented and the command returns `ok`, so the user sees a saved
+configuration and no change in behaviour. Measured:
+
+| step | result |
+| --- | --- |
+| declare a fixture that has no topology device | devices after projection `[]`, version bumped |
+| same fixture present in `topology.devices` | projected onto it, measured correctly |
+
+This is the binding problem for Example 2: a dimmer has no CT of its own, so
+`discovery.py` never creates a device for it. Discovery is anchored on a
+multi-channel monitor and emits one device per channel; a fixture behind a
+circuit, with nothing but a `light` entity, produces no device at all. The 28
+devices on the live installation are exactly the 28 channels plus appliances —
+there is no per-fixture device, and no mechanism anywhere in the product creates
+one.
+
+**#55 — demoting a dedicated CT leaves a stale device that the graph rejects.**
+Configuring Example 2 requires turning a `dedicated_device` CT into a `branch`
+row (it feeds several fixtures). `build_topology_update` only ever *adds* to a
+device's `dedicated_ct_ids`; when the role stops being `dedicated_device` the
+old id stays. Measured with the real function:
+
+| after demoting the CT | value |
+| --- | --- |
+| channel `ct_type` | `branch` |
+| placeholder device `dedicated_ct_ids` | `['ct1']` (stale) |
+| `build_graph` problems | `device dev_ct1 dedicated CT ct1 has type CTType.BRANCH, not dedicated_device` |
+| `attribution_ct_ids('dev_ct1')` | `()` |
+
+**A trap any fix must avoid.** A fixture device materialised with
+`phase=unknown` is not neutral: `phase_coefficient` returns `0.5` for a
+single-line row, so one 19.57 W row credits **39.14 W** to the single ON
+claimant — the row counted twice. A materialised device must inherit the CT's
+phase. Verified: `phase=unknown` → 0.5, `phase=l1` → 1.0 on the same row.
+
+So Example 2 is still **unverified through the product**, now for a precisely
+located reason rather than a missing landmark. What is verified is the circuit
+membership above, and that the engine computes the single-ON case correctly once
+a device carrying the right phase exists.
 The product can now express the case, but it still has **no live confirmation**,
 and the remaining blocker is knowledge, not code:
 
@@ -2361,6 +2437,86 @@ One deliberate gap is recorded rather than fixed: a device pinned OFF reports
 `unknown` / `0.0` rather than a measured `0 W`, and the row's power stays in the
 residual as `unexplained_load_on_device_circuit`. Reporting a hard zero would
 claim a measurement the engine did not make.
+
+### 7r.6d Circuit membership is now learned, and creation is opt-in (defects #54/#55 closed)
+
+The knowledge blocker in 7r.6c is now addressed by measurement rather than by
+asking, and the two defects are closed.
+
+**#54 closed.** `project_configuration` materialises a configured device that
+`topology.devices` does not contain, inheriting the phase from its CT row
+(§7r.6c's double-counting trap) and marking it
+`materialised_from_config`. Removing the configuration deletes it. Verified
+`phase=l1`, `branch_ct_ids=['ct1']`, no graph problems; removal deletes.
+
+**#55 closed.** `build_topology_update` now rebuilds the dedicated-CT mirror
+instead of only adding to it. Verified: demote → `dedicated_ct_ids = None`;
+keep dedicated → preserved.
+
+**Correlation (`ingestion/correlation.py`).** A pure function that maps
+observed co-movement to a `(switch, CT row)` candidate. Every clause is a
+refusal — see ADR-0024. Verified on the measured basement values: the two
+switched fixtures resolved to 19.57 W and 13.39 W on CT1, 100 % agreement; 7
+adversarial cases refuse with their own reason. Real HA history (700+ CT rows;
+row noise 0.039 / 0.958 / 0.061 W) recovered the larger fixture at **19.59 W on
+/ 19.54 W off** vs 19.57 W measured, at `min_corroborations=2`.
+
+**Dimmer watts, not one number.** `EntityObservation` carries the reported level;
+`CtCandidate.dimming_curve` holds measured `(level, watts)` points built from
+**off** edges only, so one cycle is one point. `typical_w` is the curve's maximum
+for a dimmer (the full-on draw) and the smaller of the two steps otherwise. The
+curve is stored as a fraction of full-on in `LightConfiguration.dimming_curve`
+and converted to watts once in `_measured_curve()`. Live attribution interpolates
+it: measured 40 % → 8.1 W and 100 % → 19.9 W reports **8.10 W at 40 %**,
+**14.00 W at 70 %** and **19.90 W when no level is reported** (with a distinct
+reason), all `configured_prior` / `tier_1_modelled`.
+
+**Placement (`disaggregation/auto_placement.py`).** Turns an accepted candidate
+into a `DeviceConfiguration` with `configured_by="auto"`, `MonitoringLevel.SHARED`,
+the measured step as `expected.on_w`, and the measured curve when available. It
+refuses a main row, a row owned by a dedicated measurement (reporting "convert
+that channel to a shared circuit", never auto-demoting), an entity the user
+configured, and a non-positive step. Re-runs are idempotent and withdraw only
+auto placements.
+
+**Opt-in.** `EngineCore.discover_placements(lookback_hours, apply)` queries the
+recorder read-only, correlates, plans, and optionally writes. The engine flag
+(`auto_placement` / `WM_AUTO_PLACEMENT`) defaults to **off**; the integration
+stores the user's choice in the options form (`CONF_AUTO_PLACEMENT`), states
+`apply` on every call, and requires `confirm: true` for `apply: true`. Exposed as
+the `wattmosaic.discover_placements` service, which returns the plan and the
+refusals.
+
+**Live blocker, unchanged and expected.** Six lighting rows are
+`dedicated_device` with paired legs, each owning a placeholder. Auto-creation
+refuses them until each is converted to a shared circuit — the ownership guard
+working, not a defect. And the dimmer curve cannot be learned from recorded
+history on this installation: the recorder stores only `device_id`, `zone_id` and
+`friendly_name` for these lights even with attributes requested, so the curve is
+learned from live `state_changed` events, which do carry `brightness`. A
+brightness-only change is now a real event for exactly that reason.
+
+**Still unverified.** Per-device accuracy against household ground truth, and a
+full live Example 2 confirmation at the default `min_corroborations=3` (only one
+on/off cycle per fixture has been approved so far). CT1's standing 8.4 W remains
+an unmodelled third load and stays in the residual.
+
+Three clauses were removed during negative verification rather than kept as
+untested protection: a second curve gate in `_measured_level` (duplicating
+`configured_power`'s), a level clamp there (duplicating `interpolate_curve`'s,
+which is tested), and a second level filter in `discover_placements` (levels are
+only read for entities the filtered state map yielded, so no test could
+distinguish it).
+
+**The orchestration had no test, and it showed.** `EngineCore.discover_placements`
+joins correlation, placement, the recorder and the configuration store, and until
+now only its two pure halves were covered. `tests/unit/test_discover_placements.py`
+now drives the real method against a real `Database` (18 tests). It was written
+because a hand-run replay returned `accepted: []` and looked exactly like a
+regression; the real fault was the replay's own recording. Two traps produce that
+signature and are documented in the test module: a sample stamped *exactly* on a
+transition carries the old value (the "before" lookup is a strict `<`), and a
+recording that fills the off interval with on watts leaves no step to measure.
 
 ### 7r.7 Known limitation found while probing the dimming case
 

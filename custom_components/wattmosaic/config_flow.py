@@ -45,6 +45,7 @@ from homeassistant.helpers.service_info.hassio import HassioServiceInfo
 from .api_client import EngineClient, describe_engine_error, redact_token_for_display
 from .const import (
     CONF_API_TOKEN,
+    CONF_AUTO_PLACEMENT,
     CONF_BASE_URL,
     CONF_CONFIGURE_DEVICE,
     CONF_CT_ASSIGNMENTS,
@@ -80,6 +81,7 @@ from .flow_logic import (
     apply_nesting_candidates,
     assignment_defaults,
     assignment_store,
+    auto_placement_enabled,
     build_topology_update,
     candidate_labels,
     connection_defaults,
@@ -351,12 +353,19 @@ def _settings_schema(defaults: dict[str, Any]) -> vol.Schema:
 
 
 def _options_schema(defaults: dict[str, Any]) -> vol.Schema:
-    """Settings plus the optional per-device configuration branch.
+    """Settings, the auto-placement opt-in, and the per-device branch.
 
-    The checkbox defaults to ``False``, so an options visit that does not tick it
-    follows exactly the previous wizard.
+    Both checkboxes default to ``False``, so an options visit that changes
+    nothing follows exactly the previous wizard -- and, more importantly, never
+    turns on a feature that writes devices.
     """
     fields: dict[Any, Any] = dict(_settings_schema(defaults).schema)
+    fields[
+        vol.Optional(
+            CONF_AUTO_PLACEMENT,
+            default=bool(defaults.get(CONF_AUTO_PLACEMENT, False)),
+        )
+    ] = BooleanSelector()
     fields[vol.Optional(CONF_CONFIGURE_DEVICE, default=False)] = BooleanSelector()
     return vol.Schema(fields)
 
@@ -791,6 +800,7 @@ class WattMosaicConfigFlow(_AssignmentWizard, ConfigFlow, domain=DOMAIN):
         self._base_url: str = ""
         self._api_token: str | None = None
         self._settings: dict[str, int] = settings_defaults(None)
+        self._auto_placement: bool = False
         self._init_wizard({}, [], {})
 
     # -- wizard hooks ------------------------------------------------------ #
@@ -1016,6 +1026,7 @@ class WattMosaicOptionsFlow(_AssignmentWizard, OptionsFlow):
     def __init__(self, config_entry: ConfigEntry | None = None) -> None:
         self._entry_arg = config_entry
         self._settings: dict[str, int] = settings_defaults(None)
+        self._auto_placement: bool = False
         self._device_config_device_id: str = ""
         self._energy_entities: dict[str, bool] = {}
         self._device_links: dict[str, str] = {}
@@ -1047,6 +1058,7 @@ class WattMosaicOptionsFlow(_AssignmentWizard, OptionsFlow):
             title="",
             data={
                 **self._settings,
+                CONF_AUTO_PLACEMENT: self._auto_placement,
                 CONF_CT_ASSIGNMENTS: assignment_store(self._assignments),
                 CONF_TOPOLOGY_CONFIRMED: confirmed,
                 CONF_TOPOLOGY_VERSION: version,
@@ -1068,6 +1080,7 @@ class WattMosaicOptionsFlow(_AssignmentWizard, OptionsFlow):
             if isinstance(raw, dict)
         }
         self._settings = settings_defaults(config)
+        self._auto_placement = auto_placement_enabled(config)
         self._errors = {}
         # Keep the stored assignments available to the optional device step so
         # finishing that branch cannot silently drop an existing CT mapping.
@@ -1083,6 +1096,7 @@ class WattMosaicOptionsFlow(_AssignmentWizard, OptionsFlow):
                 self._errors = errors
             else:
                 self._settings = normalise_settings(user_input)
+                self._auto_placement = bool(user_input.get(CONF_AUTO_PLACEMENT))
                 if user_input.get(CONF_CONFIGURE_DEVICE):
                     # Optional branch: configure one device, then finish.
                     return await self.async_step_device_config()
@@ -1409,6 +1423,7 @@ class WattMosaicOptionsFlow(_AssignmentWizard, OptionsFlow):
             title="",
             data={
                 **self._settings,
+                CONF_AUTO_PLACEMENT: self._auto_placement,
                 CONF_CT_ASSIGNMENTS: assignment_store(self._assignments),
                 CONF_TOPOLOGY_CONFIRMED: config.get(CONF_TOPOLOGY_CONFIRMED, False),
                 CONF_TOPOLOGY_VERSION: config.get(CONF_TOPOLOGY_VERSION),

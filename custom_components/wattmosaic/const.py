@@ -11,7 +11,7 @@ from __future__ import annotations
 DOMAIN = "wattmosaic"
 NAME = "WattMosaic"
 MANUFACTURER = "WattMosaic"
-VERSION = "0.2.0-dev4"
+VERSION = "0.2.0-dev5"
 
 #: Platforms forwarded by ``async_setup_entry`` (strings, so no HA import).
 PLATFORMS: list[str] = ["sensor", "binary_sensor"]
@@ -52,6 +52,10 @@ CONF_ENERGY_ENTITIES = "energy_entities"
 #: device.  It is a Home Assistant placement decision, so it lives in the config
 #: entry and never travels to the engine.
 CONF_DEVICE_LINKS = "device_links"
+#: Opt-in: let WattMosaic create devices for fixtures whose circuit membership it
+#: learned from observed co-movement (ADR-0024).  Stored as an option so the
+#: decision is the user's, survives restarts, and can be revoked.
+CONF_AUTO_PLACEMENT = "auto_placement"
 
 # --------------------------------------------------------------------------- #
 # Defaults
@@ -218,6 +222,10 @@ SERVICE_RESET_DEVICE_MODEL = "reset_device_model"
 SERVICE_REBUILD_TOPOLOGY = "rebuild_topology"
 SERVICE_RUN_DIAGNOSTICS = "run_diagnostics"
 SERVICE_EXPORT_DEVICE_DATA = "export_device_data"
+#: Learn which fixtures sit on which CT row from recorded history and, if the
+#: user consents, create the devices (ADR-0024).  Analysis is read-only; only
+#: ``apply: true`` writes, and that is what the confirmation gate protects.
+SERVICE_DISCOVER_PLACEMENTS = "discover_placements"
 
 SERVICES: tuple[str, ...] = (
     SERVICE_START_LEARNING,
@@ -232,6 +240,7 @@ SERVICES: tuple[str, ...] = (
     SERVICE_REBUILD_TOPOLOGY,
     SERVICE_RUN_DIAGNOSTICS,
     SERVICE_EXPORT_DEVICE_DATA,
+    SERVICE_DISCOVER_PLACEMENTS,
 )
 
 #: Destructive commands require an explicit ``confirm: true`` service field.
@@ -245,8 +254,20 @@ DESTRUCTIVE_SERVICES: frozenset[str] = frozenset(
 
 #: Services that return a response payload to the caller.
 RESPONSE_SERVICES: frozenset[str] = frozenset(
-    {SERVICE_RUN_DIAGNOSTICS, SERVICE_EXPORT_DEVICE_DATA}
+    {
+        SERVICE_RUN_DIAGNOSTICS,
+        SERVICE_EXPORT_DEVICE_DATA,
+        SERVICE_DISCOVER_PLACEMENTS,
+    }
 )
+
+#: Services that are read-only *unless* a parameter asks them to write.
+#:
+#: ``discover_placements`` analyses history without changing anything; passing
+#: ``apply: true`` creates devices.  Gating the whole service would block the
+#: harmless analysis, and gating nothing would let a write through unconfirmed,
+#: so the confirmation is required exactly when the write is requested.
+APPLY_CONFIRMATION_SERVICES: frozenset[str] = frozenset({SERVICE_DISCOVER_PLACEMENTS})
 
 # --------------------------------------------------------------------------- #
 # Diagnostics / redaction

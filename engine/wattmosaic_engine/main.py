@@ -35,7 +35,7 @@ import signal
 import sys
 import time
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -51,6 +51,7 @@ from .api.server import APIServer
 from .config.settings import EngineConfig
 from .contracts import (
     CONTRACT_VERSION,
+    CTType,
     DataQualityReport,
     DeviceConfiguration,
     DeviceConfigurationSet,
@@ -65,9 +66,14 @@ from .contracts import (
     TopologyStatus,
     utcnow,
 )
-from .device_links import device_for_entity, state_entity_for_device
+from .device_links import (
+    CONFIG_LOAD_ENTITIES_KEY,
+    device_for_entity,
+    state_entity_for_device,
+)
 from .diagnostics.report import redact, run_diagnostics
 from .electrical.nesting import infer_nesting
+from .ingestion.correlation import level_from_attributes
 from .ingestion.discovery import discover_candidate_topology
 from .ingestion.ha_source import HASource
 from .ingestion.queue import BoundedQueue
@@ -326,6 +332,26 @@ def row_to_reconciliation(row: dict[str, Any] | None) -> Reconciliation:
     )
 
 
+def _linkable_state_entities(topology: Topology) -> set[str]:
+    """Entities the topology declares as runtime signals for some device.
+
+    Auto placement may only reason about entities the engine already links.  An
+    undeclared entity is unknown to the topology -- it could be a scene, a
+    template, or another integration's shadow -- and treating it as a load would
+    be a guess about a device that does not exist yet.  The mapping wizard (and
+    the user) decide what is linkable; this only reads that decision.
+    """
+    out: set[str] = set()
+    for device in topology.devices:
+        for key in ("state_entity_ids", "load_entity_ids", CONFIG_LOAD_ENTITIES_KEY):
+            raw = (device.metadata or {}).get(key)
+            if isinstance(raw, str):
+                out.add(raw)
+            elif isinstance(raw, Iterable):
+                out.update(str(v) for v in raw if v)
+    return {e for e in out if e}
+
+
 def _prom_label(value: str) -> str:
     return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
@@ -404,6 +430,12 @@ class EngineCore:
 
         self.persist_queue: BoundedQueue[tuple[str, Any]] = BoundedQueue(config.queue_max_size)
         self.device_states: dict[str, Any] = {}
+        #: Latest *measured* dimmer output per device, as a fraction of full
+        #: scale, taken from the control entity's attributes.  Separate from
+        #: ``device_states`` because the state is ``on`` while the level is what
+        #: says how much: keeping them apart means a light that never reports
+        #: brightness simply has no entry, rather than an implied 100 %.
+        self.device_levels: dict[str, float] = {}
         self.latest_results: dict[str, InferenceResult] = {}
         self.latest_reconciliation: Reconciliation = Reconciliation()
         self.latest_quality: DataQualityReport | None = None
@@ -757,6 +789,16 @@ class EngineCore:
             return
         previous = self.device_states.get(device_id)
         self.device_states[device_id] = event.new_state
+        # Record the measured output level alongside the state.  A dimmer's
+        # state stays ``on`` across a brightness change, so this is the only
+        # place the *amount* is known.  Absent brightness publishes nothing
+        # (rather than 100 %), which keeps a non-dimmable fixture indistinguishable
+        # from a dimmer that has not dimmed yet.
+        level = level_from_attributes(getattr(event, "attributes", None))
+        if level is None:
+            self.device_levels.pop(device_id, None)
+        else:
+            self.device_levels[device_id] = level
         # Persist every declared event: the audit trail wants the observation even
         # when it is not a transition.
         self.persist_queue.put_nowait(("event", event))
@@ -770,7 +812,7 @@ class EngineCore:
             # invent a transition it did not observe.
             return
         if previous == event.new_state:
-            # Attribute churn: not a transition.
+            # Attribute churn: not a transition.  The level (above) still moves.
             return
         self._pending_transitions.append(
             {
@@ -1017,6 +1059,12 @@ class EngineCore:
             return {"skipped": "no topology configured"}
         self._topology_skip_logged = False
         window = self._power_window(topology)
+        # Publish each device's last measured output level.  Attribution reads it
+        # to interpolate a measured dimming curve, so a light at 40 % reports its
+        # watts at 40 % rather than its full-on value.  Devices with no reported
+        # level are absent from the mapping, never defaulted to 100 %.
+        if self.device_levels:
+            window = replace(window, metadata={**window.metadata, "device_levels": dict(self.device_levels)})
         # Attach the declared-link transitions observed since the last cycle.
         # Without this the engine's ``_collect_transitions`` sees neither
         # ``state_transitions`` nor ``previous_states`` and reports no events at
@@ -1669,6 +1717,20 @@ class EngineCore:
         commands report ``ok=False`` rather than crashing the API.
         """
         name = command.command
+        if name == "discover_placements":
+            lookback = command.parameters.get("lookback_hours", 24.0)
+            try:
+                hours = float(lookback)
+            except (TypeError, ValueError):
+                raise InvalidRequest("lookback_hours must be a number") from None
+            if not (0.1 <= hours <= 24.0 * 30):
+                raise InvalidRequest("lookback_hours must be between 0.1 and 720")
+            apply = command.parameters.get("apply")
+            data = await self.discover_placements(
+                lookback_hours=hours,
+                apply=None if apply is None else bool(apply),
+            )
+            return ServiceResult(ok=bool(data.get("ok")), command=name, data=data)
         if name in ("start_learning", "resume_learning", "pause_learning"):
             active = name != "pause_learning"
             backend = self.inference_backend
@@ -1803,6 +1865,158 @@ class EngineCore:
                 "topology_version": projected.version,
             },
         )
+
+    # -- facade: auto placement (ADR-0024) ---------------------------------- #
+    async def discover_placements(
+        self,
+        *,
+        lookback_hours: float = 24.0,
+        apply: bool | None = None,
+    ) -> dict[str, Any]:
+        """Learn which fixtures sit on which CT row from recorded history.
+
+        This is the only facade entry point that creates devices from an
+        inference, so every guard that makes that safe is visible here:
+
+        * **opt-in** -- ``config.auto_placement`` (or ``apply=True`` for an
+          explicit request) gates the write.  Analysing without writing is always
+          allowed, because it changes nothing;
+        * **read-only history** -- the recorder is queried, no service is called;
+        * **branch rows only** -- a main row or a dedicated measurement refuses
+          the placement with a reason instead of double counting the circuit;
+        * **user declarations win** -- an entity a person configured is never
+          rewritten;
+        * **no fabrication** -- a transition that did not move measured power is
+          not placed at all.
+
+        Returns the plan, the refusals and whether it was applied, so a caller can
+        show the user exactly what was learned and what it declined to believe.
+        """
+        topology = self._active_topology()
+        if topology is None:
+            return {
+                "ok": False,
+                "detail": "no topology to place devices on",
+                "accepted": [],
+                "refused": {},
+            }
+
+        from .disaggregation.auto_placement import merge_placements, plan_placements
+        from .disaggregation.configuration import project_configuration
+        from .ingestion.correlation import (
+            correlate,
+            estimate_row_noise,
+            observations_from_history,
+            parse_history_payload,
+        )
+
+        row_channels = {
+            channel.ct_id: channel
+            for channel in topology.channels
+            if channel.enabled and channel.ct_type in (CTType.BRANCH, CTType.DEDICATED_DEVICE)
+        }
+        # Only entities the topology can already see: an undeclared entity is not
+        # a candidate, because the engine has no evidence about whether it is a
+        # load at all (ADR-0012).  Auto placement narrows the set further -- to
+        # domains whose state proves runtime -- inside ``correlate``.
+        entity_ids = sorted(_linkable_state_entities(topology))
+        if not row_channels or not entity_ids:
+            return {
+                "ok": True,
+                "accepted": [],
+                "refused": {},
+                "skipped": {
+                    "reason": "no branch CT rows or no declared state entities",
+                    "channels": len(row_channels),
+                    "entities": len(entity_ids),
+                },
+            }
+
+        end = utcnow()
+        start = end - timedelta(hours=max(lookback_hours, 0.1))
+        wanted = [*entity_ids, *(ch.entity_id for ch in row_channels.values())]
+        payload = await self.hasource.history(
+            wanted, start=start, end=end, include_attributes=True
+        )
+        if not payload:
+            return {
+                "ok": True,
+                "accepted": [],
+                "refused": {},
+                "skipped": {"reason": "no recorded history", "lookback_hours": lookback_hours},
+            }
+
+        states, readings, levels = parse_history_payload(payload)
+        # Readings are keyed by entity id in the payload; remap to ct_id so the
+        # correlation (and the placement) speak the topology's vocabulary.
+        by_entity = {
+            str(ch.entity_id): ch.ct_id for ch in topology.channels if ch.entity_id
+        }
+        row_readings = {
+            by_entity[entity]: rows for entity, rows in readings.items() if entity in by_entity
+        }
+        row_noise = estimate_row_noise(row_readings)
+        observations = observations_from_history(
+            entity_states={e: rows for e, rows in states.items() if e in entity_ids},
+            row_readings=row_readings,
+            # Levels are deliberately *not* re-filtered here.  A level is only
+            # ever read for an entity that ``entity_states`` yielded, so the
+            # filter above already decides which entities can contribute one;
+            # a second filter would be unprovable protection against a refactor
+            # rather than a guard that any test can distinguish.
+            entity_levels=levels,
+        )
+        report = correlate(observations, now=end, row_noise_w=row_noise)
+
+        configurations = self.db.load_device_configurations()
+        allow_apply = self.config.auto_placement if apply is None else bool(apply)
+        plan = plan_placements(
+            report=report, topology=topology, configurations=configurations
+        )
+        result: dict[str, Any] = {
+            "ok": True,
+            "accepted": [
+                {
+                    "device_id": placement.device_id,
+                    "entity_id": placement.configuration.state_entity_ids[0],
+                    "ct_id": placement.configuration.monitored_by_ct_ids[0],
+                    "on_w": placement.configuration.expected.on_w,
+                    "dimmable": bool(
+                        placement.configuration.light is not None
+                        and placement.configuration.light.dimming_curve
+                    ),
+                    "evidence": list(placement.evidence),
+                }
+                for placement in plan.accepted
+            ],
+            "refused": dict(plan.refused),
+            "unresolved": dict(report.unresolved),
+            "skipped": dict(report.skipped),
+            "row_noise_w": row_noise,
+            "applied": False,
+        }
+        if not plan.accepted:
+            return result
+        if not allow_apply:
+            result["detail"] = (
+                "auto placement is disabled; enable it in the integration options "
+                "or pass apply=true to write these placements"
+            )
+            return result
+
+        merged = merge_placements(configurations, plan)
+        projected = project_configuration(topology, merged)
+        self.db.save_device_configurations(merged)
+        self.db.save_topology(projected, note="auto placement from observed co-movement")
+        self.topology_cache = projected
+        self.db.log_system_event(
+            "info",
+            "configuration",
+            f"auto placement created {len(plan.accepted)} device(s)",
+        )
+        result["applied"] = True
+        result["topology_version"] = projected.version
+        return result
 
     def export(self, device_id: str) -> dict[str, Any]:
         try:

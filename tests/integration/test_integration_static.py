@@ -286,12 +286,16 @@ def test_services_yaml_matches_documented_services() -> None:
         "start_learning", "pause_learning", "resume_learning", "accept_sample",
         "reject_sample", "rebuild_model", "freeze_model", "unfreeze_model",
         "reset_device_model", "rebuild_topology", "run_diagnostics", "export_device_data",
+        "discover_placements",
     }
     assert set(services) == expected
     for name in ("reset_device_model", "rebuild_topology", "reject_sample"):
         field = services[name]["fields"]["confirm"]
         assert field.get("required") is True, f"{name} confirm must be required"
         assert field.get("default") is not True, f"{name} must not default confirm to true"
+    # ``discover_placements`` writes only when apply is true, so its confirm must
+    # not be required: demanding it would block the read-only analysis.
+    assert services["discover_placements"]["fields"]["confirm"].get("required") is not True
 
 
 def test_no_secrets_in_integration() -> None:

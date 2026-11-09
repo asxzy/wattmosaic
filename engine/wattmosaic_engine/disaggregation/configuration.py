@@ -56,7 +56,7 @@ Rules
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -69,8 +69,10 @@ from wattmosaic_engine.contracts import (
     HaConnectivity,
     LightType,
     MonitoringLevel,
+    Phase,
     PowerBehavior,
     Topology,
+    TopologyStatus,
 )
 from wattmosaic_engine.entity_evidence import classify_entity
 
@@ -89,6 +91,12 @@ STATE_ENTITIES_KEY = "state_entity_ids"
 #: ``DeviceConfiguration.monitored_by_ct_ids``.  Recorded so a configuration
 #: change can retract exactly what it added instead of guessing.
 PROJECTED_CTS_KEY = "projected_ct_ids"
+#: Set on a device this module created from a configuration alone, because no
+#: discovered channel owned it.  Removal deletes the device rather than leaving
+#: an unreachable row behind.  The value is the provenance string
+#: (``user``/``auto``) so a generated device stays distinguishable from a
+#: discovered one.
+MATERIALISED_KEY = "materialised_from_config"
 
 #: Dimming is assumed linear in output unless a measured curve is supplied.
 #: Documented simplification, never presented as a fitted model.
@@ -116,6 +124,10 @@ class EffectiveConfig:
     expected_on_w: float | None = None
     expected_standby_w: float | None = None
     expected_tolerance_w: float = 2.0
+    #: Measured ``(level_fraction, watts)`` points, ascending.  Present only when
+    #: the level→watts relationship was actually observed, so a lookup here is
+    #: measurement, not an assumption about how a dimmer behaves.
+    dimming_curve: tuple[tuple[float, float], ...] = ()
     #: True when the user asserted a shared circuit we cannot fully separate.
     shared_unmodelled: bool = False
     #: Reasons surfaced in ``InferenceResult.tier_reasons``.
@@ -182,6 +194,37 @@ def _declared_light_watts(config: DeviceConfiguration) -> float | None:
     if config.expected.on_w is not None:
         return float(config.expected.on_w)
     return None
+
+
+def _measured_curve(
+    config: DeviceConfiguration | None,
+) -> tuple[tuple[float, float], ...]:
+    """Measured ``(level, watts)`` points from the light configuration.
+
+    ``LightConfiguration.dimming_curve`` is stored as *fraction of full output*
+    for the same reason it exists: the contract describes a fixture, not one
+    installation's wattage.  Wattage is what attribution needs, so the fraction
+    is scaled by the configured full-on watts here, at the one boundary where
+    both are known.  Without a stated full-on value the fractions are not
+    convertible and the curve is not used -- an unlabelled curve would report a
+    fraction as if it were watts.
+    """
+    if config is None or config.light is None or not config.light.dimming_curve:
+        return ()
+    full = config.light.full_on_w()
+    if full is None or full <= 0.0:
+        return ()
+    points: list[tuple[float, float]] = []
+    for raw_level, raw_fraction in config.light.dimming_curve:
+        level = float(raw_level)
+        fraction = float(raw_fraction)
+        if not (0.0 <= level <= 1.0) or not (0.0 <= fraction <= 1.0):
+            # A point outside the contract range cannot describe output; drop it
+            # rather than clamp, which would invent a shape the data lacks.
+            continue
+        points.append((level, fraction * full))
+    points.sort()
+    return tuple(points)
 
 
 def _light_notes(config: DeviceConfiguration) -> list[str]:
@@ -366,6 +409,7 @@ def effective_config(
         expected_tolerance_w=tolerance,
         shared_unmodelled=shared_unmodelled,
         notes=tuple(notes),
+        dimming_curve=_measured_curve(config),
     )
 
 
@@ -396,6 +440,150 @@ def effective_configs(
     }
 
 
+def _phase_for_cts(
+    cts: list[str], channels: Mapping[str, Any]
+) -> Phase:
+    """The phase a device placed on these CT rows must carry.
+
+    A device whose phase is ``UNKNOWN`` is not neutral: ``phase_coefficient``
+    returns ``0.5`` for a single-line row, so one 19.57 W row would credit
+    39.14 W to a single ON claimant -- the row counted twice.  A device created
+    from a declaration therefore inherits the phase of the CT it sits on, which
+    is the only placement knowledge available and is exactly right for the
+    common case (a fixture behind one line).
+
+    When the CTs disagree, or none is known, the phase stays ``UNKNOWN`` and the
+    validation calls it out rather than inventing a line.
+    """
+    phases = set()
+    for ct_id in cts:
+        channel = channels.get(ct_id)
+        if channel is None:
+            continue
+        phase = Phase(channel.phase)
+        if phase != Phase.UNKNOWN:
+            phases.add(phase)
+    if len(phases) == 1:
+        return phases.pop()
+    return Phase.UNKNOWN
+
+
+def cts_claimed_by_dedicated(
+    topology: Topology, ct_ids: Iterable[str]
+) -> tuple[str, str] | None:
+    """``(device_id, ct_id)`` of a device that already owns one of these rows.
+
+    A ``dedicated_device`` CT is a *direct measurement* of exactly one device:
+    the whole row is that device's power.  Placing a second device on the same
+    row and inferring its share would count the row twice -- the direct reading
+    plus the inferred slice -- which is the double counting the electrical model
+    exists to prevent.  So the caller must convert the row to a branch (or
+    shared circuit) before another device may be placed on it, and this function
+    is what detects the conflict.
+
+    Both the device's declared list and the channel's own role are consulted:
+    the two are normally consistent, but a half-applied edit can leave one
+    saying ``dedicated`` and the other not, and trusting only one side would
+    miss the conflict.
+    """
+    wanted = {str(cid) for cid in ct_ids}
+    if not wanted:
+        return None
+    for device in topology.devices:
+        for cid in device.dedicated_ct_ids:
+            if cid in wanted:
+                return device.device_id, cid
+    channels = topology.channel_map()
+    for cid in wanted:
+        channel = channels.get(cid)
+        if channel is None:
+            continue
+        if channel.ct_type == CTType.DEDICATED_DEVICE and channel.device_id:
+            return str(channel.device_id), cid
+    return None
+
+
+def materialisation_blockers(
+    topology: Topology,
+    configurations: Iterable[DeviceConfiguration],
+) -> dict[str, str]:
+    """Configurations the topology cannot honour, with the reason why.
+
+    Returned as ``{device_id: reason}`` so the caller can tell the user exactly
+    what to change.  Nothing is created or re-pointed for these; the
+    configuration is still stored by the caller, which keeps the request visible
+    instead of silently discarded.
+    """
+    items = (
+        configurations.devices
+        if isinstance(configurations, DeviceConfigurationSet)
+        else list(configurations)
+    )
+    known = {device.device_id for device in topology.devices}
+    out: dict[str, str] = {}
+    for config in items:
+        owner = cts_claimed_by_dedicated(topology, config.monitored_by_ct_ids)
+        if owner is None:
+            continue
+        owner_device, ct_id = owner
+        if owner_device == config.device_id:
+            # Its own dedicated row: the normal direct-measurement path.
+            continue
+        out[config.device_id] = (
+            f"CT row {ct_id!r} is a dedicated measurement of device "
+            f"{owner_device!r}; convert that channel to a shared circuit "
+            "before another device can be placed on it"
+        )
+        if config.device_id in known:
+            out[config.device_id] += (
+                " (declaration stored, but it does not change attribution yet)"
+            )
+    return out
+
+
+def _materialise_device(
+    device_id: str,
+    config: DeviceConfiguration,
+    channels: Mapping[str, Any],
+    topology: Topology | None = None,
+) -> DeviceTopology | None:
+    """Create the topology row for a device that only a declaration defines.
+
+    A fixture behind a circuit has no channel of its own, so discovery never
+    emits a device for it and ``project_configuration`` -- which walks
+    ``topology.devices`` -- could never see the configuration at all.  Declaring
+    "this switch is on that CT row" is enough to know a device exists there, so
+    the row is created here.
+
+    The CTs are *not* attached yet: the caller projects them through the same
+    path as every other device, so provenance, retraction and the
+    dedicated-vs-branch rule stay in one place.
+    """
+    cts = [
+        cid
+        for cid in config.monitored_by_ct_ids
+        if cid in channels and getattr(channels[cid], "enabled", True)
+    ]
+    if not cts:
+        # A declaration that names no usable CT cannot place the device.  Keep it
+        # out of the topology rather than creating a row nothing can measure.
+        return None
+    if topology is not None and cts_claimed_by_dedicated(topology, cts) is not None:
+        # Creating this row would put a second claim on a dedicated measurement
+        # and count the circuit twice.  Refuse; the caller reports the conflict.
+        return None
+    return DeviceTopology(
+        device_id=device_id,
+        name=device_id,
+        phase=_phase_for_cts(cts, channels),
+        topology_status=TopologyStatus.CANDIDATE,
+        metadata={
+            MATERIALISED_KEY: str(config.configured_by),
+            "note": "created from a device configuration; no discovered channel owned it",
+        },
+    )
+
+
 def project_configuration(
     topology: Topology,
     configurations: DeviceConfigurationSet | Iterable[DeviceConfiguration],
@@ -413,8 +601,23 @@ def project_configuration(
     )
     by_id = {c.device_id: c for c in items}
     channels = topology.channel_map()
+
+    # A configuration may describe a device that no channel owns -- a fixture
+    # behind a shared circuit.  Discovery only ever emits devices from monitor
+    # channels, so such a device does not exist and the loop below would skip the
+    # configuration entirely: the user saved it, the version bumped, and nothing
+    # changed.  Materialise those rows first so they take the normal path.
+    known = {device.device_id for device in topology.devices}
+    extra: list[DeviceTopology] = []
+    for device_id, config in by_id.items():
+        if device_id in known:
+            continue
+        created = _materialise_device(device_id, config, channels, topology)
+        if created is not None:
+            extra.append(created)
+
     devices: list[DeviceTopology] = []
-    for device in topology.devices:
+    for device in [*topology.devices, *extra]:
         config = by_id.get(device.device_id)
         metadata = dict(device.metadata or {})
         dedicated = list(device.dedicated_ct_ids)
@@ -430,6 +633,12 @@ def project_configuration(
             branch = [c for c in branch if c not in added]
             metadata.pop(PROJECTED_CTS_KEY, None)
         if config is None:
+            if metadata.get(MATERIALISED_KEY):
+                # This row exists only because a declaration asked for it.  With
+                # the declaration gone it is unreachable: no channel owns it, so
+                # nothing can ever measure it again.  Drop it instead of leaving a
+                # permanent zero in every device list.
+                continue
             # A configuration removal must clear the projection, not leave a
             # stale mode or monitoring level behind.
             for key in (
@@ -507,7 +716,11 @@ def project_configuration(
 
 
 def configured_power(
-    config: EffectiveConfig, state: str | None, *, state_is_on: bool
+    config: EffectiveConfig,
+    state: str | None,
+    *,
+    state_is_on: bool,
+    level: float | None = None,
 ) -> tuple[float, str] | None:
     """Power justified purely by configuration, plus the reason.
 
@@ -530,6 +743,13 @@ def configured_power(
     reports ``Cooling`` at 22 W, which this installation maps to off).  It is
     passed in rather than recomputed here so configuration logic never guesses
     at integration-specific state semantics.
+
+    ``level`` is the *measured* dimmer output, as a fraction of full scale, when
+    the control entity reported one.  A measured curve interpolates to the watts
+    this fixture draws at that level, which is a better answer than full-on
+    watts whenever the light is dimmed.  Without a level (or without a curve)
+    the flat ``expected_on_w`` is used and the reason says so, so a consumer can
+    tell the two apart.
     """
     if state is None:
         return None
@@ -543,9 +763,40 @@ def configured_power(
         return None
     if not state_is_on:
         return None
+    if config.dimming_curve and level is not None:
+        watts = interpolate_curve(config.dimming_curve, level)
+        if watts is not None:
+            return float(watts), "measured_dimming_curve"
     if config.expected_on_w is not None:
         return float(config.expected_on_w), "configured_running_power"
     return None
+
+
+def interpolate_curve(
+    curve: Sequence[tuple[float, float]], x: float
+) -> float | None:
+    """Piecewise-linear read of a measured ``(x, y)`` curve.
+
+    Values outside the measured range are clamped to the nearest measured point
+    rather than extrapolated: a dimmer observed between 40 % and 100 % says
+    nothing about 5 %, and inventing that number would report watts the fixture
+    was never seen to draw.  Exact points win, which keeps a lookup at a level
+    that was actually measured bit-identical to the measurement.
+    """
+    if not curve:
+        return None
+    pts = sorted((float(a), float(b)) for a, b in curve)
+    if x <= pts[0][0]:
+        return pts[0][1]
+    if x >= pts[-1][0]:
+        return pts[-1][1]
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:], strict=False):
+        if x0 <= x <= x1:
+            if x1 == x0:
+                return y1
+            frac = (x - x0) / (x1 - x0)
+            return y0 + frac * (y1 - y0)
+    return pts[-1][1]
 
 
 def is_mode_only(config: EffectiveConfig) -> bool:
@@ -573,6 +824,7 @@ __all__ = [
     "effective_config",
     "effective_configs",
     "has_ct_type",
+    "interpolate_curve",
     "is_mode_only",
     "project_configuration",
 ]
