@@ -111,6 +111,11 @@ class TierInputs:
     configured_prior: bool = False
     #: Which configured prior produced the value, used verbatim as the reason.
     prior_reason: str = ""
+    #: The value is the measured *change* on a CT row at this device's own state
+    #: transition, with every sibling on that row holding steady (ADR-0026).
+    #: That is a measurement of the device's draw even though the row is shared:
+    #: it does not require the siblings to be OFF, only to be unchanged.
+    measured_step: bool = False
     #: Sample is old; a measured value that is stale cannot be "verified".
     stale: bool = False
     #: Rows were missing, the solve was ambiguous, or the row is a shared upper
@@ -174,6 +179,13 @@ def evidence_tier(inp: TierInputs) -> tuple[ConfidenceTier, list[str]]:
         if inp.stale:
             reasons.append("inferred_stale")
             return ConfidenceTier.TIER_2_INFERRED, reasons
+        if inp.measured_step:
+            # The CT row literally moved by this many watts at the instant this
+            # device changed state, and nothing else on the row did.  That is a
+            # measurement of the device's draw, not a share of a row: it is
+            # graded like one even though the row is shared (ADR-0026).
+            reasons.append("shared_circuit_step_measured")
+            return ConfidenceTier.TIER_3_MEASURED, reasons
         if inp.monitoring == MonitoringLevel.SHARED:
             reasons.append("shared_circuit_separation")
         if corroborated and not inp.degraded:

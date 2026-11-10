@@ -3449,9 +3449,194 @@ against the Marketplace's own rule — one page of 30, `last_version` = newest
 Releases survive. Negative check: removing the checkout and restoring the
 process-substitution lookup fails three tests.
 
+### 7r.17 The live install moved to the `main` line, and the data loss was smaller than assumed
+
+The live system was updated to the new release model on 2026-11-10. The App was
+replaced outright (`7acd0210` @ `0.2.1-dev.1` → `48d0ea68` @ `0.2.1-dev.5`) and
+the integration moved `0.2.0-dev9` → `0.2.1-dev.5`, which is the first live build
+carrying the `via_device` fix from §7r.14.
+
+**The premise that had to be checked first.** The migration was approved on the
+understanding that a fresh `/data` "loses per-device models and 4,399 cycles of
+history." Reading the live engine before deleting anything corrected half of
+that: `learning_samples: 0`, `device_model_versions: 0`, `device_events: 0`, and
+`models.count: 0`. **No learned model existed.** All 28 device configurations
+were defaults (`device_type: unknown`, `monitoring: dedicated`) and the topology
+was still `status: candidate`, `topology_confirmed: false`. So the fresh-install
+route destroyed no user knowledge — only ~30 days of measurement history
+(529,434 `ct_samples`, 555,996 `inference_results`, 10,696 energy rows, 675 MB).
+"Re-learning" was true only in the sense that there was never anything learned
+to re-learn.
+
+**What was preserved, and why.** Entity unique ids are
+`{entry_id}_{device_id}_{key}` — they do **not** contain the engine URL — and
+discovery derives device ids deterministically from the CT id (`dev_{ct_id}`).
+The replacement engine rediscovered 28 devices and the id set was verified
+**identical** to the pre-migration snapshot before the integration was pointed at
+it, so all 322 entities, 29 devices and their long-term statistics rebound in
+place. Confirmed after the Core restart: 322 entities, 29 devices, one hub device
+with all 28 children linked by `via_device_id`, and `sensor.hot_tub_power`
+retaining its daily statistics back to 2026-11-01.
+
+**Preconditions recorded.** A cold partial backup of just the doomed App exists
+as slug `b984a632` (91.5 MB, stored on NFS — hence invisible in the add-on's
+`/backup` view, which is why it must be confirmed through
+`GET /backups/{slug}/info` rather than `ls`). The engine's live `topology`,
+`devices`, `diagnostics`, `health` and `status` were exported to
+`wm-main-migration/` first; a secret scan of that archive found only redacted
+`***` values.
+
+**Two failure modes worth remembering.** The Supervisor's app-install and
+backup endpoints return `success: false` with an *empty* `message` when the work
+is dispatched as a background job; the truthful answer is in `GET /jobs/info`,
+not in the response. And the Marketplace's cached record was stale
+(`prerelease: v0.2.1-dev.1`, `last_version: v0.1.6`) until
+`marketplace/repository/refresh` was called — an update offered from a stale
+cache would have installed the wrong build.
+
+**Old install removed, on explicit instruction.** Uninstalling was deferred until
+the rollback copy was proven, not merely reported. The backup was downloaded
+through `GET /backups/b984a632/download` (95,897,600 bytes, matching the
+Supervisor's `size_bytes` exactly), the nested
+`7acd0210_wattmosaic_engine.tar.gz` was extracted, and the resulting
+`wattmosaic.db` (673,746,944 bytes) was opened read-only: `PRAGMA
+integrity_check` → `ok`, `user_version` → 6, 528,142 `ct_samples`, 554,848
+`inference_results`, 10,668 energy rows. A backup that had only been *listed*,
+never opened, would not have justified deletion.
+
+Only then was `7acd0210_wattmosaic_engine` uninstalled with
+`remove_config: true`. This matters: `App.uninstall` defaults `remove_config` to
+**False**, so a plain uninstall leaves the `/data` volume on disk and the 675 MB
+is not actually reclaimed — the opposite of "remove it."
+
+The `#dev` repository and the plain-URL `f48de52e` repository were then removed,
+leaving `https://github.com/asxzy/wattmosaic#main` as the only WattMosaic
+repository and `48d0ea68_wattmosaic_engine` @ `0.2.1-dev.5` as the only install.
+Host disk use fell from 46.5 G to 45.9 G and the old hostname stopped resolving.
+
+One ghost survived the uninstall: `update.wattmosaic_engine_update_2`, backed by
+a stale `hassio` device for the deleted slug. `config/device_registry/
+remove_config_entry` refuses it ("Config entry does not support device
+removal"), so the fix was reloading the `hassio` entry, which re-registered the
+app devices and retired the stale one. Two update entities remain, both at
+`0.2.1-dev.5`.
+
+The 64 owned entities still reporting `unavailable`/`unknown` are unchanged from
+before the migration (5 branch-CT devices with no ON claimant, 7 sensors each,
+plus `operating_stage` for every device); they are a pre-existing attribution
+gap, not migration damage.
+
 **Not claimed.** Local gates passed 12/12 both before and after this defect
 existed; the harness cannot observe a workflow's *absence* of work. Nothing
 below is deployed, and the App migration in §8 is still unstarted.
+
+---
+
+### 7r.18 A CT is a circuit, and the row was credited by declaring *more* truth
+
+The attribution rule the product was built on came from ADR-0023: exactly one
+fixture positively ON, its siblings positively OFF, therefore that fixture owns
+the branch row. ADR-0025 bounded the result with a declared wattage. Both were
+written before the rule was ever run against a circuit whose fixture list was
+incomplete — which is every real lighting circuit.
+
+**The live install is already a circuit model.** Re-reading the live topology
+before changing anything: 32 `branch`, 6 `main`, and **0** `dedicated_device`.
+Every "device" on the three lighting rows is a structural placeholder named
+literally `lights`, model `Inferred load`, `monitoring: dedicated` by default and
+`device_type: unknown`. So the *role* model was never the defect. No CT is
+declared private to any appliance, and none needed to be.
+
+**What was actually broken, measured.** On `lights_ct2` at **881.72 W**:
+
+| Declared fixtures | States | Result |
+| --- | --- | --- |
+| 1, no wattage | ON | `unknown`, row held as upper bound — safe |
+| **2**, no wattages | one ON, one OFF | **881.72 W to the single ON lamp**, `source=inferred`, `tier_3_measured` |
+| 2, 150 W / 100 W stated | one ON, one OFF | `150.00 W configured_prior tier_1_modelled`; surplus in residual — correct |
+
+Declaring a second fixture is what *unlocked* the fabrication. The root cause was
+in `effective_config()`: `shared_unmodelled = bool(observed) and not siblings`.
+Read as intended it protected a lone claimant; read as written it went quiet the
+instant a sibling existed, which is precisely when the whole-row credit starts to
+look plausible. It was inverted from safety.
+
+**The rule adopted (ADR-0026).** Attribute the *measured step* — `abs(delta_w)` on
+the device's own attribution row — when and only when: the row is shared, no
+sibling changed state, the device declares a load entity, the transition is an
+activation, the step direction agrees, the reading is fresh, the device is not
+OFF, and the step is within both the row and the device's declared wattage. The
+user's own statement of it: *"No need to require all siblings to be off. As long
+as all siblings' status is stable … we say the change is the watts of the target
+device."*
+
+Clamp and refusal matter as much as the credit: a step above the row is a
+mis-scaled channel and is clamped; a step above the declared wattage means the
+movement belongs to something else on the circuit and the step is dropped
+(`step_exceeds_declared_wattage`). A deactivation step is recorded for learning
+(`shared_circuit_step_measured_on_deactivation`) but never reported as current
+power — the device is off and the row has already dropped.
+
+Attribution reads **attribution rows only**, never an enclosing main: a main step
+may have been produced by any circuit in the panel (`_attribution_step`, distinct
+from `_device_step`).
+
+**A second fabrication found while verifying.** `_state_power` fell back to the
+model's aggregate `estimated_power_w` whenever the model had no value for the
+state — including a positively-OFF state — so an OFF device was reported at full
+running power. Surfaced by the stale-bound case and fixed: "no model value for
+this state" is the answer.
+
+**Verified against the real engine, not against the suite.**
+
+* `verify_delta_rule.py` — 11 cases, all `DisaggregationEngine.infer`. Positive:
+step at activation with a steady sibling → attributed. Negative: wrong-direction
+step, concurrent sibling change, deactivation, no transition, no history, step
+larger than the row (clamped), device reports OFF, no load entity, stated wattage
+exceeded (capped), solo row. **Two of these caught real bugs in the first
+implementation** — the declared-wattage cap was missing, and the rule fired on a
+solo row where the whole row is the better answer.
+* The 881.72 W shape re-run after the change (`repro_more_truth.py`): one, two and
+  three declared fixtures now all report `unknown` with the row in the residual.
+* Solo-row control: 1 200 W row with one declared fixture → `1200.00 W inferred
+  tier_3_measured`. The user's requirement that the change "should not hurt if
+  there is only one device under the CT" holds.
+* **Live before/after on the real install's exported topology and readings**
+  (`repro_live_before_after.py`, run once at `HEAD` `c257149` and once with this
+  change) — no synthetic topology:
+
+  | Case (live `lights_ct2` = 880.16 W) | at `HEAD` | with ADR-0026 |
+  | --- | --- | --- |
+  | 2 fixtures declared, no wattages, one ON one OFF, no step | **880.16 W to the ON fixture**, `inferred`/`tier_3_measured`, row not held | `0.00 W unknown`, row held, 880.16 W in residual |
+  | same, row stepped **+180 W** at the ON transition | 880.16 W — the step changed nothing | **180.00 W** `inferred`/`tier_3_measured`, surplus in residual |
+  | 1 fixture declared, no wattage, ON | 0.00 W `unknown` | unchanged |
+  | 2 fixtures, **150 W stated**, one ON one OFF | 150.00 W `configured_prior` | unchanged |
+
+  Both controls are unchanged, so the fix is scoped to the case it was aimed at.
+* Five ADR-0023 tests rewritten against measured truth (each value taken from a
+  run, not assumed); three added. Full `tests/` suite and
+  `ruff check engine tools tests` clean; `tools/dev/verify.py` passes 12/12.
+
+**Non-claim the live run exposed.** The sibling-stability guard sees *declared*
+siblings only. When the row stepped by its whole 880.16 W at one fixture's
+activation — i.e. an undeclared fixture switched on at the same instant — that
+whole step is credited to the declared fixture. This is what the user's rule
+prescribes (the row moved, and nothing *known* else did), and it is why the
+fixture inventory still matters: the more of the circuit that is declared, the
+more competitors the guard can see.
+
+
+**What this does not do.** It does not give a per-fixture value *between*
+transitions — a fixture that has not changed state recently reads `unknown`, and
+that gap is the intended trade. It does not make discovery know which fixtures are
+on a circuit (`metadata["shared_circuit"]` still has one writer and no reader). It
+does not claim calibrated confidence or a single aggregate accuracy number.
+
+**Still blocked, unchanged by this work.** `discover_placements` resolves 0
+entities because the engine holds no `state_entity_ids`; the
+`upper_deck_heater_l1`/`_l2` polarity question needs a decision; 64 owned entities
+report `unavailable`/`unknown`; `model_estimated` is still not clamped by its CT
+row (§7r.7).
 
 ---
 

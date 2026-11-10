@@ -388,7 +388,35 @@ def effective_config(
                 if other.device_id != device_id
                 and observed.intersection([*other.dedicated_ct_ids, *other.branch_ct_ids])
             ]
-            shared_unmodelled = bool(observed) and not siblings
+            # A circuit row may carry fixtures nobody declared, so a claimant may
+            # only be credited the whole row when its draw is bounded.
+            #
+            # ``not siblings`` keeps the existing protection for a device alone
+            # on its row.  The added clause fires only for a *declared* device
+            # (``config is not None``) on a row it shares with another declared
+            # fixture, and only when it states no wattage.
+            #
+            # That is the fix for a measured defect.  With the earlier rule,
+            # declaring ONE fixture on `lights_ct2` (881.72 W) held the row as an
+            # upper bound and reported `unknown`, while declaring a SECOND
+            # fixture -- neither stating a wattage -- let the solver hand the
+            # whole 881.72 W to whichever one was ON, graded `tier_3_measured`.
+            # Declaring more of the truth made the answer less safe.
+            #
+            # The reasoning is ADR-0023's own: "the single lamp that is on owns
+            # the row" is only sound when the declared fixtures are the *whole*
+            # circuit.  This installation is the counter-example -- most CTs feed
+            # more lights than are enumerated -- so an un-wattaged claimant
+            # cannot prove the remainder is zero.  A stated wattage can: ADR-0025
+            # then caps it, and the surplus stays unexplained instead of being
+            # credited to a lamp that may not have drawn it.
+            #
+            # Topology-only devices (no configuration) keep the old behaviour, so
+            # a discovered row shared by two placeholders is unchanged.
+            shared_unmodelled = bool(observed) and (
+                not siblings
+                or (config is not None and bool(siblings) and expected_on_w is None)
+            )
         else:  # pragma: no cover - topology is always present in production
             shared_unmodelled = bool(observed)
     if shared_unmodelled:

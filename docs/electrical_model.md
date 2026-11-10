@@ -260,6 +260,16 @@ Crucially, the slack is added **only when the siblings are unmodelled**
 all modelled devices stays solvable; adding a slack there would discard a
 legitimate multi-device separation.
 
+The guard is also **not** a "one claimant" rule. It fires for a declared fixture
+on a row it shares with another declared fixture when that fixture states no
+wattage, because a circuit may carry fixtures nobody declared and the engine
+cannot tell a complete fixture list from a partial one (ADR-0026). Before that
+was fixed the condition was `bool(observed) and not siblings`, so declaring a
+*second* fixture is what unlocked whole-row credit: on one 881.72 W lighting row,
+one declared fixture with no wattage produced `unknown`, and two declared
+fixtures — one ON, one OFF, neither wattaged — produced **881.72 W credited to
+the single ON lamp at `tier_3_measured`**.
+
 #### 4.2.2 A declared wattage bounds its device (ADR-0025)
 
 A slack protects the **sum** on a row. It does nothing for a row whose claimants
@@ -295,6 +305,44 @@ ceiling with the row fully explained is still a real measurement and stays
 `tier_3_measured`. Diagnostics record `declared_ceiling_applied` and
 `declared_ceiling_hit`.
 
+#### 4.2.3 The measured step on a shared row (ADR-0026)
+
+A slack and a ceiling both protect the row, and both leave the fixture with no
+per-fixture value on a shared circuit. The evidence that survives that is the
+**movement**: the row changed by *N* watts at the instant one device on it
+changed state, and nothing else on the row changed.
+
+That is a measurement of the device, and it does not require the siblings to be
+OFF — only to be unchanged. A second lamp may be running throughout; it cannot
+explain a step it did not cause.
+
+The rule is a conjunction of refusals. Any failure leaves the device `unknown`
+and its watts in the residual:
+
+| Condition | Why it is required |
+| --- | --- |
+| The row is **shared** | A solo row already reports the whole row correctly; the step would be a worse answer there. |
+| The step is on an **attribution row** | An enclosing main may have moved for any other circuit in the panel, so a main step says nothing about this device. |
+| **No sibling changed state** | Two simultaneous changes make the movement unattributable (`ambiguous_concurrent_events`). |
+| A **declared load entity** exists | An undeclared state key is not evidence (ADR-0012). |
+| The transition is an **activation** | A deactivation says what the device drew a moment ago, not what it draws now. |
+| The step **direction agrees** | An activation that lowers the row is not this device turning on. |
+| The reading is **not stale**, the device not **OFF** | A stale or contradicted value is not a measurement. |
+| The step is **≤ the row** | A change cannot exceed the value it changed; a breach means a mis-scaled or mis-signed channel. |
+| The step is **≤ the declared wattage** | A 400 W movement on a row whose fixture declares 50 W is not that fixture; the surplus belongs to something else (`step_exceeds_declared_wattage`). |
+
+A step that passes is reported at `TIER_3_MEASURED` with reason
+`shared_circuit_step_measured`, while `source` stays `inferred`: the row is still
+shared, so no CT measured the device privately, but the evidence is a
+measurement rather than a share of a row. A deactivation step is recorded as
+`shared_circuit_step_measured_on_deactivation` and is **not** reported as current
+power — the device is off, and the row has already dropped.
+
+Between transitions a shared row has no per-fixture answer, so a fixture that has
+not changed state recently reads `unknown`. That gap is deliberate: a plausible
+permanent number that no measurement supports is exactly the fabrication ADR-0006
+exists to prevent.
+
 ### 4.3 State constraints (not estimates)
 
 An explicitly OFF device with a model is given the upper bound
@@ -312,6 +360,12 @@ fixed by an external constraint, not estimated from the data.
 Only states that positively mean "not running" pin a device
 (`off`, `idle`, `standby`, `closed`, `paused`, `none`). `unavailable` and
 `unknown` are treated as missing information, not as zero power.
+
+A model that has no parameter for a state must not fall back to its aggregate
+`estimated_power_w` when that state says "off": "no model value for this state"
+is the honest answer, and substituting the estimate reported an OFF device at its
+full running power. A stated standby remains the only non-zero value an OFF
+device can carry (ADR-0026).
 
 ### 4.4 Worked numeric example
 

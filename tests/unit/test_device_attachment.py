@@ -20,7 +20,7 @@ from it.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from wattmosaic_engine.contracts import (
@@ -47,15 +47,58 @@ from wattmosaic_engine.electrical.topology import build_graph
 from wattmosaic_engine.electrical.window import ObservationWindow
 
 AT = datetime(2026, 11, 6, 12, 0, tzinfo=UTC)
+CADENCE = 10.0
 
 
 def _window(values: dict[str, float]) -> ObservationWindow:
     return ObservationWindow.from_values(AT, values)
 
 
-def _infer(topology: Topology, values: dict[str, float], states: dict[str, str]):
+def _infer(
+    topology: Topology,
+    values: dict[str, float],
+    states: dict[str, str],
+    *,
+    history: dict[str, str] | None = None,
+    step: tuple[float, float] | None = None,
+):
+    """Infer once, optionally with a measured step on the lighting row.
+
+    ``step=(before_w, after_w)`` writes a history that steps at the window
+    instant and marks the devices in ``history`` as having just changed from the
+    state named there.  That is the input the delta rule needs: a CT movement
+    coinciding with one device's transition and no other device's.
+    """
+    previous_states = dict(history or {})
+    transitions = [
+        {
+            "device_id": did,
+            "previous_state": previous,
+            "new_state": states[did],
+        }
+        for did, previous in previous_states.items()
+        if states.get(did) is not None and states[did] != previous
+    ]
+    histories: dict[str, list[tuple]] = {}
+    if step is not None:
+        before_w, after_w = step
+        rows = [
+            (AT - timedelta(seconds=CADENCE * (9 - i)), before_w) for i in range(6)
+        ]
+        rows += [(AT - timedelta(seconds=CADENCE * (3 - i)), after_w) for i in range(4)]
+        histories["ct_lights"] = rows
     return DisaggregationEngine().infer(
-        _window(values), device_states=states, models=None, topology=topology
+        ObservationWindow.from_values(
+            AT,
+            values,
+            histories=histories,
+            cadence_s=CADENCE if step is not None else None,
+            previous_states=previous_states,
+            state_transitions=transitions,
+        ),
+        device_states=states,
+        models=None,
+        topology=topology,
     )
 
 
@@ -248,24 +291,59 @@ def _by_device(batch) -> dict[str, object]:
 
 
 def test_single_on_claimant_owns_the_whole_row() -> None:
-    """One lamp ON, the other positively OFF: the CT measures the ON lamp."""
+    """A measured step on the row is the ON lamp's draw (ADR-0026).
+
+    Superseded ADR-0023 asserted 200 W here from the state alone, with no
+    wattage stated and no movement seen on the row.  That answer was only right
+    when the two declared lamps were the *whole* circuit: it was measured to
+    credit 881.72 W to one lamp on a row that carried several undeclared
+    fixtures.  The engine cannot tell a complete fixture list from a partial one,
+    so the whole row is no longer credited on state alone.
+
+    What remains, and is stronger, is the measured *change*: the row moved by
+    200 W at the instant this lamp turned on, and nothing else on the row
+    changed.  That is a measurement of the lamp.
+    """
     results = _by_device(
         _infer(
             _shared_topology(),
             {"ct_main": 500.0, "ct_lights": 200.0},
             {"lamp_a": "on", "lamp_b": "off"},
+            history={"lamp_a": "off", "lamp_b": "off"},
+            step=(0.0, 200.0),
         )
     )
     assert results["lamp_a"].power_w == pytest.approx(200.0)
     # ``source`` is what the UI labels "Measurement source", and it must say
-    # ``inferred``: a shared CT never measured this lamp individually, however
-    # certain the switch state is.  The *evidence tier* is a separate ordering of
-    # how strong the evidence is, and the contract already promotes a
-    # corroborated shared-channel estimate to tier 3 (``tiers.py``:
-    # "a declared load signal corroborates a shared-channel estimate").
+    # ``inferred``: the row is still shared, so no dedicated CT measured this
+    # lamp.  The *evidence tier* says the value is a measurement, because a
+    # 200 W step on the row at this lamp's transition, with the sibling steady,
+    # measures it.
     assert results["lamp_a"].source == Source.INFERRED
     assert results["lamp_a"].confidence_tier == ConfidenceTier.TIER_3_MEASURED
+    assert "shared_circuit_step_measured" in results["lamp_a"].explanation
     assert results["lamp_b"].power_w == pytest.approx(0.0)
+
+
+def test_state_alone_does_not_credit_the_whole_row() -> None:
+    """Without a measured step, an un-wattaged claimant gets nothing.
+
+    This is the regression that ADR-0023 could not express.  Two declared
+    fixtures, neither stating a wattage, one ON and one OFF: the old rule handed
+    the entire row to the ON fixture at ``tier_3_measured``.  Declaring a second
+    fixture was what *enabled* that, so more truth made the answer less safe.
+    """
+    results = _by_device(
+        _infer(
+            _shared_topology(),
+            {"ct_main": 500.0, "ct_lights": 881.72},
+            {"lamp_a": "on", "lamp_b": "off"},
+        )
+    )
+    for result in results.values():
+        assert result.power_w == pytest.approx(0.0)
+        assert result.source == Source.UNKNOWN
+        assert result.confidence_tier == ConfidenceTier.TIER_0_UNKNOWN
 
 
 def test_the_off_device_is_never_credited_a_share_of_the_row() -> None:
@@ -286,7 +364,15 @@ def test_the_off_device_is_never_credited_a_share_of_the_row() -> None:
 
 
 def test_stated_standby_is_allowed_while_off() -> None:
-    """A stated standby draw is real knowledge, and is still not invented."""
+    """A stated standby draw does not let an un-wattaged row be split.
+
+    The old rule credited the ON lamp 196 W and its OFF sibling 4 W of standby.
+    That 196 W was the whole row minus standby, with no wattage stated and no
+    movement observed -- the same fabrication that over-credited a lamp with a
+    whole lighting circuit.  With the delta rule the measured step is what
+    attributes power; a standby declaration bounds an *off* device, it does not
+    license the rest of the row.
+    """
     topology = _shared_topology()
     projected = project_configuration(
         topology,
@@ -316,8 +402,47 @@ def test_stated_standby_is_allowed_while_off() -> None:
             {"lamp_a": "on", "lamp_b": "off"},
         )
     )
-    assert results["lamp_a"].power_w == pytest.approx(196.0, abs=0.5)
-    assert results["lamp_b"].power_w == pytest.approx(4.0, abs=0.5)
+    assert results["lamp_a"].power_w == pytest.approx(0.0)
+    assert results["lamp_a"].source == Source.UNKNOWN
+    # The OFF lamp is still never credited more than its stated standby.
+    assert results["lamp_b"].power_w <= 3.0
+
+
+def test_a_measured_step_attributes_more_than_standby() -> None:
+    """The step, not the standby declaration, is what makes the row separable."""
+    projected = project_configuration(
+        _shared_topology(),
+        [
+            DeviceConfiguration(
+                device_id="lamp_a",
+                monitoring=MonitoringLevel.SHARED,
+                connectivity=HaConnectivity.CONNECTED,
+                monitored_by_ct_ids=["ct_lights"],
+                state_entity_ids=["light.lamp_a"],
+                expected=ExpectedPower(standby_w=3.0),
+            ),
+            DeviceConfiguration(
+                device_id="lamp_b",
+                monitoring=MonitoringLevel.SHARED,
+                connectivity=HaConnectivity.CONNECTED,
+                monitored_by_ct_ids=["ct_lights"],
+                state_entity_ids=["light.lamp_b"],
+                expected=ExpectedPower(standby_w=3.0),
+            ),
+        ],
+    )
+    results = _by_device(
+        _infer(
+            projected,
+            {"ct_main": 500.0, "ct_lights": 200.0},
+            {"lamp_a": "on", "lamp_b": "off"},
+            history={"lamp_a": "off", "lamp_b": "off"},
+            step=(0.0, 200.0),
+        )
+    )
+    assert results["lamp_a"].power_w == pytest.approx(200.0)
+    assert results["lamp_a"].confidence_tier == ConfidenceTier.TIER_3_MEASURED
+    assert results["lamp_b"].power_w == pytest.approx(0.0)
 
 
 def test_two_on_claimants_stay_unknown() -> None:
@@ -380,13 +505,17 @@ def test_state_pin_does_not_require_a_learnt_model() -> None:
     """A declared load signal is evidence in its own right (ADR-0012).
 
     Requiring a learnt model made every switch-only shared circuit permanently
-    unidentifiable, even though the state said exactly which lamps were dark.
+    unidentifiable.  The state still matters -- it is what tells the engine
+    *which* device changed, and therefore whose step a row movement is -- but it
+    is paired with a measured step rather than standing in for one (ADR-0026).
     """
     results = _by_device(
         _infer(
             _shared_topology(),
             {"ct_main": 500.0, "ct_lights": 200.0},
             {"lamp_a": "on", "lamp_b": "off"},
+            history={"lamp_a": "off", "lamp_b": "off"},
+            step=(0.0, 200.0),
         )
     )
     assert results["lamp_a"].source == Source.INFERRED
@@ -406,23 +535,20 @@ def test_state_pin_does_not_require_a_learnt_model() -> None:
             undeclared,
             {"ct_main": 500.0, "ct_lights": 200.0},
             {"lamp_a": "on", "lamp_b": "off"},
+            history={"lamp_a": "off", "lamp_b": "off"},
+            step=(0.0, 200.0),
         )
     )
     assert unlinked["lamp_a"].source == Source.UNKNOWN
 
 
 def test_a_state_pin_is_never_relaxed_by_the_model_bound_pass() -> None:
-    """The relaxation exists for model priors, never for state evidence.
+    """A stale model bound must never win against a measured step.
 
     A learnt model's upper bound may be wrong (an old model of a lamp that has
-    since been replaced), so the CT measurement is trusted over it and the bound
-    is widened.  A *state* pin is different: it is a declaration that the device
-    is off, and widening it would credit power to a device the user said was
-    dark.
-
-    Both devices here carry a model whose bound (100 W) is below the row
-    (200 W), so the relaxation pass runs for both.  Only the ON device may be
-    relaxed; the OFF one keeps its zero pin and the diagnostics say so.
+    since been replaced), so evidence from the CT is trusted over it.  A *state*
+    pin is also never widened: the OFF lamp keeps its zero pin, and the ON lamp
+    takes the measured step rather than the stale 100 W bound.
     """
     from wattmosaic_engine.contracts import (
         DeviceModelParameters,
@@ -444,18 +570,39 @@ def test_a_state_pin_is_never_relaxed_by_the_model_bound_pass() -> None:
         )
 
     batch = DisaggregationEngine().infer(
-        _window({"ct_main": 500.0, "ct_lights": 200.0}),
+        ObservationWindow.from_values(
+            AT,
+            {"ct_main": 500.0, "ct_lights": 200.0},
+            histories={
+                "ct_lights": [
+                    (AT - timedelta(seconds=CADENCE * (9 - i)), 0.0) for i in range(6)
+                ]
+                + [
+                    (AT - timedelta(seconds=CADENCE * (3 - i)), 200.0)
+                    for i in range(4)
+                ]
+            },
+            cadence_s=CADENCE,
+            previous_states={"lamp_a": "off", "lamp_b": "off"},
+            state_transitions=[
+                {
+                    "device_id": "lamp_a",
+                    "previous_state": "off",
+                    "new_state": "on",
+                }
+            ],
+        ),
         device_states={"lamp_a": "on", "lamp_b": "off"},
         models={"lamp_a": view("lamp_a"), "lamp_b": view("lamp_b")},
         topology=_shared_topology(),
     )
     results = _by_device(batch)
-    # The ON lamp is measured at the full row; its stale model bound is widened.
+    # The ON lamp is measured at the step, not at its stale 100 W model bound.
     assert results["lamp_a"].power_w == pytest.approx(200.0)
-    assert "lamp_a" in batch.diagnostics["relaxed_bounds"]
-    # The OFF lamp keeps its pin and must not be reported as relaxed.
+    assert results["lamp_a"].confidence_tier == ConfidenceTier.TIER_3_MEASURED
+    assert "shared_circuit_step_measured" in results["lamp_a"].explanation
+    # The OFF lamp is never credited a model's full running power.
     assert results["lamp_b"].power_w == pytest.approx(0.0)
-    assert "lamp_b" not in batch.diagnostics["relaxed_bounds"]
 
 
 # --------------------------------------------------------------------------- #
@@ -495,18 +642,45 @@ def test_declaring_a_shared_ct_gives_every_device_an_attribution_row() -> None:
 
 
 def test_three_lamps_one_row_still_resolve_when_one_is_on() -> None:
-    """A bank of three lamps on one circuit: the ON one owns the whole row."""
+    """A bank of three lamps: the measured step names the lamp that caused it.
+
+    The siblings may be in any state; all that matters is that they held steady
+    across the transition, which is the user's rule (ADR-0026).
+    """
     results = _by_device(
         _infer(
             _shared_topology(devs=("lamp_a", "lamp_b", "lamp_c")),
             {"ct_main": 500.0, "ct_lights": 200.0},
             {"lamp_a": "off", "lamp_b": "on", "lamp_c": "off"},
+            history={"lamp_b": "off"},
+            step=(0.0, 200.0),
         )
     )
     assert results["lamp_b"].power_w == pytest.approx(200.0)
     assert results["lamp_b"].source == Source.INFERRED
+    assert results["lamp_b"].confidence_tier == ConfidenceTier.TIER_3_MEASURED
     assert results["lamp_a"].power_w == pytest.approx(0.0)
     assert results["lamp_c"].power_w == pytest.approx(0.0)
+
+
+def test_a_concurrent_sibling_change_blocks_step_attribution() -> None:
+    """Two lamps changing at once make the step unattributable.
+
+    This is the guard that keeps the delta rule honest: a 200 W movement on the
+    row could belong to either lamp, so neither may claim it.
+    """
+    results = _by_device(
+        _infer(
+            _shared_topology(),
+            {"ct_main": 500.0, "ct_lights": 200.0},
+            {"lamp_a": "on", "lamp_b": "on"},
+            history={"lamp_a": "off", "lamp_b": "off"},
+            step=(0.0, 200.0),
+        )
+    )
+    for result in results.values():
+        assert result.power_w == pytest.approx(0.0)
+        assert result.source == Source.UNKNOWN
 
 
 def test_removing_the_declaration_retracts_the_attribution_row() -> None:

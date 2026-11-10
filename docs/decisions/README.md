@@ -789,6 +789,7 @@ tests fail if either side's rule changes without the other.
 ## ADR-0023 — Attach measurements to the existing device, and let a declared switch settle a shared row
 
 **Status:** Accepted · 2026-11-08 · Supersedes the "energy only" part of ADR-0020/0021
+· **The "single ON claimant owns the row" rule and its verification list are superseded by ADR-0026**
 
 **Context.** Two ordinary installations showed that a measurement is not useful
 unless it lands where the appliance already is.
@@ -1107,7 +1108,7 @@ refusal is the ownership guard doing its job, not a defect.
 
 ## ADR-0025 — A single-channel CT is a branch circuit, and a declared wattage bounds what that row may credit
 
-**Status:** Accepted · 2026-11-09 · Extends ADR-0023 and ADR-0024
+**Status:** Accepted · 2026-11-09 · Extends ADR-0023 and ADR-0024 · **Amended by ADR-0026** (the ceiling now also caps a measured step)
 
 **Context.** Discovery classified every single-channel load as
 `CTType.DEDICATED_DEVICE`. The only discriminator was "this channel was not part
@@ -1190,3 +1191,192 @@ number. Discovery no longer asserts a fact only a person can supply.
   placements): all five shared-row peak cases report `configured_prior` /
   `tier_1_modelled` at the declared step (243.61 / 49.21 / 74.85 / 20.02 /
   139.29 W) instead of absorbing the row.
+
+---
+
+## ADR-0026 — A CT is a circuit; attribute the measured step, not the whole row
+
+**Status:** Accepted · 2026-11-10 · Supersedes ADR-0023's whole-row credit and amends ADR-0025
+
+**Context.** ADR-0023 let a declared switch settle a shared row: exactly one lamp
+ON, its siblings *positively OFF*, therefore the ON lamp owns the row. ADR-0025
+then bounded that credit with a declared wattage, which fixed the over-attribution
+found on rows whose fixtures stated their draw.
+
+Both rules share an assumption that was never checked: **the declared fixtures
+are the whole circuit.** When they are, the single-ON rule is sound. When they are
+not — which is the normal case, because no one has enumerated every lamp on a
+lighting circuit — the leftover belongs to something else, and the rule hands it
+to whichever fixture happens to be on.
+
+Two measurements on the instrumented installation settled this.
+
+*The defect is not the role model, it is the credit.* The live topology was
+already a circuit model: 32 `branch`, 6 `main`, **0** `dedicated_device`, and
+every "device" on a lighting row was a structural placeholder. No CT is declared
+private to any appliance. The failure was purely in attribution and presentation.
+
+*Declaring more truth made the answer less safe.* On one lighting row reading
+**881.72 W** with a single declared fixture that stated no wattage, the row was
+held as an upper bound and the answer was `unknown` — safe. Adding a **second**
+declared fixture, one ON and one OFF, neither stating a wattage, caused the engine
+to credit **881.72 W to the single ON lamp** with `source=inferred` and
+`tier_3_measured`. With stated wattages (150 W / 100 W) the same row was correctly
+bounded and the surplus stayed in the residual. So `shared_unmodelled` — the guard
+meant to protect the row — was inverted from safety: it fired when the device was
+*alone* and went quiet the moment a sibling was declared.
+
+The mechanism was `bool(observed) and not siblings`. Its intent was "a single
+claimant on a shared row has nobody to share with, so protect the row"; its effect
+was that the protection disappeared exactly when a second claimant made the
+whole-row credit look plausible.
+
+**Decision.**
+
+1. **Every CT is a circuit, and the engine attributes a *change*.** No CT is
+   treated as dedicated to a device unless the user declares it so. Where a row is
+   shared, the evidence that survives is the measured movement: the row changed by
+   *N* watts at the instant one device on it changed state, and nothing else on
+   the row changed. That movement is the device's draw, measured — it does not
+   require the siblings to be OFF, only to be unchanged.
+
+   Stated by the user, verbatim: *"No need to require all siblings to be off. As
+   long as all siblings' status is stable, and service can correctly infer the
+   watts changes before and after the device's status changes constantly, we say
+   the change is the watts of the target device."*
+
+2. **The delta rule fires only under all of these conditions.** Every one is a
+   refusal; any failure leaves the device `unknown` and its watts in the residual.
+   * the device's row is **shared** (a solo row keeps the whole-row answer, so a
+     single fixture under a CT is never made worse);
+   * a step was detected on one of the device's **attribution rows** — never on an
+     enclosing main, which may have moved for any other circuit;
+   * **every sibling on that row held steady** — no sibling has a non-`None`
+     transition direction in this window;
+   * the device has a **declared load entity** (a state key that is not declared
+     proves nothing, ADR-0012);
+   * the transition is an **activation**;
+   * the step **direction agrees** (a rising row for an activation);
+   * the reading is **not stale** and the device does not report **OFF**;
+   * the step is **clamped to the row**: a change cannot exceed the value it
+     changed;
+   * the step is **dropped to zero if it exceeds the device's declared wattage**
+     (`step_exceeds_declared_wattage`). A 400 W movement on a row whose fixture
+     declares 50 W is not that fixture being measured; the surplus is something
+     else on the circuit, so the step is not this device's draw at all.
+
+3. **A deactivation step is evidence, never current power.** On a deactivation the
+   step says what the device drew a moment ago. Reporting it as the device's
+   present power would be wrong on the device page and would double count against
+   a row that has already dropped. The explanation carries
+   `shared_circuit_step_measured_on_deactivation` and the magnitude stays in
+   `diagnostics["ct_steps"]`; the reported value is whatever the OFF state
+   justifies — zero, or a stated standby.
+
+4. **A measured step grades as a measurement.** `source` stays `inferred`,
+   because a shared row still did not measure the device privately, but the
+   evidence tier is `TIER_3_MEASURED` with reason `shared_circuit_step_measured`.
+   The tier grades evidence, not the shape of the CT (ADR-0013).
+
+5. **The un-wattaged-claimant guard is repaired.** `shared_unmodelled` now also
+   fires for a declared device on a row shared with another declared fixture when
+   it states no wattage. That restores the safe answer for the case that was
+   measured above, and it cannot make a solo row worse.
+
+6. **An OFF state is never worth the aggregate model estimate.** Found while
+   verifying this change: `_state_power` substituted `estimated_power_w` whenever
+   the model had no value for the state, including a positively-OFF state, so an
+   OFF device was reported at its full running power. "No model value for this
+   state" is now the answer, and a stated standby remains the only non-zero value
+   an OFF device can carry.
+
+**Rejected alternatives.**
+
+* *Keep ADR-0023 and require the user to enumerate the whole circuit.* It cannot
+  be enforced — the engine cannot distinguish a complete fixture list from a
+  partial one, which is exactly what the 881.72 W case exploited. A rule that
+  depends on an unverifiable completeness claim is not a guard.
+* *Attribute the whole row minus the siblings' declared wattages.* This
+  fabricates a number whenever a sibling's wattage is unknown, and it silently
+  absorbs undeclared load into the target device — the failure ADR-0006 exists to
+  prevent.
+* *Require every sibling positively OFF, plus the delta.* Strictly weaker: it
+  discards the common case where a second lamp is on and steady, which the
+  measurement can still resolve. The user's rule is the more informative one and
+  the measured step is what makes it safe.
+* *Report the deactivation step as the device's power.* Measured as wrong: it
+  reports a device the user just switched off as drawing its previous load, and
+  double counts the drop that the row already contains.
+
+**Consequences.** A lighting circuit with several fixtures reports each fixture's
+*measured* contribution at its transitions and leaves the standing load in the
+residual, instead of reporting one fixture's full row. A device that is the only
+declared fixture under its CT is unaffected and still reports the whole row
+(verified: a 1 200 W solo row reports `inferred` / `tier_3_measured`). A
+concurrent sibling change correctly blocks attribution rather than splitting the
+step.
+
+The cost is honest: between transitions a shared row has no per-fixture answer, so
+a device that has not changed state recently reads `unknown` rather than a
+plausible permanent number. That is the intended trade — an admitted gap, not a
+fabricated value.
+
+**Verification.**
+
+* `tests/unit/test_device_attachment.py` — the five ADR-0023 tests that asserted
+  whole-row credit from state alone were rewritten against the delta rule:
+  * `test_single_on_claimant_owns_the_whole_row` — a 200 W step at the lamp's
+    activation, sibling steady, reports 200 W at `tier_3_measured`;
+  * `test_state_alone_does_not_credit_the_whole_row` — the 881.72 W shape: two
+    fixtures, no wattages, one ON, no step → `unknown` for both;
+  * `test_stated_standby_is_allowed_while_off` — standby bounds an OFF device but
+    does not license the rest of the row;
+  * `test_a_measured_step_attributes_more_than_standby` — the step is what makes
+    the row separable;
+  * `test_a_state_pin_is_never_relaxed_by_the_model_bound_pass` — a measured step
+    beats a stale 100 W model bound and the OFF lamp stays at 0.
+  New: `test_a_measured_step_attributes_more_than_standby`,
+  `test_a_concurrent_sibling_change_blocks_step_attribution`.
+* Negative verification (`verify_delta_rule.py`, 11 cases, all against a real
+  `DisaggregationEngine.infer`): wrong-direction step; concurrent sibling change;
+  deactivation; no transition; no history; step larger than the row (clamped);
+  device reports OFF; no declared load entity; stated wattage exceeded (capped at
+  the declaration); and the solo-row control. Two of these caught real defects in
+  the first implementation — the declared-wattage cap was missing, and the rule
+  fired on a solo row where the whole row is the better answer.
+* Live defect reproductions (`repro_more_truth.py`, `repro_multi_on.py`,
+  `repro_placeholder_gate.py`, `repro_indistinguishable.py`) re-run after the
+  change: the 881.72 W fabrication is gone in every variant, and every fixture on
+  the affected rows reports `unknown` with the row in the residual.
+* **Live before/after** (`repro_live_before_after.py`), same exported live topology
+  and the same live channel readings, run once at `HEAD` and once with this change
+  — synthetic topology not involved:
+
+  | Case (live `lights_ct2` = 880.16 W) | `HEAD` | With ADR-0026 |
+  | --- | --- | --- |
+  | two fixtures declared, no wattages, one ON one OFF, no step | **880.16 W to the ON fixture**, `inferred`/`tier_3_measured`, row *not* held | `0.00 W unknown`, row held, 880.16 W in residual |
+  | same, but the row stepped **+180 W** at the ON transition | 880.16 W (the whole row; the step made no difference) | **180.00 W**, `inferred`/`tier_3_measured`, surplus in residual |
+  | one fixture declared, no wattage, ON | 0.00 W `unknown` | 0.00 W `unknown` (unchanged) |
+  | two fixtures, **150 W stated**, one ON one OFF | 150.00 W `configured_prior` | 150.00 W `configured_prior` (unchanged) |
+
+  The two controls matter as much as the fix: the declared-wattage path and the
+  safe single-fixture path are byte-identical before and after this change.
+* Full suite (`tests/`) and `ruff check engine tools tests` clean; the repository
+  gate suite (`tools/dev/verify.py`) passes **12/12**.
+
+
+**Non-claims.** This does not claim calibrated confidence, a per-fixture estimate
+between transitions, or that the discovery heuristic knows which fixtures are on a
+circuit. It removes an attribution that was demonstrated to be fabricated, and
+replaces it with one that is only made when a measurement supports it.
+
+The sibling-stability check sees **declared** siblings only. An undeclared fixture
+that switches on at the same instant as the target inflates the step and is
+attributed to the target — measured on the live row, a step equal to the whole
+881 W row is credited to the one ON fixture. That is the same answer the user's
+rule prescribes (the row moved, nothing *known* else moved), and it is why the
+fixture inventory in §8 still matters: the more of the circuit that is declared,
+the more of the step's competitors the guard can see. It is not a reason to
+withhold the attribution, because the alternative — ignoring a measured step
+because the inventory might be incomplete — restores the `unknown`-for-everything
+behaviour that made the product useless without one.

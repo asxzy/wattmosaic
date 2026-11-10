@@ -302,13 +302,83 @@ def _device_step(
     return sorted(candidates, key=rank)[0]
 
 
+def _attribution_step(
+    graph: TopologyGraph,
+    device_id: str,
+    steps: Mapping[str, StepChange],
+) -> StepChange | None:
+    """Best detected step on a row that *attributes* this device.
+
+    Deliberately narrower than :func:`_device_step`.  A device is also observed
+    by its enclosing mains, but a step on a main may have been produced by any
+    other circuit in the panel, so it cannot be attributed to this device.  Only
+    the device's own attribution rows may speak for it (ADR-0026).
+    """
+    candidates = [
+        steps[cid]
+        for cid in graph.attribution_ct_ids(device_id)
+        if cid in steps and steps[cid].detected
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda step: abs(step.delta_w))
+
+
+def _row_siblings(graph: TopologyGraph, device_id: str) -> tuple[str, ...]:
+    """Other devices that share at least one of this device's attribution rows."""
+    rows = set(graph.attribution_ct_ids(device_id))
+    if not rows:
+        return ()
+    topology = graph.topology
+    out = [
+        other.device_id
+        for other in topology.devices
+        if other.device_id != device_id
+        and rows.intersection([*other.dedicated_ct_ids, *other.branch_ct_ids])
+    ]
+    return tuple(out)
+
+
+def _siblings_held(
+    graph: TopologyGraph,
+    device_id: str,
+    transitions: Mapping[str, _Transition],
+) -> bool:
+    """True when no other device on this device's rows changed state.
+
+    This is the condition the delta rule needs, and it is deliberately weaker
+    than ADR-0023's "every sibling is positively OFF".  A sibling may well be
+    running; all that matters is that it did *not* change in this window, because
+    then the measured step on the row belongs to the device that did change.
+    A sibling whose state is unknown is not evidence of instability, but a
+    sibling that visibly changed is evidence against attribution.
+    """
+    for sibling in _row_siblings(graph, device_id):
+        transition = transitions.get(sibling)
+        if transition is not None and transition.direction is not None:
+            return False
+    return True
+
+
 def _state_power(model: ModelView | None, state: str | None) -> float | None:
     if model is None:
         return None
     value = model.power_for_state(state)
-    if value is None and model.estimated_power_w is not None:
+    if value is not None:
+        return value
+    # The aggregate ``estimated_power_w`` is a fallback for a state the model does
+    # not describe -- but never for a state that positively says the device is
+    # off.  A model with no ``off_power_w``/``standby_power_w`` returns ``None``
+    # for "off", and substituting the aggregate estimate there reported an OFF
+    # device as drawing its full running power.  That is the same fabrication as
+    # crediting a whole CT row to one lamp: a number that looks measured and is
+    # not.  "No model value for this state" is the honest answer.
+    normalized = (state or "").strip().lower()
+    if normalized in {"off", "idle", "standby", "closed", "paused", "unavailable", "unknown"}:
+        return None
+    if model.estimated_power_w is not None:
         return float(model.estimated_power_w)
-    return value
+    return None
 
 
 def _measured_level(
@@ -592,6 +662,9 @@ class DisaggregationEngine:
                     state=all_states.get(did),
                     transition=transitions.get(did),
                     step=_device_step(graph, did, steps),
+                    attribution_step=_attribution_step(graph, did, steps),
+                    siblings_stable=_siblings_held(graph, did, transitions),
+                    row_is_shared=bool(_row_siblings(graph, did)),
                     fit_value=x_fit.get(did),
                     identifiable=did not in ident.unidentifiable,
                     ambiguous=did in ambiguous_devices,
@@ -1059,6 +1132,9 @@ class DisaggregationEngine:
         state: str | None,
         transition: _Transition | None,
         step: StepChange | None,
+        attribution_step: StepChange | None = None,
+        siblings_stable: bool = False,
+        row_is_shared: bool = False,
         fit_value: float | None,
         identifiable: bool,
         ambiguous: bool,
@@ -1095,6 +1171,7 @@ class DisaggregationEngine:
             model_corroborates: bool = False,
             configured_prior: bool = False,
             prior_reason: str = "",
+            measured_step: bool = False,
             degraded: bool = False,
         ) -> InferenceResult:
             """Attach the evidence grade to a result without changing its score."""
@@ -1109,6 +1186,7 @@ class DisaggregationEngine:
                     model_corroborates=model_corroborates,
                     configured_prior=configured_prior,
                     prior_reason=prior_reason,
+                    measured_step=measured_step,
                     stale=result.measurement_age_seconds > self.max_measurement_age_s,
                     degraded=degraded,
                 ),
@@ -1300,6 +1378,120 @@ class DisaggregationEngine:
         if model is not None and model.params.standby_power_w is not None:
             standby = abs(float(model.params.standby_power_w))
         off_tolerance = max(self.off_tolerance_w, 2.0 * standby)
+
+        # ---------------- Level 2a: measured step (ADR-0026) --------------
+        # A shared row cannot be split by linear algebra, but a *step* on it can
+        # be read: the row moved by exactly this many watts while this device
+        # changed state, and no other device on the row changed.  That movement
+        # is the device's draw, measured.
+        #
+        # This is deliberately weaker than ADR-0023's "the single ON claimant
+        # owns the row", which required every sibling to be positively OFF and
+        # therefore credited the whole circuit to one lamp whenever the fixture
+        # list was incomplete.  Here a sibling may be running; it only has to
+        # have held steady across the transition.
+        #
+        # Only an *activation* is attributed.  On a deactivation the step tells
+        # us what the device drew a moment ago, not what it draws now -- it is
+        # off, and reporting the step as its current power would both be wrong
+        # for the device page and double count against the row that already
+        # dropped.  The deactivation is marked in the explanation so the evidence
+        # is visible without being reported as present power.
+        step_w = 0.0
+        if (
+            attribution_step is not None
+            and row_is_shared
+            and siblings_stable
+            and has_load_signal
+            and transition is not None
+            and transition.direction == "activation"
+            and attribution_step.delta_w > 0.0
+            and not stale
+            and not state_off
+        ):
+            step_w = float(attribution_step.delta_w)
+            row_now = window.readings.get(attribution_step.channel_id)
+            row_value = None if row_now is None else row_now.signed_w()
+            if row_value is not None:
+                # The step is a change *on* the row, so it cannot be larger than
+                # the row itself.  Clamping here is a physics guard against a
+                # mis-scaled or mis-signed reading, not an estimate.
+                step_w = min(step_w, abs(float(row_value)))
+            # A stated wattage is a non-relaxable upper bound (ADR-0025), and it
+            # applies to a measured step exactly as it applies to a fit.  A
+            # 400 W step on a row whose lamp declares 50 W is not that lamp's
+            # 50 W lamp being measured; the surplus belongs to something else on
+            # the circuit, so the step is not this device's draw at all.
+            ceiling = None if config is None else config.config_ceiling_w
+            if ceiling is not None and step_w > float(ceiling):
+                explanation.append("step_exceeds_declared_wattage")
+                step_w = 0.0
+            if step_w > 0.0:
+                explanation.append("shared_circuit_step_measured")
+                if attribution_step.source == "previous_snapshot":
+                    explanation.append("step_from_previous_snapshot")
+                confidence = compute_confidence(
+                    ConfidenceInputs(
+                        source=Source.INFERRED,
+                        measurement_qualities=qualities,
+                        measurement_ages_s=ages,
+                        supporting_ct_count=len(
+                            _used_support(graph, device_id, supporting)
+                        ),
+                        model_quality=0.0 if model is None else model.quality,
+                        event_isolation=isolation,
+                        topology_status=topology_status,
+                        residual_w=0.0,
+                        residual_sigma_w=float(attribution_step.noise_w),
+                        repeated=repeated,
+                    )
+                )
+                stage, stage_status = _stage_for(model, step_w)
+                return finish(
+                    InferenceResult(
+                        device_id=device_id,
+                        timestamp=now,
+                        power_w=step_w,
+                        source=Source.INFERRED,
+                        confidence=confidence.score,
+                        model_id=None if model is None else model.model_id,
+                        model_version=None if model is None else model.version,
+                        operating_stage=stage,
+                        stage_status=stage_status,
+                        sample_count=0 if model is None else model.sample_count,
+                        quality_status=quality,
+                        measurement_age_seconds=max(ages) if ages else 0.0,
+                        supporting_ct_channels=[attribution_step.channel_id],
+                        explanation=explanation,
+                        provenance={
+                            "measured_step_w": step_w,
+                            "step_channel_id": attribution_step.channel_id,
+                            "step_before_w": attribution_step.before_w,
+                            "step_after_w": attribution_step.after_w,
+                            "step_threshold_w": attribution_step.threshold_w,
+                            "step_source": attribution_step.source,
+                            "siblings_stable": True,
+                            "siblings": list(_row_siblings(graph, device_id)),
+                            "confidence": confidence.as_dict(),
+                        },
+                        confidence_is_calibrated=False,
+                    ),
+                    measured_step=True,
+                )
+        if (
+            attribution_step is not None
+            and row_is_shared
+            and siblings_stable
+            and attribution_step.delta_w < 0.0
+            and transition is not None
+            and transition.direction == "deactivation"
+        ):
+            # Keep the measurement as evidence without reporting it as current
+            # power: the device is off, and the row that dropped has already
+            # dropped.  Echoing the step now would double count it against the
+            # row and claim the device is drawing when it is not.  The magnitude
+            # is recorded so learning can use it.
+            explanation.append("shared_circuit_step_measured_on_deactivation")
 
         # ---------------- Level 2: inferred ------------------------------
         # A row the user declared shared carries power that belongs to siblings we
