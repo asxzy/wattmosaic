@@ -1,5 +1,13 @@
 # Release Notes
 
+## v0.2.1-dev.7 — 2026-11-10 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- Clear the 26 provably redundant stranded statistics
+
 ## v0.2.1-dev.6 — 2026-11-10 (development channel)
 
 Automatic development build.
