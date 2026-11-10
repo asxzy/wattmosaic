@@ -1,5 +1,14 @@
 # Release Notes
 
+## v0.2.1-dev.10 — 2026-11-10 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- Merge pull request #1 from asxzy/feature/app-ui
+- Give the App a real panel, and stop the engine from misreporting its version
+
 ## v0.2.1-dev.9 — 2026-11-10 (development channel)
 
 Automatic development build.
