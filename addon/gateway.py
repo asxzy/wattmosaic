@@ -38,11 +38,16 @@ import logging
 import os
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import aiohttp
 from aiohttp import ClientSession, ClientTimeout, web
 
+APP_DIR = Path(__file__).resolve().parent
+#: The panel is shipped beside gateway.py.  A staged App has it at
+#: ``<stage>/ui``; the container copies it to ``/app/ui``.
+UI_DIR = APP_DIR / "ui"
 ENGINE_HOST = os.environ.get("WM_API_HOST", "127.0.0.1")
 ENGINE_PORT = int(os.environ.get("WM_API_PORT", "8788"))
 GATEWAY_PORT = int(os.environ.get("WM_GATEWAY_PORT", "8787"))
@@ -114,72 +119,46 @@ logging.basicConfig(
 )
 log = logging.getLogger("wattmosaic.gateway")
 
-INDEX_HTML = """<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>WattMosaic Engine</title>
-<style>
-  :root { color-scheme: light dark; }
-  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-         margin: 0; padding: 2rem; line-height: 1.5; }
-  main { max-width: 44rem; margin: 0 auto; }
-  h1 { font-size: 1.5rem; margin: 0 0 .25rem; }
-  .sub { opacity: .7; margin-top: 0; }
-  table { border-collapse: collapse; margin-top: 1.5rem; width: 100%; }
-  th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #8884; }
-  th { width: 40%; font-weight: 600; }
-  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .ok { color: #1a7f37; } .warn { color: #9a6700; } .bad { color: #cf222e; }
-  footer { margin-top: 2rem; font-size: .85rem; opacity: .7; }
-</style>
-</head>
-<body>
-<main>
-  <h1>WattMosaic Engine</h1>
-  <p class="sub">Multi-CT load disaggregation engine &mdash; API <code>/api/v1</code></p>
-  <table>
-    <tr><th>Engine status</th><td id="status">&mdash;</td></tr>
-    <tr><th>Home Assistant</th><td id="ha">&mdash;</td></tr>
-    <tr><th>Database</th><td id="db">&mdash;</td></tr>
-    <tr><th>Contract version</th><td id="contract">&mdash;</td></tr>
-    <tr><th>Uptime</th><td id="uptime">&mdash;</td></tr>
-  </table>
-  <p>Raw endpoints: <code>/api/v1/health</code>, <code>/api/v1/status</code>,
-     <code>/api/v1/snapshot</code>, <code>/api/v1/diagnostics</code>.</p>
-  <footer>This panel is served by the app gateway. It shows liveness only;
-  configure topology in the WattMosaic Home Assistant integration.</footer>
-</main>
-<script>
-async function refresh() {
-  const set = (id, text, cls) => {
-    const el = document.getElementById(id);
-    el.textContent = text;
-    el.className = cls || "";
-  };
-  try {
-    const res = await fetch("api/v1/health", {cache: "no-store"});
-    if (!res.ok) { set("status", "HTTP " + res.status, "bad"); return; }
-    const d = await res.json();
-    set("status", d.status || "unknown",
-        d.status === "ok" ? "ok" : d.status === "degraded" ? "warn" : "bad");
-    set("ha", d.ha_connected ? "connected" : "disconnected",
-        d.ha_connected ? "ok" : "warn");
-    set("db", d.database || "unknown", d.database === "ok" ? "ok" : "warn");
-    set("contract", d.contract_version || "unknown");
-    const s = Math.round(d.uptime_seconds || 0);
-    set("uptime", Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m " + (s % 60) + "s");
-  } catch (err) {
-    set("status", "engine unreachable", "bad");
-  }
+#: The panel is static files, not an inline string.  Inline HTML cannot be
+#: cached separately from the response, and a single 300-line blob is impossible
+#: to test or lint.  These files are served by :func:`static` below.
+UI_INDEX = UI_DIR / "index.html"
+UI_ASSETS = {
+    "ui/app.css": UI_DIR / "app.css",
+    "ui/app.js": UI_DIR / "app.js",
+    "ui/mark.svg": UI_DIR / "mark.svg",
 }
-refresh();
-setInterval(refresh, 10000);
-</script>
-</body>
-</html>
-"""
+#: (content type, charset).  aiohttp appends the charset itself, so it must not
+#: be baked into ``content_type``.
+ASSET_TYPES = {
+    ".css": ("text/css", "utf-8"),
+    ".js": ("text/javascript", "utf-8"),
+    ".svg": ("image/svg+xml", None),
+    ".html": ("text/html", "utf-8"),
+}
+
+#: Content-Security-Policy for the panel.  No external origins are allowed at
+#: all: the App has no internet access at runtime, so a CDN reference would
+#: fail silently in the field.  ``style-src`` allows the inline ``style``
+#: attribute the panel uses for meter widths and dial values; everything else
+#: is a same-origin file.
+PANEL_CSP = (
+    "default-src 'none'; "
+    "script-src 'self'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "font-src 'self'; "
+    "connect-src 'self'; "
+    "base-uri 'none'; "
+    "form-action 'none'; "
+    "frame-ancestors 'self'"
+)
+
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "X-Frame-Options": "SAMEORIGIN",
+}
 
 
 def _now() -> str:
@@ -257,26 +236,65 @@ async def healthz(request: web.Request) -> web.Response:
     )
 
 
+def _panel_headers() -> dict[str, str]:
+    """Headers for the HTML panel and its assets.
+
+    ``Cache-Control: no-store`` is deliberate: the panel is served from an App
+    whose ingress URL contains a per-install token, and an upgraded image must
+    never leave a browser running the previous release's script.
+    """
+    return {
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": PANEL_CSP,
+        **SECURITY_HEADERS,
+    }
+
+
 async def index(request: web.Request) -> web.Response:
     # The panel is only served to Supervisor-ingress peers; direct API clients
-    # get the JSON health document instead of an HTML page.
+    # get a small JSON descriptor instead of an HTML page.
     if not _peer_trusted(request):
         return web.json_response(
             {"service": "wattmosaic-engine", "api": "/api/v1", "health": "/healthz"},
             headers={"Cache-Control": "no-store"},
         )
+    try:
+        html = UI_INDEX.read_text(encoding="utf-8")
+    except OSError:
+        # A packaged image without the UI directory must fail loudly and
+        # usefully: the API is still reachable, and the message says so.
+        log.error("panel assets missing at %s", UI_INDEX)
+        return _json(503, "panel_unavailable", "the UI files are missing from this image")
+    return web.Response(text=html, content_type="text/html", headers=_panel_headers())
+
+
+async def static(request: web.Request) -> web.Response:
+    """Serve one immutable panel asset.
+
+    Only the fixed allowlist in :data:`UI_ASSETS` is reachable, so a crafted
+    path cannot walk outside the UI directory.  Assets are also gated on the
+    ingress peer: an unauthenticated caller on a published host port must not
+    be able to enumerate or fetch them.
+    """
+    if not _peer_trusted(request):
+        return _json(401, "unauthorized", "the panel is only served through Home Assistant ingress")
+
+    name = request.match_info["asset"]
+    path = UI_ASSETS.get(f"ui/{name}")
+    if path is None:
+        return _json(404, "not_found", "unknown asset")
+    try:
+        payload = path.read_bytes()
+    except OSError:
+        log.error("panel asset missing: %s", path)
+        return _json(503, "panel_unavailable", "the UI files are missing from this image")
+
+    content_type, charset = ASSET_TYPES.get(path.suffix, ("application/octet-stream", None))
     return web.Response(
-        text=INDEX_HTML,
-        content_type="text/html",
-        headers={
-            "Cache-Control": "no-store",
-            "Content-Security-Policy": (
-                "default-src 'none'; style-src 'unsafe-inline'; "
-                "script-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:"
-            ),
-            "X-Content-Type-Options": "nosniff",
-            "Referrer-Policy": "no-referrer",
-        },
+        body=payload,
+        content_type=content_type,
+        charset=charset,
+        headers=_panel_headers(),
     )
 
 
@@ -352,6 +370,7 @@ def create_app() -> web.Application:
     app = web.Application(client_max_size=MAX_BODY)
     app.router.add_get("/healthz", healthz)
     app.router.add_get("/", index)
+    app.router.add_get("/ui/{asset}", static)
     app.router.add_route("*", "/{tail:.*}", proxy)
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)

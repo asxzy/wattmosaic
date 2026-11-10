@@ -138,6 +138,13 @@ Concretely, at first:
 - **Per-device `unavailable`** usually means the engine is unreachable or was
   just restarted, not that the device is gone.
 
+To watch this happen, open the **WattMosaic** sidebar panel (the App's ingress
+page; see [`installation.md`](installation.md) §A). It shows the same values the
+entities report, but with the evidence behind each one: the tier, the measurement
+age, and the reasons the engine placed a device where it did. **Devices** and
+**Data quality** are the useful ones in the first hour; **Diagnostics** is for
+when something looks wrong. The panel is read-only — it never changes a device.
+
 ### 0.6 The one thing to configure first: your CT topology
 
 The engine cannot guess which CT measures what. On a fresh install the topology

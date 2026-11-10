@@ -107,8 +107,25 @@ level=info component=entrypoint msg="starting engine db=/data/wattmosaic.db ..."
 ... "inference backend loaded: DisaggregationEngine"
 ```
 
-Open the sidebar panel **WattMosaic** (ingress) — it shows engine status, HA
-connection, database state and contract version.
+Open the sidebar panel **WattMosaic** (ingress). It is a read-only view of what the
+engine currently believes, refreshed every few seconds while the tab is visible:
+
+- **Overview** — engine/HA/database state, contract version, the live power split
+  (known loads, residual, and what is still unknown), and the device list.
+- **Devices** — every inferred or learned device with its latest estimate, the
+  evidence grade behind it (a tier, not a probability) and its measurement age.
+  Open one for history, phase/topology placement and the reasons behind its tier.
+- **Topology** — the current topology version, candidate parents and aliases, and
+  what the engine has suppressed or could not infer. **Confirm topology** records
+  the current view as authoritative.
+- **Data quality** — per-channel sample cadence, gaps and ages, so a bad feed can be
+  told apart from a bad model.
+- **Diagnostics** — aligner state, channel health, event log, and JSON download /
+  copy for bug reports.
+
+The panel never changes device state; the only write it offers is confirming the
+topology the engine already inferred. Unknown values are shown as unknown rather
+than as zero.
 
 ### 4. Connect the integration
 
@@ -172,6 +189,11 @@ Install `custom_components/wattmosaic` in Home Assistant, then
 - `SUPERVISOR_TOKEN` is an administrator-grade credential for the Core proxy.
   The engine only reads; still, prefer a dedicated read-only user token in
   `ha_token` if your policy requires it.
+- The ingress panel is static files inside the image (`addon/ui/`), served only
+  to a trusted ingress peer. Direct clients get a JSON descriptor at `/` and
+  `401` for `/ui/*`, so the panel cannot be enumerated from a published port.
+  Its CSP is `script-src 'self'`; there is no inline script, and the gateway
+  injects the API token for ingress requests, so the browser never sees it.
 - The container drops all capabilities and `no_new_privs`, and the engine runs as
   UID 10001. `run.sh` starts as root only to fix `/data` ownership.
 
@@ -183,7 +205,8 @@ Install `custom_components/wattmosaic` in Home Assistant, then
 | --- | --- |
 | App stops immediately | Log shows `no Home Assistant token` → set `ha_token` or leave empty with `homeassistant_api: true`. |
 | `no Home Assistant URL` | Set `ha_url` (or `WM_HA_URL`). |
-| Panel loads, data missing | `api_token` must match the integration's token. |
+| Panel loads, data missing | The panel calls `/api/v1` through the gateway, which injects the token for ingress peers. An empty `api_token` is fine for ingress. Check the engine log and `/healthz` instead. |
+| Panel is blank | The image has no `ui/` directory (stale or hand-built image), or the CSP blocked an asset. Check the browser console; `/healthz` should still answer. |
 | `status: degraded` | HA disconnected or inference backend missing; see `/api/v1/health` → `details`. |
 | Watchdog restarts the app | `/healthz` must return 200; inspect engine logs for `error`. |
 | Database permission error | Volume owned by another UID → set `WM_DROP_PRIVILEGES=false` (not recommended) or remove the volume. |

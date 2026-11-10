@@ -71,6 +71,7 @@ RUN groupadd --gid 10001 wattmosaic \
 
 COPY --from=builder /opt/venv /opt/venv
 COPY addon/run.sh addon/gateway.py addon/healthcheck.py addon/discovery.py /app/
+COPY addon/ui /app/ui
 
 RUN chmod 0755 /app/run.sh /app/gateway.py /app/healthcheck.py /app/discovery.py
 

@@ -1,6 +1,6 @@
 # Interface Contracts (authoritative)
 
-**Contract version: `1.1.0`** — mirrors `engine/wattmosaic_engine/contracts.py`.
+**Contract version: `1.2.0`** — mirrors `engine/wattmosaic_engine/contracts.py`.
 
 `contracts.py` is the single source of truth. JSON schemas are exported from it to
 `data/schemas/` by `tools/dev/export_schemas.py`. No component may define a

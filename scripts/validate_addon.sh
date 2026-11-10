@@ -82,6 +82,10 @@ required_files=(
   addon/gateway.py
   addon/healthcheck.py
   addon/discovery.py
+  addon/ui/index.html
+  addon/ui/app.css
+  addon/ui/app.js
+  addon/ui/mark.svg
   addon/constraints.txt
   addon/icon.png
   addon/logo.png
@@ -448,6 +452,32 @@ for module in addon/gateway.py addon/healthcheck.py scripts/generate_icons.py; d
 done
 
 # ---------------------------------------------------------------------------
+section "Ingress panel (static assets)"
+# ---------------------------------------------------------------------------
+# The panel is served by the gateway under a strict CSP and must work without
+# any network access beyond this origin.  The checks live in a Python helper
+# because a heredoc containing regex like ``eval()`` cannot be nested inside
+# ``$( )`` on the bash 3.2 that ships with macOS.
+if OUT="$("${PY}" tools/dev/check_panel.py 2>&1)"; then
+  pass "ingress panel is self-contained and CSP-safe (${OUT##*: })"
+else
+  fail "ingress panel static checks" "${OUT}"
+fi
+
+# Syntax-check the browser script when a JavaScript engine is available.  CI
+# has no node, so this is a skip there; a developer machine catches a typo
+# before it is ever served to a browser.
+if command -v node >/dev/null 2>&1; then
+  if OUT="$(node --check addon/ui/app.js 2>&1)"; then
+    pass "node --check addon/ui/app.js"
+  else
+    fail "node --check addon/ui/app.js" "${OUT}"
+  fi
+else
+  skip "node --check addon/ui/app.js (node not installed)"
+fi
+
+# ---------------------------------------------------------------------------
 section "Images"
 # ---------------------------------------------------------------------------
 IMG_CHECK="$("${PY}" - <<'PY'
@@ -756,7 +786,8 @@ if OUT="$(bash scripts/package_addon.sh --out "${STAGE_PARENT}" 2>&1)"; then
   pass "package_addon.sh stages a self-contained app"
   STAGE="${STAGE_PARENT}/wattmosaic_engine"
   for f in config.yaml Dockerfile run.sh gateway.py healthcheck.py constraints.txt \
-           pyproject.toml README.md engine/wattmosaic_engine/main.py; do
+           pyproject.toml README.md ui/index.html ui/app.css ui/app.js ui/mark.svg \
+           engine/wattmosaic_engine/main.py; do
     if [[ -e "${STAGE}/${f}" ]]; then pass "staged ${f}"; else fail "staged ${f}"; fi
   done
 else

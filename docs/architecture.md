@@ -1,6 +1,7 @@
 # WattMosaic Architecture
 
-**Contract version:** 1.1.0 · **Engine version:** 0.1.3
+**Contract version:** 1.2.0 · **Engine version:** reported at runtime as
+`wattmosaic_engine.__version__` (development builds carry `X.Y.Z-dev.N`)
 
 WattMosaic is three cooperating pieces with one narrow, versioned boundary
 between the Home Assistant side and the inference side.
@@ -56,7 +57,7 @@ the engine's global sensors), so a prediction can never become its own input.
 
 ```text
 engine/wattmosaic_engine/
-├── contracts.py        # authoritative schemas (no dependencies)
+├── contracts.py        # authoritative schemas (depends only on __version__)
 ├── config/             # env loading, validation, redaction
 ├── storage/            # SQLite, migrations, repositories
 ├── ingestion/          # HA WebSocket read-only client
@@ -136,12 +137,18 @@ Details and worked examples: `docs/electrical_model.md`.
 - Engine → HA: a long-lived token from env; **read-only commands only**. There is
   no service-call code path.
 - Integration → engine: optional shared `X-API-Token`, constant-time compare.
+- Panel → engine: the App's ingress panel is static files (`addon/ui/`) served by
+  the gateway, and it calls the same `/api/v1` through the gateway. The gateway
+  injects the token for ingress peers, so the browser never receives it. The
+  panel is gated on the same trusted-ingress check as the proxied API, and it is
+  read-only apart from confirming an already-inferred topology.
 - Secrets never logged; `EngineConfig.redacted()` is used everywhere.
 - SQLite never stores tokens.
 
 ## 7. Deployment shapes
 
-1. **HA OS App** (primary): `addon/` build, ingress on 8787, `/data` volume.
+1. **HA OS App** (primary): `addon/` build, ingress on 8787, `/data` volume, and
+   a read-only panel served from `addon/ui/` at `/`.
 2. **Standalone Docker**: root `Dockerfile`, volume for DB, env from `.env`.
 3. **Local dev**: `.venv` + `python -m wattmosaic_engine.main`.
 

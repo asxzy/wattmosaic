@@ -29,7 +29,7 @@ loopback-only deployments). A missing or wrong token yields:
 
 ```http
 HTTP/1.1 401 Unauthorized
-X-WattMosaic-Contract-Version: 1.1.0
+X-WattMosaic-Contract-Version: 1.2.0
 Content-Type: application/json
 
 {"error": "unauthorized", "detail": "missing or invalid X-API-Token", "retryable": false}
@@ -72,7 +72,7 @@ curl -sS -X POST http://127.0.0.1:8787/api/v1/commands \
 
 ```http
 HTTP/1.1 400 Bad Request
-X-WattMosaic-Contract-Version: 1.1.0
+X-WattMosaic-Contract-Version: 1.2.0
 
 {"error": "bad_request", "detail": "[{\"type\":\"literal_error\",\"loc\":[\"command\"],...}]", "retryable": false}
 ```
@@ -89,8 +89,8 @@ Liveness/readiness without touching the inference path. `status` is one of
 ```json
 {
   "status": "ok",
-  "contract_version": "1.1.0",
-  "engine_version": "0.1.3",
+  "contract_version": "1.2.0",
+  "engine_version": "<version>",
   "database": "ok",
   "ha_connected": true,
   "ha_last_event_at": "2026-11-05T23:40:45.916958+00:00",
@@ -138,8 +138,8 @@ Operational summary: engine, database, ingestion and inference counters.
 ```json
 {
   "status": "ok",
-  "contract_version": "1.1.0",
-  "engine_version": "0.1.3",
+  "contract_version": "1.2.0",
+  "engine_version": "<version>",
   "started_at": "2026-11-05T23:39:59.100000+00:00",
   "uptime_seconds": 128.4,
   "ha_connected": true,
@@ -492,7 +492,7 @@ wattmosaic_queue_depth 0
 wattmosaic_uptime_seconds 132.6
 # HELP wattmosaic_contract_info Contract version
 # TYPE wattmosaic_contract_info gauge
-wattmosaic_contract_info{version="1.1.0",engine="0.1.3"} 1
+wattmosaic_contract_info{version="1.2.0",engine="<version>"} 1
 ```
 
 Metrics must never fail a scrape: if the backend cannot produce them, a
@@ -502,7 +502,7 @@ fallback exposition built from `/health` is returned with status `200`.
 
 ## 4. Versioning
 
-`CONTRACT_VERSION` (`1.1.0`) follows semantic versioning:
+`CONTRACT_VERSION` (`1.2.0`) follows semantic versioning:
 
 | Change | Version bump |
 | --- | --- |

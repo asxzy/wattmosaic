@@ -346,4 +346,46 @@ def test_the_real_tree_does_not_use_a_glued_counter():
     assert module.ERRORS == [], module.ERRORS
 
 
+def test_the_served_engine_version_is_the_package_version():
+    """`/health`, `/status` and metrics must not report a hardcoded version.
 
+    ``api/facade.py`` used to define ``ENGINE_VERSION = "0.1.2"`` and
+    ``contracts.HealthResponse`` defaulted to the same literal, while
+    ``__version__`` had moved on.  Nothing failed, because the release checker
+    only compared the five version *fields* and this was a sixth literal.  The
+    panel's Diagnostics view made the drift user-visible, so the constant now
+    derives from ``__version__`` and this test pins that.
+    """
+    engine_root = ROOT / "engine"
+    if str(engine_root) not in sys.path:
+        sys.path.insert(0, str(engine_root))
+
+    from wattmosaic_engine import __version__
+    from wattmosaic_engine.api import facade
+    from wattmosaic_engine.contracts import HealthResponse
+
+    assert __version__ == facade.ENGINE_VERSION
+    assert __version__ == HealthResponse().engine_version
+    assert "0.1.2" not in (ROOT / "engine/wattmosaic_engine/api/facade.py").read_text()
+
+
+def test_the_health_schema_does_not_embed_the_current_version():
+    """The generated schema must not change when only the version changes.
+
+    CI bumps the version on every push to ``main`` and then asserts
+    ``git diff --exit-code data/schemas``.  A plain pydantic default writes the
+    current version into the JSON schema, so every auto-release would fail the
+    schema gate with no contract change.  ``HealthResponse.engine_version``
+    uses a ``default_factory`` for exactly that reason: the runtime field is
+    still filled in, but no value appears in the generated schema.
+    """
+    engine_root = ROOT / "engine"
+    if str(engine_root) not in sys.path:
+        sys.path.insert(0, str(engine_root))
+
+    from wattmosaic_engine import __version__
+    from wattmosaic_engine.contracts import HealthResponse
+
+    prop = HealthResponse.model_json_schema()["properties"]["engine_version"]
+    assert "default" not in prop, prop
+    assert HealthResponse().engine_version == __version__

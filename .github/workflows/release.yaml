@@ -269,6 +269,7 @@ jobs:
             addon/gateway.py
             addon/healthcheck.py
             addon/discovery.py
+            addon/ui
             Dockerfile
             pyproject.toml
             README.md

@@ -17,7 +17,6 @@
       "type": "string"
     },
     "engine_version": {
-      "default": "0.1.2",
       "title": "Engine Version",
       "type": "string"
     },
