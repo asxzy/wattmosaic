@@ -3733,9 +3733,9 @@ lookback), which is the history the fresh start re-learns from.
 parent directory and calls `apply_migrations`, so a path that does not exist yet
 becomes a correctly migrated empty schema. `database_path` was moved
 `/data/wattmosaic.db` → `/data/wattmosaic-fresh.db` and the app restarted. This
-was preferred to uninstalling with `remove_config: true` because the old DB stays
-on disk inside the app as a rollback, no `/data` volume is destroyed, and the
-ghost-entity failure mode from §7r.17 is not re-entered. The engine was upgraded
+was preferred at the time to uninstalling with `remove_config: true` because the
+old DB stayed on disk as a rollback. (Superseded hours later: §7r.20 deleted the
+App and its data outright on explicit instruction.) The engine was upgraded
 `0.2.1-dev.5` → `0.2.1-dev.7` **in the same operation**, so the new measurements
 are collected under ADR-0026 rather than under the superseded rule.
 
@@ -3765,11 +3765,73 @@ stale count; the measured figure was 75 before and is 68 now.
 
 **Left alone, deliberately.** The 95 stranded statistics and 1,907 points from
 §7r.14, all non-WattMosaic integrations, and HA's own recorder history were
-untouched. The old `/data/wattmosaic.db` remains in place as a rollback.
+untouched.
 
-**Open consequence.** `database_path` is now the one non-default App option
-(`/data/wattmosaic-fresh.db`). Folding it back to the default is a separate,
-explicit step; doing it silently would delete the rollback copy.
+---
+
+### 7r.20 The App was then deleted outright, and the entry was *still* not touched
+
+§7r.19 swapped the database file to keep a rollback copy. The user then asked for
+a full delete — "you can delete and start fresh" — so the rollback copy, the
+non-default option and the old 3-day database were removed for real. **The
+integration config entry was again not touched**, which is the whole reason the
+322 entities survived.
+
+**What was deleted.** `POST /addons/48d0ea68_wattmosaic_engine/uninstall` with
+`remove_config: true`, then a reinstall from the same repository. Two endpoint
+facts cost time and belong on the record:
+
+* `App.uninstall` lives at `POST /addons/{slug}/uninstall`, **not**
+  `/store/addons/{slug}/uninstall` — the latter answers `405 Method Not Allowed`
+  for POST and DELETE alike.
+* A successful install/update dispatch returns `success: false` with an **empty**
+  `message`, exactly as §7r.17 warned. The truth is only visible by re-reading
+  `/addons/{slug}/info`: the app appears as `stopped` (not `started`) after an
+  install and needs an explicit `POST /addons/{slug}/start`.
+
+`remove_config: true` reclaimed 0.8 GB (host `disk_used` 46.8 → 46.0 GB). The
+reinstall came back with `database_path` at its **default** `/data/wattmosaic.db`,
+which closes §7r.19's open consequence: there is no longer a non-default option.
+
+**The entry really does pin a unique_id.** `config_entries/get` and the REST
+`/api/config/config_entries/entry` both report `unique_id: None`, which looks
+alarming — a reinstall would then create a *new* entry and orphan everything. The
+field is simply omitted from those list payloads. The config flow calls
+`async_set_unique_id(base_url)` / `_abort_if_unique_id_configured()` on both the
+discovery and manual paths, and the outcome proves it: after the uninstall the app
+re-announced itself and **no second entry appeared** (`wattmosaic: 1`).
+
+**Verified against a full before/after baseline** (`wipe_baseline.json`, taken
+before the uninstall):
+
+| Check | Before | After |
+| --- | --- | --- |
+| Owned entities | 322 | 322 |
+| Entity-id set (statistics are keyed by this) | 322 | 322, set-identical |
+| Unique-id set | 322 | 322, set-identical |
+| Entities with a live state | 322 | 322 |
+| Devices | 29 | 29 |
+| Statistic ids | 122 | 122, none missing |
+| Hourly statistic points | 5,398 | 5,398 |
+| Series that shrank | — | **0** |
+
+**Negative verification of the blast radius.** 10 apps total, 9 started, only
+WattMosaic replaced (now `0.2.1-dev.7`). All 6 repositories unchanged. Of 3,838
+statistic ids, exactly 122 are WattMosaic's and **3,716 belong to other
+integrations and were not touched**. 105 config entries across 67 domains,
+`wattmosaic: 1`. The 95 stranded non-WattMosaic ids from §7r.14 are still there
+(`same_values: 0`, `recreated: 102`, `gap: 19`, `no_target: 0`).
+
+**Two transient readings that are not defects.** Immediately after the start the
+engine reported `degraded` with `uptime_seconds: 2.0`, `queue_depth: 278` and
+every power at `0.0`; 90 seconds later it was `ok` and publishing. And
+`accounted_fraction` read 13.3 % on the first poll, then 19.5 → 19.0 → 19.6 % over
+the next 100 s — a learning ramp from an empty database, not a regression. 26
+devices publish power now, against 21 under the previous database.
+
+**Freshness is proved by the engine, not by the option.** `topology_version` is
+**1** (it had reached 6), every device `sample_count` starts at 0, and
+`database_path` is the default again.
 
 ---
 
