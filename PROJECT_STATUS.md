@@ -3574,10 +3574,11 @@ removal"), so the fix was reloading the `hassio` entry, which re-registered the
 app devices and retired the stale one. Two update entities remain, both at
 `0.2.1-dev.5`.
 
-The 64 owned entities still reporting `unavailable`/`unknown` are unchanged from
-before the migration (5 branch-CT devices with no ON claimant, 7 sensors each,
+The owned entities still reporting `unavailable`/`unknown` are unchanged from
+before the migration (branch-CT devices with no ON claimant, 7 sensors each,
 plus `operating_stage` for every device); they are a pre-existing attribution
-gap, not migration damage.
+gap, not migration damage. The "64" written here was an estimate; §7r.19 measured
+75 just before the 2026-11-10 reset and 68 after it.
 
 **Not claimed.** Local gates passed 12/12 both before and after this defect
 existed; the harness cannot observe a workflow's *absence* of work. Nothing
@@ -3687,9 +3688,88 @@ does not claim calibrated confidence or a single aggregate accuracy number.
 
 **Still blocked, unchanged by this work.** `discover_placements` resolves 0
 entities because the engine holds no `state_entity_ids`; the
-`upper_deck_heater_l1`/`_l2` polarity question needs a decision; 64 owned entities
-report `unavailable`/`unknown`; `model_estimated` is still not clamped by its CT
-row (§7r.7).
+`upper_deck_heater_l1`/`_l2` polarity question needs a decision; 68 owned entities
+report `unavailable`/`unknown` (§7r.19 measured this); `model_estimated` is still
+not clamped by its CT row (§7r.7).
+
+---
+
+### 7r.19 The engine database was reset; the install was not
+
+The App and integration were reset on 2026-11-10 so learning could start over
+from Home Assistant's own history. **Scope was "this app and integration only"**,
+and the two ways to violate that were both checked before anything was written.
+
+**Why the config entry was not deleted.** Entity unique ids are
+`{entry_id}_{device_id}_{key}`, and the entry id is embedded in all 322 of them.
+Deleting the integration entry would have orphaned every statistic — exactly the
+defect §7r.14 had just spent a session clearing. The entry was therefore
+**reloaded, never recreated**. It also stores no state at all: `data keys: []`,
+`options keys: []`. It is a pure mirror of the engine, so there was nothing
+inside it to reset.
+
+**The precondition that made this safe.** Fresh discovery has to emit the same
+device ids or every entity id changes. Proved before touching the engine, by
+running `discover_candidate_topology` against the live HA states and registries
+(`discovery_dryrun.py`):
+
+```
+discovered: channels=38 devices=28
+install:    channels=38 devices=28
+device id sets identical: True
+channel id sets identical: True
+```
+
+**What the reset actually destroyed.** The engine DB was opened read-only from
+the §7r.17 cold backup before deciding: `learning_samples` 0, `device_models` 0,
+`device_model_versions` 0, `device_configurations` 0, six topology versions all
+`candidate`. So the wipe discarded 3 days of measurement (`ct_samples` 528,142,
+`inference_results` 554,848) and **no learned model and no user declaration** —
+there was still nothing learned to lose. HA's recorder holds CT history back to
+2026-10-31 (`sensor.refoss_sub_panel_ct1_power`: 57,174 rows at a 10-day
+lookback), which is the history the fresh start re-learns from.
+
+**Method: swap the file, do not uninstall.** `Database.__init__` creates the
+parent directory and calls `apply_migrations`, so a path that does not exist yet
+becomes a correctly migrated empty schema. `database_path` was moved
+`/data/wattmosaic.db` → `/data/wattmosaic-fresh.db` and the app restarted. This
+was preferred to uninstalling with `remove_config: true` because the old DB stays
+on disk inside the app as a rollback, no `/data` volume is destroyed, and the
+ghost-entity failure mode from §7r.17 is not re-entered. The engine was upgraded
+`0.2.1-dev.5` → `0.2.1-dev.7` **in the same operation**, so the new measurements
+are collected under ADR-0026 rather than under the superseded rule.
+
+**Verified, and negatively verified.**
+
+| Check | Before | After |
+| --- | --- | --- |
+| Owned entities | 322 | 322 |
+| Distinct unique ids (set-identical) | 322 | 322 |
+| Entities with a live state | 322 | 322 |
+| Devices | 29 | 29 |
+| Devices without a `via_device` parent | 0 | 0 |
+| Statistic ids | 122 | 122 |
+| Hourly statistic points | 5,077 | 5,291 (recorder kept writing) |
+
+The engine itself is provably empty: `topology_version` fell from **6 to 1**,
+`engine_status` `ok`, and every device `sample_count` reads `0`. The negative
+check is the one that matters — replaying 12 hours of history up to
+`16:50Z`, twenty minutes before the reset, gave **75** unavailable/unknown
+entities; immediately after it gave **68**, with `newly unavailable since reset:
+0` and 7 recovered. The seven devices with no power reading
+(`ensuite_in_floor_heating`, `hot_tub`, `kitchen_plug`, `main_floor_ac`, `sauna`,
+`upper_deck_heater`, `upper_floor_ac`) had `first_unavail` timestamps on
+**2026-11-09**, a day before the reset, so they are the pre-existing
+no-ON-claimant gap, not reset damage. The "64" quoted in §7r.14 and §7r.18 was a
+stale count; the measured figure was 75 before and is 68 now.
+
+**Left alone, deliberately.** The 95 stranded statistics and 1,907 points from
+§7r.14, all non-WattMosaic integrations, and HA's own recorder history were
+untouched. The old `/data/wattmosaic.db` remains in place as a rollback.
+
+**Open consequence.** `database_path` is now the one non-default App option
+(`/data/wattmosaic-fresh.db`). Folding it back to the default is a separate,
+explicit step; doing it silently would delete the rollback copy.
 
 ---
 
