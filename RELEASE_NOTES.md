@@ -1,5 +1,13 @@
 # Release Notes
 
+## v0.2.1-dev.9 — 2026-11-10 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- Delete the app and its data outright; keep the entry and every statistic
+
 ## v0.2.1-dev.8 — 2026-11-10 (development channel)
 
 Automatic development build.
