@@ -594,6 +594,44 @@ not replace the stable integration or App.**
 - No API version change (`/api/v1` stays at 1.1.0). The topology contract moves
   to `1.2.0`, which adds fields and changes no existing one.
 
+## v0.1.6 — 2026-11-09
+
+Home Assistant was showing this integration's version as a **commit hash**
+(`eec273d`), not `0.1.5`. Nothing in the tree was wrong: every version field said
+`0.1.5` and the matching container image was published. What was missing was
+**metadata** — Home Assistant, HACS and the Marketplace resolve the displayed
+version from the repository's git tags and GitHub Releases, and this repository
+had never created either. With nothing to resolve they fell back to the branch
+head and displayed its SHA. No engine or API change (`/api/v1` stays at 1.1.0).
+
+### Added
+
+- **A release pipeline.** Every release now gets an annotated git tag and a
+  GitHub Release whose body is taken from `RELEASE_NOTES.md`, so the version a
+  user is offered and the version in the tree cannot disagree. `main` publishes
+  stable versions as "latest"; the `dev` branch publishes `-dev.N` builds as
+  prereleases, which are never offered as "latest".
+- **A release-contract check** (`tools/dev/check_release.py`) that runs in CI
+  and in the verification harness. It fails if `manifest.json`, `const.py`,
+  `addon/config.yaml`, `pyproject.toml` and the engine `__version__` disagree,
+  if the release notes do not document the current version, or if the branch
+  carries a version of the wrong kind.
+
+### Fixed
+
+- **The version fields had silently drifted.** The new check found two on its
+  first run: `pyproject.toml` and `engine/wattmosaic_engine/__init__.py` both
+  still said `0.1.3`, two releases behind. Both now track the release.
+- **A documentation-only push could turn the App-image run red.** Its stale-tag
+  check compared the published commit SHA against `HEAD`, so a commit that
+  touched only documentation failed while building a byte-identical image. It
+  now compares the paths that actually enter the image.
+
+### Note for the development channel
+
+`dev` builds numbered `0.2.0-dev1` … `0.2.0-dev9` exist and are unrelated to this
+stable release. They remain prereleases and are not offered to stable users.
+
 ## v0.1.5 — 2026-11-08
 
 An App install now announces itself, so the integration can be added from a
