@@ -1,6 +1,6 @@
 # Verification Report
 
-Generated: `2026-11-10T01:48:45.887044+00:00`
+Generated: `2026-11-10T01:55:39.383208+00:00`
 
 **Required gates passed: 12/12**
 
@@ -9,16 +9,16 @@ Generated: `2026-11-10T01:48:45.887044+00:00`
 | contract_schema_sync | **PASS** | 0.18 |  |
 | secret_scan | **PASS** | 0.41 |  |
 | lint | **PASS** | 0.04 |  |
-| unit_tests | **PASS** | 8.5 |  |
-| integration_tests | **PASS** | 2.41 |  |
-| simulation_tests | **PASS** | 12.11 |  |
-| end_to_end_tests | **PASS** | 44.91 |  |
+| unit_tests | **PASS** | 8.58 |  |
+| integration_tests | **PASS** | 2.57 |  |
+| simulation_tests | **PASS** | 12.0 |  |
+| end_to_end_tests | **PASS** | 45.09 |  |
 | manifest_valid | **PASS** | 0.07 |  |
 | release_valid | **PASS** | 0.05 |  |
 | docs_fresh | **PASS** | 0.42 |  |
-| deployment_valid | **PASS** | 2.19 |  |
+| deployment_valid | **PASS** | 2.11 |  |
 | hacs_valid | **PASS** | 0.03 |  |
-| config_valid | **PASS** | 0.6 | requires HA_TOKEN in environment |
+| config_valid | **PASS** | 0.59 | requires HA_TOKEN in environment |
 
 ## Failures
 

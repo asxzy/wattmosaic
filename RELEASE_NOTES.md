@@ -77,6 +77,15 @@ branch and does not replace the stable integration or App.**
   The counter is now its own numeric identifier (`-dev.1`, `-dev.2`, …), which
   compares numerically and keeps incrementing. `check_release.py` rejects the
   glued form (`-dev10`) so this cannot be reintroduced.
+
+  > **Correction (2026-11-10).** The *symptom* above was real — the update entity
+  > did keep resolving `dev9` — but the mechanism given here is **wrong**. The
+  > Marketplace compares versions with **AwesomeVersion**
+  > (`marketplace/utils/version.py::is_newer_version`), not raw SemVer, and it
+  > orders `v0.2.0-dev10 > v0.2.0-dev9` correctly. The dot form is kept because
+  > it is unambiguous and already published, not because the glued form is
+  > broken here. Some other cause produced the stuck `dev9`; it has not been
+  > identified, and this note should not be cited for the ordering claim.
 - **The version fields had silently drifted, and nothing noticed.** The gate
   found two on its first run: `pyproject.toml` was still `0.2.0-dev4` (five
   releases behind) and `engine/wattmosaic_engine/__init__.py` was `0.1.3` (three
