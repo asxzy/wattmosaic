@@ -1,5 +1,13 @@
 # Release Notes
 
+## v0.2.1-dev.8 — 2026-11-10 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- Reset the engine database without touching the install
+
 ## v0.2.1-dev.7 — 2026-11-10 (development channel)
 
 Automatic development build.
