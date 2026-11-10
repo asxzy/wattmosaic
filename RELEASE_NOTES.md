@@ -1,5 +1,13 @@
 # Release Notes
 
+## v0.2.1-dev.5 — 2026-11-10 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- Correct the glued-counter claim in the v0.2.1-dev.1 notes
+
 ## v0.2.1-dev.4 — 2026-11-10 (development channel)
 
 Automatic development build.
