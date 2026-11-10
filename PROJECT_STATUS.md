@@ -3253,6 +3253,155 @@ returns `6c930d8` from the real published manifest while the old one returns
 
 ---
 
+### 7r.14 A deprecated `via_device` tuple took 276 sensors offline
+
+Removing the stable install left one integration (dev). The user then asked for
+the dev entities to take the plain names the stable install had occupied. That
+work is **not** what this section records — it records the outage it triggered
+and the real defect underneath it.
+
+**What happened.** During an entity-registry pass, Home Assistant logged
+`Cannot rename statistic_id ... because the new statistic_id is already in use`
+for 320 entities (the deleted install's orphaned series still held the plain
+names). Immediately afterwards, `homeassistant.components.sensor` logged 276
+`Error adding entity ... for domain sensor with platform wattmosaic`. **276 of
+322 sensors had no state for roughly six minutes** on a live, occupied home.
+They returned after `homeassistant.reload_config_entry` re-ran platform setup.
+
+**Root cause — ours, not the rename's.** The traceback ends in our own module:
+
+```
+RuntimeError: Detected that integration 'config' calls
+`device_registry.async_get_or_create` with a deprecated `via_device` parameter;
+use `via_device_id` instead at custom_components/wattmosaic/sensor.py, line 98
+```
+
+`DeviceInfo(via_device=(DOMAIN, f"engine_{entry.entry_id}"))` was set in
+`sensor.py` and `binary_sensor.py`. Home Assistant 2026.8 deprecated that pair
+in favour of `via_device_id` (a registry id). Normally the report is a warning,
+but inside a frame whose reporting behaviour is `ERROR` it is **raised**, and
+entity creation aborts. The registry pass put the entity re-adds in the `config`
+integration's frame, so a warning became a hard failure.
+
+The version constraint makes a blind swap wrong. Measured against released
+sources: `async_get_or_create` gained the `via_device_id` keyword in **2026.8**;
+before that only `via_device` exists. `hacs.json` declares `2024.11.0` as the
+minimum, where passing `via_device_id` is a `TypeError`. Passing *both* raises
+`HomeAssistantError`. So the form has to be chosen at runtime.
+
+**Fix.**
+
+- `custom_components/wattmosaic/hub_device.py` (new): registers the engine (hub)
+  device from `async_setup_entry` **before** any platform is forwarded — a
+  `via_device_id` must name an already-registered device — and returns its id,
+  stored as `engine_device_id` in `hass.data`.
+- `entity_values.via_device_kwargs(...)` (pure, HA-free): emits **exactly one**
+  key. On 2026.8+ it returns `{"via_device_id": <id>}` and never the deprecated
+  pair. If the id is missing it returns `{}` rather than falling back — a
+  parentless device is harmless, while the deprecated pair is the call that
+  aborts entity creation.
+- `supports_via_device_id()` reads the capability from
+  `inspect.signature(dr.DeviceRegistry.async_get_or_create)` (cached), not from a
+  version string, so it tracks what the installed HA actually accepts.
+- Both platform call sites now splat the helper instead of a literal pair.
+
+**Verification.** `tests/integration/test_hub_device_link.py`, 11 tests: modern
+HA emits only `via_device_id`; legacy emits only the pair; exactly one link key
+in both cases; a missing hub id drops the link; no platform module sets
+`via_device=` literally; and the hub is created before
+`async_forward_entry_setups`. Negative check: restoring the deprecated
+`via_device=` line in `sensor.py` makes two tests fail. Full gate suite 12/12.
+
+**Not claimed.** The 320 renames and the 117 stranded statistic ids are a
+separate, unresolved matter. This fix removes the crash mechanism; it does not
+consolidate the split history. Deploying it to the live HA requires a Core
+restart, which has not been done.
+
+---
+
+### 7r.15 `main` becomes the development line, and the reason two premises were wrong
+
+The user asked for one branch that CI releases from on every push, with stable
+pinned at `v0.1.6` and the App moved from `#dev` to `#main`. Two things had to be
+measured against the real installers before any of it could be designed, and both
+contradicted what this repository had recorded.
+
+**Premise 1, falsified: the Marketplace does not order `dev9 > dev10`.**
+`RELEASE_NOTES.md:35` and §7r.13 stated that SemVer compares a lettered
+prerelease identifier lexically, so `0.2.0-dev10` sorts below `0.2.0-dev9` and
+the channel silently stops incrementing at ten. The actual comparison is
+`marketplace/utils/version.py::is_newer_version`, which uses **AwesomeVersion**.
+Measured against it:
+
+```
+v0.2.0-dev10 > v0.2.0-dev9   ->  True
+v0.2.1-dev.9 < v0.2.1-dev.10 ->  True
+v0.1.6       > v0.1.6-dev.1  ->  True
+```
+
+The glued form orders correctly. The dot form is kept — it is unambiguous and
+already published — but the recorded *reason* was wrong, and docs/deployment.md
+now says so. The earlier observation that `latest_version` stayed at `dev9` was
+real; the mechanism attributed to it was not this one.
+
+**Premise 2, discovered: a Release per push breaks stable, unless pruned.**
+`marketplace/repositories/base.py::async_get_releases` fetches **one unpaginated
+page** (`per_page: 30`) and `_async_update_releases` keeps at most 30, taking
+`last_version` from the newest release with `prerelease=False`. Fill that page
+with development releases and:
+
+- `last_version` becomes `None`,
+- `display_available_version` falls back to a commit SHA,
+- `version_to_install()` returns `default_branch` — **so a stable user would be
+  offered the development line.**
+
+That is worse than a stale version, so pruning is mandatory, not tidiness.
+Simulated against the real comparison: `keep=10` retains `v0.1.6` as
+`last_version`; `keep=30` yields `None`. `release.yaml` therefore prunes
+development Releases to the newest 10, refuses a `KEEP_PRERELEASES` that leaves
+no room for stable releases, and never deletes a stable Release.
+
+**Architecture.**
+
+| | Ref | Version | Trigger |
+| --- | --- | --- | --- |
+| Integration (dev) | `main` (default) | `X.Y.Z-dev.N` | every push |
+| App (dev) | `#main` | `X.Y.Z-dev.N` | every push |
+| Integration + App (stable) | `#stable` | `X.Y.Z` | frozen at `v0.1.6` |
+
+`check_release.py --channel` is inverted: `main` must carry a prerelease,
+`stable` must carry a stable version.
+
+**Why one workflow, not three.** A push made with the automatic `GITHUB_TOKEN`
+does not trigger another workflow. Since CI must commit the version bump (the
+Supervisor compares version *strings*, never commits), the image and the Release
+had to become jobs in the same run — otherwise the image is built from the
+*pre-bump* tree and the tag names a version no artifact carries. `app-image.yaml`
+is deleted; its steps, and the stale-tag guard they carry, moved into the
+`image` job of `release.yaml`.
+
+**Verification.**
+`tools/dev/bump_version.py` (new) computes and writes the bump; 20 tests pin the
+increment, the five-field rewrite, that a comment mentioning an old version is
+not rewritten, and the refusals — a stable version, a glued counter, and an
+`rc`/`beta` channel are all refused rather than guessed. Negative check: a naive
+"strip the suffix, append `-dev.1`" implementation makes three tests fail.
+`tests/integration/test_release_workflow.py` (new, 25 tests) pins the trigger
+branches, that the bump is committed and marked, that image and Release are jobs
+in one workflow checking out the *bumped* commit, and that pruning exists, only
+touches prereleases, deletes the tag too, and leaves room for stable. Negative
+checks: building from the triggering SHA, setting `keep=40`, and deleting the
+`prune` job each fail the suite. `tests/unit/test_release_contract.py` channel
+tests were inverted and negatively verified — restoring the old semantics fails
+three of them. Full gate suite 12/12; `ruff` clean.
+
+**Not claimed.** Nothing is deployed. The `stable` branch does not exist yet, the
+live dev App still points at `#dev`, and moving it to `#main` changes the
+repository id (`7acd0210` → `48d0ea68`), the hostname, and the `/data` volume —
+a migration that has not been performed.
+
+---
+
 ## 8. Needs user authorization
 
 | Action | Why it needs authorization |
