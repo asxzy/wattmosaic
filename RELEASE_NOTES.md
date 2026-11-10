@@ -1,5 +1,15 @@
 # Release Notes
 
+## v0.2.1-dev.6 — 2026-11-10 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- Investigate the stranded statistics instead of guessing at them
+- Record verification gate results for ADR-0026
+- Treat every CT as a circuit and attribute the measured step (ADR-0026)
+
 ## v0.2.1-dev.5 — 2026-11-10 (development channel)
 
 Automatic development build.
