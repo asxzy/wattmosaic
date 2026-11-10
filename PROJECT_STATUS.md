@@ -3317,6 +3317,35 @@ separate, unresolved matter. This fix removes the crash mechanism; it does not
 consolidate the split history. Deploying it to the live HA requires a Core
 restart, which has not been done.
 
+**Followed up 2026-11-10 — what those statistics actually are.** The recorder
+was read directly (`recorder/list_statistic_ids` against `get_states` and
+`config/entity_registry/list`) rather than inferred from the name. Of 134
+stranded statistic ids on the live system, **121 belong to WattMosaic** (322
+registered entities, platform `wattmosaic`) and 70 `sensor.*` plus 9 `opower:*`
+ids belong to other integrations and are not ours to touch.
+
+Of the 121, every one now maps to a live entity through the shipped rename table
+(`custom_components/wattmosaic/entity_migration.py`, applied in reverse). The
+`_2`/`_3`–`_6` suffixes are HA's collision disambiguation, not part of the name.
+They break down as 95 `_2` collision copies, 12 other collision copies, 10 engine
+aggregate ids, and 4 old `_estimated_*` names.
+
+The earlier phrasing ("stranded, needs consolidating") was too weak in one
+direction and too strong in the other. **Nothing is orphaned** — every id has a
+live counterpart, so no series is unreachable. But the history is genuinely
+**split**, not duplicated: comparing hourly `sum`/`mean` per timestamp, only
+**26** of the 121 have identical values and full coverage (safe to drop). **76**
+have a live counterpart whose values differ — the live entity was re-created and
+holds the newer series, so the old one is the only record of that earlier period.
+**19** have live-series hours missing that the old series covers, 1–2 hours each
+around the 2026-11-08 → 09 re-registration. Total stranded volume is small:
+**2,448 hourly points** across all 121.
+
+So the options are not equivalent, and none of them is "delete duplicates":
+merging preserves 2,448 points of pre-migration history, keeping costs nothing
+but leaves 121 ids in the recorder, and deleting removes the only record for the
+76 re-created series. **No action taken** — this needs the user's decision.
+
 ---
 
 ### 7r.15 `main` becomes the development line, and the reason two premises were wrong

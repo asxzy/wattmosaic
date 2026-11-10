@@ -1,24 +1,24 @@
 # Verification Report
 
-Generated: `2026-11-10T07:33:28.595553+00:00`
+Generated: `2026-11-10T07:40:34.767844+00:00`
 
 **Required gates passed: 12/12**
 
 | Gate | Status | Duration (s) | Notes |
 | --- | --- | --- | --- |
-| contract_schema_sync | **PASS** | 0.16 |  |
-| secret_scan | **PASS** | 0.41 |  |
-| lint | **PASS** | 0.05 |  |
+| contract_schema_sync | **PASS** | 0.18 |  |
+| secret_scan | **PASS** | 0.49 |  |
+| lint | **PASS** | 0.04 |  |
 | unit_tests | **PASS** | 8.46 |  |
-| integration_tests | **PASS** | 2.72 |  |
-| simulation_tests | **PASS** | 12.4 |  |
-| end_to_end_tests | **PASS** | 45.93 |  |
+| integration_tests | **PASS** | 2.41 |  |
+| simulation_tests | **PASS** | 12.42 |  |
+| end_to_end_tests | **PASS** | 45.87 |  |
 | manifest_valid | **PASS** | 0.07 |  |
 | release_valid | **PASS** | 0.05 |  |
-| docs_fresh | **PASS** | 0.42 |  |
-| deployment_valid | **PASS** | 2.11 |  |
+| docs_fresh | **PASS** | 0.43 |  |
+| deployment_valid | **PASS** | 2.16 |  |
 | hacs_valid | **PASS** | 0.03 |  |
-| config_valid | **PASS** | 0.63 | requires HA_TOKEN in environment |
+| config_valid | **PASS** | 0.59 | requires HA_TOKEN in environment |
 
 ## Failures
 
