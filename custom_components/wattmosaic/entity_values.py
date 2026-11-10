@@ -314,6 +314,34 @@ def binding_update(
     return {"device_id": target_device_id}
 
 
+def via_device_kwargs(
+    *,
+    supports_via_device_id: bool,
+    hub_device_id: Any,
+    hub_identifier: tuple[str, str],
+) -> dict[str, Any]:
+    """The keyword mapping that links a child device to the engine device.
+
+    Home Assistant 2026.8 deprecated the ``via_device=(domain, identifier)``
+    form in favour of ``via_device_id=<registry id>``.  Passing *both* raises
+    ``HomeAssistantError``, and passing only the deprecated pair reports the
+    calling integration -- a report that is raised (not logged) when it happens
+    inside a strict frame, aborting entity creation.
+
+    So on a version that understands ``via_device_id`` the id form is used, and
+    the deprecated pair is never emitted.  If the hub id is missing there, the
+    link is dropped rather than falling back: a device without a parent is
+    harmless, while the deprecated pair can take every entity down.
+
+    On older versions the pair form is the only one accepted, and it is correct.
+    """
+    if supports_via_device_id:
+        if isinstance(hub_device_id, str) and hub_device_id:
+            return {"via_device_id": hub_device_id}
+        return {}
+    return {"via_device": hub_identifier}
+
+
 __all__ = [
     "BINDABLE_KEYS",
     "ENERGY_ENABLED_KEY",
@@ -327,4 +355,5 @@ __all__ = [
     "global_values",
     "merge_energy_choice",
     "resolve_binding_target",
+    "via_device_kwargs",
 ]

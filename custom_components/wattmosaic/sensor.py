@@ -40,6 +40,7 @@ from .entity_values import (
     global_values,
     resolve_binding_target,
 )
+from .hub_device import via_device_for_entry
 from .util import published_energy, utcnow
 
 _LOGGER = logging.getLogger(__name__)
@@ -272,7 +273,7 @@ class WattMosaicDeviceSensor(_WattMosaicBase, RestoreEntity):
             name=name,
             manufacturer=MANUFACTURER,
             model="Inferred load",
-            via_device=(DOMAIN, f"engine_{entry.entry_id}"),
+            **via_device_for_entry(coordinator.hass, entry),
             suggested_area=coordinator.device_areas.get(device_id),
         )
         # The *measurement* entities are placed on the user's real device when a

@@ -22,6 +22,7 @@ from .const import DOMAIN, MANUFACTURER, NAME, VERSION
 from .coordinator import WattMosaicCoordinator
 from .entity_defs import DEVICE_BINARY_SENSORS, GLOBAL_BINARY_SENSORS
 from .entity_values import device_values, global_values
+from .hub_device import via_device_for_entry
 from .util import utcnow
 
 _LOGGER = logging.getLogger(__name__)
@@ -161,7 +162,7 @@ class WattMosaicDeviceBinarySensor(_Base):
             name=name,
             manufacturer=MANUFACTURER,
             model="Inferred load",
-            via_device=(DOMAIN, f"engine_{entry.entry_id}"),
+            **via_device_for_entry(coordinator.hass, entry),
         )
 
     def _values(self) -> dict[str, Any]:

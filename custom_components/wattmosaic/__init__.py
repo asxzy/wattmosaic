@@ -36,6 +36,7 @@ from .const import (
 from .coordinator import WattMosaicCoordinator
 from .entity_migration import async_migrate_entity_ids
 from .flow_logic import placement_request_parameters
+from .hub_device import async_create_engine_device
 from .service_logic import (
     ConfirmationRequired,
     ServiceValidationError,
@@ -92,6 +93,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "coordinator": coordinator,
         "client": client,
     }
+
+    # The engine (hub) device must exist before any platform is forwarded: on
+    # Home Assistant 2026.8+ child devices link to it by registry id, and an
+    # unknown id is rejected.  Doing it here also means a later strict-frame
+    # registry report can never be triggered by the deprecated `via_device` pair.
+    hass.data[DOMAIN][entry.entry_id]["engine_device_id"] = async_create_engine_device(
+        hass, entry, coordinator
+    )
 
     # A translated entity name changed, which changes the entity_id Home
     # Assistant derives for new installs.  An existing install must be renamed
