@@ -1,76 +1,129 @@
-# Tag and publish a release for the current version.
+# Publish a version: bump, image, tag, Release -- in one run, in that order.
 #
-# Why this exists
-# ---------------
-# Home Assistant, HACS and the built-in Marketplace do not read a version out of
-# the tree. They read the repository's **git tags** and **GitHub Releases**, and
-# when neither exists they fall back to the branch head and display a raw commit
-# SHA. That is what happened here: fifteen versions shipped with a correct
-# `manifest.json` and a published container image, but no tag and no release, so
-# the update entity reported `0.2.0-dev9` as `latest_version: eec273d`.
+# Why one workflow and not three
+# ------------------------------
+# A push made with the automatic `GITHUB_TOKEN` does **not** trigger other
+# workflows; GitHub suppresses it deliberately to prevent recursion.  The
+# version bump has to be committed by CI (see below), so if the image and the
+# Release lived in separate push-triggered workflows they would never run for
+# the bumped commit: the image would be built from the *pre-bump* tree and the
+# tag would name a version no artifact carries.  Every stage therefore lives in
+# this one run, chained with `needs`.
+#
+# Why CI bumps the version
+# ------------------------
+# The Supervisor offers an App update only when `addon/config.yaml`'s
+# `version:` *string* changes.  It clones one branch and compares versions; it
+# never compares commits.  A push that changed code without moving the version
+# would publish an image nobody is offered, and the installed App would keep
+# running old code while the workflow reported success -- the `0.2.0-dev5`
+# defect.  So the bump is part of publishing, not a manual step.
 #
 # Channels
 # --------
-# `main` is the stable channel and carries `X.Y.Z`. `dev` is the development
-# channel and carries `X.Y.Z-devN`. Both branches use this one workflow because
-# a tag is derived from the version string, not from the branch: the branch only
-# decides which kind of version was committed.
+# `main` is the development line: every push publishes a prerelease
+# (`X.Y.Z-dev.N`).  `stable` carries plain `X.Y.Z` and is human-driven.
 #
-# A tag names a *release*, not a commit
-# -------------------------------------
-# Pushing a documentation or tooling change does not bump the version, so this
-# workflow runs, finds `v<version>` already tagged, and exits with a notice. It
-# must not fail: the version is still the released one, and failing would make
-# every later commit red for a reason that is not a defect. The App-image
-# workflow used to fail exactly this way.
+# A prerelease on `main` cannot reach a stable user, and that is enforced by the
+# Marketplace rather than by trust: `show_beta` defaults to false, and
+# `last_version` is set only from the newest release with `prerelease=False`.
+# See `tools/dev/check_release.py::check_channel` for the full argument.
 #
-# Don't advertise what cannot be installed
-# ----------------------------------------
-# The Release is the "this version is installable" claim. Before it is created,
-# the matching image is required to exist in GHCR, because the Supervisor pulls
-# `ghcr.io/asxzy/wattmosaic-engine:<version>` for the App. A release with no
-# image behind it is a broken update prompt.
+# The 30-release window (why `prune` exists)
+# ------------------------------------------
+# `marketplace/repositories/base.py::async_get_releases` fetches **one
+# unpaginated page** (`per_page: 30`) and `_async_update_releases` keeps at most
+# 30.  If prereleases ever fill that page, the newest *stable* Release is no
+# longer in the list, so `last_version` stays `None`, `display_available_version`
+# falls back to a commit SHA, and `version_to_install()` returns
+# `default_branch` -- which would offer a stable user the development line.  A
+# per-push release stream reaches 30 within a week, so old prereleases are
+# deleted.  Stable Releases are never pruned.
 name: Release
 
 on:
   push:
-    branches: ["main", "dev"]
+    branches: ["main", "stable"]
   workflow_dispatch:
     inputs:
       force:
-        description: "Recreate the Release even if the tag already exists"
+        description: "Republish even if this version is already released"
         type: boolean
         default: false
 
-# Two branches must never race to create different releases, and a backfill
-# dispatch must not collide with a push. Serialise per branch.
+# Two pushes must never race to create different releases, and the bump commit
+# must land before the next run reads the tree. Serialise per branch.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  #: How many prerelease Releases to keep. Must leave room for every stable
+  #: Release inside the Marketplace's 30-entry window with a wide margin.
+  KEEP_PRERELEASES: "10"
+
 jobs:
-  release:
+  prepare:
     runs-on: ubuntu-latest
     permissions:
-      # `contents: write` creates the tag and the Release. No other scope is
-      # needed, and nothing here reads a secret beyond the automatic token.
       contents: write
-      packages: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      sha: ${{ steps.commit.outputs.sha }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      skip: ${{ steps.guard.outputs.skip }}
     steps:
       - uses: actions/checkout@v4
         with:
-          # Full history: the release contract is checked against the tree, and
-          # an existing tag may point at an earlier commit on this branch.
+          # Full history: the release contract is checked against the tree, the
+          # notes are derived from the commits since the previous tag, and an
+          # existing tag may point at an earlier commit on this branch.
           fetch-depth: 0
+          # A bump commit is pushed with this token; `persist-credentials` keeps
+          # it available to `git push` below.
+          persist-credentials: true
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Read the version this commit claims
-        id: version
+      - name: Never re-enter on our own bump commit
+        id: guard
         run: |
-          version=$(python -c 'import json,pathlib; print(json.loads(pathlib.Path("custom_components/wattmosaic/manifest.json").read_text())["version"])')
+          # The bump is pushed with GITHUB_TOKEN, which does not trigger
+          # workflows -- but a repository that switches to a PAT would recurse
+          # forever. Refuse to bump a commit that is already a bump.
+          subject=$(git log -1 --format=%s)
+          if [[ "${subject}" == *"[wm-auto-version]"* ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::HEAD is an automatic version bump; nothing to do."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Decide the version this push publishes
+        id: version
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          current=$(python -c 'import json,pathlib; print(json.loads(pathlib.Path("custom_components/wattmosaic/manifest.json").read_text())["version"])')
+          echo "committed version: ${current}"
+
+          if [[ "${{ github.ref_name }}" == "stable" ]]; then
+            # Stable is human-driven: the committed version is the release.
+            version="${current}"
+          elif git rev-parse -q --verify "refs/tags/v${current}" >/dev/null; then
+            # This exact version is already published, so the push carries new
+            # code under an old number. Increment the dev counter.
+            version=$(python tools/dev/bump_version.py --next)
+            echo "v${current} is already tagged; bumping to ${version}"
+          else
+            # A human moved the core version (e.g. 0.2.2-dev.1). Honour it
+            # rather than skipping the number they chose.
+            version="${current}"
+            echo "v${current} is new; publishing it as committed"
+          fi
+
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "tag=v${version}" >> "$GITHUB_OUTPUT"
           if [[ "${version}" == *-* ]]; then
@@ -78,66 +131,233 @@ jobs:
           else
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
-          echo "version: ${version}"
+
+      - name: Write the version and the notes
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          current=$(python -c 'import json,pathlib; print(json.loads(pathlib.Path("custom_components/wattmosaic/manifest.json").read_text())["version"])')
+
+          if [[ "${version}" == "${current}" ]]; then
+            # Human-set version: the contract requires notes to exist already.
+            echo "keeping committed version ${version}"
+            exit 0
+          fi
+
+          # An automatically incremented version cannot have been documented by
+          # hand, and `check_release.py` refuses to tag an undocumented version.
+          # Derive the section from the commits since the last tag so it says
+          # what changed rather than restating the number.
+          last_tag=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          if [[ -n "${last_tag}" ]]; then
+            range="${last_tag}..HEAD"
+          else
+            range="HEAD"
+          fi
+          {
+            echo "Automatic development build."
+            echo ""
+            echo "### Changes"
+            echo ""
+            git log --pretty=format:'- %s' "${range}" | grep -v '\[wm-auto-version\]' || true
+            echo ""
+          } > /tmp/notes.md
+
+          python tools/dev/bump_version.py --write --notes-file /tmp/notes.md
+          head -20 /tmp/notes.md
 
       - name: The tree must describe the version it is about to be tagged as
+        if: steps.guard.outputs.skip != 'true'
         run: |
-          python tools/dev/check_release.py --tag "v${{ steps.version.outputs.version }}"
-
-      - name: The branch must carry a version of its own kind
-        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
-        run: |
+          # Run after the bump is written, so this validates the version that
+          # will actually be published rather than the one that was pushed.
+          # `--channel` is checked first: it says whether this branch may carry
+          # that version at all, which is a cheaper and clearer failure.
           python tools/dev/check_release.py --channel "${{ github.ref_name }}"
+          python tools/dev/check_release.py --tag "${{ steps.version.outputs.tag }}"
+
+      - name: Commit the bump
+        id: commit
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          if git diff --quiet; then
+            echo "no version change to commit"
+          else
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -A
+            # The marker keeps the re-entry guard above honest.
+            git commit -m "Release ${version} [wm-auto-version]"
+            git push origin "HEAD:${{ github.ref_name }}"
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  image:
+    needs: prepare
+    if: needs.prepare.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Is this version already published?
+        id: exists
+        run: |
+          tag="ghcr.io/asxzy/wattmosaic-engine:${{ needs.prepare.outputs.version }}"
+          if docker buildx imagetools inspect "${tag}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "${tag} already exists; nothing to publish."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "${tag} does not exist yet; it will be built."
+          fi
+
+      - name: Refuse a stale tag that does not match this commit
+        if: steps.exists.outputs.exists == 'true' && inputs.force != true
+        id: stale
+        run: |
+          # A version tag is immutable, so an existing image is normally left
+          # alone. But "the tag exists" is not "the tag contains this code".
+          # The test is *runtime inputs*, not "HEAD == published revision": a
+          # docs-only commit has a different SHA while building a byte-identical
+          # image, and comparing SHAs made every such push fail -- a false alarm
+          # that trains people to ignore a red run.
+          tag="ghcr.io/asxzy/wattmosaic-engine:${{ needs.prepare.outputs.version }}"
+          # `--format '{{json .Image}}'` returns one entry per platform on a
+          # multi-arch manifest list, not a flat image object; reading
+          # `.config.Labels` at the top level returned nothing, which made this
+          # guard fail open. The extraction lives in tools/dev/image_revision.py
+          # so it can be tested offline.
+          published=$(
+            docker buildx imagetools inspect "${tag}" --format '{{json .Image}}' \
+              | python tools/dev/image_revision.py
+          )
+          echo "published revision: ${published:-<none>}"
+          echo "this commit:        ${{ needs.prepare.outputs.sha }}"
+          if [[ -z "${published}" ]]; then
+            echo "::error::Could not read org.opencontainers.image.revision from ${tag}. The stale-tag guard cannot tell whether this commit's code is published, so it refuses to guess. Inspect the image manifest, then re-run."
+            exit 1
+          fi
+          if [[ "${published}" == "${{ needs.prepare.outputs.sha }}" ]]; then
+            echo "action=current" >> "$GITHUB_OUTPUT"
+            echo "::notice::App image ${{ needs.prepare.outputs.version }} is already published from this commit; nothing to publish."
+            exit 0
+          fi
+          runtime_paths=(
+            engine
+            addon/constraints.txt
+            addon/run.sh
+            addon/gateway.py
+            addon/healthcheck.py
+            addon/discovery.py
+            Dockerfile
+            pyproject.toml
+            README.md
+          )
+          if git cat-file -e "${published}^{commit}" 2>/dev/null \
+             && git diff --quiet "${published}" "${{ needs.prepare.outputs.sha }}" -- "${runtime_paths[@]}"; then
+            echo "action=identical" >> "$GITHUB_OUTPUT"
+            echo "::notice::Commit ${{ needs.prepare.outputs.sha }} changes no runtime input of the engine image. ${tag} was built from ${published} and is byte-identical for these sources, so nothing is republished."
+            exit 0
+          fi
+          echo "action=stale" >> "$GITHUB_OUTPUT"
+          echo "::error::App image ${tag} was built from ${published}, but this commit changes engine runtime inputs. Bump the version by hand, or re-run with force=true."
+          exit 1
+
+      - name: Build and push (multi-arch manifest list)
+        if: steps.exists.outputs.exists == 'false' || inputs.force == true
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/asxzy/wattmosaic-engine:${{ needs.prepare.outputs.version }}
+          labels: |
+            org.opencontainers.image.title=WattMosaic Engine
+            org.opencontainers.image.description=Multi-CT load disaggregation engine for WattMosaic
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.source=https://github.com/asxzy/wattmosaic
+
+      - name: Verify the published manifest list
+        run: |
+          # This is the check that matters to an installing user, and it also
+          # proves the package is publicly readable (a private package would
+          # make the store entry fail at pull time).
+          docker buildx imagetools inspect \
+            "ghcr.io/asxzy/wattmosaic-engine:${{ needs.prepare.outputs.version }}"
+
+  publish:
+    needs: [prepare, image]
+    if: needs.prepare.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Is this version already tagged?
         id: tag
         run: |
-          tag="${{ steps.version.outputs.tag }}"
+          tag="${{ needs.prepare.outputs.tag }}"
           if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
-            at=$(git rev-list -n1 "${tag}")
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "at=${at}" >> "$GITHUB_OUTPUT"
-            echo "${tag} already exists at ${at}."
-          elif git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "at=remote" >> "$GITHUB_OUTPUT"
-            echo "${tag} exists on the remote but was not fetched."
+            echo "::notice::${tag} is already tagged; the Release will be refreshed."
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "${tag} does not exist yet."
           fi
 
-      - name: Nothing to release
-        if: steps.tag.outputs.exists == 'true' && inputs.force != true
-        run: |
-          # A tag names a release, not a commit.  This branch is still on the
-          # version that was already released, so there is genuinely nothing to
-          # do -- and a red run here would be a false alarm on every later
-          # commit on the branch.
-          echo "::notice::v${{ steps.version.outputs.version }} is already tagged (${{ steps.tag.outputs.at }}). This commit does not change the version, so no new release is published. Bump the version to release."
-
       - name: The image for this version must be pullable
-        if: steps.tag.outputs.exists == 'false' || inputs.force == true
         run: |
-          tag="ghcr.io/asxzy/wattmosaic-engine:${{ steps.version.outputs.version }}"
-          # The App-image workflow publishes on the same push.  Wait for it
-          # rather than racing it, but keep the wait bounded so a genuinely
-          # broken publish fails here instead of hanging forever.
-          for attempt in $(seq 1 90); do
+          tag="ghcr.io/asxzy/wattmosaic-engine:${{ needs.prepare.outputs.version }}"
+          # A Release is the claim "this version can be installed". The image is
+          # built by the `image` job, but GHCR can lag; wait rather than race it,
+          # and keep the wait bounded so a broken publish fails here instead of
+          # hanging forever.
+          for attempt in $(seq 1 30); do
             if docker buildx imagetools inspect "${tag}" >/dev/null 2>&1; then
               echo "${tag} is published."
               exit 0
             fi
-            echo "attempt ${attempt}/90: ${tag} not published yet; waiting 20s"
-            sleep 20
+            echo "attempt ${attempt}/30: ${tag} not published yet; waiting 10s"
+            sleep 10
           done
-          echo "::error::${tag} was never published. A Release would tell users there is an update they cannot install. Check the 'App image' workflow for this commit, then re-run this one."
+          echo "::error::${tag} was never published. A Release would tell users there is an update they cannot install."
           exit 1
 
       - name: Create the tag
         if: steps.tag.outputs.exists == 'false' || inputs.force == true
         run: |
-          tag="${{ steps.version.outputs.tag }}"
+          tag="${{ needs.prepare.outputs.tag }}"
           if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
             echo "::notice::${tag} already exists locally; leaving it in place."
             exit 0
@@ -146,13 +366,12 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # Annotated: the tag carries who created it and when, which a
           # lightweight tag pointing at a commit does not.
-          git tag -a "${tag}" -m "WattMosaic ${tag#v}" "${{ github.sha }}"
+          git tag -a "${tag}" -m "WattMosaic ${tag#v}" "${{ needs.prepare.outputs.sha }}"
           git push origin "refs/tags/${tag}"
 
       - name: Assemble the Release body
-        if: steps.tag.outputs.exists == 'false' || inputs.force == true
         run: |
-          version="${{ steps.version.outputs.version }}"
+          version="${{ needs.prepare.outputs.version }}"
           {
             python tools/dev/check_release.py --notes-for "${version}"
             echo ""
@@ -165,14 +384,13 @@ jobs:
           head -20 release-body.md
 
       - name: Publish the Release
-        if: steps.tag.outputs.exists == 'false' || inputs.force == true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tag="${{ steps.version.outputs.tag }}"
+          tag="${{ needs.prepare.outputs.tag }}"
           channel_flags=()
-          if [[ "${{ steps.version.outputs.prerelease }}" == "true" ]]; then
-            # A `-devN` version is not a stable release.  `--prerelease` keeps it
+          if [[ "${{ needs.prepare.outputs.prerelease }}" == "true" ]]; then
+            # A `-dev.N` version is not a stable release. `--prerelease` keeps it
             # out of the "latest" slot, so a dev build can never be offered to
             # someone tracking stable.
             channel_flags+=(--prerelease --latest=false)
@@ -180,8 +398,6 @@ jobs:
             channel_flags+=(--latest)
           fi
           if gh release view "${tag}" >/dev/null 2>&1; then
-            # The tag is immutable and the body is derived from the tree, so an
-            # existing Release is refreshed rather than duplicated.
             echo "::notice::Release ${tag} already exists; updating its body."
             gh release edit "${tag}" \
               --title "${tag}" --notes-file release-body.md "${channel_flags[@]}"
@@ -194,12 +410,66 @@ jobs:
         run: |
           echo "## Release" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- version: \`${{ steps.version.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- tag: \`${{ steps.version.outputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- version: \`${{ needs.prepare.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- tag: \`${{ needs.prepare.outputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- channel: \`${{ github.ref_name }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- prerelease: \`${{ steps.version.outputs.prerelease }}\`" >> "$GITHUB_STEP_SUMMARY"
-          if [[ "${{ steps.tag.outputs.exists }}" == "true" && "${{ inputs.force }}" != "true" ]]; then
-            echo "- action: **skipped**, the version is already released" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "- action: tag created and Release published" >> "$GITHUB_STEP_SUMMARY"
+          echo "- prerelease: \`${{ needs.prepare.outputs.prerelease }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- commit: \`${{ needs.prepare.outputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  prune:
+    # Only development builds are pruned. Stable Releases are the record of what
+    # users were offered and are never deleted.
+    needs: [prepare, publish]
+    if: needs.prepare.outputs.skip != 'true' && needs.prepare.outputs.prerelease == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Keep the newest development Releases inside the 30-entry window
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # `marketplace/repositories/base.py::async_get_releases` reads ONE
+          # unpaginated page (per_page: 30). If prereleases fill it, the newest
+          # *stable* Release drops out; `last_version` becomes None and the
+          # installer falls back to `default_branch`, offering a stable user the
+          # development line. Pruning keeps that impossible.
+          #
+          # `gh release list` returns newest first.
+          keep="${KEEP_PRERELEASES:-10}"
+
+          # Refuse a configuration that leaves no room for stable Releases. The
+          # window is 30 entries; if `keep` approached it, pruning would remove
+          # the very entries that keep `last_version` non-empty.
+          window=30
+          if (( keep >= window )); then
+            echo "::error::KEEP_PRERELEASES=${keep} leaves no room for stable Releases in the Marketplace's ${window}-entry window. A stable user would be offered the development line. Lower it."
+            exit 1
           fi
+
+          # Every prerelease, newest first, excluding the one just published.
+          # A `while read` loop rather than `mapfile`: the runner has bash 5, but
+          # keeping this portable means it can be exercised locally too.
+          olds=()
+          while IFS= read -r tag; do
+            [[ -n "${tag}" ]] && olds+=("${tag}")
+          done < <(
+            gh release list --limit 100 \
+              --json tagName,isPrerelease \
+              --jq '.[] | select(.isPrerelease) | .tagName' \
+              | tail -n +$((keep + 1))
+          )
+
+          if [[ ${#olds[@]} -eq 0 ]]; then
+            echo "no development Releases to prune (keeping the newest ${keep})"
+            exit 0
+          fi
+
+          echo "pruning ${#olds[@]} development Release(s), keeping the newest ${keep}:"
+          for tag in "${olds[@]}"; do
+            echo "  - ${tag}"
+            # --cleanup-tag deletes the git tag too: a pruned version must not
+            # remain installable by tag name, or the update entity could offer
+            # a build whose Release no longer exists.
+            gh release delete "${tag}" --yes --cleanup-tag || true
+          done

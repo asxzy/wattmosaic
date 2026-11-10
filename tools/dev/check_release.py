@@ -49,6 +49,12 @@ to ``0.2.1-dev.1`` rather than ``0.2.0-dev.10``.
 For an **ordinary commit** (no tag), the same version fields must at least agree
 with each other, and ``RELEASE_NOTES.md`` must document the current version.
 
+Channels
+--------
+``main`` is the development line and carries ``X.Y.Z-dev.N``; ``stable`` carries
+``X.Y.Z``.  See :func:`check_channel` for why the development line is ``main``
+and why that cannot reach a stable user.
+
 Run:
     python tools/dev/check_release.py                 # check the working tree
     python tools/dev/check_release.py --tag v0.2.0    # check a candidate tag
@@ -277,11 +283,29 @@ def notes_section(version: str) -> str | None:
 def check_channel(channel: str) -> None:
     """A branch may only carry a version of its own kind.
 
-    ``main`` is the stable channel and ``dev`` is the development channel.  A
-    prerelease published from ``main`` would become the version stable users are
-    offered; a stable version published from ``dev`` would do the same while
-    carrying untested code.  The tag is derived from the version string, so the
-    version string is what has to be checked.
+    ``main`` is the **development** line: every push publishes a prerelease, so
+    the version there must carry a ``-dev.N`` suffix.  ``stable`` is the frozen
+    stable line and may only carry a plain ``X.Y.Z``.
+
+    Why ``main`` is the development line
+    ------------------------------------
+    The Supervisor updates an App only when ``addon/config.yaml``'s ``version:``
+    changes, and it reads that file from the branch the repository URL pins.  A
+    separate ``dev`` branch therefore meant every improvement had to be
+    cherry-picked across two long-lived branches before the App could see it.
+    Making ``main`` the development line removes that fork: one branch, one
+    place to merge, and the App follows it directly.
+
+    Stable users are not affected by this, and that is not a matter of trust:
+    the Marketplace ignores prereleases unless the beta toggle is enabled
+    (``show_beta`` defaults to false) and only ever names the newest
+    *non*-prerelease Release as ``last_version``.  So a stable install stays on
+    the last stable tag no matter how many ``-dev.N`` releases ``main``
+    publishes.  A prerelease on ``main`` therefore cannot reach a stable user,
+    which is why it is allowed here and required on ``stable``.
+
+    The tag is derived from the version string, so the version string is what
+    has to be checked.
     """
     current = manifest_version()
     if current is None:
@@ -291,22 +315,23 @@ def check_channel(channel: str) -> None:
         return  # already reported by check_version_fields
 
     is_prerelease = bool(semver.group("pre"))
-    if channel == "main" and is_prerelease:
+    if channel == "main" and not is_prerelease:
+        error(
+            f"'{channel}' is the development channel but the tree version {current!r} "
+            "is a stable version. A stable version published from main would be "
+            "offered to every stable user as 'latest'. Add a '-dev.N' suffix, or "
+            "release stable versions from the 'stable' branch."
+        )
+    elif channel == "stable" and is_prerelease:
         error(
             f"'{channel}' is the stable channel but the tree version {current!r} is a "
             "prerelease. Stable users would be offered it as an update. Release "
-            "prereleases from 'dev'."
+            "prereleases from 'main'."
         )
-    elif channel == "dev" and not is_prerelease:
-        error(
-            f"'{channel}' is the development channel but the tree version {current!r} "
-            "is a stable version. Publishing it from 'dev' would offer untested code "
-            "to stable users as 'latest'. Add a '-devN' suffix, or release from 'main'."
-        )
-    elif channel == "dev":
-        note(f"{current} is a prerelease, as required on the dev channel")
+    elif channel == "main":
+        note(f"{current} is a prerelease, as required on the development channel (main)")
     else:
-        note(f"{current} is stable, as required on the main channel")
+        note(f"{current} is stable, as required on the stable channel")
 
 
 def check_prerelease_numbering(version: str) -> None:
@@ -385,7 +410,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--channel",
-        choices=("main", "dev"),
+        choices=("main", "stable"),
         default=None,
         help="Validate that this branch may carry the current version.",
     )

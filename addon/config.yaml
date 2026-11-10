@@ -29,7 +29,7 @@ arch:
   - amd64
   - aarch64
 # Prebuilt multi-arch image (linux/amd64 + linux/aarch64) published to GitHub
-# Container Registry by .github/workflows/app-image.yaml. No tag here: the
+# Container Registry by .github/workflows/release.yaml. No tag here: the
 # Supervisor pulls `<image>:<version>`, i.e. the exact `version` above, and
 # Docker picks the right architecture from the manifest list. Building locally
 # instead would need the whole engine package copied into this folder, which is

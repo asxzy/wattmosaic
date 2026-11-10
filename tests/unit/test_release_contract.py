@@ -179,33 +179,39 @@ def test_the_real_tree_is_consistent():
     assert version is not None
 
 
-def test_a_prerelease_may_not_be_the_stable_channel(checker, tmp_path):
-    """A ``-dev`` version on ``main`` would be offered to stable users."""
+def test_a_prerelease_is_accepted_on_the_main_channel(checker, tmp_path):
+    """``main`` is the development line, so a prerelease is what it carries.
+
+    This is not a relaxation of safety: the Marketplace ignores prereleases
+    unless the beta toggle is enabled, so a ``-dev.N`` on ``main`` cannot reach a
+    stable user.
+    """
     _retarget(checker, tmp_path)
-    _write_tree(tmp_path, "0.2.0-dev9")
+    _write_tree(tmp_path, "0.2.0-dev.9")
     checker.check_channel("main")
-    assert any("stable channel" in message for message in checker.ERRORS)
-
-
-def test_a_prerelease_is_accepted_on_the_dev_channel(checker, tmp_path):
-    _retarget(checker, tmp_path)
-    _write_tree(tmp_path, "0.2.0-dev9")
-    checker.check_channel("dev")
     assert checker.ERRORS == []
 
 
-def test_a_stable_version_may_not_be_the_dev_channel(checker, tmp_path):
-    """Stable code must not reach stable users through the dev channel."""
-    _retarget(checker, tmp_path)
-    _write_tree(tmp_path, "1.0.0")
-    checker.check_channel("dev")
-    assert any("development channel" in message for message in checker.ERRORS)
-
-
-def test_a_stable_version_is_accepted_on_the_main_channel(checker, tmp_path):
+def test_a_stable_version_may_not_be_the_main_channel(checker, tmp_path):
+    """A stable version on the development line would be offered to everyone."""
     _retarget(checker, tmp_path)
     _write_tree(tmp_path, "1.0.0")
     checker.check_channel("main")
+    assert any("development channel" in message for message in checker.ERRORS)
+
+
+def test_a_prerelease_may_not_be_the_stable_channel(checker, tmp_path):
+    """A ``-dev`` version on ``stable`` would be offered to stable users."""
+    _retarget(checker, tmp_path)
+    _write_tree(tmp_path, "0.2.0-dev.9")
+    checker.check_channel("stable")
+    assert any("stable channel" in message for message in checker.ERRORS)
+
+
+def test_a_stable_version_is_accepted_on_the_stable_channel(checker, tmp_path):
+    _retarget(checker, tmp_path)
+    _write_tree(tmp_path, "1.0.0")
+    checker.check_channel("stable")
     assert checker.ERRORS == []
 
 

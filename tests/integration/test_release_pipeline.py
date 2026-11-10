@@ -9,10 +9,16 @@ that the tag already existed, published nothing, and still reported success.
 The live app therefore kept running the pre-fix code while the HA update entity
 advertised ``0.2.0-dev5`` -- a silent "the fix shipped" lie.
 
-The workflow now stamps ``org.opencontainers.image.revision`` into every image
+The pipeline now stamps ``org.opencontainers.image.revision`` into every image
 and refuses to treat an existing tag as up to date unless that label matches the
 current commit.  These tests pin the workflow contract, because the failure mode
 is an *absence* of work that no runtime assertion can observe.
+
+The image steps moved from ``app-image.yaml`` into the ``image`` job of
+``release.yaml``: a version bump has to be committed by CI, and a push made with
+the automatic ``GITHUB_TOKEN`` does not trigger another workflow, so the build
+had to become part of the same run.  The assertions below are unchanged; only
+the file and job they read have moved.
 """
 
 from __future__ import annotations
@@ -23,7 +29,8 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
-WORKFLOW = ROOT / ".github" / "workflows" / "app-image.yaml"
+WORKFLOW = ROOT / ".github" / "workflows" / "release.yaml"
+JOB = "image"
 
 
 def _workflow() -> dict:
@@ -31,7 +38,7 @@ def _workflow() -> dict:
 
 
 def _steps() -> list[dict]:
-    return _workflow()["jobs"]["publish"]["steps"]
+    return _workflow()["jobs"][JOB]["steps"]
 
 
 def _step(prefix: str) -> dict:
@@ -45,32 +52,53 @@ def test_image_is_stamped_with_the_building_commit() -> None:
     """Without a revision label the stale-tag check has nothing to compare."""
     build = _step("Build and push")
     labels = build["with"]["labels"]
-    assert "org.opencontainers.image.revision=${{ github.sha }}" in labels, labels
+    # The build runs against the bumped commit, which is what the tag names.
+    assert "org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}" in labels
 
 
 def test_existing_tag_is_checked_against_this_commit() -> None:
     """An existing tag must be verified, not assumed to contain this commit."""
     step = _step("Refuse a stale tag")
     script = step["run"]
-    assert "org.opencontainers.image.revision" in script, script
-    assert "github.sha" in script, script
+    assert "org.opencontainers.image.revision" in script
+    assert "needs.prepare.outputs.sha" in script
     # A mismatch must fail the job: exiting 0 here is the original defect.
     assert re.search(r"exit\s+1", script), script
     # It must only run when the tag already exists (the build path is untouched).
     assert "exists.outputs.exists == 'true'" in step["if"], step["if"]
 
 
-def test_the_stale_tag_check_runs_before_the_skip_notice() -> None:
-    """Order matters: the notice must not be the only thing a stale push does."""
+def test_the_stale_tag_check_runs_before_the_build() -> None:
+    """Order matters: a stale tag must be rejected, not silently rebuilt."""
     names = [s.get("name") or "" for s in _steps()]
     stale = next(i for i, n in enumerate(names) if n.startswith("Refuse a stale tag"))
-    notice = next(i for i, n in enumerate(names) if n.startswith("Explain why nothing"))
-    assert stale < notice, names
+    build = next(i for i, n in enumerate(names) if n.startswith("Build and push"))
+    assert stale < build, names
 
 
 def test_a_version_bump_is_what_triggers_a_publish() -> None:
     """The skip decision must key on the app version, not on ``force`` alone."""
     exists = _step("Is this version already published?")
     script = exists["run"]
-    assert "addon/config.yaml" in _workflow()["jobs"]["publish"]["steps"][1]["run"]
-    assert "steps.version.outputs.version" in script
+    assert "needs.prepare.outputs.version" in script
+
+
+def test_the_version_comes_from_addon_config() -> None:
+    """The Supervisor pulls ``<image>:<version from addon/config.yaml>``."""
+    prepare = _workflow()["jobs"]["prepare"]["steps"]
+    version_step = next(
+        s for s in prepare if (s.get("name") or "").startswith("Decide the version")
+    )
+    assert "manifest.json" in version_step["run"]
+
+
+def test_the_guard_never_reads_the_label_at_the_top_level() -> None:
+    """The fail-open defect: ``.config.Labels`` is absent on a manifest list.
+
+    ``docker buildx imagetools inspect --format '{{json .Image}}'`` returns one
+    entry per platform, so the extraction lives in ``image_revision.py`` and is
+    tested offline in ``tests/unit/test_image_revision.py``.
+    """
+    script = _step("Refuse a stale tag")["run"]
+    assert "image_revision.py" in script
+    assert "'.config.Labels'" not in script

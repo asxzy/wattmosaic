@@ -133,7 +133,7 @@ image: "ghcr.io/asxzy/wattmosaic-engine"
 
 so the Supervisor **pulls** `ghcr.io/asxzy/wattmosaic-engine:<version>` — a
 multi-arch manifest list for `linux/amd64` and `linux/aarch64`, published by
-`.github/workflows/app-image.yaml`. Nothing is built on the HA host, and the
+`.github/workflows/release.yaml`. Nothing is built on the HA host, and the
 app folder never needs to be self-contained. The tag is always the `version:`
 field in `addon/config.yaml`; bump the version and push, and the workflow
 publishes the matching tag.
@@ -405,7 +405,50 @@ and show a raw commit SHA. That is the state this repository was in until
 `0.2.1-dev.1`, and it is why an installed integration could report `eec273d`
 while every version field correctly said `0.2.0-dev9`.
 
-Bump the version in **all five** places, then push to `main` or `dev`:
+#### Channels
+
+| Branch | Carries | Published as | Who sees it |
+| --- | --- | --- | --- |
+| `main` | `X.Y.Z-dev.N` | prerelease | development installs only |
+| `stable` | `X.Y.Z` | latest | everyone |
+
+`main` is the **development line**: every push publishes a prerelease. That is
+safe rather than trusting, because the Marketplace ignores prereleases unless
+the beta toggle is on — `show_beta` defaults to false, and the version offered
+to a stable user is only ever the newest release with `prerelease=false`.
+
+#### What a push to `main` does
+
+You do not bump the version by hand. One workflow
+(`.github/workflows/release.yaml`) does all of it, in order, in a single run:
+
+1. **Bumps** the counter (`X.Y.Z-dev.N` → `X.Y.Z-dev.(N+1)`) in all five files
+   and commits it with `[wm-auto-version]` in the message.
+2. **Builds** `ghcr.io/asxzy/wattmosaic-engine:<version>` as a multi-arch
+   manifest list.
+3. **Tags** that commit and publishes the GitHub Release.
+4. **Prunes** old development Releases, keeping the newest 10.
+
+All four stages are one workflow on purpose. A push made with the automatic
+`GITHUB_TOKEN` does not trigger another workflow, so splitting them into chained
+push-triggered workflows would build the image from the *pre-bump* tree and tag
+a version no artifact carries.
+
+The bump is committed because the Supervisor offers an App update only when
+`addon/config.yaml`'s `version:` **string** changes — it compares versions, never
+commits. Without the commit the image would be published and never offered.
+
+Pruning exists because the Marketplace reads a single unpaginated page of 30
+Releases. If prereleases filled it, the newest stable Release would fall out,
+the offered version would become a commit SHA, and the installer would fall back
+to the default branch — offering a stable user the development line. Stable
+Releases are never pruned.
+
+#### What a push to `stable` does
+
+The committed version **is** the release: no counter is incremented. Use this
+for a deliberate stable release. The five fields are still checked for
+agreement, and `RELEASE_NOTES.md` must already document the version.
 
 | File | Field |
 | --- | --- |
@@ -415,38 +458,22 @@ Bump the version in **all five** places, then push to `main` or `dev`:
 | `pyproject.toml` | `version` |
 | `engine/wattmosaic_engine/__init__.py` | `__version__` |
 
-Add a `## v<version>` section to `RELEASE_NOTES.md`. Run
-`python tools/dev/check_release.py`; it fails if any of the five disagree, if the
-notes do not cover the version, or if the branch carries a version of the wrong
-kind.
+Run `python tools/dev/check_release.py`; it fails if any of the five disagree, if
+the notes do not cover the version, or if the branch carries a version of the
+wrong kind.
 
-The workflows then do the rest, independently and idempotently:
+#### Numbering
 
-- `.github/workflows/app-image.yaml` publishes
-  `ghcr.io/asxzy/wattmosaic-engine:<version>` as a multi-arch manifest list. It
-  only builds when the tag does not exist yet.
-- `.github/workflows/release.yaml` creates the annotated `v<version>` tag and the
-  GitHub Release, taking the body from `RELEASE_NOTES.md`. It waits until the
-  image is pullable before publishing, because a Release is a claim that the
-  version can be installed.
+Keep the counter a **separate numeric identifier**: `-dev.2`, `-dev.3`. The glued
+form (`-dev2`) is rejected by `check_release.py`. Note that the original reason
+recorded here — that SemVer compares `dev10` below `dev9` — is **wrong for this
+installer**: the Marketplace compares with AwesomeVersion, which parses `dev9`
+as SemVer and orders it numerically (`v0.2.0-dev10 > v0.2.0-dev9` is `True`).
+The dot form is kept because it is unambiguous and already published, not
+because the glued form is broken here.
 
-Channels are decided by the version string, not the branch:
-
-- `main` carries `X.Y.Z` and publishes as **latest**.
-- `dev` carries `X.Y.Z-dev.N` and publishes with `--prerelease --latest=false`,
-  so a development build is never offered to someone tracking stable.
-
-The counter must be a **separate numeric identifier**, `-dev.2`, `-dev.3`. Do not
-write `-dev2` glued to the word: SemVer 2.0.0 compares an identifier containing
-letters lexically, so `0.2.0-dev10` sorts *below* `0.2.0-dev9` and an updater
-will keep offering `dev9` forever. This is not theoretical — it happened here,
-and the only visible symptom was an update entity that said "up to date".
-`check_release.py` rejects the glued form.
-
-A commit that does not change the version is **not** a release: both workflows
-notice the tag already exists and exit successfully with a notice. A red run
-there would be a false alarm, and a false alarm teaches people to ignore the
-signal.
+A human may still move the core version (for example `0.2.2-dev.1`); CI honours
+a version that is not already tagged rather than skipping the number chosen.
 
 Tags are immutable. To correct a release, delete and recreate the tag and
 Release deliberately — never rely on a republish to change what an existing tag

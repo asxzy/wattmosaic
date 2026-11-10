@@ -361,25 +361,28 @@ There are two channels, and they are separate installs rather than a toggle:
 
 | Channel | Git ref | App version | Integration version | Intended for |
 | --- | --- | --- | --- | --- |
-| Stable | `main` | `x.y.z` | `x.y.z` | normal use |
-| Development | `dev` | `x.y.z-devN` | `x.y.z-devN` | testing a fix before it is stable |
+| Stable | `stable` | `x.y.z` | `x.y.z` | normal use |
+| Development | `main` | `x.y.z-dev.N` | `x.y.z-dev.N` | testing a fix before it is stable |
 
 **The App** distinguishes the channels by repository URL. The Supervisor accepts
 a `#branch` suffix, and because the repository id is the SHA-1 of the whole URL,
-`https://github.com/asxzy/wattmosaic#dev` resolves to a *different* repository id
-than the stable URL. That gives the dev App its own slug, its own `/data` volume
-and its own sidebar entry, so installing a dev build cannot overwrite a stable
-one. Add it as a second app repository and install it alongside the stable app.
+`https://github.com/asxzy/wattmosaic#main` resolves to a *different* repository
+id than `https://github.com/asxzy/wattmosaic#stable`. That gives the development
+App its own slug, its own `/data` volume and its own sidebar entry, so installing
+a development build cannot overwrite a stable one. Add it as a second app
+repository and install it alongside the stable app.
 
 **The integration** cannot pin a branch: the Marketplace extracts `owner/repo`
-from the URL and rejects `#`. Install a dev build explicitly instead — in the
-Marketplace repository page use **Install another version** and pick the
-prerelease tag. The dev tree is installable by ref, so no GitHub release has to
-exist for the channel to work, and the stable channel keeps tracking `main`.
+from the URL and rejects `#`. Install a development build explicitly instead —
+in the Marketplace repository page use **Install another version** and pick the
+newest prerelease tag. Enable the beta/pre-release toggle to be offered these
+updates automatically; without it the Marketplace offers only the newest stable
+Release, which is why a development release can never reach a stable install.
 
-Both branches publish through the same workflow (`.github/workflows/app-image.yaml`),
-because the image tag is the `version:` field rather than the branch name. A
-version already present in GHCR is never rebuilt unless the workflow is
+Every push to `main` publishes one prerelease, so development installs move
+without a manual bump. See *Releasing* in `docs/deployment.md` for the pipeline.
+
+A version already present in GHCR is never rebuilt unless the workflow is
 dispatched with `force`, so a published tag is immutable.
 
 ---

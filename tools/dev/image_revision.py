@@ -1,6 +1,6 @@
 """Print the image revision from ``docker buildx imagetools inspect`` JSON.
 
-Used by ``.github/workflows/app-image.yaml`` to answer one question: *which
+Used by ``.github/workflows/release.yaml`` to answer one question: *which
 commit was the published image built from?*  That decides whether a push has
 already been published, so getting it wrong is not cosmetic.
 
