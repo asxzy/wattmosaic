@@ -3344,7 +3344,31 @@ around the 2026-11-08 → 09 re-registration. Total stranded volume is small:
 So the options are not equivalent, and none of them is "delete duplicates":
 merging preserves 2,448 points of pre-migration history, keeping costs nothing
 but leaves 121 ids in the recorder, and deleting removes the only record for the
-76 re-created series. **No action taken** — this needs the user's decision.
+76 re-created series.
+
+**Action taken 2026-11-10 (user's choice: the provably redundant subset only).**
+"Provably redundant" was defined strictly before anything was written, as all
+four of: the id has no live entity; it maps to one through the shipped rename
+table; every hourly timestamp it has the live series also has; and every value is
+equal at that timestamp. That is **26 ids / 541 hourly points** — overwhelmingly
+`*_sample_count_2` collisions, plus two old `_estimated_*` names.
+
+Two safety gates ran before the write. First, `get_states` cannot see a
+*disabled* entity, so a target could still be registered and merely hidden;
+`config/entity_registry/list` was checked separately — **0 of 26 were still
+registered**. Second, every live counterpart was confirmed present, so no target
+was holding the only copy.
+
+`recorder/clear_statistics` then returned `success: true`. Verified after:
+exactly **26** ids disappeared, **0** unexpected absences, **95** still stranded
+with **1,907** points, and the live counterparts lost **0** rows. A spot-checked
+live entity (`sensor.boiler_sample_count`) still holds 46 hourly rows and is still
+growing.
+
+The exact values of everything cleared were captured to
+`redundant_26.json` before the call. The remaining 95 are untouched and still
+`76` style re-created series plus `19` with coverage gaps; they need no action
+unless the user asks for the merge route.
 
 ---
 
