@@ -21,13 +21,14 @@ internals, storage, health, upgrade and recovery procedures.
   :8787  gateway.py            aiohttp reverse proxy
             ├── /healthz        unauthenticated liveness (no data)
             ├── /              panel for Supervisor ingress, JSON otherwise
+            ├── /ui/{asset}     panel stylesheet, script and mark (allowlisted)
             └── /api/v1/*       proxied, X-API-Token injected for ingress peers
   :8788  engine (loopback)     WattMosaic /api/v1, requires X-API-Token
             ├── Home Assistant WebSocket ingestion (read-only)
             ├── SQLite (WAL) at WM_DATABASE_PATH
             └── inference / learning loops
   /data  persistent volume     database, WAL, -shm
-  /app   code                  run.sh, gateway.py, healthcheck.py
+  /app   code                  run.sh, gateway.py, healthcheck.py, ui/
   /opt/venv                    engine + pinned dependencies, no build tools
 ```
 
@@ -263,7 +264,7 @@ Migrations run automatically at start. Forward-only: take a backup first.
 ## 5. C. Plain docker run
 
 ```bash
-docker build -t wattmosaic-engine:0.1.3 .
+docker build -t wattmosaic-engine:<version> .
 docker run -d --name wattmosaic \
   --restart unless-stopped \
   --env-file .env \
@@ -272,7 +273,7 @@ docker run -d --name wattmosaic \
   -p 127.0.0.1:8787:8787 \
   --read-only --tmpfs /tmp --cap-drop ALL \
   --security-opt no-new-privileges \
-  wattmosaic-engine:0.1.3
+  wattmosaic-engine:<version>
 ```
 
 Binding the published port to `127.0.0.1` is the safe default; put a TLS reverse
@@ -386,12 +387,12 @@ docker compose build --pull
 docker compose up -d
 ```
 
-Tag images by version (`wattmosaic-engine:0.1.3`) and keep the previous tag for
+Tag images by version (`wattmosaic-engine:<version>`) and keep the previous tag for
 rollback.
 
 ### Version compatibility
 
-The engine reports `contract_version` (`1.1.0`) on every response. The
+The engine reports `contract_version` (`1.2.0`) on every response. The
 integration refuses to run against an incompatible contract rather than
 misinterpreting data. Upgrade the integration and app together when the contract
 version changes.
@@ -501,6 +502,7 @@ means, because users may already have pulled it.
 | Token handling | Secrets only in App options / env. `run.sh` never echoes them (`--print-config` prints `***set(N chars)`). `EngineConfig.redacted()` keeps them out of logs, diagnostics and exports. |
 | API exposure | Engine API on `127.0.0.1:8788`, token-protected. Only `8787` is reachable, and only the gateway. |
 | Ingress | Home Assistant authenticates the user; `panel_admin: true` limits the sidebar panel to admins. Ingress requests are trusted **only** from `WM_GATEWAY_TRUSTED_INGRESS_IPS` *and* only when the Supervisor's `X-Remote-User-Id` header is present. |
+| Panel assets | `index.html`, `app.css`, `app.js` and `mark.svg` ship inside the image and are served only to ingress peers, from a fixed allowlist (no path traversal, direct clients get `401`). The CSP is `script-src 'self'` with no inline script; `style-src` allows inline attributes only for meter widths and dial geometry. All engine-provided strings are inserted as text, never markup. |
 | `api_token` | Compared with `hmac.compare_digest`. Empty is warned about at start. Generate with `secrets.token_urlsafe(32)`. |
 | `SUPERVISOR_TOKEN` | Administrator-grade for the Core proxy. Prefer a dedicated read-only user token in `ha_token` when policy allows. |
 | Least privilege | All capabilities dropped, `no_new_privs`, engine runs as UID 10001, read-only root filesystem in compose. |
@@ -522,7 +524,7 @@ means, because users may already have pulled it.
 | `setpriv not found` | Image tampered with | Rebuild; `setpriv` ships in `python:3.12-slim-bookworm`. |
 | Healthcheck fails with `401` | `WM_API_TOKEN` mismatch between container and caller | Make the integration's token match. |
 | Watchdog restarts the app repeatedly | `/healthz` returns 503: engine not answering | Check engine logs; `/healthz` only turns 200 when `/api/v1/health` answers. |
-| Ingress panel is blank | CSP blocked a script, or the gateway is unreachable | Check the browser console; the panel uses only inline script/style. |
+| Ingress panel is blank | CSP blocked an asset, or the gateway/image is missing `ui/` | Check the browser console; the panel loads `/ui/app.css` and `/ui/app.js` as separate files, so a `404` or a CSP `script-src` violation points at a stale image. The API is unaffected — `curl -H "X-API-Token: …" …/api/v1/health` still answers. |
 | Integration gets 401 | Token not set or wrong | Set `api_token` and enter the same value in the integration. |
 | Integration cannot connect | Wrong URL | Use `http://<hostname>:8787` — copy **Hostname** from the app's info tab, not `localhost` or a hand-computed hash. |
 | `status: degraded`, `ha_connected: false` | HA unreachable or bad token | Check `ha_url`, token validity, and the log for `HA connection error`. |
@@ -559,7 +561,10 @@ Diagnostics never include tokens; verify before sharing.
 - The runtime image contains no package manager cache, no compiler and no build
   headers; `pip check` runs at build time.
 - `scripts/validate_addon.sh` rebuilds the image and asserts the entrypoint,
-  healthcheck, dependencies and service user.
+  healthcheck, dependencies, service user and the staged `ui/` panel. Its static
+  stage runs `tools/dev/check_panel.py`, which proves the panel has no external
+  origin, no inline script/style, no `on*` handler and no missing or `eval`-based
+  code, so a broken shell fails before the image is built.
 
 ```bash
 scripts/validate_addon.sh            # static checks + real docker build

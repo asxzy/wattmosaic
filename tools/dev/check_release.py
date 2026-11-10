@@ -158,8 +158,11 @@ def pyproject_version() -> str | None:
 def package_version() -> str | None:
     """``engine/wattmosaic_engine/__init__.py``'s ``__version__``.
 
-    Nothing reads it at runtime, which is exactly how it drifted three releases
-    behind without anyone noticing.  It is still shipped, so it must not lie.
+    ``api/facade.py`` and ``contracts.HealthResponse`` import this as
+    ``ENGINE_VERSION``, so it is what ``/api/v1/health``, ``/status`` and the
+    Prometheus ``wattmosaic_contract_info`` line report.  It drifted three
+    releases behind once while nothing read it; now the panel and every API
+    response would show the drift, so it must not lie.
     """
     raw = _read(PACKAGE_INIT)
     if raw is None:

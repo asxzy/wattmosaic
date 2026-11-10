@@ -54,10 +54,11 @@ via **Settings → Apps → Install app → ⋮ → Repositories**, then install
 compiled on your hardware.
 
 > **Image version.** The Supervisor always pulls `<image>:<version>` where
-> `version` is the `version:` field in `addon/config.yaml`. The newest published
-> tag is `0.1.3`; the `0.1.5` image that adds App-install discovery is built by
-> the release workflow on the next push to `main`. Until it exists, the App does
-> not announce itself and step 4 is done by hand.
+> `version` is the `version:` field in `addon/config.yaml`. Every version a push
+> publishes gets a matching multi-arch image in the same workflow, so the App
+> announces itself and step 4 is automatic. If a version is ever offered before
+> its image is pullable, install it by hand via step 4 and it will announce
+> itself on the next start.
 
 **From a local copy.** If you cannot reach GitHub Container Registry, stage a
 self-contained folder and copy it into the local-apps directory:
@@ -103,7 +104,7 @@ which survives App updates and is included in HA backups.
 Start the App, then open its **Log** tab. You should see:
 
 ```text
-engine_starting  contract_version=1.1.0
+engine_starting  contract_version=1.2.0
 database_ready   schema_version=<latest>
 ha_connected
 api_listening    host=0.0.0.0 port=8787
@@ -115,7 +116,13 @@ From the App's ingress panel (or `http://<ha>:8787/api/v1/health`) you should ge
 {"status": "ok", "ha_connected": true, "database": "ok"}
 ```
 
-Click **Open Web UI** (ingress) to see the engine panel.
+Click **Open Web UI** (ingress) to see the WattMosaic panel. It opens on an
+overview of engine health and the live power split, with tabs for **Devices**
+(latest estimate, evidence grade and measurement age per device), **Topology**
+(candidate parents, aliases and what could not be inferred), **Data quality**
+(per-channel cadence, gaps and ages) and **Diagnostics** (aligner state, event log,
+JSON export). It is read-only apart from confirming the topology the engine has
+already inferred.
 
 ### 4. Install the integration
 
@@ -257,13 +264,13 @@ pointing the integration at the Docker host and port.
 ### Building the image directly
 
 ```bash
-docker build -t wattmosaic-engine:0.1.3 .
+docker build -t wattmosaic-engine:<version> .
 docker run -d --name wattmosaic \
   --env-file .env \
   -e WM_DATABASE_PATH=/data/wattmosaic.db \
   -v wattmosaic-data:/data \
   -p 8787:8787 \
-  wattmosaic-engine:0.1.3
+  wattmosaic-engine:<version>
 ```
 
 ---

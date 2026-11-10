@@ -79,6 +79,10 @@ for f in config.yaml Dockerfile run.sh gateway.py healthcheck.py discovery.py \
   copy "${REPO_ROOT}/addon/${f}" "${STAGE}/${f}"
 done
 
+# The ingress panel.  It is static (HTML/CSS/JS/SVG) and has no build step, so
+# staging it is a plain directory copy.  The Dockerfile serves it from /app/ui.
+copy "${REPO_ROOT}/addon/ui" "${STAGE}/ui"
+
 # Python package sources (the Supervisor has no network access to PyPI beyond
 # the build, and must not clone the repo).
 copy "${REPO_ROOT}/engine/wattmosaic_engine" "${STAGE}/engine/wattmosaic_engine"
@@ -108,6 +112,7 @@ chmod 0755 "${STAGE}/run.sh" "${STAGE}/discovery.py"
 # Sanity checks: the build context must be self-sufficient.
 required=(config.yaml Dockerfile run.sh gateway.py healthcheck.py discovery.py
           constraints.txt icon.png logo.png pyproject.toml README.md
+          ui/index.html ui/app.css ui/app.js ui/mark.svg
           engine/wattmosaic_engine/main.py)
 missing=0
 for f in "${required[@]}"; do

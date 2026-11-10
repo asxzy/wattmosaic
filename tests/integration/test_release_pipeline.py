@@ -102,3 +102,26 @@ def test_the_guard_never_reads_the_label_at_the_top_level() -> None:
     script = _step("Refuse a stale tag")["run"]
     assert "image_revision.py" in script
     assert "'.config.Labels'" not in script
+
+
+def test_the_panel_is_a_runtime_input_of_the_image() -> None:
+    """A panel-only change must count as a change to the image.
+
+    The ``identical`` shortcut skips the build when the pushed commit changes no
+    file in ``runtime_paths``.  That list is a hand-maintained inventory of what
+    the image actually ships.  A runtime input missing from it makes a change to
+    that input look like "nothing to rebuild", so the tag keeps pointing at an
+    image built from an older tree while the workflow reports success.
+    """
+    script = _step("Refuse a stale tag")["run"]
+    match = re.search(r"runtime_paths=\((.*?)\)", script, re.DOTALL)
+    assert match, "the stale-tag step no longer declares runtime_paths"
+    paths = {line.strip() for line in match.group(1).splitlines() if line.strip()}
+    assert "addon/ui" in paths, sorted(paths)
+
+
+def test_the_panel_assets_exist_where_the_image_stages_them() -> None:
+    """Every file the gateway serves must be staged into the image."""
+    ui = ROOT / "addon" / "ui"
+    for name in ("index.html", "app.css", "app.js", "mark.svg"):
+        assert (ui / name).is_file(), name

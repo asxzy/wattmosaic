@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -48,6 +49,15 @@ def _scrub(text: str) -> str:
     """
     text = re.sub(r"(?i)\bhttps?://[^\s\"',}]+", "<redacted-url>", text)
     text = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b", "<redacted-ip>", text)
+    # Absolute filesystem paths name the operator's checkout (and, for a
+    # worktree, a directory they may not have chosen to publish).  Traces and
+    # warnings are the usual source.  Keep the file name and line so the
+    # message stays diagnostic.
+    text = re.sub(
+        r"(?<![\w.-])/(?:Users|home)/[^\s:\"'`]+/([^\s/:\"'`]+)",
+        r"<redacted-path>/\1",
+        text,
+    )
     return text
 
 
@@ -56,10 +66,26 @@ def _run(gate: Gate) -> Gate:
     cmd = [exe, *gate.command[1:]]
     if gate.command[0] == "python":
         cmd = [sys.executable, *gate.command[1:]]
+    # Resolve the engine from *this* checkout.  A git worktree usually shares
+    # its parent's virtualenv, whose editable install names the main checkout,
+    # so `python -m wattmosaic_engine...` would exercise a different tree and
+    # the gate could pass against code that is not being verified.
+    env = dict(os.environ)
+    engine_root = ROOT / "engine"
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        f"{engine_root}{os.pathsep}{existing}" if existing else str(engine_root)
+    )
     start = time.monotonic()
     try:
         proc = subprocess.run(
-            cmd, cwd=ROOT, capture_output=True, text=True, timeout=gate.timeout, check=False
+            cmd,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=gate.timeout,
+            check=False,
+            env=env,
         )
         gate.returncode = proc.returncode
         combined = (proc.stdout or "") + (proc.stderr or "")

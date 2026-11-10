@@ -26,6 +26,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from . import __version__ as ENGINE_VERSION
+
 CONTRACT_VERSION = "1.2.0"
 
 
@@ -843,7 +845,15 @@ class DataQualityReport(Model):
 class HealthResponse(Model):
     status: Literal["ok", "degraded", "error"] = "ok"
     contract_version: str = CONTRACT_VERSION
-    engine_version: str = "0.1.2"
+    # A factory, not a plain default: pydantic writes a plain default into the
+    # generated JSON schema, so the shipped contract would embed the version of
+    # whichever tree last ran `export_schemas.py`.  CI bumps the version on
+    # every push to main and then asserts `git diff --exit-code data/schemas`,
+    # so a version *value* in the schema turns every auto-release red.  The
+    # factory still fills the runtime field at response time; it just keeps the
+    # generated schema free of a value that changes without the contract
+    # changing.
+    engine_version: str = Field(default_factory=lambda: ENGINE_VERSION)
     database: str = "unknown"
     ha_connected: bool = False
     ha_last_event_at: datetime | None = None

@@ -7,11 +7,20 @@ Fails if CONTRACT_VERSION does not match the schema_metadata expectation.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
-from wattmosaic_engine import contracts
-
 ROOT = Path(__file__).resolve().parents[2]
+# Resolve the engine from *this* checkout, not from whatever `pip install -e`
+# happens to point at.  A worktree shares the parent's virtualenv, whose editable
+# install names the main checkout, so an unqualified import would generate the
+# schemas of a different tree and the gate would pass against stale code.
+ENGINE_ROOT = ROOT / "engine"
+if str(ENGINE_ROOT) not in sys.path:
+    sys.path.insert(0, str(ENGINE_ROOT))
+
+from wattmosaic_engine import contracts  # noqa: E402
+
 OUT = ROOT / "data" / "schemas"
 
 MODELS = {

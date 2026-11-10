@@ -213,6 +213,28 @@ marked stale, quality scoring penalises staleness, the disaggregation engine
 runs on a real aligned window without double counting nested panels, and that
 low-quality learning samples are rejected before they can train a model.
 
+### 2.6 App gateway and ingress panel
+
+The panel is static files (`addon/ui/`) served by `addon/gateway.py`. Two layers
+cover it, neither needing a browser:
+
+- `tests/unit/test_panel.py` drives the real aiohttp app: the shell is returned
+  for a trusted ingress peer, direct peers get a JSON descriptor at `/` and
+  `401` for `/ui/*`, each asset has the right content type, unknown assets
+  `404`, traversal cannot escape the allowlist, and a missing `ui/` directory
+  returns `503` instead of a blank page. It also asserts the CSP and the
+  `no-store` cache policy, and negative-verifies the static checker below against
+  a mutated copy of the panel.
+- `tools/dev/check_panel.py` is static: no external origin, no inline script or
+  style block, no `on*` attribute, no missing asset, and no
+  `eval`/`new Function`/`document.write`. It runs inside
+  `scripts/validate_addon.sh`, so the deployment gate fails on a broken shell
+  without building the image.
+
+The panel's *visual* behaviour (layout at 390/900/1440 px, no console errors) was
+verified against a stub engine with headless Chromium. That check is a
+screenshot review, not a committed test, because it needs a browser download.
+
 ---
 
 ## 3. Running the tests

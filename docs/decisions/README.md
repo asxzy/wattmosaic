@@ -1380,3 +1380,89 @@ the more of the step's competitors the guard can see. It is not a reason to
 withhold the attribution, because the alternative — ignoring a measured step
 because the inventory might be incomplete — restores the `unknown`-for-everything
 behaviour that made the product useless without one.
+
+---
+
+## ADR-0027 — The App panel is static files under a strict CSP, gated on ingress
+
+**Status:** Accepted · 2026-11-10
+
+**Context.** The App's ingress page was a single inline string in
+`addon/gateway.py`: a five-row liveness table (engine/HA/database/contract/uptime)
+with an inline `<script>` that polled `/api/v1/health`. It answered "is the engine
+up" and nothing else. Everything the engine actually inferred — device values,
+their evidence grade, the topology and the residual — was only visible in the
+Home Assistant integration's entities, so a user debugging an attribution had no
+place to look.
+
+Growing the string was not an option. An inline page cannot be cached or linted
+separately from the gateway module, every asset edit re-owns the Python file, and
+the CSP had to stay permissive (`script-src 'unsafe-inline'`) to run it at all —
+which is exactly the policy that makes markup injection from an interpolated
+device name possible.
+
+The App also has no internet access at runtime, so a CDN or build step would fail
+silently in the field and could not be reproduced in CI.
+
+**Decision.**
+
+1. **The panel is four static files** in `addon/ui/` — `index.html`, `app.css`,
+   `app.js`, `mark.svg` — shipped in the image and by
+   `scripts/package_addon.sh`. No build step, no external origin, no bundler.
+2. **The gateway serves them, and only them.** `GET /` reads `ui/index.html`;
+   `GET /ui/{asset}` serves a fixed allowlist (`app.css`, `app.js`, `mark.svg`),
+   so a crafted path cannot escape the directory. Unknown assets `404`; a
+   missing `ui/` directory returns `503` with a message rather than a blank page.
+3. **Ingress is the only audience.** Both routes require a trusted ingress peer
+   (Supervisor IP *and* `X-Remote-User-Id`); a direct client gets the JSON
+   descriptor at `/` and `401` for assets. The panel can therefore not be
+   enumerated from a host port the user publishes.
+4. **The CSP is `script-src 'self'`.** Inline script is gone. `style-src` keeps
+   `'unsafe-inline'` only for the `style` attribute the panel sets on meter
+   segments and dial geometry; there is no inline `<style>` block. Everything
+   else is `default-src 'none'` plus same-origin fonts and images.
+5. **The browser never holds the API token.** The panel calls relative
+   `/api/v1/...` URLs resolved from `document.baseURI`, so the same files work at
+   `/` and under `/api/hassio_ingress/<token>/`. The gateway injects
+   `X-API-Token` for ingress peers, exactly as it does for the integration.
+6. **Markup injection is not expressible.** The `el()` helper has no `html` key;
+   every engine-provided string becomes a `textContent` node. A device name
+   containing `<script>` renders as text.
+7. **Unknown is shown as unknown.** A missing `power_w` renders `—`, never
+   `0 W`; a missing `db.healthy` shows "Unknown", not "Unhealthy". The panel
+   never invents a value to fill a card.
+8. **The panel is read-only** apart from `POST /topology/confirm`, which records
+   the topology the engine already inferred. There is no device-control path;
+   presenting one would contradict ADR-0002 and ADR-0024.
+9. **Static checks are part of the deployment gate.** `tools/dev/check_panel.py`
+   rejects an external origin, an inline script/style block, an `on*` attribute,
+   a missing asset and `eval`/`new Function`/`document.write`. It runs in
+   `scripts/validate_addon.sh`, so a broken shell fails before the image builds.
+
+**Consequences.** The panel can be developed and reviewed as ordinary
+HTML/CSS/JS, and the gateway module returns to being a proxy. The CSP is strict
+enough that an injected `<script>` cannot run even if escaping were bypassed, and
+the ingress gate means the assets have the same audience as the proxied API.
+
+The trade-off is that the panel is a second place UI work happens, separate from
+the integration's config flow. It is deliberately not a replacement for that: the
+integration owns entity creation and configuration; the panel reports what the
+engine already decided.
+
+**Verification.**
+
+* `tests/unit/test_panel.py` — the shell is returned for an ingress peer; the CSP
+  and `Cache-Control: no-store` are present; a direct peer gets JSON at `/` and
+  `401` for assets; an ingress peer without `X-Remote-User-Id` is refused; each
+  asset has its expected content type; an unknown asset `404`s; a traversal
+  attempt cannot read outside `UI_ASSETS`; a missing `ui/` directory returns
+  `503`; and the static checker rejects each unsafe construct it exists to catch.
+* `tools/dev/check_panel.py` — negative-verified in `tests/unit/test_panel.py`,
+  which copies the shipped panel into a temp root and then adds an external
+  stylesheet, an inline `<script>`, an inline `<style>`, an `onload=`, an
+  `eval()`/`document.write()`, and deletes `app.js`; each mutation fails the
+  check. The unmodified copy passes.
+* `scripts/validate_addon.sh --no-build` — stages the panel and asserts all four
+  files reach the packaging directory.
+* Visual review: 21 screenshots (7 views × 390/900/1440 px) against a stub engine,
+  with no console errors and no horizontal overflow.

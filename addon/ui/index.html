@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#0d1117">
+<title>WattMosaic</title>
+<link rel="icon" href="ui/mark.svg" type="image/svg+xml">
+<link rel="stylesheet" href="ui/app.css">
+<script src="ui/app.js" defer></script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="#/overview" aria-label="WattMosaic overview">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 32 32" width="30" height="30" role="img" focusable="false">
+          <rect x="1" y="1" width="30" height="30" rx="8" fill="currentColor" opacity=".14"></rect>
+          <path d="M9 9.5 13.2 22l2.8-8 2.8 8L23 9.5" fill="none" stroke="currentColor"
+                stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"></path>
+          <path d="M17.6 6.4 13.9 14h3l-1.5 5.4 5.7-7.7h-3.2z" fill="#f5b042"></path>
+        </svg>
+      </span>
+      <span class="brand-text">
+        <span class="brand-name">WattMosaic</span>
+        <span class="brand-sub">Load disaggregation</span>
+      </span>
+    </a>
+
+    <nav class="nav" aria-label="Sections">
+      <a href="#/overview" data-nav="overview">Overview</a>
+      <a href="#/devices" data-nav="devices">Devices</a>
+      <a href="#/topology" data-nav="topology">Topology</a>
+      <a href="#/quality" data-nav="quality">Data quality</a>
+      <a href="#/diagnostics" data-nav="diagnostics">Diagnostics</a>
+    </nav>
+
+    <div class="topbar-actions">
+      <span class="conn" id="conn" title="Engine connection">
+        <span class="conn-dot" aria-hidden="true"></span>
+        <span id="conn-text">Connecting…</span>
+      </span>
+      <button class="btn btn-ghost btn-icon" id="refresh" type="button" title="Refresh now" aria-label="Refresh now">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 12a9 9 0 1 1-2.64-6.36"></path><path d="M21 3v6h-6"></path>
+        </svg>
+      </button>
+    </div>
+  </div>
+</header>
+
+<div class="banner" id="banner" role="alert" hidden>
+  <div class="banner-inner">
+    <span class="banner-icon" aria-hidden="true">!</span>
+    <div class="banner-body">
+      <strong id="banner-title">Engine unreachable</strong>
+      <p id="banner-text">The engine did not answer the last request.</p>
+    </div>
+    <button class="btn btn-ghost" id="banner-retry" type="button">Retry</button>
+  </div>
+</div>
+
+<main id="main" tabindex="-1">
+  <div id="view" aria-live="polite"></div>
+</main>
+
+<footer class="footer">
+  <span>WattMosaic Engine <span id="footer-version">—</span></span>
+  <span class="footer-sep" aria-hidden="true">·</span>
+  <span>Contract <span id="footer-contract">—</span></span>
+  <span class="footer-sep" aria-hidden="true">·</span>
+  <span>Read-only: this engine never switches a device.</span>
+</footer>
+
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+
+<noscript><p class="noscript">WattMosaic needs JavaScript for this panel.</p></noscript>
+</body>
+</html>

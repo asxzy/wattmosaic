@@ -18,9 +18,8 @@ from __future__ import annotations
 import inspect
 from typing import Any, Protocol, runtime_checkable
 
+from .. import __version__ as ENGINE_VERSION
 from ..contracts import CONTRACT_VERSION, ServiceCommand, ServiceResult
-
-ENGINE_VERSION = "0.1.2"
 
 
 class FacadeUnavailable(RuntimeError):

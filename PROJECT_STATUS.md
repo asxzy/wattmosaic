@@ -3,8 +3,8 @@
 Authoritative, continuously updated record of planning, delegation, integration and
 verification. If it is not recorded here with evidence, it does not count as done.
 
-**Last updated:** 2026-11-08
-**Commit:** `5c766bd` (`dev`, 0.2.0-dev4 deployed to the live installation)
+**Last updated:** 2026-11-10
+**Commit:** branch `feature/app-ui` on `main` (`b23d6d3`, `0.2.1-dev.8`)
 
 ---
 
@@ -59,6 +59,7 @@ Status legend: `TODO` / `IN_PROGRESS` / `IMPLEMENTED` / `VERIFIED` (tests run) /
 | 8 | Documentation | Agents + Orchestrator | VERIFIED | `docs/*` incl. `acceptance_report.md`; link check clean |
 | 9 | Integration + E2E verification | Orchestrator | VERIFIED | **7/7** required gates PASS; `pytest tests` 871 passed |
 | 10 | Device taxonomy + tiers + per-device config | Orchestrator | VERIFIED | `contracts.py` v1.1.0, `disaggregation/{tiers,configuration}.py`, `entity_evidence.py`; `tests/unit/test_device_taxonomy.py` (51) |
+| 11 | App ingress panel (static UI) | Orchestrator | VERIFIED | `addon/ui/` (ADR-0027), `tests/unit/test_panel.py` (18), `tools/dev/check_panel.py`, `validate_addon.sh` 71 passed |
 
 Parallelisation rule: subagents received **disjoint file scopes** plus the
 authoritative `contracts.py`. No subagent redefined a shared schema. Every
@@ -70,7 +71,7 @@ real engine; three of them contained defects that "tests pass" did not reveal
 
 ## 3. Locked architectural decisions
 
-See `docs/decisions/README.md` (ADR-0001…ADR-0014). Summary:
+See `docs/decisions/README.md` (ADR-0001…ADR-0027). Summary:
 
 | ID | Decision |
 | --- | --- |
@@ -88,6 +89,7 @@ See `docs/decisions/README.md` (ADR-0001…ADR-0014). Summary:
 | D12 | Mode entities are context only; a declared load signal proves runtime |
 | D13 | Confidence tiers grade evidence kind; the 0–1 score stays, neither is calibrated |
 | D14 | A power entity is measurable, not state-bearing; only runtime entities write device state |
+| D15 | The App panel is static files under `script-src 'self'`, gated on ingress, read-only (ADR-0027) |
 
 ---
 
@@ -3584,8 +3586,6 @@ gap, not migration damage. The "64" written here was an estimate; §7r.19 measur
 existed; the harness cannot observe a workflow's *absence* of work. Nothing
 below is deployed, and the App migration in §8 is still unstarted.
 
----
-
 ### 7r.18 A CT is a circuit, and the row was credited by declaring *more* truth
 
 The attribution rule the product was built on came from ADR-0023: exactly one
@@ -3832,6 +3832,106 @@ devices publish power now, against 21 under the previous database.
 **Freshness is proved by the engine, not by the option.** `topology_version` is
 **1** (it had reached 6), every device `sample_count` starts at 0, and
 `database_path` is the default again.
+
+---
+
+### 7r.20 The App panel was a liveness table, and showed nothing the engine knew
+
+The ingress page was a 90-line inline HTML string in `addon/gateway.py`: five
+rows of engine/HA/database/contract/uptime, polled from `/api/v1/health`. It
+answered "is the process up". It could not answer any question a user actually
+has — what was inferred, how fresh it is, which evidence supports it, what the
+residual is, or why a device is unplaced. Diagnosis meant reading the
+integration's entities one at a time or running `run_diagnostics`.
+
+The string could not simply be grown. It was served with
+`script-src 'unsafe-inline'`, which is the policy that makes an interpolated
+device name a markup-injection vector; it re-owned the gateway module on every
+asset edit; and it could not be cached or linted.
+
+**What changed.** The panel is now four static files in `addon/ui/` (ADR-0027):
+
+| File | Role |
+| --- | --- |
+| `index.html` | shell: header, nav, `#view` container, banner, footer |
+| `app.css` | tokens incl. light mode, layout, responsive rules, meter styling |
+| `app.js` | API client, views, formatting; no `html` key in the element helper |
+| `mark.svg` | favicon/wordmark, same-origin only |
+
+Six views: **Overview** (health + live reconciliation split), **Devices** and
+device detail (latest estimate, tier, measurement age, history, placement),
+**Topology** (candidates, aliases, suppressed/not-inferable, confirm),
+**Data quality** (per-channel cadence/gaps/age), **Diagnostics** (aligner,
+channel health, events, JSON export).
+
+**Gateway.** `/` reads `ui/index.html`; `/ui/{asset}` serves a fixed allowlist.
+Both require a trusted ingress peer — a direct client on a published port gets
+the JSON descriptor at `/` and `401` for assets. CSP is now
+`script-src 'self'`; `style-src` keeps `'unsafe-inline'` only for the `style`
+attribute used on meter widths. Assets are `Cache-Control: no-store` so an
+upgraded image cannot leave an old script running.
+
+**Defects found by looking at it, not by testing it.** Rendered against a stub
+engine at 390/900/1440 px with headless Chromium:
+
+- the loading skeleton was never removed above the page content (`render()` now
+  clears before the view builds and toggles `aria-busy`);
+- the sparkline mapped newest-first history, producing huge negative coordinates
+  that painted across the page (now sorted by time with real min/max domains);
+- `Number(null) === 0` made a null `power_w` render `— W` *and* report "has
+  power" (explicit null/undefined checks now);
+- a 5-card row sat in a 4-column grid;
+- the reconciliation card labelled `main_power_w` as "Known plus unknown" and
+  used `reconciliation_error_ratio` as "Residual share" — both wrong keys;
+- Diagnostics read `status`/`last_seen` (nonexistent) instead of
+  `quality`/`interval_median_s`/`last_update_age_s`;
+- event rows read `component` instead of `category`/`code`/`channel_id`;
+- the topology nesting card assumed array shapes where the engine returns dicts;
+- a missing `db.healthy` rendered as "Unhealthy" rather than "Unknown";
+- the residual meter segment — the product's central claim — was nearly
+  invisible at 55 % opacity (now hatched at 0.9);
+- mobile: channel rows crushed, quality header wrapped, nav overflowed
+  horizontally, wide tables clipped.
+
+**Gates.** `tests/unit/test_panel.py` (18 tests) drives the real aiohttp app and
+negative-verifies `tools/dev/check_panel.py` against a mutated copy of the panel.
+`check_panel.py` runs inside `scripts/validate_addon.sh` (71 passed / 0 failed /
+3 skipped). `Dockerfile`, `addon/Dockerfile`, `scripts/package_addon.sh` stage
+`addon/ui`, and `.github/workflows/release.yaml` lists it in the image's
+`runtime_paths` so a panel-only change is recognised as a runtime change.
+
+**Three defects the panel exposed, fixed here.** None was reachable from the
+liveness table, which is the argument for the change:
+
+- **The served engine version was a hardcoded `0.1.2`.** `api/facade.py` defined
+  `ENGINE_VERSION = "0.1.2"` and `HealthResponse` defaulted to the same literal,
+  while `__version__` was already `0.2.1-dev.5` (and `0.2.1-dev.8` by the time
+  this merged). `/health`, `/status`, the Prometheus
+  `wattmosaic_contract_info` line and the Diagnostics view would all have shown
+  a version three releases old. `check_release.py` compared the five version
+  *fields* and could not see a sixth literal. Both now import `__version__`;
+  `test_the_served_engine_version_is_the_package_version` fails on the old
+  constant (verified by reverting it: `assert '0.1.2' == '0.2.1-dev.5'`, and
+  again at `0.2.1-dev.8`).
+- **The gates could analyze the wrong checkout.** This worktree shares the main
+  checkout's virtualenv, whose editable install points at
+  `/Users/asxzy/src/wattmosaic`. `export_schemas.py` therefore regenerated
+  schemas from the main tree — a green "schemas are current" while
+  `data/schemas/health_response.json` still said `0.1.2` — and `verify.py`
+  recorded `engine_version: 0.1.2` in the evidence. Both now put this checkout's
+  `engine/` first on the module path.
+  `tests/unit/test_dev_tools_resolve_this_tree.py` pins it, and both tests were
+  negative-verified by removing the fix.
+- **The schema embedded the version, so every auto-release would fail.** Once
+  `HealthResponse.engine_version` imported `__version__`, the plain pydantic
+  default wrote `"default": "<current version>"` into
+  `data/schemas/health_response.json`. CI bumps the version on *every* push to
+  `main` and then asserts `git diff --exit-code data/schemas`; the generated
+  contract would have changed on every release with no contract change. A
+  `default_factory` fills the runtime field but leaves no `default` in the JSON
+  schema, so the schema is version-independent. This also retired a genuinely
+  stale `"default": "0.1.2"` that had sat in the published contract.
+
 
 ---
 
