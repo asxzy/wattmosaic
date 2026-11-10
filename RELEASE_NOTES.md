@@ -1,5 +1,24 @@
 # Release Notes
 
+## v0.2.1-dev.2 — 2026-11-10 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- Regenerate verification data after the merge
+- Join main's history so the v0.1.6 record is not orphaned
+- Carry the v0.1.6 release notes onto the development line
+- Record the branch rework and the two premises it falsified
+- Make main the development line and release every push from one workflow
+- Stop using the deprecated via_device pair, which took 276 sensors offline
+- Close the stale-image guard's fail-open, and record the release work
+- Make the stale-image guard fail closed, and prove it against the registry
+- Record both channels naming a version, and the harness/CI gap
+- Lint the release tests, and make the harness run the linter
+- Lint the release tests, and make the harness run the linter
+- Release 0.1.6: automate the stable channel's tags and releases
+
 ## v0.2.1-dev.1 — 2026-11-09 (development channel)
 
 Home Assistant was showing this integration's version as a **commit hash**
