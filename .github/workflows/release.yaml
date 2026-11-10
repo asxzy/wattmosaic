@@ -425,6 +425,14 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Without a checkout there is no `.git`, so `gh` cannot infer the
+      # repository. It then returns an empty release list, which this job used to
+      # read as "nothing to prune" and report success -- a fail-open that left 11
+      # development Releases against a limit of 10. `--repo` below makes the job
+      # independent of the working directory; the checkout keeps `gh`'s own
+      # inference working for any command that does not pass it.
+      - uses: actions/checkout@v4
+
       - name: Keep the newest development Releases inside the 30-entry window
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -447,21 +455,37 @@ jobs:
             exit 1
           fi
 
-          # Every prerelease, newest first, excluding the one just published.
+          # Read the list into a variable rather than straight into the loop. A
+          # failure inside a process substitution does not set the parent's exit
+          # status, so `while read ... done < <(gh ...)` turns a failed API call
+          # into an empty list -- indistinguishable from "no Releases yet".
+          # That is the fail-open this job hit in production.
+          if ! listed=$(
+            gh release list --repo "${GITHUB_REPOSITORY}" --limit 100 \
+              --json tagName,isPrerelease \
+              --jq '.[] | select(.isPrerelease) | .tagName'
+          ); then
+            echo "::error::Could not list Releases for ${GITHUB_REPOSITORY}. Refusing to report success without knowing what exists."
+            exit 1
+          fi
+
+          # `publish` has just created a prerelease, so the list can never be
+          # legitimately empty on this path.
+          if [[ -z "${listed}" ]]; then
+            echo "::error::The release list came back empty, but this run just published a prerelease. Refusing to guess."
+            exit 1
+          fi
+
+          # Every prerelease, newest first, past the retained window.
           # A `while read` loop rather than `mapfile`: the runner has bash 5, but
           # keeping this portable means it can be exercised locally too.
           olds=()
           while IFS= read -r tag; do
             [[ -n "${tag}" ]] && olds+=("${tag}")
-          done < <(
-            gh release list --limit 100 \
-              --json tagName,isPrerelease \
-              --jq '.[] | select(.isPrerelease) | .tagName' \
-              | tail -n +$((keep + 1))
-          )
+          done < <(printf '%s\n' "${listed}" | tail -n +$((keep + 1)))
 
           if [[ ${#olds[@]} -eq 0 ]]; then
-            echo "no development Releases to prune (keeping the newest ${keep})"
+            echo "nothing to prune: $(printf '%s\n' "${listed}" | wc -l) development Release(s) exist, keeping the newest ${keep}"
             exit 0
           fi
 
@@ -471,5 +495,8 @@ jobs:
             # --cleanup-tag deletes the git tag too: a pruned version must not
             # remain installable by tag name, or the update entity could offer
             # a build whose Release no longer exists.
-            gh release delete "${tag}" --yes --cleanup-tag || true
+            if ! gh release delete "${tag}" --repo "${GITHUB_REPOSITORY}" --yes --cleanup-tag; then
+              echo "::error::Failed to delete ${tag}. The release window may be full, which would make stable users fall back to the default branch."
+              exit 1
+            fi
           done

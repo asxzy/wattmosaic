@@ -137,17 +137,19 @@ class TestVersionBump:
 
 
 class TestPruning:
+    PRUNE_STEP = "Keep the newest development Releases"
+
     def test_pruning_runs(self) -> None:
         assert "prune" in _jobs()
 
     def test_pruning_only_affects_prereleases(self) -> None:
         """Stable Releases record what users were offered; never delete them."""
-        script = _steps("prune")[0]["run"]
+        script = _step("prune", self.PRUNE_STEP)["run"]
         assert "select(.isPrerelease)" in script
 
     def test_pruning_deletes_the_git_tag_too(self) -> None:
         """A pruned version must not stay installable by tag name."""
-        script = _steps("prune")[0]["run"]
+        script = _step("prune", self.PRUNE_STEP)["run"]
         assert "--cleanup-tag" in script
 
     def test_pruning_is_skipped_for_stable_releases(self) -> None:
@@ -163,7 +165,7 @@ class TestPruning:
 
     def test_the_workflow_refuses_an_unsafe_retained_count(self) -> None:
         """A future edit to `keep` must fail loudly, not silently break stable."""
-        script = _steps("prune")[0]["run"]
+        script = _step("prune", self.PRUNE_STEP)["run"]
         assert "keep >= window" in script
         assert "exit 1" in script
 
@@ -172,6 +174,40 @@ class TestPruning:
         text = WORKFLOW.read_text()
         assert "per_page: 30" in text
         assert "default_branch" in text
+
+    def test_pruning_has_a_checkout(self) -> None:
+        """`gh` needs a repository.
+
+        The job first shipped with no checkout, so it ran outside a git tree:
+        `gh` could not infer the repository, every ``gh release list`` returned
+        nothing, and the empty result was read as "nothing to prune". It
+        reported success while 11 development Releases remained against a limit
+        of 10.
+        """
+        uses = [s.get("uses") for s in _steps("prune")]
+        assert any(str(u).startswith("actions/checkout") for u in uses), uses
+
+    def test_pruning_names_the_repository_explicitly(self) -> None:
+        """Passing ``--repo`` makes the job independent of the working directory."""
+        script = _step("prune", self.PRUNE_STEP)["run"]
+        assert "--repo" in script
+        assert "GITHUB_REPOSITORY" in script
+
+    def test_a_failed_release_listing_is_not_treated_as_an_empty_one(self) -> None:
+        """The fail-open: a failed call must not look like "nothing to prune".
+
+        A ``while read`` loop fed by a process substitution does not see the
+        producer's exit status, so a failed API call yields zero iterations and
+        the job exits 0. The listing is therefore captured first and checked.
+        """
+        script = _step("prune", self.PRUNE_STEP)["run"]
+        # Captured into a variable so the exit status is observable...
+        assert "if ! listed=$(" in script
+        # ...and an empty list is an error here, because `publish` just made one.
+        assert "came back empty" in script
+        # A failed delete must not be swallowed.
+        assert "Failed to delete" in script
+        assert "|| true" not in script.split("gh release delete")[1].split("\n")[0]
 
 
 class TestSafety:
