@@ -3402,6 +3402,59 @@ a migration that has not been performed.
 
 ---
 
+### 7r.16 The first real release run: two things worked, one failed open
+
+The rework was exercised for the first time on a genuine push rather than in
+review, and the outcome differed from the local evidence in a way worth
+recording.
+
+**What worked.** `main` fast-forwarded from `f6b53bb` to `3e48b1a`; the push
+produced `v0.2.1-dev.2` with all five version fields moved together, a pullable
+multi-arch image (`sha256:91d5cc8e…`), an annotated tag and a prerelease whose
+body listed the commits since `v0.2.1-dev.1`. The version string the Supervisor
+compares was committed by CI, so the App is offered the update. `stable` was
+created at `v0.1.6` and its old trigger list (`main`, `dev`) means a push there
+cannot republish `v0.1.6` — confirmed, not assumed: the push triggered `CI` only,
+no `Release` run.
+
+**What failed, silently.** The `prune` job had **no checkout**, so it ran outside
+a git tree:
+
+```
+failed to run git: fatal: not a git repository
+no development Releases to prune (keeping the newest 10)
+```
+
+`gh` could not infer the repository, every `gh release list` returned nothing,
+and the empty result was read as *"nothing to prune."* The job reported success
+with 11 development Releases present against a limit of 10.
+
+The second defect is why the first stayed invisible. `while read … done < <(gh
+…)` cannot see the producer's exit status, so a failed API call produced zero
+loop iterations — the same observable outcome as a repository with nothing to
+prune. **Success and total failure were indistinguishable**, which is the same
+fail-open shape as the stale-image guard in §7r.14 and, before that, the tag
+guard that started this work.
+
+**Fix.** The listing is captured with `if ! listed=$(gh …)` so its status is
+visible; an empty list is an error on this path, because `publish` has just
+created a prerelease and the list cannot legitimately be empty; a failed delete
+fails the job instead of being swallowed by `|| true`; every call passes
+`--repo "$GITHUB_REPOSITORY"`; and a checkout is added.
+
+**Verified on the next real run.** `bea34c9` bumped to `v0.2.1-dev.3` and pruned
+`v0.2.0-dev.2` and `v0.2.0-dev.1`, leaving exactly 10 prereleases. Read back
+against the Marketplace's own rule — one page of 30, `last_version` = newest
+`prerelease=False` — the stable user is still offered `v0.1.6`, and both stable
+Releases survive. Negative check: removing the checkout and restoring the
+process-substitution lookup fails three tests.
+
+**Not claimed.** Local gates passed 12/12 both before and after this defect
+existed; the harness cannot observe a workflow's *absence* of work. Nothing
+below is deployed, and the App migration in §8 is still unstarted.
+
+---
+
 ## 8. Needs user authorization
 
 | Action | Why it needs authorization |
