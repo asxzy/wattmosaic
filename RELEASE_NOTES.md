@@ -1,5 +1,13 @@
 # Release Notes
 
+## v0.2.1-dev.4 — 2026-11-10 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- Record the prune fail-open the first real release run exposed
+
 ## v0.2.1-dev.3 — 2026-11-10 (development channel)
 
 Automatic development build.
