@@ -1,5 +1,13 @@
 # Release Notes
 
+## v0.2.1-dev.3 — 2026-11-10 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- Make the prune job fail closed, and give it a repository to talk to
+
 ## v0.2.1-dev.2 — 2026-11-10 (development channel)
 
 Automatic development build.
