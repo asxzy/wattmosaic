@@ -94,6 +94,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "client": client,
     }
 
+    # Replay the user's confirmed topology declaration onto the engine.
+    #
+    # The wizard's confirm step is the only other writer of nesting/aliasing,
+    # so a database reset or a discovery-driven bootstrap can replace the
+    # confirmed topology with a parentless candidate and silently make the
+    # engine double-count nested mains.  The declaration in this config entry
+    # is user intent, not an inference: re-applying it is the fix, and it is
+    # deliberately awaited *after* the first successful refresh (there is a
+    # snapshot to reconcile against) but *before* platforms are forwarded (so
+    # entities never publish a reading computed from a wrong topology).
+    #
+    # ``async_ensure_topology_pushed`` never raises: an engine that is down or
+    # refuses the write records the error and the coordinator retries on the
+    # next poll.  Setup must never fail or block on a topology write.
+    await coordinator.async_ensure_topology_pushed()
+
     # The engine (hub) device must exist before any platform is forwarded: on
     # Home Assistant 2026.8+ child devices link to it by registry id, and an
     # unknown id is rejected.  Doing it here also means a later strict-frame

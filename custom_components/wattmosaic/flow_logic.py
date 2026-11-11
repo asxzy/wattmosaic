@@ -7,8 +7,13 @@ only presentation + HTTP orchestration around these helpers.
 
 from __future__ import annotations
 
+import json
+import logging
 import re
 from collections.abc import Collection, Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
+from datetime import datetime
 from typing import Any
 
 from .const import (
@@ -38,7 +43,7 @@ from .const import (
     POLARITY_NORMAL,
     POWER_BEHAVIORS,
 )
-from .util import as_bool, as_float, as_int, normalise_base_url
+from .util import as_bool, as_float, as_int, normalise_base_url, sanitize_text, utcnow
 
 #: Form field for the per-device energy-entity opt-in.  Integration-side only:
 #: it is stored in the config entry, never sent to the engine.
@@ -940,6 +945,492 @@ def build_topology_update(
         existing_notes = topology.get("notes")
         topology["notes"] = list(existing_notes or []) + extra_notes
     return topology
+
+
+# --------------------------------------------------------------------------- #
+# Replaying the stored declaration on setup
+# --------------------------------------------------------------------------- #
+
+#: Assignment key -> engine channel key for the fields a user declaration owns.
+#: Anything not listed here (``ct_id``, ``entity_id``, ``name``, ...) belongs to
+#: the engine's discovery and is deliberately never compared.
+DECLARED_CHANNEL_FIELDS: dict[str, str] = {
+    "role": "ct_type",
+    "phase": "phase",
+    "polarity": "polarity",
+    "paired_ct_id": "paired_ct_id",
+    "parent_ct_id": "parent_ct_id",
+    "alias_of_ct_id": "alias_of_ct_id",
+    "measurement_multiplier": "measurement_multiplier",
+    "device_id": "device_id",
+    "enabled": "enabled",
+}
+
+#: Note appended to a topology the integration replays, so the engine's own
+#: history explains where the nesting came from.
+TOPOLOGY_REPLAY_NOTE = (
+    "Re-applied the Home Assistant topology declaration "
+    "(user-confirmed CT assignments)."
+)
+
+#: Upper bound on one replay attempt.  A write must never hold up setup or a
+#: poll longer than this; the client has its own per-request timeout, this is
+#: the belt-and-braces bound around the whole read+write+confirm sequence.  It
+#: is a *bound*, not a delay: an in-sync install returns immediately without
+#: touching the network.
+TOPOLOGY_PUSH_TIMEOUT = 15.0
+
+#: How many times the *identical* declaration may be written without the engine
+#: reflecting it.  An engine that accepts the PUT but drops ``parent_ct_id``
+#: would otherwise be rewritten on every poll; two attempts are enough to ride
+#: out a restart, and the second failure is reported instead of hidden.
+MAX_IDENTICAL_PUSHES = 2
+
+#: Re-verify the declaration every this many polls even when the engine's
+#: version has not changed.  Version-only guards have one blind spot: a database
+#: reset that happens to recreate the *same* version number.  One read-only
+#: ``GET /topology`` per this many polls closes it for a fraction of a request
+#: per minute.
+TOPOLOGY_RECHECK_POLLS = 60
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def declaration_signature(
+    assignments: Mapping[str, Mapping[str, Any]] | None,
+    confirmed: bool,
+) -> str:
+    """Stable fingerprint of a declaration, used to bound identical rewrites."""
+    normalised = {
+        str(ct_id): normalise_assignment(raw)
+        for ct_id, raw in (assignments or {}).items()
+        if isinstance(raw, Mapping)
+    }
+    return f"{int(bool(confirmed))}:" + json.dumps(normalised, sort_keys=True)
+
+
+@dataclass
+class TopologyPushPlan:
+    """Whether setup should replay the stored declaration, and why.
+
+    ``push is False`` always carries a ``reason`` so the decision can be
+    audited (diagnostics show it next to the engine's current version).
+    """
+
+    push: bool
+    reason: str
+    assignments: dict[str, dict[str, Any]] = dataclass_field(default_factory=dict)
+    confirmed: bool = False
+    engine_version: int | None = None
+    #: The engine already reports this topology as confirmed.  A rewrite of the
+    #: *declared fields* must then stay confirmed: demoting it to ``candidate``
+    #: would silently disable learning until the user ran the wizard again.
+    preserve_confirmed: bool = False
+
+
+def _channel_value(channel: Mapping[str, Any], key: str) -> Any:
+    """One engine channel field in the same shape as a normalised assignment."""
+    raw = channel.get(key)
+    if key == "measurement_multiplier":
+        return _as_multiplier(raw)
+    if key == "enabled":
+        return bool(raw) if raw is not None else True
+    if key in ("paired_ct_id", "parent_ct_id", "alias_of_ct_id", "device_id"):
+        return raw.strip() if isinstance(raw, str) and raw.strip() else None
+    if key == "ct_type":
+        return str(raw or CT_ROLE_UNKNOWN).strip().lower()
+    return str(raw or "").strip().lower()
+
+
+def assignment_matches_channel(
+    assignment: Mapping[str, Any], channel: Mapping[str, Any]
+) -> bool:
+    """Whether one stored assignment already describes an engine channel.
+
+    Only the *declared* fields are compared: a difference in entity id, name or
+    metrics is the engine's business, and treating it as a mismatch would make
+    the integration rewrite the topology on every poll.
+    """
+    normalised = normalise_assignment(assignment, channel)
+    for assignment_key, channel_key in DECLARED_CHANNEL_FIELDS.items():
+        expected = _channel_value(
+            {channel_key: normalised[assignment_key]}, channel_key
+        )
+        actual = _channel_value(channel, channel_key)
+        if assignment_key == "measurement_multiplier":
+            if abs(float(expected) - float(actual)) > 1e-9:
+                return False
+        elif expected != actual:
+            return False
+    return True
+
+
+def assignments_match_topology(
+    topology: Mapping[str, Any] | None,
+    assignments: Mapping[str, Mapping[str, Any]] | None,
+) -> bool:
+    """Whether every declared channel the engine knows already matches.
+
+    Channels that exist only on one side are ignored: the engine may report CTs
+    the wizard never saw, and a declared CT the engine dropped cannot be
+    re-created by a ``PUT`` (that would be fabricating a channel), so it is not
+    a reason to rewrite the topology.
+    """
+    channels = {c["ct_id"]: c for c in normalise_channels(topology)}
+    for ct_id, raw in (assignments or {}).items():
+        channel = channels.get(str(ct_id))
+        if channel is None:
+            continue
+        if not assignment_matches_channel(raw, channel):
+            return False
+    return True
+
+
+def plan_topology_push(
+    topology: Mapping[str, Any] | None,
+    assignments: Mapping[str, Mapping[str, Any]] | None,
+    *,
+    confirmed: bool = False,
+    stored_version: Any = None,
+) -> TopologyPushPlan:
+    """Decide whether the stored declaration must be replayed onto ``topology``.
+
+    The declaration in the config entry is *user intent*: the wizard recorded
+    what the user confirmed, and a database reset or a discovery-driven
+    bootstrap that replaces the topology with a parentless candidate must not
+    erase it.  Replaying it is not an inference -- every field written here was
+    chosen by the user -- so this never fabricates a nesting decision.
+
+    A push is skipped when
+
+    * there is no declaration at all (fresh install, wizard never ran);
+    * the engine reports no channels (there is nothing to merge onto -- inventing
+      a channel would be fabrication);
+    * no declared CT id exists in the engine topology;
+    * the engine already matches the declaration at the same version, or the
+      engine is *confirmed* at a **newer** version and the declaration did not
+      change (never downgrade a newer confirmed topology).
+
+    A push is performed when the declaration differs from the engine, when the
+    engine is behind the stored version, or when the stored entry says the user
+    confirmed it and the engine still reports ``candidate``.
+    """
+    stored = {
+        str(ct_id): dict(raw)
+        for ct_id, raw in (assignments or {}).items()
+        if isinstance(raw, Mapping)
+    }
+    if not stored:
+        return TopologyPushPlan(push=False, reason="no_assignments")
+
+    engine_version = as_int(topology.get("version")) if isinstance(topology, Mapping) else None
+    channels = normalise_channels(topology)
+    if not channels:
+        return TopologyPushPlan(
+            push=False, reason="engine_topology_empty", engine_version=engine_version
+        )
+
+    known = {channel["ct_id"] for channel in channels}
+    if not any(ct_id in known for ct_id in stored):
+        return TopologyPushPlan(
+            push=False, reason="no_matching_channels", engine_version=engine_version
+        )
+
+    matches = assignments_match_topology(topology, stored)
+    engine_status = str((topology or {}).get("status") or "candidate").strip().lower()
+    engine_confirmed = engine_status == "confirmed"
+    declared_version = as_int(stored_version)
+    version_known = engine_version is not None and declared_version is not None
+    same_version = version_known and engine_version == declared_version
+    needs_confirmation = bool(confirmed) and not engine_confirmed
+
+    if matches and not needs_confirmation:
+        if version_known and engine_version > declared_version:
+            return TopologyPushPlan(
+                push=False,
+                reason="engine_newer_confirmed" if engine_confirmed else "engine_newer",
+                engine_version=engine_version,
+            )
+        return TopologyPushPlan(
+            push=False,
+            reason="in_sync" if same_version else "engine_matches",
+            engine_version=engine_version,
+        )
+
+    return TopologyPushPlan(
+        push=True,
+        reason="confirmation_missing" if matches else "declaration_missing",
+        assignments=stored,
+        # Never downgrade: if the engine already holds a confirmed topology, a
+        # rewrite of the declared fields (or of the entry's confirmation flag)
+        # must stay confirmed -- a candidate would silently disable learning.
+        confirmed=bool(confirmed) or engine_confirmed,
+        engine_version=engine_version,
+        preserve_confirmed=engine_confirmed,
+    )
+
+
+@dataclass
+class TopologyPushState:
+    """Outcome of the last replay attempt, surfaced through diagnostics.
+
+    Everything here is safe to show a user: no token, no URL, only counts,
+    versions and the scrubbed error text.
+    """
+
+    #: ``True`` once a replay has been accepted by the engine at least once.
+    pushed: bool = False
+    #: Engine topology version this integration's last successful push produced.
+    pushed_version: int | None = None
+    #: Version stored in the config entry when the push was made.
+    declared_version: int | None = None
+    #: Scrubbed last error, or ``None`` after a success.
+    error: str | None = None
+    #: Total attempts since setup (a failure retries on the next poll).
+    attempts: int = 0
+    #: When the last *successful* push happened.
+    pushed_at: datetime | None = None
+    #: Stable reason key for the last decision (``in_sync``, ``declaration_missing``...).
+    reason: str = "not_attempted"
+    #: Engine version observed when the last decision was taken.
+    observed_version: int | None = None
+    #: Engine version this integration has already reconciled against.  The
+    #: coordinator re-checks only when the engine reports a different version
+    #: (a reset or a bootstrap replaced the topology) or the last attempt failed.
+    verified_version: int | None = None
+    #: A ``PUT`` landed but ``POST /topology/confirm`` did not.  Retrying the
+    #: confirm alone avoids a second topology revision for the same declaration.
+    pending_confirm: int | None = None
+    #: Fingerprint of the declaration the last push wrote, and how many times it
+    #: has been written without the engine reflecting it.  Bounds a rewrite loop
+    #: against an engine that accepts the PUT but drops the nesting fields.
+    last_declaration: str | None = None
+    identical_pushes: int = 0
+    #: Polls elapsed since the last verification.  Drives the periodic re-read
+    #: that catches a reset which recreated the same version number.
+    polls_since_check: int = 0
+
+    def as_diagnostics(self) -> dict[str, Any]:
+        """The public, secret-free view used by ``diagnostics.py``."""
+        return {
+            "topology_pushed": self.pushed,
+            "topology_push_version": self.pushed_version,
+            "topology_push_error": self.error,
+            "topology_push_attempts": self.attempts,
+            "topology_push_reason": self.reason,
+            "topology_push_declared_version": self.declared_version,
+            "topology_push_at": self.pushed_at.isoformat() if self.pushed_at else None,
+            "topology_engine_version_seen": self.observed_version,
+        }
+
+
+async def async_replay_topology(
+    client: Any,
+    assignments: Mapping[str, Mapping[str, Any]] | None,
+    *,
+    confirmed: bool = False,
+    stored_version: Any = None,
+    state: TopologyPushState | None = None,
+    observed_version: Any = None,
+    now: datetime | None = None,
+    logger: logging.Logger | None = None,
+) -> TopologyPushState:
+    """Re-apply the config entry's topology declaration to the engine.
+
+    Why this exists
+    ---------------
+    The nesting/aliasing the user confirmed in the config-flow wizard is
+    **user intent**, not an inference.  It lives in the config entry
+    (``CONF_CT_ASSIGNMENTS``) and is the only record of it.  Until now the sole
+    code path writing it to the engine was the wizard's confirm step, so a
+    database reset -- or a discovery-driven bootstrap that installs a
+    parentless candidate -- silently erased the declaration while the entry
+    still said "confirmed at v5".  The engine then summed six physically nested
+    mains and reported roughly double the real draw.
+
+    Replaying a *stored user decision* is not fabrication: nothing here invents
+    a channel, a parent or an alias.  Every field written comes from
+    ``CONF_CT_ASSIGNMENTS``; the merge is :func:`build_topology_update`, the
+    same function the wizard uses, so there is one and only one merge rule.
+
+    Semantics
+    ---------
+    * No assignments -> nothing happens (a fresh install has no declaration).
+    * In sync -> nothing happens; ``pushed`` stays truthful from the last run.
+    * Declaration differs, or the engine is behind the stored version, or the
+      user confirmed but the engine reports ``candidate`` -> one ``PUT`` and,
+      when the entry is confirmed, one ``POST /topology/confirm``.
+    * The engine reports a *newer* topology that already matches the
+      declaration -> never downgrade it, never write.
+    * A rewrite of a topology the engine already reports as *confirmed* stays
+      confirmed: demoting it to ``candidate`` would silently disable learning.
+    * Any engine error -> state records it and the caller retries on the next
+      poll.  This function never raises: setup must not fail or block because a
+      replay did not land.
+    * The identical declaration is written at most :data:`MAX_IDENTICAL_PUSHES`
+      times without the engine reflecting it, so a schema that drops the
+      nesting fields cannot turn into one write per poll.
+
+    Idempotency is a version guard: this exact engine revision is reconciled
+    once, and a *different* revision (a reset, a bootstrap, a manual edit)
+    re-opens the check.  A periodic read-only re-verification
+    (:data:`TOPOLOGY_RECHECK_POLLS`) covers the case a version number cannot: a
+    reset that recreated the same number.
+    """
+    log = logger or _LOGGER
+    state = state or TopologyPushState()
+    state.observed_version = as_int(observed_version)
+
+    # No declaration -> no traffic at all.  A fresh install (or an entry whose
+    # wizard never ran) has nothing to replay, and issuing a ``GET /topology``
+    # on every poll for it would be pure cost.  Never fabricate assignments.
+    if not isinstance(assignments, Mapping) or not assignments:
+        state.reason = "no_assignments"
+        return state
+
+    # Idempotent guard, and the "engine topology_version != CONF_TOPOLOGY_VERSION"
+    # re-check the coordinator relies on.
+    #
+    # This exact engine revision has already been reconciled, so there is
+    # nothing to do.  A *different* version means the engine (re)wrote its
+    # topology -- a database reset, a discovery bootstrap, a manual edit -- and
+    # the declaration is re-examined (read-only when it still matches).  A
+    # previous failure, or a PUT still awaiting confirmation, always re-opens
+    # the check.  A periodic re-read covers the one case a version comparison
+    # cannot see: a reset that recreated the same version number.
+    state.polls_since_check += 1
+    if (
+        state.error is None
+        and state.pending_confirm is None
+        and state.verified_version is not None
+        and state.verified_version == state.observed_version
+        and state.polls_since_check < TOPOLOGY_RECHECK_POLLS
+    ):
+        return state
+
+    topology = await _safe_topology(client, state, log)
+    if topology is None:
+        # The read failed; ``_safe_topology`` recorded why.  Do not plan against
+        # a topology we could not read -- that would either fabricate an empty
+        # one or rewrite blind.  Retry on the next poll.  A pending confirm does
+        # not need the body, so it is retried below regardless.
+        state.reason = "topology_unavailable"
+        state.attempts += 1
+        if state.pending_confirm is None:
+            return state
+    elif state.error is not None and state.pending_confirm is None:
+        # A previous read failed and the engine is reachable again.  The error
+        # is stale now; a plan that still needs a write will set its own.
+        state.error = None
+    state.polls_since_check = 0
+
+    # A previous attempt pushed the declaration but failed to confirm it.  The
+    # topology body is already on the engine; re-sending it would create a
+    # second revision for the same declaration, so only the confirm is retried.
+    if state.pending_confirm is not None:
+        state.attempts += 1
+        try:
+            await client.confirm_topology(state.pending_confirm)
+            state.pushed = True
+            state.pushed_version = state.pending_confirm
+            state.pending_confirm = None
+            state.error = None
+            state.pushed_at = now or utcnow()
+            state.verified_version = state.observed_version
+        except Exception as err:  # noqa: BLE001 - retried on the next poll
+            state.error = sanitize_text(err) or "topology confirmation failed"
+            log.debug("WattMosaic topology confirm retry failed: %s", state.error)
+        return state
+
+    plan = plan_topology_push(
+        topology,
+        assignments,
+        confirmed=confirmed,
+        stored_version=stored_version,
+    )
+    state.reason = plan.reason
+    if not plan.push:
+        # Record the revision actually read from the engine (not the snapshot's
+        # possibly older reconciliation version), so the guard settles as soon
+        # as the two agree.
+        state.verified_version = (
+            plan.engine_version if plan.engine_version is not None else state.observed_version
+        )
+        state.identical_pushes = 0
+        return state
+
+    # Bound identical rewrites.  A declaration the engine accepted but does not
+    # reflect (a schema that silently drops ``parent_ct_id``, say) must not be
+    # re-sent on every poll: two attempts ride out a restart, then the mismatch
+    # is reported as a push error instead of being hidden behind traffic.
+    signature = declaration_signature(plan.assignments, plan.confirmed)
+    if signature == state.last_declaration and state.identical_pushes >= MAX_IDENTICAL_PUSHES:
+        already_reported = state.reason == "engine_ignored_declaration"
+        state.error = (
+            "engine did not reflect the stored topology declaration after "
+            f"{state.identical_pushes} attempts"
+        )
+        state.reason = "engine_ignored_declaration"
+        (log.debug if already_reported else log.warning)("WattMosaic %s", state.error)
+        return state
+
+    state.attempts += 1
+    produced: int | None = None
+    try:
+        updated = build_topology_update(
+            topology,
+            plan.assignments,
+            confirmed=plan.confirmed,
+            notes=[TOPOLOGY_REPLAY_NOTE],
+        )
+        result = await client.put_topology(updated)
+        produced = as_int(result.get("version")) if isinstance(result, Mapping) else None
+        if plan.confirmed:
+            await client.confirm_topology(produced)
+        state.pushed = True
+        state.pushed_version = produced if produced is not None else plan.engine_version
+        state.declared_version = as_int(stored_version)
+        state.error = None
+        state.pushed_at = now or utcnow()
+        state.identical_pushes = (
+            state.identical_pushes + 1 if signature == state.last_declaration else 1
+        )
+        state.last_declaration = signature
+        # ``PUT`` produces a new revision, so the version observed on the next
+        # poll is the one to reconcile against (and it will already be in sync).
+        state.verified_version = produced if produced is not None else state.observed_version
+        log.info(
+            "Re-applied the stored WattMosaic topology declaration (engine v%s)",
+            state.pushed_version,
+        )
+    except Exception as err:  # noqa: BLE001 - a replay must never break setup
+        message = sanitize_text(err)
+        first_failure = state.error is None
+        state.error = message or "topology replay failed"
+        if produced is not None and plan.confirmed:
+            # The PUT landed; only the confirmation is outstanding.
+            state.pending_confirm = produced
+            state.pushed_version = produced
+            state.declared_version = as_int(stored_version)
+        # Log the first failure loudly, later retries quietly: a flapping engine
+        # must not fill the log with one warning per poll.
+        (log.warning if first_failure else log.debug)(
+            "WattMosaic topology replay failed (will retry): %s", state.error
+        )
+    return state
+
+
+async def _safe_topology(
+    client: Any, state: TopologyPushState, log: logging.Logger
+) -> dict[str, Any] | None:
+    """``GET /topology`` that degrades to ``None`` instead of raising."""
+    try:
+        topology = await client.topology()
+    except Exception as err:  # noqa: BLE001 - read failure is state, not a crash
+        state.error = sanitize_text(err) or "topology read failed"
+        log.debug("WattMosaic topology read failed: %s", state.error)
+        return None
+    return topology if isinstance(topology, Mapping) else None
 
 
 def mapping_summary(
