@@ -73,6 +73,20 @@ AGE_SOFT_LIMIT_S = 30.0
 #: Age at which the measurement-quality component reaches zero.
 AGE_HARD_LIMIT_S = 180.0
 
+#: Floor for ``direct_measured`` only.  A healthy dedicated CT is a real
+#: observation of the load, so its score is never allowed to fall below this
+#: even when the age/residual components are imperfect (and ``0.30`` when
+#: stale).
+#:
+#: It is **not** the 55.0 % seen on every inferred device in production.  That
+#: value is the analytic fixed point of a degenerate input set — no models, no
+#: corroboration, so ``blend == 0.625`` and ``0.88 * 0.625 == 0.55``.  Two
+#: unrelated constants that happen to print the same number; do not "fix" the
+#: inferred score by touching this one.
+DIRECT_MEASURED_FLOOR = 0.55
+#: The same floor when the measurement is stale: the CT proves nothing current.
+DIRECT_MEASURED_STALE_FLOOR = 0.30
+
 
 @dataclass(slots=True)
 class ConfidenceInputs:
@@ -170,7 +184,10 @@ def compute_confidence(inp: ConfidenceInputs) -> ConfidenceBreakdown:
     if inp.source == Source.DIRECT_MEASURED:
         # A healthy dedicated CT must stay clearly above every estimate even
         # when its age/residual terms are imperfect.
-        score = max(score, 0.55 if not inp.stale else 0.30)
+        score = max(
+            score,
+            DIRECT_MEASURED_STALE_FLOOR if inp.stale else DIRECT_MEASURED_FLOOR,
+        )
     if inp.source == Source.UNKNOWN:
         score = min(score, 0.25)
 
