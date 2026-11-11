@@ -436,9 +436,26 @@
     abort: null,
     devicesFilter: '',
     devicesSort: 'power',
-    topologyTab: 'channels',
     qualityFilter: 'all',
+    // The hierarchy view's own state lives here, not in the DOM, so a re-render
+    // (a poll, a refresh, a route change) does not reset what the user opened.
+    tree: {
+      open: new Set(),      // node ids the user explicitly expanded
+      closed: new Set(),    // node ids the user explicitly collapsed
+      filter: '',
+    },
+    // Nesting compares a historical window, so its answer stays true for
+    // minutes.  Caching it means revisiting the tab paints instantly instead
+    // of paying the whole comparison again.
+    nesting: { data: null, at: 0, inflight: false },
   };
+
+  const NESTING_TTL_MS = 10 * 60 * 1000;
+  // A refresh younger than this is not worth repeating: a just-completed
+  // comparison would otherwise be fetched again the instant the tab is
+  // reopened.
+  const NESTING_REFRESH_AFTER_MS = 60 * 1000;
+  const NESTING_PATH = '/topology/nesting?hours=12';
 
   const viewRoot = () => document.getElementById('view');
 
@@ -572,35 +589,46 @@
     state.abort = new AbortController();
     const signal = state.abort.signal;
 
-    clear(root);
-    root.append(loadingCards(4));
     root.setAttribute('aria-busy', 'true');
+    // The view container is a polite live region so route changes and value
+    // ticks are announced.  A hierarchy of a hundred nodes is not a status
+    // message: silence the region on the topology tab and let the explicit
+    // role="status" summary announce the result instead.
+    root.setAttribute('aria-live', state.view === 'topology' ? 'off' : 'polite');
 
     try {
-      await loadTiers();
-      if (signal.aborted) return;
-      // The skeleton is provisional: every view builds its own page head, so it
-      // must be removed before the first view node is appended.  Leaving it in
-      // place used to push a stale row of empty cards above the real content.
-      clear(root);
-      switch (state.view) {
-        case 'devices':
-          await renderDevices(root, signal);
-          break;
-        case 'device':
-          await renderDevice(root, signal);
-          break;
-        case 'topology':
-          await renderTopology(root, signal);
-          break;
-        case 'quality':
-          await renderQuality(root, signal);
-          break;
-        case 'diagnostics':
-          await renderDiagnostics(root, signal);
-          break;
-        default:
-          await renderOverview(root, signal);
+      if (state.view === 'topology') {
+        // The topology view paints its own page head and skeleton synchronously
+        // inside renderTopology, before its first await.  It must not sit
+        // behind the tier-vocabulary fetch (a cold start used to clear the view
+        // and then leave it blank until the slowest request came back).
+        await renderTopology(root, signal);
+      } else {
+        clear(root);
+        root.append(loadingCards(4));
+        await loadTiers();
+        if (signal.aborted) return;
+        // The skeleton is provisional: every view builds its own page head, so
+        // it must be removed before the first view node is appended.  Leaving
+        // it in place used to push a stale row of empty cards above the real
+        // content.
+        clear(root);
+        switch (state.view) {
+          case 'devices':
+            await renderDevices(root, signal);
+            break;
+          case 'device':
+            await renderDevice(root, signal);
+            break;
+          case 'quality':
+            await renderQuality(root, signal);
+            break;
+          case 'diagnostics':
+            await renderDiagnostics(root, signal);
+            break;
+          default:
+            await renderOverview(root, signal);
+        }
       }
       state.lastError = null;
       hideBanner();
@@ -612,6 +640,7 @@
       root.append(errorState('Could not load this view', err, () => render()));
     } finally {
       root.removeAttribute('aria-busy');
+      if (state.view !== 'topology') root.setAttribute('aria-live', 'polite');
     }
   }
 
@@ -1430,30 +1459,67 @@
 
   /* --- Topology --------------------------------------------------------- */
 
+  // The hierarchy is painted from GET /api/v1/topology/tree.  This file never
+  // derives the tree again — not from names, not from ct_id prefixes, not from
+  // entity ids.  A second derivation in the browser is exactly what used to
+  // produce a silently wrong tree, so the engine owns the hierarchy and the
+  // panel renders it verbatim.
+
+  const TREE_PATH = '/topology/tree';
+  const CT_TONES = { main: 'accent', branch: 'info', dedicated_device: 'ok' };
+  const ctTone = (type) => CT_TONES[String(type || '')] || 'mute';
+
+  const topologyHead = (topology) =>
+    el('div', { class: 'page-head' }, [
+      el('div', {}, [
+        el('h1', {}, 'Topology'),
+        el('p', { class: 'lede' },
+          'The electrical model the engine solves against: panels, the circuits they feed, and the devices attributed to each circuit.'),
+      ]),
+      el('div', { class: 'head-actions' }, [
+        topology && topology.status !== 'confirmed'
+          ? el('button', { class: 'btn btn-primary', type: 'button', onclick: confirmTopology }, 'Confirm topology')
+          : null,
+      ]),
+    ]);
+
+  // Painted synchronously, before the first await.  Without it a cold route
+  // showed a blank, zero-height viewport for the whole request.
+  const topologySkeleton = () =>
+    el('div', { id: 'topology-loading', class: 'topo-loading' }, [
+      el('p', { class: 'stat-hint', role: 'status' }, 'Loading the electrical model…'),
+      el('div', { class: 'grid cols-4', style: 'margin-bottom:16px' },
+        Array.from({ length: 4 }, () => el('div', { class: 'skeleton h-stat' }))),
+      el('div', { class: 'topo-grid' }, [
+        el('div', { class: 'card' }, [el('div', { class: 'skeleton h-card' })]),
+        el('div', { class: 'card' }, [el('div', { class: 'skeleton h-card' })]),
+      ]),
+    ]);
+
   async function renderTopology(root, signal) {
-    const [topology, nesting] = await Promise.all([
+    // 1. First paint, synchronously.  The page head and skeleton go up before
+    //    any request so the user sees a loading state immediately.
+    clear(root);
+    root.append(topologyHead(null));
+    root.append(topologySkeleton());
+
+    // 2. Only the fast endpoints are awaited here.  /topology/nesting compares
+    //    a 12-hour window and can take tens of seconds; putting it in this
+    //    Promise.all is what made the whole tab wait for it.
+    const [topology, treeResult] = await Promise.all([
       get('/topology', signal).catch((err) => {
         if (err && err.status === 404) return null;
         throw err;
       }),
-      get('/topology/nesting?hours=12', signal).catch(() => null),
+      get(TREE_PATH, signal).then(
+        (data) => ({ ok: true, data, err: null }),
+        (err) => ({ ok: false, data: null, err })
+      ),
     ]);
     if (signal.aborted) return;
 
-    root.append(
-      el('div', { class: 'page-head' }, [
-        el('div', {}, [
-          el('h1', {}, 'Topology'),
-          el('p', { class: 'lede' },
-            'The electrical model the engine solves against: CT roles, phases, containment and the devices they feed.'),
-        ]),
-        el('div', { class: 'head-actions' }, [
-          topology && topology.status !== 'confirmed'
-            ? el('button', { class: 'btn btn-primary', type: 'button', onclick: confirmTopology }, 'Confirm topology')
-            : null,
-        ]),
-      ])
-    );
+    clear(root);
+    root.append(topologyHead(topology));
 
     if (!topology) {
       root.append(
@@ -1466,34 +1532,69 @@
       return;
     }
 
-    root.append(topologySummary(topology, nesting));
+    const tree = treeResult.ok && treeResult.data && Array.isArray(treeResult.data.roots)
+      ? treeResult.data
+      : null;
+
+    root.append(topologySummary(topology, tree));
+    if (!tree) root.append(topologyFallbackNotice(treeResult.err));
+
+    // The hierarchy is the subject of this tab, so it gets the full width: a
+    // tree squeezed into half a page forces every ct_id to wrap.
+    root.append(topologyHierarchyCard(topology, tree));
+
+    // The candidates card is a real card from the start: either the cached
+    // comparison or an explicit loading state.  It is replaced in place.
     root.append(
       el('div', { class: 'topo-grid' }, [
         topologyChannelsCard(topology),
-        el('div', { style: 'display:flex;flex-direction:column;gap:16px' }, [
-          topologyTreeCard(topology),
-          topologyDevicesCard(topology),
-        ]),
+        topologyCandidatesSlot(),
       ])
     );
-    root.append(topologyCandidatesCard(nesting));
-    if ((topology.notes || []).length) {
+
+    const notes = [...(topology.notes || []), ...((tree && tree.notes) || [])];
+    if (notes.length) {
       root.append(
         card(
           'Engine notes',
           el('ul', { class: 'explain' },
-            topology.notes.map((note) =>
+            notes.map((note) =>
               el('li', {}, [el('span', { class: 'marker' }, '·'), el('span', {}, note)])))
         )
       );
     }
+
+    // 3. Everything above is on screen.  Now, and only now, ask for the slow
+    //    comparison; it fills one card when it lands.
+    fillNestingCandidates(signal);
   }
 
-  function topologySummary(topology, nesting) {
+  function topologyFallbackNotice(err) {
+    const missing = Boolean(err && err.status === 404);
+    const text = missing
+      ? 'This engine does not serve /api/v1/topology/tree (HTTP 404), so the engine-owned hierarchy cannot be drawn. The hierarchy card falls back to CT containment from parent_ct_id only, and devices are not placed.'
+      : `The hierarchy could not be loaded (${describeError(err)}). The hierarchy card falls back to CT containment from parent_ct_id only, and devices are not placed.`;
+    return notice('Hierarchy unavailable', text, 'warn');
+  }
+
+  function topologySummary(topology, tree) {
+    const channels = topology.channels || [];
     const counts = { main: 0, branch: 0, dedicated_device: 0, unknown: 0 };
-    for (const ch of topology.channels || []) {
+    for (const ch of channels) {
       counts[ch.ct_type] = (counts[ch.ct_type] || 0) + 1;
     }
+    const stats = (tree && tree.stats) || null;
+    const panels = stats && stats.panels !== undefined ? String(stats.panels) : '—';
+    const circuits = stats && stats.circuits !== undefined
+      ? String(stats.circuits)
+      : String(counts.branch + counts.dedicated_device);
+    const devices = stats && stats.devices !== undefined
+      ? String(stats.devices)
+      : String((topology.devices || []).length);
+    const unplaced = stats
+      ? (Number(stats.unplaced_devices) || 0) + (Number(stats.unplaced_circuits) || 0)
+      : 0;
+
     const configured =
       topology.status === 'confirmed'
         ? null
@@ -1502,27 +1603,427 @@
             'Results carry a topology-uncertainty penalty until the topology is confirmed. Confirm it only when the CT roles match your wiring.',
             'warn'
           );
+
     return frag([
       configured,
-      el('div', { class: 'grid cols-4', style: 'margin-bottom:16px' }, [
-        statCard('Version', String(topology.version ?? '—'), { hint: ago(topology.created_at) }),
+      el('div', { class: 'grid cols-5', style: 'margin-bottom:16px' }, [
+        statCard('Panels', panels, { hint: panels === '1' ? 'distribution board' : 'distribution boards' }),
+        statCard('Circuits', circuits, {
+          hint: `${counts.main} feed · ${counts.branch} branch · ${counts.dedicated_device} dedicated`,
+        }),
+        statCard('Devices', devices, {
+          hint: unplaced ? `${unplaced} unplaced — shown, never dropped` : 'each placed once',
+          tone: unplaced ? 'warn' : null,
+        }),
         statCard('Status', label(topology.status), { tone: toneFor(topology.status) }),
-        statCard('Channels', String((topology.channels || []).length), {
-          hint: `${counts.main} main · ${counts.branch} branch · ${counts.dedicated_device} dedicated`,
-        }),
-        statCard('Devices', String((topology.devices || []).length), {
-          hint: nesting && nesting.instants ? `${nesting.instants} comparison instants` : '',
-        }),
+        statCard('Version', String(topology.version ?? '—'), { hint: ago(topology.created_at) }),
       ]),
     ]);
   }
+
+  /* --- The hierarchy ---------------------------------------------------- *
+   * Real nested markup: ul.hier-list > li.hier-node > .hier-row (+ a nested
+   * ul for children).  Connector lines are CSS borders on the li, so the tree
+   * reads as a tree without SVG and without any inline style.
+   * ---------------------------------------------------------------------- */
+
+  const nodeKey = (node) =>
+    String((node && (node.id || node.ct_id || node.device_id)) || (node && node.label) || 'node');
+
+  const BADGE_TONES = new Set(['ok', 'warn', 'bad', 'info', 'mute', 'accent']);
+  const nodeBadges = (node) =>
+    (Array.isArray(node.badges) ? node.badges : [])
+      .filter((item) => item && item.text !== undefined && item.text !== null)
+      .map((item) => {
+        const tone = String(item.tone || 'mute');
+        // An unknown tone would render an unstyled badge: fall back to the
+        // neutral one rather than shipping a pill with no border or colour.
+        return badge(String(item.text), BADGE_TONES.has(tone) ? tone : 'mute');
+      });
+
+  // Contract §1.2 R5: a group with no children is omitted entirely.  The
+  // engine already does this, but a group is pure structure, so hiding an
+  // empty one costs nothing and keeps a stale payload from drawing a bare
+  // "DEVICES 0" heading.
+  const prunedNodes = (nodes) =>
+    nodes
+      .filter((node) => !(node.kind === 'group' && !(node.children || []).length))
+      .map((node) => (Array.isArray(node.children) && node.children.length
+        ? { ...node, children: prunedNodes(node.children) }
+        : node));
+
+  const hierarchyNodes = (topology, tree) =>
+    tree && Array.isArray(tree.roots) ? prunedNodes(tree.roots) : legacyRoots(topology);
+
+  // Fallback for an engine without /topology/tree: the old CT containment view,
+  // expressed in the same node shape so one renderer serves both.  This is the
+  // only place that looks at parent_ct_id, and it is explicitly labelled.
+  function legacyRoots(topology) {
+    const channels = [...(topology.channels || [])];
+    const byId = new Map(channels.map((ch) => [ch.ct_id, ch]));
+    const children = new Map();
+    const roots = [];
+    for (const ch of channels) {
+      const parent = ch.parent_ct_id;
+      if (parent && parent !== ch.ct_id && byId.has(parent)) {
+        if (!children.has(parent)) children.set(parent, []);
+        children.get(parent).push(ch);
+      } else {
+        roots.push(ch);
+      }
+    }
+
+    const seen = new Set();
+    const build = (ch) => {
+      seen.add(ch.ct_id);
+      const kids = (children.get(ch.ct_id) || [])
+        .sort((a, b) => String(a.ct_id).localeCompare(String(b.ct_id)))
+        .map((kid) => (seen.has(kid.ct_id) ? null : build(kid)))
+        .filter(Boolean);
+      return {
+        id: `legacy:circuit:${ch.ct_id}`,
+        kind: 'circuit',
+        label: ch.name && ch.name !== ch.phase ? ch.name : ch.ct_id,
+        subtitle: ch.entity_id || ch.ct_id,
+        badges: [],
+        ct_id: ch.ct_id,
+        ct_type: ch.ct_type,
+        phase: ch.phase,
+        enabled: ch.enabled,
+        alias_of_ct_id: ch.alias_of_ct_id,
+        polarity: ch.polarity,
+        topology_status: ch.topology_status,
+        latest_power_w: null,
+        children: kids,
+      };
+    };
+
+    return roots
+      .sort((a, b) => String(a.ct_id).localeCompare(String(b.ct_id)))
+      .map((ch) => (seen.has(ch.ct_id) ? null : build(ch)))
+      .filter(Boolean);
+  }
+
+  // Default: the first panel is open to depth 2 — the panel, its group nodes
+  // and the circuits inside them are visible, while every deeper branch starts
+  // collapsed.  Other panels start collapsed.
+  function defaultOpenSet(nodes) {
+    const ids = new Set();
+    const first = nodes[0];
+    if (!first) return ids;
+    const walk = (node, depth) => {
+      if (depth >= 2) return;
+      if ((node.children || []).length) ids.add(nodeKey(node));
+      for (const child of node.children || []) walk(child, depth + 1);
+    };
+    walk(first, 0);
+    return ids;
+  }
+
+  const isExpanded = (key, defaults) => {
+    if (state.tree.open.has(key)) return true;
+    if (state.tree.closed.has(key)) return false;
+    return defaults.has(key);
+  };
+
+  const nodeText = (node) =>
+    [node.label, node.subtitle, node.id, node.ct_id, node.device_id, node.ct_type, node.phase]
+      .concat(Array.isArray(node.feed_ct_ids) ? node.feed_ct_ids : [])
+      .concat(Array.isArray(node.badges) ? node.badges.map((b) => (b && b.text) || '') : [])
+      .filter((part) => part !== null && part !== undefined && part !== '')
+      .join(' ')
+      .toLowerCase();
+
+  const nodeMatches = (node, query) => nodeText(node).includes(query);
+
+  // Keep a node when it matches, or when any descendant does, so a filtered
+  // tree still shows the path down to the match.
+  const filterSubtree = (node, query) => {
+    const kids = (node.children || [])
+      .map((child) => filterSubtree(child, query))
+      .filter(Boolean);
+    if (!nodeMatches(node, query) && kids.length === 0) return null;
+    return { node, kids };
+  };
+
+  const toEntry = (node) => ({
+    node,
+    kids: (node.children || []).map(toEntry),
+  });
+
+  function topologyHierarchyCard(topology, tree) {
+    const body = el('div', {
+      id: 'topology-hierarchy-body',
+      class: 'hier',
+      // The view container is aria-live="polite"; a tree of a hundred nodes
+      // must not be read out on every repaint.
+      'aria-live': 'off',
+    });
+
+    // One short announcement per user action, instead of the whole tree.
+    const status = el('p', { class: 'hier-status', role: 'status' });
+    const announce = (text) => { status.textContent = text; };
+
+    const repaint = (options) => {
+      const focusKey = options && options.focusKey;
+      paintHierarchy(body, topology, tree, repaint);
+      if (focusKey) {
+        // The button that was clicked no longer exists: the whole list was
+        // rebuilt.  Put focus back on its equivalent so keyboard use does not
+        // drop to the document body after every toggle.
+        const next = [...body.querySelectorAll('.hier-toggle')].find((b) => b.dataset.key === focusKey);
+        if (next) next.focus({ preventScroll: true });
+        const count = body.querySelectorAll('li.hier-node').length;
+        announce(next
+          ? `${next.getAttribute('aria-expanded') === 'true' ? 'Expanded' : 'Collapsed'}. ${count} rows visible.`
+          : `${count} rows visible.`);
+      }
+    };
+
+    const filter = el('input', {
+      type: 'search',
+      class: 'hier-filter',
+      placeholder: 'Filter circuits and devices…',
+      'aria-label': 'Filter the hierarchy',
+      value: state.tree.filter,
+      oninput: (event) => {
+        state.tree.filter = event.target.value;
+        repaint();
+        const query = state.tree.filter.trim();
+        announce(
+          query
+            ? `${body.querySelectorAll('li.hier-node').length} rows match “${query}”.`
+            : `${body.querySelectorAll('li.hier-node').length} rows visible.`
+        );
+      },
+    });
+
+    const expandAll = el('button', {
+      class: 'btn btn-sm',
+      type: 'button',
+      onclick: () => {
+        setAllExpanded(hierarchyNodes(topology, tree), true);
+        repaint();
+        announce(`Expanded all. ${body.querySelectorAll('li.hier-node').length} rows visible.`);
+      },
+    }, 'Expand all');
+
+    const collapseAll = el('button', {
+      class: 'btn btn-sm',
+      type: 'button',
+      onclick: () => {
+        setAllExpanded(hierarchyNodes(topology, tree), false);
+        repaint();
+        announce(`Collapsed all. ${body.querySelectorAll('li.hier-node').length} rows visible.`);
+      },
+    }, 'Collapse all');
+
+    const node = card('Hierarchy', [status, body], {
+      id: 'topology-hierarchy',
+      actions: [filter, expandAll, collapseAll],
+      foot: tree
+        ? `Computed by the engine${tree.version !== undefined ? ` (contract v${tree.version})` : ''} at ${ago(tree.generated_at)}. Each device appears once, under the circuit that measures it.`
+        : 'Fallback view: CT containment from parent_ct_id only. Devices are not placed.',
+    });
+
+    // Paint in the same task as the card so the tree is never a frame late.
+    paintHierarchy(body, topology, tree, repaint);
+    // The layout actually used, recorded on the card so a bug report can name
+    // it without re-deriving it from the markup.
+    node.dataset.layout = tree ? 'tree' : 'legacy';
+    announce(
+      `${body.querySelectorAll('li.hier-node').length} rows shown.`
+      + (tree ? '' : ' Hierarchy endpoint unavailable; showing CT containment.')
+    );
+    return node;
+  }
+
+  function setAllExpanded(nodes, open) {
+    state.tree.open.clear();
+    state.tree.closed.clear();
+    const walk = (node) => {
+      if ((node.children || []).length) {
+        const key = nodeKey(node);
+        if (open) state.tree.open.add(key);
+        else state.tree.closed.add(key);
+      }
+      for (const child of node.children || []) walk(child);
+    };
+    for (const node of nodes) walk(node);
+  }
+
+  // ``onToggle(key)`` rebuilds the card.  It is supplied by the caller so the
+  // focus-restoring repaint lives in one place.
+  function paintHierarchy(body, topology, tree, onToggle) {
+    if (!body) return;
+    clear(body);
+
+    const nodes = hierarchyNodes(topology, tree);
+    const query = state.tree.filter.trim().toLowerCase();
+
+    let entries;
+    let forcedOpen = null;
+    if (query) {
+      entries = nodes.map((node) => filterSubtree(node, query)).filter(Boolean);
+      forcedOpen = new Set();
+      const mark = (entry) => {
+        if (entry.kids.length) forcedOpen.add(nodeKey(entry.node));
+        entry.kids.forEach(mark);
+      };
+      entries.forEach(mark);
+    } else {
+      entries = nodes.map(toEntry);
+    }
+
+    if (!entries.length) {
+      body.append(
+        emptyState(
+          'No node matches',
+          query ? `Nothing in this hierarchy matches “${state.tree.filter.trim()}”.` : 'This topology has no nodes to show.'
+        )
+      );
+      return;
+    }
+
+    const ctx = {
+      defaults: defaultOpenSet(nodes),
+      forcedOpen,
+      repaint: onToggle,
+    };
+
+    body.append(
+      el(
+        'ul',
+        { class: 'hier-list hier-root' },
+        entries.map((entry) => renderEntry(entry, 0, ctx))
+      )
+    );
+  }
+
+  function renderEntry(entry, depth, ctx) {
+    const node = entry.node;
+    const key = nodeKey(node);
+    const hasKids = entry.kids.length > 0;
+    const expanded = hasKids
+      ? (ctx.forcedOpen ? ctx.forcedOpen.has(key) : isExpanded(key, ctx.defaults))
+      : null;
+
+    const item = el('li', { class: 'hier-node', dataset: { depth: String(depth) } }, [
+      hierarchyRow(node, depth, expanded, key, ctx, entry.kids.length),
+    ]);
+
+    if (hasKids && expanded) {
+      item.append(
+        el('ul', { class: 'hier-list' }, entry.kids.map((kid) => renderEntry(kid, depth + 1, ctx)))
+      );
+    }
+
+    return item;
+  }
+
+  function hierarchyRow(node, depth, expanded, key, ctx, childCount) {
+    const kind = String(node.kind || 'node');
+    const row = el('div', { class: 'hier-row', dataset: { kind, depth: String(depth) } });
+
+    if (expanded === null) {
+      row.append(el('span', { class: 'hier-toggle-spacer', 'aria-hidden': 'true' }));
+    } else {
+      row.append(
+        el('button', {
+          class: 'hier-toggle',
+          type: 'button',
+          'aria-expanded': String(expanded),
+          'aria-label': `${expanded ? 'Collapse' : 'Expand'} ${node.label || nodeKey(node)}`,
+          dataset: { key },
+          onclick: (event) => {
+            const next = event.currentTarget.getAttribute('aria-expanded') !== 'true';
+            if (next) {
+              state.tree.open.add(key);
+              state.tree.closed.delete(key);
+            } else {
+              state.tree.closed.add(key);
+              state.tree.open.delete(key);
+            }
+            ctx.repaint({ focusKey: key });
+          },
+        })
+      );
+    }
+
+    row.append(el('span', { class: 'hier-glyph', 'aria-hidden': 'true' }, GLYPHS[kind] || '·'));
+
+    if (kind === 'group') {
+      row.append(
+        el('span', { class: 'hier-group-label' }, String(node.label || node.role || 'Group').toUpperCase())
+      );
+      row.append(el('span', { class: 'hier-count' }, String(childCount)));
+    } else if (kind === 'panel') {
+      row.append(el('span', { class: 'hier-label' }, node.label || node.panel_id || 'Panel'));
+      if (node.monitor) row.append(el('span', { class: 'hier-sub' }, node.monitor));
+      if (node.is_service_entry) row.append(badge('Service entry', 'accent'));
+      for (const item of nodeBadges(node)) row.append(item);
+      const feeds = Array.isArray(node.feed_ct_ids) ? node.feed_ct_ids : [];
+      if (feeds.length) {
+        row.append(
+          el('span', { class: 'hier-feeds', title: 'Feed CTs' },
+            feeds.map((id) => el('span', { class: 'chip chip-ct' }, String(id))))
+        );
+      }
+      if (node.subtitle && String(node.subtitle) !== String(node.label || '')) {
+        row.append(el('span', { class: 'hier-sub' }, node.subtitle));
+      }
+    } else if (kind === 'circuit') {
+      const name = node.label || node.ct_id || 'Circuit';
+      row.append(el('span', { class: 'hier-label' }, name));
+      // Only show the subtitle when it adds something: the engine may set both
+      // to the ct_id, and printing it twice is pure noise.
+      if (node.subtitle && String(node.subtitle) !== String(name)) {
+        row.append(el('span', { class: 'hier-sub' }, node.subtitle));
+      }
+      row.append(badge(label(node.ct_type || 'unknown'), ctTone(node.ct_type)));
+      if (node.phase && node.phase !== 'unknown') row.append(badge(label(node.phase), 'mute'));
+      if (node.latest_power_w !== null && node.latest_power_w !== undefined) {
+        row.append(el('span', { class: 'hier-power' }, watts(node.latest_power_w)));
+      }
+      if (node.enabled === false) row.append(badge('Disabled', 'bad'));
+      if (node.alias_of_ct_id) row.append(badge(`alias of ${node.alias_of_ct_id}`, 'warn'));
+      if (node.polarity === 'inverted') row.append(badge('Inverted', 'warn'));
+      for (const item of nodeBadges(node)) row.append(item);
+    } else if (kind === 'device') {
+      const name = node.label || node.device_id || 'Device';
+      if (node.device_id) {
+        row.append(
+          el('a', { class: 'hier-link', href: `#/device/${encodeURIComponent(node.device_id)}` }, name)
+        );
+      } else {
+        row.append(el('span', { class: 'hier-label' }, name));
+      }
+      if (node.phase && node.phase !== 'unknown') row.append(badge(label(node.phase), 'mute'));
+      row.append(el('span', { class: 'hier-power' }, watts(node.latest_power_w)));
+      if (node.source) row.append(badge(label(node.source), sourceTone(node.source)));
+      if (node.confidence !== null && node.confidence !== undefined) {
+        row.append(el('span', { class: 'hier-conf' }, percent(node.confidence, 0)));
+      }
+      // ``via_ct_id`` is the parent circuit this device already sits under; it
+      // would repeat the tree edge on every row.
+      for (const item of nodeBadges(node)) row.append(item);
+    } else {
+      row.append(el('span', { class: 'hier-label' }, node.label || nodeKey(node)));
+      if (node.subtitle) row.append(el('span', { class: 'hier-sub' }, node.subtitle));
+      for (const item of nodeBadges(node)) row.append(item);
+    }
+
+    return row;
+  }
+
+  const GLYPHS = { panel: '▤', group: '▫', circuit: '◉', device: '◆' };
 
   function topologyChannelsCard(topology) {
     const channels = [...(topology.channels || [])].sort((a, b) => {
       const order = { main: 0, branch: 1, dedicated_device: 2, unknown: 3 };
       return (order[a.ct_type] ?? 9) - (order[b.ct_type] ?? 9) || String(a.ct_id).localeCompare(String(b.ct_id));
     });
-    return el('section', { class: 'card' }, [
+    return el('section', { class: 'card', id: 'topology-channels' }, [
       el('div', { class: 'card-head' }, [
         el('h2', {}, 'CT channels'),
         el('span', { class: 'spacer' }),
@@ -1535,15 +2036,18 @@
           ? channels.map((ch) =>
               el('div', { class: 'channel-row', dataset: { type: ch.ct_type } }, [
                 el('span', { class: 'sw', 'aria-hidden': 'true' }),
-                el('div', { style: 'min-width:0' }, [
-                  el('div', { class: 'ch-name' }, ch.name || ch.ct_id),
+                el('div', { class: 'ch-main' }, [
+                  // A CT whose name is just its phase ("l1") tells the reader
+                  // nothing; the id does.  This mirrors the pre-existing rule.
+                  el('div', { class: 'ch-name' },
+                    ch.name && ch.name !== ch.phase ? ch.name : ch.ct_id),
                   el('div', { class: 'ch-sub' }, ch.entity_id || ch.ct_id),
                   ch.parent_ct_id
                     ? el('div', { class: 'ch-sub' }, `parent: ${ch.parent_ct_id}`)
                     : null,
                 ]),
                 el('div', { class: 'ch-tags' }, [
-                  badge(label(ch.ct_type), ch.ct_type === 'main' ? 'accent' : ch.ct_type === 'branch' ? 'info' : ch.ct_type === 'dedicated_device' ? 'ok' : 'mute'),
+                  badge(label(ch.ct_type), ctTone(ch.ct_type)),
                   badge(label(ch.phase), 'mute'),
                   ch.enabled === false ? badge('Disabled', 'bad') : null,
                   ch.topology_status && ch.topology_status !== 'confirmed' ? statusBadge(ch.topology_status) : null,
@@ -1557,79 +2061,86 @@
     ]);
   }
 
-  function topologyTreeCard(topology) {
-    const channels = topology.channels || [];
-    const byId = new Map(channels.map((c) => [c.ct_id, c]));
-    const children = new Map();
-    const roots = [];
-    for (const ch of channels) {
-      if (ch.parent_ct_id && byId.has(ch.parent_ct_id)) {
-        if (!children.has(ch.parent_ct_id)) children.set(ch.parent_ct_id, []);
-        children.get(ch.parent_ct_id).push(ch);
-      } else {
-        roots.push(ch);
-      }
+  /* --- Nesting candidates (slow; fills in after the tree) ---------------- */
+
+  const nestingIsFresh = () =>
+    Boolean(state.nesting.data) && Date.now() - state.nesting.at < NESTING_TTL_MS;
+
+  function topologyCandidatesSlot() {
+    if (nestingIsFresh()) {
+      // Only promise a background refresh when fillNestingCandidates will
+      // actually issue one: inside the refresh-after window it deliberately
+      // does not, and the footer must not claim otherwise.
+      const willRefresh = Date.now() - state.nesting.at >= NESTING_REFRESH_AFTER_MS;
+      return topologyCandidatesCard(state.nesting.data, { cached: true, willRefresh });
     }
-    const seen = new Set();
-    const renderNode = (ch, depth) => {
-      if (seen.has(ch.ct_id)) return null;
-      seen.add(ch.ct_id);
-      const kids = (children.get(ch.ct_id) || []).sort((a, b) => String(a.ct_id).localeCompare(String(b.ct_id)));
-      const node = el('div', { class: `node depth-${Math.min(4, depth)}` }, [
-        el('span', { class: 'arc', 'aria-hidden': 'true' }, depth === 0 ? '▸' : '└'),
-        el('span', { class: 'nm' }, ch.name || ch.ct_id),
-        el('span', { class: 'stat-hint' }, `(${label(ch.ct_type)})`),
-      ]);
-      return frag([node, ...kids.map((kid) => renderNode(kid, depth + 1))]);
-    };
-    const tree = el(
-      'div',
-      { class: 'topo-tree' },
-      roots.length
-        ? roots.sort((a, b) => String(a.ct_id).localeCompare(String(b.ct_id))).map((ch) => renderNode(ch, 0))
-        : channels.map((ch) => renderNode(ch, 0))
-    );
-    return card('Containment', [tree], {
-      foot: 'A CT may sit under any other CT. Nested totals are only authoritative once confirmed.',
-    });
+    return topologyCandidatesLoadingCard();
   }
 
-  function topologyDevicesCard(topology) {
-    const devices = topology.devices || [];
+  function topologyCandidatesLoadingCard() {
     return card(
-      'Devices',
+      'Parent and alias candidates',
       [
-        devices.length
-          ? el('div', { class: 'table-wrap' }, [
-              el('table', { class: 'data' }, [
-                el('thead', {}, el('tr', {}, [
-                  el('th', {}, 'Device'),
-                  el('th', {}, 'Phase'),
-                  el('th', {}, 'Dedicated CTs'),
-                  el('th', {}, 'Branch CTs'),
-                ])),
-                el('tbody', {},
-                  devices.map((d) =>
-                    el('tr', {}, [
-                      el('td', {}, [
-                        el('a', { href: `#/device/${encodeURIComponent(d.device_id)}` }, d.name || d.device_id),
-                        el('div', { class: 'ch-sub' }, d.device_id),
-                      ]),
-                      el('td', {}, label(d.phase)),
-                      el('td', {}, (d.dedicated_ct_ids || []).join(', ') || '—'),
-                      el('td', {}, (d.branch_ct_ids || []).join(', ') || '—'),
-                    ])
-                  )),
-              ]),
-            ])
-          : emptyState('No devices', 'This topology has no devices.'),
+        el('div', { class: 'cand-loading', role: 'status' }, [
+          el('span', { class: 'spinner', 'aria-hidden': 'true' }),
+          el('span', {}, 'Comparing a 12-hour window for shared conductors and nested feeds…'),
+        ]),
+        el('div', { class: 'skeleton h-row' }),
+        el('div', { class: 'skeleton h-row' }),
+        el('div', { class: 'skeleton h-row' }),
       ],
-      { flush: true }
+      {
+        id: 'topology-candidates',
+        foot: 'The hierarchy above is already usable. This comparison only adds advisory candidates; nothing is written until you confirm it.',
+      }
     );
   }
 
-  function topologyCandidatesCard(nesting) {
-    if (!nesting) return frag([]);
+  function topologyCandidatesErrorCard(err) {
+    return card(
+      'Parent and alias candidates',
+      [
+        el('p', { class: 'stat-hint', style: 'margin-bottom:12px' },
+          `The comparison did not finish: ${describeError(err)}`),
+        el('button', { class: 'btn btn-sm', type: 'button', onclick: () => render() }, 'Try again'),
+      ],
+      { id: 'topology-candidates' }
+    );
+  }
+
+  function fillNestingCandidates(signal) {
+    // One request at a time.  A second render (a poll, a hash change, a
+    // refresh) while a comparison is in flight must not queue another 12-hour
+    // window on top of it.
+    if (state.nesting.inflight) return;
+    const age = Date.now() - state.nesting.at;
+    if (nestingIsFresh() && age < NESTING_REFRESH_AFTER_MS) return;
+
+    state.nesting.inflight = true;
+    const done = () => { state.nesting.inflight = false; };
+    get(NESTING_PATH, signal)
+      .then((data) => {
+        done();
+        if (signal.aborted || !data) return;
+        state.nesting = { data, at: Date.now(), inflight: false };
+        swapCandidates(topologyCandidatesCard(data));
+      })
+      .catch((err) => {
+        done();
+        if (!err || err.name === 'AbortError') return;
+        if (signal.aborted) return;
+        // A cached answer is still a true answer for this window: keep it.
+        if (nestingIsFresh()) return;
+        swapCandidates(topologyCandidatesErrorCard(err));
+      });
+  }
+
+  function swapCandidates(node) {
+    const current = document.getElementById('topology-candidates');
+    if (current) current.replaceWith(node);
+  }
+
+  function topologyCandidatesCard(nesting, { cached = false, willRefresh = false } = {}) {
     const candidates = nesting.candidates || [];
     const ambiguous = nesting.ambiguous || [];
     const suppressed = nesting.suppressed || [];
@@ -1687,7 +2198,7 @@
     if (ambiguous.length) {
       body.push(
         el('div', { class: 'notice', dataset: { tone: 'warn' }, style: 'margin-top:14px' }, [
-          el('div', { class: 'banner-icon' }, '!'),
+          el('div', { class: 'banner-icon', 'aria-hidden': 'true' }, '!'),
           el('div', {}, [
             el('strong', {}, `${ambiguous.length} channel${ambiguous.length === 1 ? '' : 's'} ambiguous`),
             el('p', {}, 'Measurement cannot establish a level. The engine reports the options instead of guessing.'),
@@ -1711,7 +2222,15 @@
       );
     }
     return card('Parent and alias candidates', body, {
-      foot: nesting.instants ? `Compared over ${nesting.instants} instants across ${nesting.channels_compared || 0} channels.` : null,
+      id: 'topology-candidates',
+      foot: nesting.instants
+        ? `Compared over ${nesting.instants} instants across ${nesting.channels_compared || 0} channels.`
+          + (cached
+            ? (willRefresh
+              ? ' Showing the cached result; refreshing in the background.'
+              : ' Showing the cached result from a moment ago.')
+            : '')
+        : null,
     });
   }
 
@@ -2178,7 +2697,12 @@
   function boot() {
     wire();
     applyRoute();
-    startPolling();
+    // The overview is the only view that consumes the poll.  Starting it
+    // unconditionally meant a cold load straight onto #/topology kept an 8 s
+    // /health poll running behind a slow request, competing for the same
+    // connection and delaying the first paint.
+    if (state.view === 'overview') startPolling();
+    else stopPolling();
     pollTick();
   }
 
