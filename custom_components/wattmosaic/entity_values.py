@@ -189,15 +189,26 @@ def global_values(
         "inferred_power": as_float(reconciliation.get("inferred_w")),
         "model_estimated_power": as_float(reconciliation.get("model_estimated_w")),
         "unknown_power": as_float(reconciliation.get("unknown_residual_w")),
-        #: The same residual, decomposed (contract 1.4.0).  ``unknown_power``
-        #: above keeps its exact meaning -- the whole gap -- so a dashboard that
-        #: reads only it sees no change.  These two say *what the gap is made
-        #: of*: instrument disagreement between two meters on the same wires vs
-        #: genuinely unclamped load.  ``None`` when the engine did not report
-        #: them (an older engine), never a fabricated 0 W.
+        #: The same residual, decomposed (contract 1.4.0, corrected in 1.5.0).
+        #: ``unknown_power`` above keeps its exact meaning -- the whole gap -- so
+        #: a dashboard that reads only it sees no change.  These two say *what
+        #: the gap is made of*: the part of it attributable to two meters on the
+        #: same wires reading differently, vs the part not attributable to any
+        #: device.  They add up to ``unknown_power`` exactly.  ``None`` when the
+        #: engine did not report them (an older engine), never a fabricated 0 W.
         "unmonitored_power": as_float(reconciliation.get("unmonitored_w")),
         "meter_disagreement_power": as_float(
             reconciliation.get("meter_disagreement_w")
+        ),
+        #: The raw, **unbounded** meter-to-meter spread (contract 1.5.0).  It is
+        #: a diagnostic about two instruments, not a component of the residual,
+        #: so it is deliberately *not* added to the two above: on the reference
+        #: install it is ~349 W while the whole residual is ~166 W.  ``None``
+        #: when the engine did not report it -- an old engine must never look
+        #: like "the meters agree".
+        "meter_spread_power": as_float(reconciliation.get("meter_spread_w")),
+        "meter_spread_exceeds_residual": bool(
+            reconciliation.get("meter_spread_exceeds_residual", False)
         ),
         "reconciliation_error": as_float(reconciliation.get("reconciliation_error_w")),
         "accounted_fraction": as_percentage(reconciliation.get("accounted_fraction")),

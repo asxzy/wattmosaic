@@ -28,7 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from . import __version__ as ENGINE_VERSION
 
-CONTRACT_VERSION = "1.4.0"
+CONTRACT_VERSION = "1.5.0"
 
 
 def utcnow() -> datetime:
@@ -822,17 +822,39 @@ class Reconciliation(Model):
     model_estimated_w: float = 0.0
     configured_prior_w: float = 0.0
     unknown_residual_w: float = 0.0
-    #: The ``unknown_residual_w`` decomposition (contract 1.4.0, additive).
-    #: ``meter_disagreement_w`` is the absolute difference between the canonical
-    #: feed total and an aliased meter on the *same* conductors; it is 0.0 when
-    #: there is no alias or when either meter is not fresh.
-    #: ``unmonitored_w`` is the remainder -- ``unknown_residual_w -
-    #: meter_disagreement_w`` clamped at 0 -- which is genuinely unclamped load.
-    #: ``unmonitored_w + meter_disagreement_w == unknown_residual_w`` whenever
-    #: the residual is non-negative, and ``accounted + unknown_residual ==
-    #: main_power_w`` still holds exactly because the total is unchanged.
+    #: The ``unknown_residual_w`` decomposition (contract 1.5.0).
+    #:
+    #: Two different kinds of number live here, and conflating them is what
+    #: contract 1.4.0 got wrong:
+    #:
+    #: * ``meter_spread_w`` is the **absolute** ``|canonical feed total -
+    #:   aliased feed total|``.  It is an independent, *unbounded* property of
+    #:   two instruments on the same conductors -- a diagnostic, never a part of
+    #:   the residual.  0.0 when no enabled alias exists or either side is not a
+    #:   fresh, complete meter node.
+    #: * ``meter_disagreement_w`` is that spread's **contribution to the
+    #:   residual**, clipped into ``[0, unknown_residual_w]``.  A residual cannot
+    #:   contain more of anything than itself, so when the meters disagree by
+    #:   more than the whole residual, this equals the residual.
+    #: * ``unmonitored_w`` is ``unknown_residual_w - meter_disagreement_w``.
+    #:
+    #: Hence ``unmonitored_w + meter_disagreement_w == unknown_residual_w``
+    #: **exactly** in every case, and ``accounted + unknown_residual ==
+    #: main_power_w`` still holds because the total is never rewritten.  Note
+    #: that even a non-zero ``unmonitored_w`` means "not attributable to a
+    #: device", not "not metered".
     unmonitored_w: float = 0.0
     meter_disagreement_w: float = 0.0
+    #: ``|canonical mains total - aliased mains total|``, unbounded, diagnostic
+    #: only (contract 1.5.0).  Distinct from ``meter_disagreement_w`` above:
+    #: on the reference install it is ~349 W while the residual is ~166 W.
+    meter_spread_w: float = 0.0
+    #: True when ``meter_spread_w > unknown_residual_w``: the meters disagree by
+    #: more than the whole residual, so the residual is **not** evidence of
+    #: unmonitored load.  Surfaced so that ``unmonitored_w == 0`` is never read
+    #: as "everything is metered" when the opposite is true.  Mirrored in
+    #: ``explanation`` as ``meter_spread_exceeds_residual:<W>_vs_<W>``.
+    meter_spread_exceeds_residual: bool = False
     reconciliation_error_w: float = 0.0
     reconciliation_error_ratio: float = 0.0
     accounted_fraction: float = 0.0

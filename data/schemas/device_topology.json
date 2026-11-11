@@ -90,5 +90,5 @@
   "title": "DeviceTopology",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/device_topology.json",
-  "x-contract-version": "1.4.0"
+  "x-contract-version": "1.5.0"
 }

@@ -67,7 +67,7 @@ from wattmosaic_engine.electrical.direct import (
 from wattmosaic_engine.electrical.main_power import (
     MainPower,
     main_power_w,
-    meter_disagreement_w,
+    meter_spread_w,
 )
 from wattmosaic_engine.electrical.matrix import MeasurementMatrix, build_measurement_matrix
 from wattmosaic_engine.electrical.models import ModelView, resolve_model
@@ -2117,32 +2117,64 @@ class DisaggregationEngine:
                     ),
                 }
 
-        # The residual is two physically different quantities when the home is
-        # metered twice on one conductor.  ``unknown_residual`` keeps its exact
-        # meaning (it is the whole gap and the balance identity depends on it);
-        # the split only names how much of it is instrument disagreement
-        # between two meters on the same wires and how much is genuinely
-        # unclamped load.  Nothing is re-estimated: the two parts add to the
-        # number that was already reported.
+        # The residual and the meter-to-meter spread are *different kinds of
+        # number* and must not be forced into one sum.
+        #
+        # ``unknown_residual`` is a bounded accounting remainder: it is exactly
+        # ``main - accounted`` for the one canonical meter, and
+        # ``accounted + unknown_residual == main.total_w`` depends on that.
+        #
+        # ``meter_spread`` is ``|canonical total - alias total|``: an
+        # independent property of two instruments clamped on the same
+        # conductors, with no upper bound at all.  On the reference install it
+        # is ~349 W while the whole residual is ~166 W, so the spread is larger
+        # than the residual and can never be "inside" it.
+        #
+        # What *is* a part of the residual is the disagreement's *contribution*
+        # to it: at most the whole residual, because a residual cannot contain
+        # more of anything than itself.  Hence:
+        #
+        #     meter_disagreement = clip(meter_spread, 0, residual)
+        #     unmonitored        = residual - meter_disagreement
+        #
+        # which is additive by construction.  When the spread exceeds the
+        # residual the whole residual is attributable to the instruments, and
+        # ``meter_spread_exceeds_residual`` says so loudly: the residual is then
+        # *not* evidence of unmonitored load.  Nothing is re-estimated, and the
+        # residual itself is never rewritten.
+        meter_spread = 0.0
         meter_disagreement = 0.0
+        meter_spread_exceeds_residual = False
         if not (main.errors or not main.usable):
-            meter_disagreement, disagreeing_cts = meter_disagreement_w(
+            meter_spread, disagreeing_cts = meter_spread_w(
                 graph,
                 window.readings,
                 canonical_total_w=main.total_w,
                 max_age_s=self.max_measurement_age_s,
                 phase_split_l1=self.phase_split_l1,
             )
-            if meter_disagreement > 0.0:
+            if meter_spread > 0.0:
+                # A residual below zero is a sample-vintage artefact, not a
+                # quantity that can contain any part of a spread, so the
+                # contribution is clipped at zero for it.
+                meter_disagreement = min(meter_spread, max(0.0, unknown_residual))
+                meter_spread_exceeds_residual = meter_spread > unknown_residual
                 diagnostics["meter_disagreement"] = {
+                    "spread_w": meter_spread,
                     "disagreement_w": meter_disagreement,
                     "channels": list(disagreeing_cts),
+                    "exceeds_residual": meter_spread_exceeds_residual,
                     "reason": (
                         "two CTs on the same conductors report different totals; "
-                        "the difference is instrument disagreement, not load"
+                        "only the part that fits inside the residual is charged to "
+                        "it, and the spread itself is an unbounded instrument "
+                        "diagnostic, not load"
                     ),
                 }
-        unmonitored = max(0.0, unknown_residual - meter_disagreement)
+        # Additive by construction.  For a non-negative residual both parts are
+        # non-negative; a negative residual keeps its sign (it is a
+        # sample-vintage artefact and is reported as-is, never clamped away).
+        unmonitored = unknown_residual - meter_disagreement
 
         # Measurement-fit error: how well all attributed device power explains
         # the CT rows.  This is a *fit* diagnostic, not the power balance.
@@ -2198,6 +2230,16 @@ class DisaggregationEngine:
             explanation.append(
                 f"unmonitored_residual_excludes_meter_disagreement:{unmonitored:.1f}W"
             )
+        if meter_spread_exceeds_residual:
+            # Never hidden: when the two meters disagree by more than the whole
+            # residual, the residual is *not* evidence of unmonitored load.  An
+            # operator reading only ``unmonitored_w == 0`` could mistake that
+            # for "everything is metered", which is the opposite of the fact
+            # recorded here.
+            explanation.append(
+                f"meter_spread_exceeds_residual:{meter_spread:.1f}W"
+                f"_vs_{unknown_residual:.1f}W"
+            )
         if main.has_export:
             explanation.append("negative_power_export_preserved")
         if main.missing_channels:
@@ -2230,6 +2272,8 @@ class DisaggregationEngine:
             unknown_residual_w=unknown_residual,
             unmonitored_w=unmonitored,
             meter_disagreement_w=meter_disagreement,
+            meter_spread_w=meter_spread,
+            meter_spread_exceeds_residual=meter_spread_exceeds_residual,
             reconciliation_error_w=recon_error,
             reconciliation_error_ratio=ratio,
             accounted_fraction=accounted_fraction,
