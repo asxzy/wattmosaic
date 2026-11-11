@@ -416,7 +416,7 @@ class WattMosaicBackend:
           ``DEDICATED_DEVICE`` channel), so the Level-1 path yields nothing even
           when the device is the only thing on the circuit.  The type gate
           belongs to the electrical layer; this records the fact and *why* so a
-          dashboard can say "0 W direct because all 21 circuits are classified
+          dashboard can say "0 W direct because this circuit is classified
           branch" instead of showing a bare zero.
         * **No fresh measurement.**  The device has an attribution row but the
           CT value is stale/bad/missing, so nothing current describes it.  Such
@@ -475,10 +475,47 @@ class WattMosaicBackend:
             if result is not None and not _has_fresh_measurement(result, max_age):
                 no_fresh[device_id] = _stale_reason(result, max_age)
 
+        # Structural guard, computed from the *graph and the readings* rather
+        # than from the loop's own branches above: every device the graph says
+        # has a dedicated CT must be either measured or named in
+        # ``missing_direct``.  If a future edit narrows that loop, a capable
+        # device can no longer vanish from the explanation without this
+        # reporting it.
+        capable = (
+            {did for did in graph.device_ids if graph.dedicated_channel_for(did)}
+            if graph is not None
+            else set()
+        )
+        measured = {
+            did
+            for did, reading in direct_map.items()
+            if isinstance(reading, Mapping)
+            and reading.get("usable")
+            and reading.get("power_w") is not None
+        }
+        unexplained = sorted(capable - measured - set(missing_direct))
+        # A 0 W direct count is only acceptable when *every* device that has no
+        # usable direct reading says why (``missing_direct``).  The count alone
+        # cannot distinguish "this install's circuits are all ``branch``" --
+        # a legitimate outcome (ADR-0025/0026) -- from "the direct path silently
+        # produced nothing", which is a defect.
+        if not capable:
+            availability = "no_dedicated_ct"
+        elif unexplained:
+            availability = "unexplained_unavailable"
+        elif measured:
+            availability = "measured"
+        else:
+            availability = "explained_unavailable"
+
         return {
             "direct_measured_count": direct_count,
             "missing_direct": missing_direct,
             "missing_direct_count": len(missing_direct),
+            "direct_capable_count": len(capable),
+            "direct_availability": availability,
+            "direct_unavailable_explained": not unexplained,
+            "unexplained_direct_devices": unexplained,
             "no_fresh_measurement": no_fresh,
             "no_fresh_measurement_count": len(no_fresh),
         }

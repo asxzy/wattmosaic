@@ -42,6 +42,7 @@ The fixtures keep the deadline so a regression fails fast instead of hanging CI.
 from __future__ import annotations
 
 import os
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -347,6 +348,84 @@ def test_real_replay_excludes_refused_totals_from_the_mean(
         "longer contains an undecidable feed relation, so this gate is stale"
     )
     assert any("excluded from every mean" in note for note in shipped_replay.notes)
+
+
+def test_the_real_install_has_a_live_direct_measurement_path(
+    shipped_topology, capture
+) -> None:
+    """C1: direct measurement must be *live*, or its absence must be explained.
+
+    The concern behind C1 was that the Level-1 path might return nothing on the
+    real install, leaving every device to the solver.  The type gate is real
+    (``resolve_direct`` requires ``DEDICATED_DEVICE``, and 10 of this
+    installation's circuits are ``branch`` by declaration -- ADR-0026), but it is
+    not starving the install: this capture carries 22 dedicated channels and
+    17-20 of them produce a usable reading in a typical window.
+
+    Both halves are pinned, because either alone is the failure this guards:
+
+    * the topology must still contain dedicated channels (if it stops, the
+      measurement is gone and something reclassified them);
+    * across the replay, at least one window must produce a usable direct
+      reading -- a permanently-zero count means the path is dead.
+
+    Measured on the 120-minute tail: 458 usable windows, direct count histogram
+    ``{15: 1, 17: 181, 18: 208, 19: 29, 20: 39}``.
+    """
+    from collections import Counter
+
+    from wattmosaic_engine.electrical.direct import resolve_direct
+    from wattmosaic_engine.electrical.topology import build_graph
+    from wattmosaic_engine.synchronization.aligner import SampleAligner
+
+    from tools.audit.replay_capture import _measurement
+
+    dedicated = [
+        ch for ch in shipped_topology.channels
+        if str(getattr(ch.ct_type, "value", ch.ct_type)) == "dedicated_device"
+    ]
+    assert dedicated, "the real topology carries no dedicated_device CT at all"
+
+    graph = build_graph(shipped_topology)
+    capable = [did for did in graph.device_ids if graph.dedicated_channel_for(did)]
+    assert len(capable) == len(dedicated), (
+        "each dedicated CT must resolve to exactly one device through the graph"
+    )
+
+    aligner = SampleAligner(max_age_s=300.0)
+    index = 0
+    samples = capture.samples
+    histogram: Counter[int] = Counter()
+    cursor = capture.window_start
+    while cursor <= capture.window_end:
+        while index < len(samples) and samples[index].received_at <= cursor:
+            aligner.add(_measurement(samples[index]))
+            index += 1
+        window = aligner.window(at=cursor, max_age_s=300.0)
+        if window.channels:
+            readings = resolve_direct(window, graph, max_age_s=120.0)
+            histogram[
+                sum(
+                    1
+                    for r in readings.values()
+                    if r.usable and r.power_w is not None
+                )
+            ] += 1
+        cursor = cursor + timedelta(seconds=REPLAY_TICK_S)
+
+    assert histogram, "no usable aligner window in the capture tail"
+    best = max(histogram)
+    assert best > 0, (
+        "the Level-1 direct path produced no usable reading in any window; "
+        f"histogram={dict(histogram)} -- the direct measurement path is dead"
+    )
+    # Stale-capture detector: the bulk of dedicated devices must be readable, not
+    # a single channel that happens to be alive while the rest are absent.
+    majority = sum(n for count, n in histogram.items() if count * 2 > len(capable))
+    assert majority >= 0.9 * sum(histogram.values()), (
+        "most windows do not read a majority of the dedicated CTs "
+        f"(histogram={dict(histogram)}, capable={len(capable)})"
+    )
 
 
 def test_nested_replay_terminates_and_balances(nested_replay) -> None:

@@ -372,10 +372,20 @@ WATTMOSAIC_REAL_DB=/path/to/wattmosaic.db \
 | `test_real_replay_excludes_refused_totals_from_the_mean` | A window where the engine refuses a total is counted as unavailable and excluded from every mean, never averaged in as `0 W` |
 | `test_shipped_replay_terminates` | The shipped topology finishes inside the deadline (E2-2 fixed) |
 | `test_shipped_replay_does_not_double_count` | The inverse of the old defect gate: shipped / nested paired ratio is within 5 % |
+| `test_the_real_install_has_a_live_direct_measurement_path` | C1: the topology keeps its dedicated channels, each resolves to exactly one device, at least one window produces a usable direct reading, and a majority of capable CTs is read in ≥ 90 % of windows (a stale-capture detector) |
 
 The gates are plain assertions now. Both were `xfail`s naming E2-1/E2-2 while
 the engine was broken; they flipped to passes when the fixes landed, and a
 future regression fails the test instead of silently XPASSing.
+
+**Two guards added with the C1 decision.** `main_power_w` now forces
+`complete=False` and names the channel (`feed_group_unmeasured`) when a feed
+inside a same-leg conflict group has no reading — it used to be dropped from the
+group silently, publishing part of the service as the whole-home total. And a
+0 W direct count carries a verdict (`direct_availability`), so "every circuit is
+a branch" (legitimate, ADR-0026) is distinguishable from "the Level-1 path is
+dead" (a defect). Both are negative-verified: reverting the engine change makes
+the new unit tests fail on exactly the silent behaviour described.
 
 **What was fixed, and why the gate is not a simulator test.** The shipped
 topology declares the load manager, the main panel and the sub panel as six

@@ -527,7 +527,11 @@ MainPower = main_power_w(graph, readings)
 * Polarity inverted channels are negated first, from `CTChannel.polarity` for
   bare floats and from `Measurement.polarization` / `ChannelReading` otherwise.
 * A missing or `NaN` main is `missing_channels` and sets `complete=False`; it is
-  **not** treated as `0 W`.
+  **not** treated as `0 W`. This holds for a feed inside a conflict group too:
+  a member with no reading may carry a disjoint leg (which would add) or may be
+  the outer feed the measured member nests inside, and neither can be decided
+  without the value. It is named in `notes` as `feed_group_unmeasured` and
+  forces `complete=False` rather than being dropped from the group.
 * Nested mains are excluded from the sum (see §1.1), not an error.
 * Feeds are grouped into **measurement nodes**: a `<stem>_l1`/`<stem>_l2`
   split-phase pair, or a declared reciprocal `paired_ct_id` pair, is one meter
@@ -587,6 +591,36 @@ verified dedicated CT:
 * A direct value is **never** replaced by a model estimate. Conflicts with a HA
   state transition are surfaced (`state_direct_measurement_conflict`) and cap
   confidence, but the measured value is kept.
+
+### The gate: 0 W direct is allowed only when explained
+
+`direct_measured_count` alone cannot say whether a "0 W direct" batch is a
+legitimate install or a broken Level-1 path. Two very different houses produce
+the same count:
+
+* every circuit is a `branch` (this is the honest default, ADR-0025/0026), so
+  nothing is *capable* of a direct reading;
+* the dedicated CTs exist but no reading reached the window, so the path is
+  producing nothing.
+
+The batch therefore carries a verdict, computed from the graph and the readings
+rather than from the explanation loop's own bookkeeping:
+
+| `direct_availability` | Meaning |
+| --- | --- |
+| `no_dedicated_ct` | the topology has no `DEDICATED_DEVICE` channel at all |
+| `measured` | at least one capable device produced a usable reading |
+| `explained_unavailable` | capable, but every device is named in `missing_direct` |
+| `unexplained_unavailable` | **a defect**: a capable device is neither measured nor named |
+
+`direct_capable_count`, `direct_unavailable_explained` and
+`unexplained_direct_devices` accompany it, and
+`Reconciliation.explanation` names the missing count by reason
+(`no_direct_measurement:N device(s) (no_dedicated_device_ct×k, ...)`). The
+release gate is exactly: `direct_measured_count > 0` **or** every capable device
+is named in `missing_direct`; i.e. `direct_availability` is never
+`unexplained_unavailable`. This is pinned on the real capture by
+`tests/simulation/test_real_topology.py::test_the_real_install_has_a_live_direct_measurement_path`.
 
 ---
 

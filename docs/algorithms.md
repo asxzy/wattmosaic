@@ -47,6 +47,19 @@ one.
 | 3 | `model_estimated` | a validated model gives a value for the current state |
 | 4 | `unknown` | none of the above, or ambiguity |
 
+A `branch` CT is never Level 1, however alone the device is on the circuit
+(ADR-0026): the branch may carry unmodelled load. Level 1 requires a
+`DEDICATED_DEVICE` channel or a declared `dedicated_ct_ids` entry.
+
+Because of that gate a batch can legitimately contain **zero** direct readings --
+on a branch-only install nothing is capable of one. `InferenceBatch.diagnostics`
+therefore carries a verdict (`direct_availability`:
+`measured` / `explained_unavailable` / `no_dedicated_ct` /
+`unexplained_unavailable`, with `direct_capable_count` and
+`unexplained_direct_devices`) so "0 W because every circuit is a branch" is
+distinguishable from "the direct path produced nothing". Only
+`unexplained_unavailable` is a defect. See `docs/electrical_model.md` §7.
+
 Guarantees:
 
 * A direct measurement is never replaced by a model estimate (tested with a

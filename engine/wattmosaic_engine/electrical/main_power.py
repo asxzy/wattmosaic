@@ -257,6 +257,21 @@ def main_power_w(
     partial = False
     for group in conflict_groups:
         members = [nodes[i] for i in group]
+        # Every member here is a *top-level* feed: aliases and nested mains were
+        # already removed by ``effective_feeds``, so no member is redundant.
+        # A member with no reading at all is a feed this total cannot see -- it
+        # may carry part of the household (disjoint legs add), or it may be the
+        # outermost feed the measured member nests inside.  Which of those it is
+        # cannot be decided without the reading, so the sum is not provably the
+        # whole-home power.  ``complete`` therefore must be False: the module
+        # contract is that a missing main is reported, never silently dropped.
+        unmeasured = [n for n in members if node_total(n) is None]
+        if unmeasured:
+            partial = True
+            notes.append(
+                "feed_group_unmeasured: "
+                + "; ".join("+".join(n) for n in unmeasured)
+            )
         usable = [n for n in members if node_total(n) is not None]
         if not usable:
             continue

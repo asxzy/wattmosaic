@@ -627,6 +627,52 @@ def test_three_way_same_leg_ambiguity_still_refuses():
     assert result.complete is False
 
 
+def test_a_missing_feed_in_a_conflict_group_is_not_silently_dropped():
+    """A feed with no reading must make the total incomplete, not invisible.
+
+    Two feeds on the same leg with no declared parent are one conductor measured
+    twice *or* one nested inside the other.  When only one of them reports, the
+    missing one may be the outermost feed -- so the visible reading is a lower
+    bound, never a whole-home total.  Before this was fixed the member simply
+    vanished from the conflict group and ``complete`` stayed ``True``, which is
+    exactly the silent partial total the module docstring forbids.
+    """
+    result = main_power_w(build_graph(_same_leg_feeds("a", "b")), {"a": 1500.0})
+    assert result.total_w == 1500.0
+    assert result.complete is False
+    assert "b" in result.missing_channels
+    assert any(n.startswith("feed_group_unmeasured") for n in result.notes)
+    assert any("b" in n for n in result.notes if n.startswith("feed_group_unmeasured"))
+
+
+def test_a_missing_feed_on_an_additive_leg_also_blocks_completeness():
+    """Disjoint phases add, so a missing leg is missing half the household.
+
+    ``l1`` and ``l2`` are provably additive feeds.  With ``l2`` absent the sum
+    is one leg's draw, not the service total; reporting ``complete=True`` there
+    would let a consumer publish half the house as the whole.  A single panel
+    feed measured on both legs is *not* affected (it is one node, already
+    covered by ``partial_leg_measurement``).
+    """
+    topology = Topology(
+        channels=[
+            _ch("panel_a_l1", CTType.MAIN, phase=Phase.L1),
+            _ch("panel_b_l2", CTType.MAIN, phase=Phase.L2),
+        ]
+    )
+    result = main_power_w(build_graph(topology), {"panel_a_l1": 1500.0})
+    assert result.total_w == 1500.0
+    assert result.complete is False
+    assert result.missing_channels == ("panel_b_l2",)
+    assert any(n.startswith("feed_group_unmeasured") for n in result.notes)
+    # And the fully measured case is still complete, so the guard is surgical.
+    both = main_power_w(
+        build_graph(topology), {"panel_a_l1": 1500.0, "panel_b_l2": 900.0}
+    )
+    assert both.complete is True
+    assert both.total_w == 2400.0
+
+
 def test_the_measurement_resolution_is_deterministic():
     """Same readings must give the same outermost feed, run after run.
 

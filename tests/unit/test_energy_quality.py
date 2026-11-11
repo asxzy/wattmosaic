@@ -527,7 +527,7 @@ class _Window:
 
 
 def test_branch_ct_devices_are_reported_as_missing_direct_measurement(db: Database) -> None:
-    """The 21-branch-CT case: 0 W direct, and the reason is stated.
+    """The branch-only case: 0 W direct, and the reason is stated.
 
     ``resolve_direct`` only reads ``DEDICATED_DEVICE`` channels.  A branch CT
     therefore never produces a direct reading, however alone the device is on
@@ -624,6 +624,100 @@ def test_measurement_gap_explanation_is_idempotent(db: Database) -> None:
     before = list(batch.reconciliation.explanation)
     WattMosaicBackend._explain_measurement_gaps(batch.reconciliation, gaps)
     assert batch.reconciliation.explanation == before
+
+
+def test_direct_availability_names_the_branch_only_case(db: Database) -> None:
+    """A branch-only install is ``no_dedicated_ct``, not a silent zero.
+
+    C1 resolved to (b): a 0 W direct count is acceptable only when it is
+    *explained*.  This topology has no ``DEDICATED_DEVICE`` channel at all, so
+    nothing is capable of a direct reading and the verdict says so -- the case a
+    dashboard must render as "0 W because these are branch circuits", never as a
+    bare zero.
+    """
+    topology = _solo_branch_topology()
+    backend = _backend_with_db(db)
+    batch = backend.process(
+        _Window({"br_solo": 800.0}, T0), device_states={}, topology=topology
+    )
+
+    gaps = batch.diagnostics["measurement_gaps"]
+    assert gaps["direct_measured_count"] == 0
+    assert gaps["direct_capable_count"] == 0
+    assert gaps["direct_availability"] == "no_dedicated_ct"
+    assert gaps["direct_unavailable_explained"] is True
+    assert gaps["unexplained_direct_devices"] == []
+
+
+def test_direct_availability_reports_a_capable_device_with_no_reading(db: Database) -> None:
+    """A dedicated CT that produced nothing is ``explained_unavailable``.
+
+    The channel exists, so the install *is* capable of a direct reading; the
+    reading is missing because the CT was absent from this window.  That is the
+    distinction the count alone could not express.
+    """
+    topology = Topology(
+        channels=[
+            CTChannel(ct_id="m_l1", entity_id="s.m", ct_type=CTType.MAIN, phase=Phase.L1),
+            CTChannel(
+                ct_id="ct_heater",
+                entity_id="s.heater",
+                ct_type=CTType.DEDICATED_DEVICE,
+                phase=Phase.L1,
+                parent_ct_id="m_l1",
+                device_id="heater",
+            ),
+        ],
+        devices=[
+            DeviceTopology(
+                device_id="heater", dedicated_ct_ids=["ct_heater"], phase=Phase.L1
+            )
+        ],
+    )
+    backend = _backend_with_db(db)
+    batch = backend.process(
+        _Window({"m_l1": 1000.0}, T0), device_states={}, topology=topology
+    )
+
+    gaps = batch.diagnostics["measurement_gaps"]
+    assert gaps["direct_measured_count"] == 0
+    assert gaps["direct_capable_count"] == 1
+    assert gaps["direct_availability"] == "explained_unavailable"
+    assert gaps["missing_direct"]["heater"].startswith("direct_reading_unusable")
+    assert gaps["direct_unavailable_explained"] is True
+    assert gaps["unexplained_direct_devices"] == []
+
+
+def test_a_measured_dedicated_ct_is_reported_as_measured(db: Database) -> None:
+    topology = Topology(
+        channels=[
+            CTChannel(ct_id="m_l1", entity_id="s.m", ct_type=CTType.MAIN, phase=Phase.L1),
+            CTChannel(
+                ct_id="ct_heater",
+                entity_id="s.heater",
+                ct_type=CTType.DEDICATED_DEVICE,
+                phase=Phase.L1,
+                parent_ct_id="m_l1",
+                device_id="heater",
+            ),
+        ],
+        devices=[
+            DeviceTopology(
+                device_id="heater", dedicated_ct_ids=["ct_heater"], phase=Phase.L1
+            )
+        ],
+    )
+    backend = _backend_with_db(db)
+    batch = backend.process(
+        _Window({"m_l1": 1000.0, "ct_heater": 400.0}, T0),
+        device_states={},
+        topology=topology,
+    )
+
+    gaps = batch.diagnostics["measurement_gaps"]
+    assert gaps["direct_availability"] == "measured"
+    assert gaps["direct_capable_count"] == 1
+    assert gaps["unexplained_direct_devices"] == []
 
 
 def test_direct_measured_floor_only_applies_to_direct_measurement() -> None:

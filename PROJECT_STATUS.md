@@ -3935,6 +3935,211 @@ liveness table, which is the argument for the change:
 
 ---
 
+## 7s. The four electrical-core lanes, integrated and gated (2026-11-11)
+
+Branch `fix/electrical-core` at `8e3dae2`, shipping as `0.2.1-dev.11`.
+
+### 7s.1 What was actually verified, and against what
+
+The full suite was run **before** any change (`1775 passed, 8 skipped, 11
+warnings in 120.19 s`, 0 failures) and again after. Every number in §7s.3 was
+produced locally from the read-only capture at
+`/Users/asxzy/src/wattmosaic/data/wattmosaic.db` (392 MB, opened `mode=ro`), not
+copied from a commit message or an earlier report. The worktree has no `data/`
+directory, so the real-topology gates take `WATTMOSAIC_REAL_DB`.
+
+Capture facts established directly: 38 channels, 28 devices, latest stored
+topology row `version 4` (payload version 3, status `candidate`), 320 852
+inference rows and 296 340 CT samples. Channel types **22
+`dedicated_device` / 10 `branch` / 6 `main`**. That mix is the whole basis of
+the C1 decision in §7s.4 -- a claim that this install produces "0 W of direct
+measurement" is false, and the evidence says so in the histogram below.
+
+### 7s.2 Two real defects found by review, both fixed with a regression test
+
+Nobody had reported these; they were found by running the code against the
+capture and against small hand-built topologies.
+
+**Defect A -- a missing feed was silently absorbed into the whole-home total.**
+`main_power_w` groups feeds into measurement nodes and, inside a conflict group,
+skipped any node whose reading was `None`. `complete` was computed only from
+*selected* channels, so a group where one feed had no reading still reported
+`complete=True` while summing only the feeds it could see. Reproduced before the
+fix on two shapes:
+
+```text
+disjoint legs, L2 missing   -> total 1500.0  complete True   (half a service, called whole)
+same-leg pair, b missing    -> total 1500.0  complete True   (b may be the outer feed)
+```
+
+Both are wrong for the same reason: the module contract is "a missing main is
+reported per channel; the total is computed over the mains that are usable and
+`complete` becomes `False`". A feed with no reading is now named in `notes` as
+`feed_group_unmeasured: <channels>` and forces `complete=False`. The fully
+measured cases are unchanged, which the tests assert in the same breath as the
+missing case so the guard cannot be satisfied by making everything incomplete.
+
+Tests: `test_a_missing_feed_in_a_conflict_group_is_not_silently_dropped`,
+`test_a_missing_feed_on_an_additive_leg_also_blocks_completeness`. **Negative
+verified**: with `main_power.py` reverted both fail with
+`AssertionError: assert True is False` on `complete`, showing the exact silent
+partial total.
+
+**Defect B -- a 0 W direct count had no verdict.** `_measurement_gap_summary`
+returned `direct_measured_count` plus a `missing_direct` map, but nothing tied
+the two together. A count of 0 could mean "this install has no dedicated CT"
+(legitimate: 10 of the 38 channels are `branch` by declaration, ADR-0026) or
+"the Level-1 path is dead" (a defect), and no caller or test could tell them
+apart. The batch now carries `direct_capable_count`,
+`direct_availability` (`measured` / `explained_unavailable` /
+`no_dedicated_ct` / `unexplained_unavailable`), `direct_unavailable_explained`
+and `unexplained_direct_devices`. The verdict is derived from the **graph and
+the readings**, not from the loop's own bookkeeping, so narrowing that loop
+cannot hide a capable device.
+
+Tests: `test_direct_availability_names_the_branch_only_case`,
+`test_direct_availability_reports_a_capable_device_with_no_reading`,
+`test_a_measured_dedicated_ct_is_reported_as_measured`. **Negative verified**:
+all three fail without the integration change (`KeyError` on the new keys).
+
+### 7s.3 Measured numbers on the real capture (120 min, 13 681 samples, 459 windows)
+
+```text
+naive sum of all six mains   3943.3 W mean   min 2391.3  median 3424.9  max 13379.4
+resolved whole-home total    1568.9 W mean                    median 1344.0  max  5000.0
+paired on 434 complete instants: 2.447x  (worst single instant 2.68x at 11:24:35)
+```
+
+That is the E2-1 double count, measured rather than asserted: the old sum was
+**2.5x** the resolved total, and the worst instant was **13 379 W** for a house
+whose resolved draw never exceeds 5 000 W on this window.
+
+```text
+as-shipped  main 1568.9 W  accounted 1033.8 W  residual 535.2 W  11.8 s
+            24/459 windows refused (excluded from the mean)
+nested      main 1599.1 W  accounted 1082.9 W  residual 516.2 W  10.1 s
+paired on 435 shared instants: 1568.9 W vs 1555.0 W, ratio 1.009
+```
+
+Attribution coverage **0.659**, unknown-load share **0.341**, false attribution
+**0**. The 24 refusals are genuine: on those instants the three panel feeds sit
+inside the 30 W / 2 % containment tolerance and the engine declines to state a
+total, which is the honest answer.
+
+**Direct path liveness (the C1 evidence).** `resolve_direct` over the same
+window, per 15.7 s tick, histogram of usable readings out of 22 capable
+channels:
+
+```text
+{15: 1, 17: 181, 18: 208, 19: 29, 20: 39}   over 458 usable windows
+```
+
+So the Level-1 path is alive and reading 17-20 of 22 dedicated CTs every tick.
+The two devices that never report are `refoss_main_panel_sauna` and
+`refoss_main_panel_upper_floor_ac`; absence is named per device
+(`missing_channel:<ct>,missing_measurement`), not swallowed.
+
+**Energy single-counting.** `energy_aggregates` holds both 300 s and 3600 s
+series: summing every row gives **56.94 kWh**, selecting the smallest bucket
+gives **31.12 kWh** across all 28 devices. `Database.energy_total` now selects
+one bucket size, and `test_storage_e2e` asserts against the fixed total.
+
+### 7s.4 C1 resolved: option (b), as an invariant rather than a sentence
+
+C1 asked for a choice between promoting exclusive branch CTs to
+`direct_measured`/tier 3, or keeping 0 direct and amending the gate to
+"`direct_measured > 0` OR every device carries an explicit
+`direct_unavailable` reason".
+
+**Decision: option (b).** Reasons, in order of weight:
+
+1. **The premise of option (a) is false on this install.** §7s.3 shows 17-20
+   usable direct readings per tick from 22 dedicated channels. There is no
+   starvation to relieve, so a promotion rule would add risk without adding a
+   measurement.
+2. **Promotion would fabricate wiring.** `docs/electrical_model.md` §7 and
+   ADR-0026 are explicit: a `branch` CT is never direct measurement, because the
+   branch may carry unmodelled load. ADR-0025 says `branch` is the honest
+   default and `dedicated_device` comes only from a declaration or verified
+   evidence. Promoting on "sole occupant" would convert a declaration the user
+   did not make into a measurement claim, and the six sole-occupant devices on
+   this install are exactly the ones whose circuits are shared in practice
+   (lights CT1/CT2 and four double-pole pairs: upper-floor plug, hot tub,
+   kitchen plug, upper-deck heater).
+3. **The gate as written was unfalsifiable.** "`direct_measured > 0`" is either
+   trivially true (this install) or false for a legitimate branch-only install,
+   so it could not distinguish a dead path from a design choice. Option (b)'s
+   second clause is the actual invariant, and §7s.2 Defect B makes it checkable
+   in code rather than in prose.
+
+The gate is therefore: **`direct_measured_count > 0` OR every capable device is
+named in `missing_direct`** -- equivalently `direct_availability` is never
+`unexplained_unavailable`. It is pinned on synthetic topologies (three unit
+tests, negative-verified) and on the real capture by
+`test_the_real_install_has_a_live_direct_measurement_path`, which asserts the
+install keeps dedicated channels, that each resolves to exactly one device, that
+the direct count is non-zero in at least one window, and that a majority of
+capable CTs is read in at least 90 % of windows. That last clause is a
+stale-capture detector: it fails if the capture stops exercising the path,
+rather than silently passing on an empty series.
+
+### 7s.5 Test assertions changed, and why none were weakened
+
+Only three test files were touched by the merged lanes, and the release owner
+re-read each change rather than trusting the diff summary:
+
+| File | Change | Direction |
+| --- | --- | --- |
+| `tests/end_to_end/test_storage_e2e.py` | assertion re-pointed at the fixed `Database.energy_total` (smallest bucket size) | re-pointed at correct semantics; it previously encoded the double count |
+| `tests/unit/test_contracts.py` | `CONTRACT_VERSION` 1.2.0 -> 1.3.0 | tightened; `test_contract_version_present` now pins 1.3.0 |
+| `tests/unit/test_device_taxonomy.py` | sole-occupant branch relabelled `DEDICATED` -> `SHARED` | stricter: adds `sole_occupant is True` and `allows_direct_measurement is False` |
+
+No `xfail`, `skip`, or assertion deletion was introduced by this branch beyond
+these. `tests/simulation/test_accuracy.py` still holds its measured bounds
+(`direct.n > 5 000`, MAE `< 40 W`, relative error `< 0.05`) unchanged.
+
+### 7s.6 Residual risks, ranked
+
+1. **`unspecified` -- the real install is still on `candidate` topology.**
+   Nothing in this branch confirms it, and the six-mains shape is resolved from
+   measurement on every tick (24/459 refusals). Declaring the panel tree would
+   remove the refusals, but that is a user authorization (§8). *Unverified
+   until then: the refusal rate on a confirmed topology.*
+2. **`unspecified` -- no per-device ground truth on the real house.** Every
+   accuracy number in §7s.3 is measurement-side (coverage, residual, double
+   count). Per-device MAE on this install remains unverifiable without a
+   ground-truth set, exactly as `docs/testing.md` states.
+3. **Two dedicated CTs never report** (`sauna`, `upper_floor_ac`). Named in
+   diagnostics, not fixed: whether those sensors exist but are idle, or are
+   renamed, is only knowable on the install.
+4. **`test_real_topology` depends on a local, git-ignored capture.** CI skips it
+   cleanly; that means the strongest gates are not in CI unless the capture is
+   provisioned. Stated here rather than papered over.
+5. **The refusal path is magnitude-based** (30 W / 2 % containment). A house
+   whose feeds differ by less than that on every instant would always refuse.
+   No fix proposed: the alternative is guessing the panel tree.
+
+### 7s.7 Release hygiene
+
+`CONTRACT_VERSION` is **1.3.0** in both the engine and the integration (Task 3
+already satisfied; `tests/unit/test_contracts.py` pins it). Version **0.2.1-dev.11**
+applied to all five fields (`manifest.json`, `const.py`, `addon/config.yaml`,
+`pyproject.toml`, `engine/wattmosaic_engine/__init__.py`) via
+`tools/dev/bump_version.py --write`; `v0.2.1-dev.10` is already tagged on
+origin, so `--next` produced `.11` and the release workflow will publish this
+tree as committed rather than bumping again. `check_release.py` is clean both
+without a channel and with `--channel main`, and `RELEASE_NOTES.md` documents
+the version it now ships.
+
+Docs updated only where behaviour changed: `docs/electrical_model.md` §5/§7
+(missing feed forces `complete=False`; the C1 gate), `docs/algorithms.md`
+(the direct-availability verdict), `docs/testing.md` (the new gates and the
+C1 invariant). No behaviour claim was added to a doc that the code does not
+make true.
+
+
+---
+
 ## 8. Needs user authorization
 
 | Action | Why it needs authorization |
