@@ -121,6 +121,24 @@ async def async_get_config_entry_diagnostics(
         topology = None
         diagnostics["last_errors"].append(f"topology fetch failed: {err}")
 
+    # What every ``device_links`` entry resolved to, and — just as important —
+    # which ones resolved to nothing and why.  A link that resolves to no state
+    # entity is why ``samples_seen`` stays 0, and the engine can never say so
+    # because the HA registry is not its business.
+    if isinstance(topology, dict):
+        try:
+            view = coordinator.resolve_state_links(topology).as_diagnostics()
+            diagnostics["state_links"] = view["state_links"]
+            diagnostics["state_links_declared"] = view["links_declared"]
+            # Named at the top level, not nested under the successful links: a
+            # device that resolved to *nothing* is the reason ``samples_seen``
+            # stays 0, and it must be impossible to miss in a support download.
+            diagnostics["devices_without_state_entity"] = view[
+                "devices_without_state_entity"
+            ]
+        except Exception as err:  # noqa: BLE001 - diagnostics must never fail
+            diagnostics["state_links"] = {"error": str(err)}
+            diagnostics["devices_without_state_entity"] = []
     if isinstance(topology, dict):
         channels = normalise_channels(topology)
         diagnostics["topology"] = {
@@ -131,6 +149,16 @@ async def async_get_config_entry_diagnostics(
             "channels": channels,
             "notes": topology.get("notes", []),
             "assignments": config.get(CONF_CT_ASSIGNMENTS, {}),
+        }
+        # Surface the ids actually written on each device, so a support
+        # download can be compared against the resolution above: if the engine
+        # nowhere carries them, the write never landed.
+        diagnostics["topology"]["device_link_state_entity_ids"] = {
+            str(device.get("device_id")): list(
+                (device.get("metadata") or {}).get("link_state_entity_ids") or []
+            )
+            for device in (topology.get("devices") or [])
+            if isinstance(device, dict)
         }
 
     diagnostics["models"] = {}

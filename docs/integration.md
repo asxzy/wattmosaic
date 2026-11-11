@@ -414,7 +414,9 @@ returns:
 | `config` | full config with token fields replaced by `**REDACTED**` |
 | `coordinator` | availability, last success, snapshot age/staleness, device count, last error |
 | `engine` | `HealthResponse` (whitelisted keys), reconciliation, quality score + issues |
-| `topology` | version, status, channel/device counts, normalised channels, stored assignments |
+| `topology` | version, status, channel/device counts, normalised channels, stored assignments, and `device_link_state_entity_ids` (the ids the engine actually carries) |
+| `state_links` | per engine device, the state entity ids its `device_links` entry resolved to |
+| `devices_without_state_entity` | every link that resolved to **nothing**, with the reason (`only_measurement_entities`, `device_not_in_registry`, `not_a_state_domain`, `no_state_entities`, `engine_device_not_in_topology`) |
 | `models` | active model status per device (versions truncated to 10) |
 | `last_errors` | accumulated error strings (secrets scrubbed) |
 
@@ -435,6 +437,8 @@ No token, password or secret appears anywhere in the output.
 | Total power unknown but devices fine | `Reconciliation` missing or `quality_status` stale | run `wattmosaic.run_diagnostics` |
 | Energy resets after restart | HA recorder/restore disabled | ensure restore state is enabled; check the entity's restored value |
 | New device never appears | device not in `/snapshot` results | it has no inference yet; run diagnostics, confirm topology |
+| `samples_seen: 0` **and** `samples_rejected: 0` | no state entity reached the engine: the offer stage is empty, not the filter | check diagnostics `state_links` / `devices_without_state_entity`; a link must resolve to a `binary_sensor`/`switch`/`climate`/… entity, not to a power or energy sensor |
+| `samples_seen: 0`, `samples_rejected: 0`, topology `candidate` | normal for a candidate topology **only if** a state change happened; otherwise see the row above | confirm the topology once the rows are verified |
 | Options changes ignored | reload did not complete | check logs; options change triggers entry reload |
 | `confirmation_required` error | destructive service without `confirm: true` | add `confirm: true` |
 

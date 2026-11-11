@@ -43,6 +43,7 @@ from .const import (
     POLARITY_NORMAL,
     POWER_BEHAVIORS,
 )
+from .state_links import apply_state_link_metadata
 from .util import as_bool, as_float, as_int, normalise_base_url, sanitize_text, utcnow
 
 #: Form field for the per-device energy-entity opt-in.  Integration-side only:
@@ -973,6 +974,12 @@ TOPOLOGY_REPLAY_NOTE = (
     "(user-confirmed CT assignments)."
 )
 
+#: Note appended when the replay also carried resolved device-link state ids.
+TOPOLOGY_LINK_NOTE = (
+    "Re-applied the resolved device-link state entities "
+    "(device_links -> link_state_entity_ids)."
+)
+
 #: Upper bound on one replay attempt.  A write must never hold up setup or a
 #: poll longer than this; the client has its own per-request timeout, this is
 #: the belt-and-braces bound around the whole read+write+confirm sequence.  It
@@ -1092,6 +1099,7 @@ def plan_topology_push(
     *,
     confirmed: bool = False,
     stored_version: Any = None,
+    links_changed: bool = False,
 ) -> TopologyPushPlan:
     """Decide whether the stored declaration must be replayed onto ``topology``.
 
@@ -1101,9 +1109,17 @@ def plan_topology_push(
     erase it.  Replaying it is not an inference -- every field written here was
     chosen by the user -- so this never fabricates a nesting decision.
 
+    ``links_changed`` says the caller has already resolved a ``device_links``
+    entry into explicit state entity ids and the engine topology does not carry
+    them yet.  That is a second, independent reason to write: a link that never
+    reaches the engine leaves the learning intake empty, which is how a live
+    install reported ``samples_seen: 0`` for days.  It still requires the engine
+    to have devices to write them onto; a topology with none cannot receive a
+    link and inventing one would be fabrication.
+
     A push is skipped when
 
-    * there is no declaration at all (fresh install, wizard never ran);
+    * there is no declaration and no link change;
     * the engine reports no channels (there is nothing to merge onto -- inventing
       a channel would be fabrication);
     * no declared CT id exists in the engine topology;
@@ -1112,19 +1128,49 @@ def plan_topology_push(
       change (never downgrade a newer confirmed topology).
 
     A push is performed when the declaration differs from the engine, when the
-    engine is behind the stored version, or when the stored entry says the user
-    confirmed it and the engine still reports ``candidate``.
+    engine is behind the stored version, when the stored entry says the user
+    confirmed it and the engine still reports ``candidate``, or when a resolved
+    device link has not reached the engine yet.
     """
     stored = {
         str(ct_id): dict(raw)
         for ct_id, raw in (assignments or {}).items()
         if isinstance(raw, Mapping)
     }
-    if not stored:
+    devices = [
+        device for device in (topology.get("devices") or []) if isinstance(device, Mapping)
+    ] if isinstance(topology, Mapping) else []
+    if not stored and not links_changed:
         return TopologyPushPlan(push=False, reason="no_assignments")
 
     engine_version = as_int(topology.get("version")) if isinstance(topology, Mapping) else None
     channels = normalise_channels(topology)
+    # Read before any branch: a link-only write must not demote a confirmed
+    # topology.  ``build_topology_update(confirmed=False)`` sets ``candidate``,
+    # which would silently disable learning on an install that had already
+    # confirmed its rows -- the exact failure ADR-0008 exists to prevent.
+    engine_status = str((topology or {}).get("status") or "candidate").strip().lower()
+    engine_confirmed = engine_status == "confirmed"
+
+    if links_changed and not devices:
+        # Nothing to carry the resolved ids.  Report it rather than writing a
+        # no-op revision the engine would accept and the user could not see.
+        return TopologyPushPlan(
+            push=False, reason="no_devices_for_state_links", engine_version=engine_version
+        )
+
+    if links_changed and not stored:
+        # A link-only declaration: the channels are the engine's own discovery,
+        # and only the state entities are being (re)applied.
+        return TopologyPushPlan(
+            push=True,
+            reason="state_links_missing",
+            assignments={},
+            confirmed=bool(confirmed) or engine_confirmed,
+            engine_version=engine_version,
+            preserve_confirmed=bool(confirmed) or engine_confirmed,
+        )
+
     if not channels:
         return TopologyPushPlan(
             push=False, reason="engine_topology_empty", engine_version=engine_version
@@ -1132,19 +1178,39 @@ def plan_topology_push(
 
     known = {channel["ct_id"] for channel in channels}
     if not any(ct_id in known for ct_id in stored):
+        if links_changed:
+            # The declaration names no channel this engine knows, but the
+            # resolved state entities still belong on the devices that do exist.
+            return TopologyPushPlan(
+                push=True,
+                reason="state_links_missing",
+                assignments=stored,
+                confirmed=bool(confirmed),
+                engine_version=engine_version,
+            )
         return TopologyPushPlan(
             push=False, reason="no_matching_channels", engine_version=engine_version
         )
 
     matches = assignments_match_topology(topology, stored)
-    engine_status = str((topology or {}).get("status") or "candidate").strip().lower()
-    engine_confirmed = engine_status == "confirmed"
     declared_version = as_int(stored_version)
     version_known = engine_version is not None and declared_version is not None
     same_version = version_known and engine_version == declared_version
     needs_confirmation = bool(confirmed) and not engine_confirmed
 
     if matches and not needs_confirmation:
+        if links_changed:
+            # The declaration already matches; only the resolved device-link
+            # state entities are missing from the engine.  Writing them is what
+            # turns a silent intake into a working one.
+            return TopologyPushPlan(
+                push=True,
+                reason="state_links_missing",
+                assignments=stored,
+                confirmed=bool(confirmed) or engine_confirmed,
+                engine_version=engine_version,
+                preserve_confirmed=engine_confirmed,
+            )
         if version_known and engine_version > declared_version:
             return TopologyPushPlan(
                 push=False,
@@ -1217,6 +1283,12 @@ class TopologyPushState:
     #: Polls elapsed since the last verification.  Drives the periodic re-read
     #: that catches a reset which recreated the same version number.
     polls_since_check: int = 0
+    #: Fingerprint of the device-link *inputs* (stored links + registry rows)
+    #: the last completed check examined.  A version guard alone cannot see a
+    #: link the user adds *after* setup -- the engine's revision does not change
+    #: -- so the resolved state entities would never be written.  Comparing this
+    #: re-opens exactly that check and nothing else.
+    checked_links: str | None = None
 
     def as_diagnostics(self) -> dict[str, Any]:
         """The public, secret-free view used by ``diagnostics.py``."""
@@ -1242,6 +1314,8 @@ async def async_replay_topology(
     observed_version: Any = None,
     now: datetime | None = None,
     logger: logging.Logger | None = None,
+    state_links: Any = None,
+    link_signature: str | None = None,
 ) -> TopologyPushState:
     """Re-apply the config entry's topology declaration to the engine.
 
@@ -1263,7 +1337,11 @@ async def async_replay_topology(
 
     Semantics
     ---------
-    * No assignments -> nothing happens (a fresh install has no declaration).
+    * No assignments and no resolved device link -> nothing happens (a fresh
+      install has no declaration).
+    * A resolved device link whose state entities the engine does not carry ->
+      one ``PUT`` carrying ``metadata.link_state_entity_ids`` on the devices,
+      even when no CT assignment changed.
     * In sync -> nothing happens; ``pushed`` stays truthful from the last run.
     * Declaration differs, or the engine is behind the stored version, or the
       user confirmed but the engine reports ``candidate`` -> one ``PUT`` and,
@@ -1284,15 +1362,37 @@ async def async_replay_topology(
     re-opens the check.  A periodic read-only re-verification
     (:data:`TOPOLOGY_RECHECK_POLLS`) covers the case a version number cannot: a
     reset that recreated the same number.
+
+    ``state_links`` is a :class:`state_links.LinkResolution` built by the caller
+    from the Home Assistant registry; it never travel as an HA device id.  Only
+    the resolved entity ids are written, and only into
+    ``metadata.link_state_entity_ids``, so evidence-owned ``state_entity_ids``
+    and ``config_load_entity_ids`` survive an unlink byte for byte.
+    ``link_signature`` fingerprints those resolution *inputs* so a link added
+    after setup re-opens the check even though the engine's version did not
+    change.
     """
     log = logger or _LOGGER
     state = state or TopologyPushState()
     state.observed_version = as_int(observed_version)
 
-    # No declaration -> no traffic at all.  A fresh install (or an entry whose
-    # wizard never ran) has nothing to replay, and issuing a ``GET /topology``
-    # on every poll for it would be pure cost.  Never fabricate assignments.
-    if not isinstance(assignments, Mapping) or not assignments:
+    # A resolved device link is a second, independent reason to talk to the
+    # engine.  Without it the state entities never reach the topology and the
+    # engine's learning intake stays empty (the live ``samples_seen: 0``).
+    #
+    # ``state_links`` is a *callable* rather than a value on purpose: the
+    # resolved ids depend on the engine's own device and CT list (a device's CT
+    # entity must never become a state source), and that list only exists once
+    # this function has read the topology.  Handing the callback the topology it
+    # just fetched keeps this to one ``GET`` and keeps the registry read
+    # integration-side.
+    has_links = callable(state_links)
+
+    # No declaration and no link declaration -> no traffic at all.  A fresh
+    # install (or an entry whose wizard never ran) has nothing to replay, and
+    # issuing a ``GET /topology`` on every poll for it would be pure cost.  Never
+    # fabricate assignments.
+    if (not isinstance(assignments, Mapping) or not assignments) and not has_links:
         state.reason = "no_assignments"
         return state
 
@@ -1306,6 +1406,11 @@ async def async_replay_topology(
     # previous failure, or a PUT still awaiting confirmation, always re-opens
     # the check.  A periodic re-read covers the one case a version comparison
     # cannot see: a reset that recreated the same version number.
+    #
+    # ``link_signature`` closes the mirror-image blind spot for links: a user who
+    # links a device *after* setup changes no engine revision at all, so a
+    # version guard alone would never write the newly resolved entities.
+    links_seen = link_signature is None or state.checked_links == link_signature
     state.polls_since_check += 1
     if (
         state.error is None
@@ -1313,12 +1418,21 @@ async def async_replay_topology(
         and state.verified_version is not None
         and state.verified_version == state.observed_version
         and state.polls_since_check < TOPOLOGY_RECHECK_POLLS
+        # Both guards are independent and both must hold before the cached
+        # verdict can be reused.
+        #
         # A cached verdict from a non-confirming poll cannot answer a
         # confirming request: the poll only proved "the declaration matches",
         # never "the user may confirm now".  Re-examine instead of returning a
         # stale ``engine_matches`` that the confirm path would read as
         # "nothing was written".
         and (state.verified_confirmed_request or not confirmed)
+        # A link declaration is a second, independent reason to re-examine: a
+        # user who links a device after setup changes no engine revision at
+        # all, so a version guard alone could never write the newly resolved
+        # state entities.  ``links_seen`` is False until that signature is
+        # checked in.
+        and links_seen
     ):
         return state
 
@@ -1357,13 +1471,39 @@ async def async_replay_topology(
             log.debug("WattMosaic topology confirm retry failed: %s", state.error)
         return state
 
+    resolved_links = has_links and topology is not None
+    links_changed = False
+    resolution: Any = None
+    if resolved_links:
+        resolution = state_links(topology)
+        topology, links_changed = apply_state_link_metadata(topology, resolution)
+        # A resolved link the engine already carries is not a reason to write;
+        # record the inputs so the guard above settles instead of re-reading.
+        if not links_changed:
+            state.checked_links = link_signature
+
     plan = plan_topology_push(
         topology,
         assignments,
         confirmed=confirmed,
         stored_version=stored_version,
+        links_changed=links_changed,
     )
     state.reason = plan.reason
+    if (
+        not plan.push
+        and plan.reason == "no_assignments"
+        and resolution is not None
+        and resolution.links_declared
+    ):
+        # "no_assignments" would blame a wizard that was never needed and hide
+        # the link entirely.  Name the link outcome instead; each individual
+        # refusal is in ``devices_without_state_entity``.
+        state.reason = (
+            "state_links_in_sync"
+            if resolution.state_entities
+            else "state_links_unresolved"
+        )
     if not plan.push:
         # Record the revision actually read from the engine (not the snapshot's
         # possibly older reconciliation version), so the guard settles as soon
@@ -1373,13 +1513,18 @@ async def async_replay_topology(
         )
         state.verified_confirmed_request = bool(confirmed)
         state.identical_pushes = 0
+        state.checked_links = link_signature
         return state
 
     # Bound identical rewrites.  A declaration the engine accepted but does not
     # reflect (a schema that silently drops ``parent_ct_id``, say) must not be
     # re-sent on every poll: two attempts ride out a restart, then the mismatch
     # is reported as a push error instead of being hidden behind traffic.
+    # The fingerprint covers the *whole* body this path writes, links included,
+    # so a link-only push is bounded exactly like a declaration push.
     signature = declaration_signature(plan.assignments, plan.confirmed)
+    if link_signature:
+        signature = f"{signature}|links:{link_signature}"
     if signature == state.last_declaration and state.identical_pushes >= MAX_IDENTICAL_PUSHES:
         already_reported = state.reason == "engine_ignored_declaration"
         state.error = (
@@ -1392,12 +1537,15 @@ async def async_replay_topology(
 
     state.attempts += 1
     produced: int | None = None
+    notes = [TOPOLOGY_REPLAY_NOTE]
+    if links_changed:
+        notes.append(TOPOLOGY_LINK_NOTE)
     try:
         updated = build_topology_update(
             topology,
             plan.assignments,
             confirmed=plan.confirmed,
-            notes=[TOPOLOGY_REPLAY_NOTE],
+            notes=notes,
         )
         result = await client.put_topology(updated)
         produced = as_int(result.get("version")) if isinstance(result, Mapping) else None
@@ -1412,6 +1560,7 @@ async def async_replay_topology(
             state.identical_pushes + 1 if signature == state.last_declaration else 1
         )
         state.last_declaration = signature
+        state.checked_links = link_signature
         # ``PUT`` produces a new revision, so the version observed on the next
         # poll is the one to reconcile against (and it will already be in sync).
         state.verified_version = produced if produced is not None else state.observed_version

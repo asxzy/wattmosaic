@@ -22,12 +22,25 @@ The link is **declarative, never inferred**.  A device owns:
    ``binary_sensor`` entities whose state describes whether the device is on;
 3. zero or more state entities the *user* declared in configuration, kept under
    ``metadata["config_load_entity_ids"]`` so they never overwrite the
-   evidence-derived list above.
+   evidence-derived list above;
+4. zero or more state entities the *user* declared by linking the device to a
+   Home Assistant device, kept under ``metadata["link_state_entity_ids"]``.
 
-Name similarity, HA areas and the HA device registry are deliberately **not**
-used: guessing an association would fabricate attribution, which the spec
-forbids.  An entity that no device claims stays unlinked and any sample built
-from it is rejected with a recorded reason.
+The last key exists because a device link stores an HA **device** id, which is
+not an entity at all.  Home Assistant's entity registry is the only place that
+can expand it, and the engine may run outside Home Assistant, so the integration
+resolves it and writes the resulting entity ids here.  The engine only ever
+reads the topology; it never learns what a device registry is.  Without this
+key the live install's only link (``dev_refoss_main_panel_hot_tub`` →
+``9a2b4caee1c94761ae1c0403873d39b3``) linked nothing but two CT *power*
+entities, so every real state change was discarded at the
+``power_events_not_state`` bridge and ``samples_seen`` stayed at zero.
+
+Name similarity and HA areas are deliberately **not** used: guessing an
+association would fabricate attribution, which the spec forbids.  An entity that
+no device claims stays unlinked and any sample built from it is rejected with a
+recorded reason.  The HA device registry is not consulted *here* either — this
+module stays host-agnostic and reads only the declared metadata keys above.
 
 A power entity is *measurable*, not *state-bearing*
 --------------------------------------------------
@@ -49,10 +62,15 @@ from typing import Any
 
 from .contracts import DeviceTopology, Topology
 
-#: Metadata key holding the HA entity ids that describe a device's own state, as
+#: Metadata key holding the HA entities that describe a device's own state, as
 #: derived from mapping *evidence*.  Evidence-owned: configuration never rewrites
 #: it (ADR-0011).
 STATE_ENTITIES_KEY = "state_entity_ids"
+#: Metadata key holding runtime state entities resolved from a Home Assistant
+#: **device** link (``device_links: {engine_device: ha_device_id}``).  Written by
+#: the integration, which alone can consult the HA entity registry; the engine
+#: reads it as a declarative state source and never resolves it itself.
+LINK_STATE_ENTITIES_KEY = "link_state_entity_ids"
 #: Metadata key holding runtime entities the *user* declared in configuration.
 #: Separate from ``STATE_ENTITIES_KEY`` so removing a configuration restores the
 #: evidence-derived list exactly.
@@ -101,20 +119,44 @@ def config_load_entity_ids(device: DeviceTopology | Mapping[str, Any]) -> list[s
     return _as_sequence(metadata.get(CONFIG_LOAD_ENTITIES_KEY))
 
 
+def link_state_entity_ids(device: DeviceTopology | Mapping[str, Any]) -> list[str]:
+    """Runtime state entities resolved from a Home Assistant device link.
+
+    A ``device_links`` entry stores an HA *device* id, which is not an entity.
+    The integration expands it through the entity registry and records the
+    result under :data:`LINK_STATE_ENTITIES_KEY`; this module only reads that
+    declaration, so the engine never needs registry knowledge and stays
+    runnable outside Home Assistant.
+    """
+    metadata = (
+        device.get("metadata") if isinstance(device, Mapping) else getattr(device, "metadata", None)
+    )
+    if not isinstance(metadata, Mapping):
+        return []
+    return _as_sequence(metadata.get(LINK_STATE_ENTITIES_KEY))
+
+
 def runtime_state_entities(device: DeviceTopology | Mapping[str, Any]) -> list[str]:
     """Entities whose *state* may be written into ``device_states``.
 
-    This is the union of evidence-derived and user-declared runtime entities, and
-    it deliberately excludes CT power entities.  A power entity is a measurement
-    source (``entity_links`` still links it so a learning sample can find its
-    CTs), but its value is watts.  Numeric readings never reach the event path —
-    they are consumed as measurements — yet availability changes (``unavailable``,
-    ``unknown``, ``restored``) do, and writing one of those as the device's state
-    replaces ``"off"`` with ``"unavailable"``; the next real ``"off"`` then reads
-    as a transition, so one blip manufactures two phantom transitions.
+    This is the union of evidence-derived, configuration-declared and
+    link-resolved runtime entities, and it deliberately excludes CT power
+    entities.  A power entity is a measurement source (``entity_links`` still
+    links it so a learning sample can find its CTs), but its value is watts.
+    Numeric readings never reach the event path — they are consumed as
+    measurements — yet availability changes (``unavailable``, ``unknown``,
+    ``restored``) do, and writing one of those as the device's state replaces
+    ``"off"`` with ``"unavailable"``; the next real ``"off"`` then reads as a
+    transition, so one blip manufactures two phantom transitions.
     """
     return list(
-        dict.fromkeys([*state_entity_ids(device), *config_load_entity_ids(device)])
+        dict.fromkeys(
+            [
+                *state_entity_ids(device),
+                *config_load_entity_ids(device),
+                *link_state_entity_ids(device),
+            ]
+        )
     )
 
 
@@ -145,8 +187,7 @@ def entity_links(topology: Topology | None) -> dict[str, tuple[str, tuple[str, .
     channels = topology.channel_map()
     for device in topology.devices:
         cts = tuple(_ct_ids(device))
-        entities = list(state_entity_ids(device))
-        entities.extend(config_load_entity_ids(device))
+        entities = runtime_state_entities(device)
         for ct_id in cts:
             channel = channels.get(ct_id)
             if channel is not None and channel.entity_id:
@@ -167,8 +208,7 @@ def ambiguous_entities(topology: Topology | None) -> dict[str, list[str]]:
     channels = topology.channel_map()
     claims: dict[str, list[str]] = {}
     for device in topology.devices:
-        entities = list(state_entity_ids(device))
-        entities.extend(config_load_entity_ids(device))
+        entities = runtime_state_entities(device)
         for ct_id in _ct_ids(device):
             channel = channels.get(ct_id)
             if channel is not None and channel.entity_id:
@@ -238,12 +278,14 @@ def state_entity_for_device(
 
 __all__ = [
     "CONFIG_LOAD_ENTITIES_KEY",
+    "LINK_STATE_ENTITIES_KEY",
     "STATE_ENTITIES_KEY",
     "STATE_OVERRIDES_KEY",
     "ambiguous_entities",
     "config_load_entity_ids",
     "device_for_entity",
     "entity_links",
+    "link_state_entity_ids",
     "runtime_state_entities",
     "state_entity_for_device",
     "state_entity_ids",
