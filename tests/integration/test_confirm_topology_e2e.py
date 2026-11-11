@@ -491,6 +491,6 @@ def test_the_engine_contract_version_is_1_4_0(tmp_path: Path, path: str) -> None
             return response.headers.get("X-WattMosaic-Contract-Version"), await response.json()
 
     header, body = _with_harness(tmp_path, scenario)
-    assert header == contracts.CONTRACT_VERSION == "1.4.0"
+    assert header == contracts.CONTRACT_VERSION == "1.5.0"
     if "contract_version" in body:
-        assert body["contract_version"] == "1.4.0"
+        assert body["contract_version"] == "1.5.0"

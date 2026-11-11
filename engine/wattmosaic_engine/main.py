@@ -330,6 +330,13 @@ def row_to_reconciliation(row: dict[str, Any] | None) -> Reconciliation:
         #: as the model default ``0.0`` rather than a fabricated split.
         unmonitored_w=_safe_float(row.get("unmonitored_w")),
         meter_disagreement_w=_safe_float(row.get("meter_disagreement_w")),
+        #: Contract 1.5.0.  ``meter_spread_w`` is the unbounded meter-to-meter
+        #: spread, distinct from the residual-clipped ``meter_disagreement_w``.
+        #: A pre-schema-7 row has NULL and reads as the model default ``0.0``.
+        meter_spread_w=_safe_float(row.get("meter_spread_w")),
+        #: SQLite stores the flag as 0/1; NULL (an older row) is not a claim
+        #: that the spread exceeded the residual.
+        meter_spread_exceeds_residual=bool(row.get("meter_spread_exceeds_residual")),
         reconciliation_error_w=_safe_float(row.get("reconciliation_error_w")),
         reconciliation_error_ratio=_safe_float(row.get("reconciliation_error_ratio")),
         accounted_fraction=_safe_float(row.get("accounted_fraction")),

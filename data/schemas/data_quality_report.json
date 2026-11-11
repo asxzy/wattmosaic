@@ -30,5 +30,5 @@
   "title": "DataQualityReport",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/data_quality_report.json",
-  "x-contract-version": "1.4.0"
+  "x-contract-version": "1.5.0"
 }

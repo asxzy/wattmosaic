@@ -236,6 +236,17 @@ class WattMosaicGlobalSensor(_WattMosaicBase):
                 attributes["meter_disagreement_w"] = data.reconciliation.get(
                     "meter_disagreement_w"
                 )
+                #: Contract 1.5.0: the raw, unbounded meter-to-meter spread and
+                #: whether it exceeds the whole residual.  Exposed beside the
+                #: split -- never summed into it -- so the "Unknown / unattributed
+                #: power" sensor can say "the meters disagree by more than this
+                #: residual" instead of implying the house is fully metered.
+                attributes["meter_spread_w"] = data.reconciliation.get(
+                    "meter_spread_w"
+                )
+                attributes["meter_spread_exceeds_residual"] = data.reconciliation.get(
+                    "meter_spread_exceeds_residual"
+                )
         else:
             attributes["last_success"] = (
                 self.coordinator.last_success.isoformat()

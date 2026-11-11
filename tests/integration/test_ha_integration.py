@@ -855,6 +855,71 @@ class TestStaleness:
         assert values["unmonitored_power"] == 470.0
         assert values["meter_disagreement_power"] == 164.0
 
+    def test_the_meter_spread_is_separate_from_the_residual_split(self) -> None:
+        """Contract 1.5.0: the *unbounded* spread must not be summed with the split.
+
+        Live shape: residual 166.4 W, spread 348.9 W.  Before 1.5.0 the spread
+        itself was published as ``meter_disagreement_w``, so
+        ``unmonitored + disagreement`` overshot the residual.  Now the
+        contribution is clipped into the residual (166.4) while the raw spread
+        (348.9) is exposed beside it, and the flag says which situation it is.
+        """
+        snapshot = util.coerce_snapshot(
+            {
+                "timestamp": NOW.isoformat(),
+                "reconciliation": {
+                    "main_power_w": 1000.0,
+                    "quality_status": "good",
+                    "unknown_residual_w": 166.4,
+                    "unmonitored_w": 0.0,
+                    "meter_disagreement_w": 166.4,
+                    "meter_spread_w": 348.9,
+                    "meter_spread_exceeds_residual": True,
+                },
+            }
+        )
+        reconciliation = snapshot["reconciliation"]
+        assert reconciliation["meter_spread_w"] == 348.9
+        assert reconciliation["meter_spread_exceeds_residual"] is True
+        # The additive pair still reconciles exactly; the spread is not in it.
+        assert (
+            reconciliation["unmonitored_w"] + reconciliation["meter_disagreement_w"]
+            == reconciliation["unknown_residual_w"]
+        )
+
+        values = entity_values.global_values(
+            snapshot, {}, engine_available=True, now=NOW, stale_after=120
+        )
+        assert values["unknown_power"] == 166.4
+        assert values["meter_disagreement_power"] == 166.4
+        assert values["meter_spread_power"] == 348.9
+        assert values["meter_spread_exceeds_residual"] is True
+
+    def test_an_older_engine_does_not_fabricate_a_zero_spread(self) -> None:
+        """An engine without ``meter_spread_w`` must read ``None``, not 0.0.
+
+        ``0.0`` would assert "the two meters agree", which an engine that never
+        measured a spread cannot know.
+        """
+        snapshot = util.coerce_snapshot(
+            {
+                "timestamp": NOW.isoformat(),
+                "reconciliation": {
+                    "main_power_w": 1247.9,
+                    "quality_status": "good",
+                    "unknown_residual_w": 634.0,
+                    "unmonitored_w": 470.0,
+                    "meter_disagreement_w": 164.0,
+                },
+            }
+        )
+        values = entity_values.global_values(
+            snapshot, {}, engine_available=True, now=NOW, stale_after=120
+        )
+        assert values["meter_spread_power"] is None
+        # No claim either: an absent flag is not "the spread exceeded it".
+        assert values["meter_spread_exceeds_residual"] is False
+
     def test_an_older_engine_does_not_fabricate_a_zero_split(self) -> None:
         """Absent must read as "not reported", never as "0 W of disagreement"."""
         snapshot = util.coerce_snapshot(

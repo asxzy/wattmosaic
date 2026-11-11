@@ -19,6 +19,11 @@ object returned by the disaggregation engine.  The loss happened in storage:
 These tests therefore exercise the round-trip — write through the real
 ``Database``, read back through the same function the API uses — because that is
 the only layer that was broken.
+
+Contract 1.5.0 then corrected the *arithmetic* (the spread is unbounded, the
+residual is not) and added ``meter_spread_w`` / ``meter_spread_exceeds_residual``.
+Those two columns live in the **same schema-7 migration**, because schema 7 has
+never been deployed and both changes are one logical fix to one read path.
 """
 
 from __future__ import annotations
@@ -62,6 +67,8 @@ def _live_split() -> Reconciliation:
         unknown_residual_w=LIVE_RESIDUAL_W,
         unmonitored_w=LIVE_UNMONITORED_W,
         meter_disagreement_w=LIVE_METER_DISAGREEMENT_W,
+        meter_spread_w=LIVE_METER_DISAGREEMENT_W,
+        meter_spread_exceeds_residual=False,
         configured_prior_w=LIVE_CONFIGURED_PRIOR_W,
         measurement_uncertainty_w=LIVE_UNCERTAINTY_W,
         topology_confirmed=True,
@@ -124,6 +131,7 @@ def test_round_trip_preserves_every_contract_field(tmp_path: Path) -> None:
             "unknown_residual_w",
             "unmonitored_w",
             "meter_disagreement_w",
+            "meter_spread_w",
             "reconciliation_error_w",
             "accounted_fraction",
             "measurement_uncertainty_w",
@@ -169,6 +177,8 @@ def test_snapshot_reads_the_split_from_the_database(tmp_path: Path) -> None:
         recon = snapshot["reconciliation"]
         assert recon["unmonitored_w"] == pytest.approx(LIVE_UNMONITORED_W)
         assert recon["meter_disagreement_w"] == pytest.approx(LIVE_METER_DISAGREEMENT_W)
+        assert recon["meter_spread_w"] == pytest.approx(LIVE_METER_DISAGREEMENT_W)
+        assert recon["meter_spread_exceeds_residual"] is False
         assert recon["unknown_residual_w"] == pytest.approx(LIVE_RESIDUAL_W)
         assert (
             recon["unmonitored_w"] + recon["meter_disagreement_w"]
@@ -243,10 +253,13 @@ def test_row_from_before_the_columns_reads_as_zero(tmp_path: Path) -> None:
         assert row is not None
         assert row["unmonitored_w"] is None
         assert row["meter_disagreement_w"] is None
+        assert row["meter_spread_w"] is None
 
         rec = row_to_reconciliation(row)
         assert rec.unmonitored_w == 0.0
         assert rec.meter_disagreement_w == 0.0
+        assert rec.meter_spread_w == 0.0
+        assert rec.meter_spread_exceeds_residual is False
         assert rec.unknown_residual_w == pytest.approx(300.0)
     finally:
         db.close()
@@ -324,6 +337,8 @@ def test_migration_7_adds_the_split_columns_in_place(tmp_path: Path) -> None:
         assert {
             "unmonitored_w",
             "meter_disagreement_w",
+            "meter_spread_w",
+            "meter_spread_exceeds_residual",
             "configured_prior_w",
             "measurement_uncertainty_w",
             "topology_confirmed",
@@ -340,11 +355,12 @@ def test_migration_7_adds_the_split_columns_in_place(tmp_path: Path) -> None:
         assert old_model.unmonitored_w == 0.0
         assert old_model.topology_confirmed is False
 
-        # And a new row round-trips with a real split.
+        # And a new row round-trips with a real split and its spread.
         db.insert_reconciliation(_live_split())
         rec = row_to_reconciliation(db.latest_reconciliation())
         assert rec.unmonitored_w == pytest.approx(LIVE_UNMONITORED_W)
         assert rec.meter_disagreement_w == pytest.approx(LIVE_METER_DISAGREEMENT_W)
+        assert rec.meter_spread_w == pytest.approx(LIVE_METER_DISAGREEMENT_W)
     finally:
         db.close()
 
@@ -396,6 +412,10 @@ def test_migration_7_noops_when_create_table_already_has_the_columns(tmp_path: P
         conn.execute(
             "ALTER TABLE reconciliation_results ADD COLUMN meter_disagreement_w REAL"
         )
+        conn.execute("ALTER TABLE reconciliation_results ADD COLUMN meter_spread_w REAL")
+        conn.execute(
+            "ALTER TABLE reconciliation_results ADD COLUMN meter_spread_exceeds_residual INTEGER"
+        )
         assert current_version(conn) == 6
     finally:
         conn.close()
@@ -409,6 +429,8 @@ def test_migration_7_noops_when_create_table_already_has_the_columns(tmp_path: P
         ]
         assert cols.count("unmonitored_w") == 1
         assert cols.count("meter_disagreement_w") == 1
+        assert cols.count("meter_spread_w") == 1
+        assert cols.count("meter_spread_exceeds_residual") == 1
         db.insert_reconciliation(_live_split())
         assert row_to_reconciliation(db.latest_reconciliation()).unmonitored_w == pytest.approx(
             LIVE_UNMONITORED_W
@@ -424,44 +446,25 @@ def test_latest_schema_version_is_7() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# A second-order defect found while proving this one (NOT this lane's fix)
+# The engine-side decomposition, now that it is additive (was xfail here)
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "engine-side: meter_disagreement_w is unbounded by unknown_residual_w, so "
-        "unmonitored_w + meter_disagreement_w != unknown_residual_w when the "
-        "instrument disagreement exceeds the residual (live: 354.8 vs 120.8)"
-    ),
-)
-def test_engine_split_is_additive_when_disagreement_exceeds_residual() -> None:
-    """KNOWN OPEN DEFECT: the split is not additive when md > residual.
+def test_engine_split_is_additive_when_spread_exceeds_residual() -> None:
+    """The split adds up even when the meters disagree by more than the residual.
 
-    Persistence is now correct — whatever the engine computes is stored and read
-    back verbatim.  But the engine's own arithmetic can still violate the
-    contract identity, and the live capture shows it happening:
-
-    * captured snapshot: ``unknown_residual_w = 120.81`` but
-      ``residual_includes_meter_disagreement:354.8W_of:120.8W``;
-    * ``unmonitored_w = max(0, 120.81 - 354.8) = 0.0``;
-    * so ``unmonitored_w + meter_disagreement_w = 354.8 != 120.81``.
-
-    ``meter_disagreement_w`` is an *absolute* difference between two meters on
-    the same conductors, and it is not bounded by the residual: the canonical
-    feed can agree with the aliased feed to within 354.8 W while everything
-    else is accounted for.  Clamping ``unmonitored_w`` at zero then cannot
-    repair the identity.
-
-    This is deliberately ``xfail(strict=True)``: it fails today, and it will
-    start failing *the other way* (xpass) the moment the electrical lane fixes
-    the engine, which is the signal to delete this marker.
+    This used to be a strict ``xfail``: the engine reported the *unbounded*
+    meter-to-meter spread as a part of a bounded residual, so
+    ``unmonitored_w + meter_disagreement_w`` overshot
+    ``unknown_residual_w`` whenever the instruments disagreed by more than the
+    whole gap.  Contract 1.5.0 clips the spread's *contribution* into the
+    residual and reports the spread separately, so the identity now holds for
+    every input shape.
     """
     from tests.unit.test_reconciliation_split import _aliased_topology, _infer, _window
 
-    # canonical 1000 W, alias 600 W -> disagreement 400 W; heater 900 W leaves a
-    # 100 W residual, so the disagreement exceeds it by 300 W.
+    # canonical 1000 W, alias 600 W -> spread 400 W; heater 900 W leaves a
+    # 100 W residual, so the spread exceeds it by 300 W.
     rec = _infer(
         _aliased_topology(),
         _window(
@@ -475,8 +478,48 @@ def test_engine_split_is_additive_when_disagreement_exceeds_residual() -> None:
         ),
     ).reconciliation
     assert rec.unknown_residual_w == pytest.approx(100.0)
-    assert rec.meter_disagreement_w == pytest.approx(400.0)
-    # The contract identity under test; it does not hold today.
+    # The honest, unbounded diagnostic is still reported in full ...
+    assert rec.meter_spread_w == pytest.approx(400.0)
+    # ... while its contribution to a 100 W residual can only be 100 W.
+    assert rec.meter_disagreement_w == pytest.approx(100.0)
+    assert rec.unmonitored_w == pytest.approx(0.0, abs=1e-9)
+    assert rec.meter_spread_exceeds_residual is True
     assert (
         rec.unmonitored_w + rec.meter_disagreement_w - rec.unknown_residual_w
     ) == pytest.approx(0.0, abs=0.01)
+
+
+def test_meter_spread_survives_the_round_trip(tmp_path: Path) -> None:
+    """Contract 1.5.0's spread and flag must persist like the rest of the split.
+
+    The 1.4.0 lane added the split columns; the spread is a *different*
+    quantity (unbounded, diagnostic only) and needs its own column, otherwise
+    ``meter_spread_w`` reads back as ``0.0`` and the operator is told the
+    meters agree when they do not.
+    """
+    db = Database(tmp_path / "spread.db")
+    try:
+        written = Reconciliation(
+            timestamp=TS,
+            topology_version=2,
+            main_power_w=1000.0,
+            direct_measured_w=833.6,
+            unknown_residual_w=166.4,
+            unmonitored_w=0.0,
+            meter_disagreement_w=166.4,
+            meter_spread_w=348.9,
+            meter_spread_exceeds_residual=True,
+        )
+        db.insert_reconciliation(written)
+        stored = db.latest_reconciliation()
+        assert stored is not None
+        assert stored["meter_spread_w"] == pytest.approx(348.9)
+        assert stored["meter_spread_exceeds_residual"] == 1
+
+        rec = row_to_reconciliation(stored)
+        assert rec.meter_spread_w == pytest.approx(348.9)
+        assert rec.meter_spread_exceeds_residual is True
+        assert rec.meter_disagreement_w == pytest.approx(166.4)
+        assert rec.unknown_residual_w == pytest.approx(166.4)
+    finally:
+        db.close()

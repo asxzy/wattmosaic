@@ -67,12 +67,27 @@ def _add_residual_split_columns(conn: sqlite3.Connection) -> None:
       ``candidate`` hypothesis.  Dropped on write, it read as the ``False``
       default forever.
 
+    Contract 1.5.0 added ``meter_spread_w`` / ``meter_spread_exceeds_residual``
+    and they are added **here, inside version 7**, rather than as a version 8.
+    Schema 7 has never been deployed: the reference database is still at
+    ``user_version = 5``, and both new columns belong to the same logical change
+    as the two split columns above (the 1.4.0 read path served a split that did
+    not add up; 1.5.0 fixes the arithmetic and needs the honest spread beside
+    it).  A version 8 would ship a schema 7 that no reader ever wants and force
+    a second migration pass on every install for one release cycle.  The helper
+    is idempotent, so a database that was already migrated to the 1.4.0 shape
+    picks up just the two new columns on reopen.
+
     All are nullable and **without** a default: a row written before schema 7
     genuinely never had an answer, and NULL records that.  Readers resolve NULL
     to the model default, so old rows stay valid.
     """
     add_column_if_missing(conn, "reconciliation_results", "unmonitored_w", "REAL")
     add_column_if_missing(conn, "reconciliation_results", "meter_disagreement_w", "REAL")
+    add_column_if_missing(conn, "reconciliation_results", "meter_spread_w", "REAL")
+    add_column_if_missing(
+        conn, "reconciliation_results", "meter_spread_exceeds_residual", "INTEGER"
+    )
     add_column_if_missing(conn, "reconciliation_results", "configured_prior_w", "REAL")
     add_column_if_missing(conn, "reconciliation_results", "measurement_uncertainty_w", "REAL")
     add_column_if_missing(conn, "reconciliation_results", "topology_confirmed", "INTEGER")

@@ -468,35 +468,64 @@ exists to prevent.
 ### 4.2.4 The residual split: meter disagreement vs unmonitored load
 
 `Reconciliation.unknown_residual_w` is `main_power_w - accounted`. It is one
-honest number, and it stays exactly that (contract 1.4.0 does not change its
-meaning). But when the home is metered **twice on the same conductors** — a
-canonical feed plus an aliased second panel — the residual mixes two physically
-different quantities:
+honest number and it keeps exactly that meaning (contract 1.5.0 does not change
+it). But when the home is metered **twice on the same conductors** — a canonical
+feed plus an aliased second panel — two different *kinds* of number are in play,
+and contract 1.4.0 made the mistake of treating them as parts of one whole.
 
-| Quantity | Field | What it means |
+| Quantity | Field | What it is |
 | --- | --- | --- |
-| Instrument disagreement | `meter_disagreement_w` | Two CTs on one wire report different totals. Nothing is missing; two instruments disagree. |
-| Unmonitored load | `unmonitored_w` | Load that no CT or device accounts for. This is what a new CT would find. |
+| Meter spread | `meter_spread_w` | `\|canonical total − alias total\|`. An **independent, unbounded** property of two instruments on the same wire. Diagnostic only. |
+| Meter disagreement | `meter_disagreement_w` | That spread's **contribution to the residual**, clipped into `[0, unknown_residual_w]`. |
+| Unmonitored load | `unmonitored_w` | `unknown_residual_w − meter_disagreement_w`. The remainder not attributable to a device. |
 
-Measured on the reference install: of a 580–648 W residual, ~166 W (mean) is
-the aliased Refoss main panel reading ~8.9 % below the canonical load manager on
-the *same* conductors, and ~470 W is genuinely unclamped load. Reporting all of
-it as "unknown load" overstates the gap and points the operator at the wrong
-fix.
+Measured on the reference install: the residual (`unknown_residual_w`) has a
+median of **166.4 W**, and the independently computed meter spread
+(`|canonical − alias|`) has a median of **348.9 W**. The two meters disagree by
+*more than twice the whole residual*.
 
-The split is a **decomposition, not a new estimate**:
+That is why 1.4.0's identity could not hold. It reported
 
 ```text
-meter_disagreement_w = |canonical feed total - aliased feed total|      (never guessed)
-unmonitored_w        = max(0, unknown_residual_w - meter_disagreement_w)
+meter_disagreement_w = |canonical − alias|              # 348.9 W, unbounded
+unmonitored_w        = max(0, residual − disagreement)  # max(0, 166.4 − 348.9) = 0
 ```
 
-so `unmonitored_w + meter_disagreement_w == unknown_residual_w` for a
-non-negative residual, and `accounted + unknown_residual_w == main_power_w`
-still holds exactly. `unknown_residual_w` is never rewritten to either part.
+so `unmonitored_w + meter_disagreement_w = 348.9 ≠ 166.4 = unknown_residual_w`,
+an error of 182.5 W on that cycle and 233–660 W across the capture. The residual
+is a **bounded accounting remainder** for one meter; the spread is an
+**unbounded measurement difference** between two. A bounded quantity cannot
+contain an unbounded one, and forcing them to add is a category error. Even when
+the spread happens to be smaller than the residual, "unmonitored" means "not
+attributable to a device", **not** "not metered".
 
-`meter_disagreement_w` is `0.0` — and no claim is made — unless **all** of these
-hold:
+Contract 1.5.0 separates the concepts:
+
+```text
+meter_spread_w       = |canonical feed total − aliased feed total|   (never guessed)
+meter_disagreement_w = min(meter_spread_w, max(0, unknown_residual_w))  (clipped contribution)
+unmonitored_w        = unknown_residual_w − meter_disagreement_w
+```
+
+so
+
+```text
+unmonitored_w + meter_disagreement_w == unknown_residual_w     — exactly, always
+accounted + unknown_residual_w == main_power_w                 — unchanged
+```
+
+and `unknown_residual_w` is never rewritten to either part. When
+`meter_spread_w > unknown_residual_w` the whole residual is attributable to the
+instruments, so `meter_disagreement_w == unknown_residual_w` and
+`unmonitored_w == 0`.
+
+In that case the contract sets `meter_spread_exceeds_residual = true` and adds
+`meter_spread_exceeds_residual:<spread>W_vs_<residual>W` to `explanation`. This
+is never hidden: `unmonitored_w == 0` next to a spread larger than the residual
+would otherwise read as "everything is metered", which is the opposite of the
+fact. It means *the residual is not evidence of unmonitored load*.
+
+`meter_spread_w` is `0.0` — and no claim is made — unless **all** of these hold:
 
 * there is at least one enabled alias channel (`alias_of_ct_id`);
 * the alias legs form a complete meter point (every leg of every node they
@@ -509,7 +538,8 @@ and a second meter that watches only some conductors is not a check on the
 whole-home total. When the split applies, the explanation says which part is
 which: `residual_includes_meter_disagreement:<W>_of_<total>W` and
 `unmonitored_residual_excludes_meter_disagreement:<W>W`, and
-`diagnostics["meter_disagreement"]` names the channels compared.
+`diagnostics["meter_disagreement"]` names the channels compared and carries both
+`spread_w` and the clipped `disagreement_w` plus `exceeds_residual`.
 
 ### 4.3 State constraints (not estimates)
 
@@ -815,6 +845,17 @@ Contract **1.4.0** added two more additive fields, `Reconciliation.unmonitored_w
 and `Reconciliation.meter_disagreement_w` (both `float`, default `0.0`), which
 decompose the existing `unknown_residual_w` without changing it (§4.2.4). An
 older reader that ignores them still sees the same residual it always saw.
+
+Contract **1.5.0** corrected that decomposition and added two fields:
+`Reconciliation.meter_spread_w` (`float`, default `0.0`) is the raw, unbounded
+`|canonical − alias|` diagnostic, and
+`Reconciliation.meter_spread_exceeds_residual` (`bool`, default `false`) says the
+spread is larger than the whole residual. `meter_disagreement_w` keeps its name
+but now means the spread's *contribution to the residual*, clipped into
+`[0, unknown_residual_w]`, so `unmonitored_w + meter_disagreement_w ==
+unknown_residual_w` holds exactly (§4.2.4). Storage carries both new fields in
+the existing schema-7 migration; schema 7 was never deployed, so no version 8 is
+needed.
 
 The remaining observations are non-blocking:
 

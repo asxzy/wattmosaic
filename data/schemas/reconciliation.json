@@ -89,6 +89,16 @@
       "title": "Meter Disagreement W",
       "type": "number"
     },
+    "meter_spread_w": {
+      "default": 0.0,
+      "title": "Meter Spread W",
+      "type": "number"
+    },
+    "meter_spread_exceeds_residual": {
+      "default": false,
+      "title": "Meter Spread Exceeds Residual",
+      "type": "boolean"
+    },
     "reconciliation_error_w": {
       "default": 0.0,
       "title": "Reconciliation Error W",
@@ -129,5 +139,5 @@
   "title": "Reconciliation",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/reconciliation.json",
-  "x-contract-version": "1.4.0"
+  "x-contract-version": "1.5.0"
 }

@@ -414,7 +414,7 @@ def _alias_node_total(
     return total if matched else None
 
 
-def meter_disagreement_w(
+def meter_spread_w(
     graph: TopologyGraph,
     readings: Mapping[str, object],
     *,
@@ -422,17 +422,25 @@ def meter_disagreement_w(
     max_age_s: float = 120.0,
     phase_split_l1: float = 0.5,
 ) -> tuple[float, tuple[str, ...]]:
-    """Meter-to-meter disagreement on the wires the mains measure, in watts.
+    """Absolute meter-to-meter spread on the wires the mains measure, in watts.
 
     Two CTs clamped on one service entrance are the same conductors, but they
-    are different instruments.  On the reference install the aliased Refoss
-    main panel reads ~8.9 % below the canonical load manager, so of a ~600 W
-    residual roughly 166 W is *instrument disagreement*, not unmonitored load.
-    Reporting both as "unknown load" overstates what the physics says is
-    missing and points the operator at the wrong fix.
+    are different instruments, and they can disagree by *any* amount.  This
+    function reports that spread exactly as measured::
 
-    The quantity is ``|canonical feed total - aliased feed total|``, and it is
-    computed only when both sides describe *the same wires*:
+        meter_spread_w = |canonical feed total - aliased feed total|
+
+    It is an **independent, unbounded diagnostic**.  It is *not* a part of
+    ``unknown_residual_w``: the residual is the remainder of one meter's
+    accounting and is bounded by ``main - accounted``, while the spread is a
+    property of two meters and has no such bound.  On the reference install the
+    two meters differ by ~349 W (median) while the whole residual is ~166 W --
+    the disagreement is more than twice the residual, so the residual cannot
+    possibly contain it.  See :func:`wattmosaic_engine.disaggregation.engine`
+    ``_reconcile`` for how the clipped *contribution* is derived from this
+    quantity; the two numbers must never be conflated.
+
+    The value is computed only when both sides describe *the same wires*:
 
     * there is at least one enabled alias channel (``alias_of_ct_id``);
     * the alias legs are a complete meter point -- every leg of the node has a
@@ -444,7 +452,7 @@ def meter_disagreement_w(
     meter is not evidence of disagreement, and guessing zero agreement would be
     as wrong as guessing the difference.
 
-    Returns ``(disagreement_w, alias_ct_ids)``; the ids name the pair the
+    Returns ``(spread_w, alias_ct_ids)``; the ids name the pair the
     reconciliation can cite.
     """
     aliases = [c for c in graph.alias_channels() if c.enabled]
