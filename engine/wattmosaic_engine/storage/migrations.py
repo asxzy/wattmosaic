@@ -9,6 +9,7 @@ Never edit an already-released migration; add a new one.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 
 
@@ -16,7 +17,65 @@ from dataclasses import dataclass
 class Migration:
     version: int
     name: str
-    statements: tuple[str, ...]
+    statements: tuple[str, ...] = ()
+    #: Optional step run after ``statements`` inside the same transaction.
+    #: Needed only where the SQL is not idempotent on its own -- SQLite has no
+    #: ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS``, and a migration must still
+    #: no-op on a database that already carries the column (a database created
+    #: by a build whose ``CREATE TABLE`` included it, or a migration that was
+    #: interrupted after the ``ALTER`` but before ``user_version`` advanced).
+    apply: Callable[[sqlite3.Connection], None] | None = None
+
+
+def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    """Column names of ``table``; empty when the table does not exist."""
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def add_column_if_missing(
+    conn: sqlite3.Connection, table: str, column: str, declaration: str
+) -> None:
+    """``ALTER TABLE ... ADD COLUMN`` only when the column is absent.
+
+    ``ALTER TABLE ADD COLUMN`` in SQLite is metadata-only: it does not rewrite
+    the table, so this is cheap on a production database with ~12k rows in
+    ``reconciliation_results``.  Existing rows get NULL.
+    """
+    if column in table_columns(conn, table):
+        return
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+
+def _add_residual_split_columns(conn: sqlite3.Connection) -> None:
+    """Persist the ``Reconciliation`` fields storage silently dropped.
+
+    Contract 1.4.0 added ``unmonitored_w`` / ``meter_disagreement_w`` and the
+    table was never extended, so ``insert_reconciliation`` dropped them and
+    ``latest_reconciliation`` read nothing back: the engine computed the split
+    correctly in memory (its own ``explanation`` names the disagreement) while
+    every API read path served the model's ``0.0`` defaults.
+
+    Three older fields have the **same** defect and are added here too, because
+    a partial fix would leave the next audit to rediscover it:
+
+    * ``configured_prior_w`` — contract 1.1.0.  It is part of the accounting
+      (``accounted = direct + inferred + model + prior``), so a row read back
+      without it under-states accounted power.
+    * ``measurement_uncertainty_w`` — contract 1.2.0, the fit uncertainty.
+    * ``topology_confirmed`` — contract 1.3.0.  The HA integration publishes it
+      to say whether the balance came from a *confirmed* topology or a
+      ``candidate`` hypothesis.  Dropped on write, it read as the ``False``
+      default forever.
+
+    All are nullable and **without** a default: a row written before schema 7
+    genuinely never had an answer, and NULL records that.  Readers resolve NULL
+    to the model default, so old rows stay valid.
+    """
+    add_column_if_missing(conn, "reconciliation_results", "unmonitored_w", "REAL")
+    add_column_if_missing(conn, "reconciliation_results", "meter_disagreement_w", "REAL")
+    add_column_if_missing(conn, "reconciliation_results", "configured_prior_w", "REAL")
+    add_column_if_missing(conn, "reconciliation_results", "measurement_uncertainty_w", "REAL")
+    add_column_if_missing(conn, "reconciliation_results", "topology_confirmed", "INTEGER")
 
 
 MIGRATIONS: tuple[Migration, ...] = (
@@ -356,6 +415,11 @@ MIGRATIONS: tuple[Migration, ...] = (
             "ALTER TABLE ct_channels ADD COLUMN measurement_multiplier REAL NOT NULL DEFAULT 1.0",
         ),
     ),
+    Migration(
+        version=7,
+        name="reconciliation_persisted_fields",
+        apply=_add_residual_split_columns,
+    ),
 )
 
 LATEST_VERSION = max(m.version for m in MIGRATIONS)
@@ -375,6 +439,8 @@ def apply_migrations(conn: sqlite3.Connection) -> int:
         try:
             for stmt in migration.statements:
                 conn.execute(stmt)
+            if migration.apply is not None:
+                migration.apply(conn)
             conn.execute(f"PRAGMA user_version = {migration.version}")
             conn.execute("COMMIT")
         except Exception:
