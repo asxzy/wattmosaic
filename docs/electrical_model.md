@@ -465,6 +465,52 @@ not changed state recently reads `unknown`. That gap is deliberate: a plausible
 permanent number that no measurement supports is exactly the fabrication ADR-0006
 exists to prevent.
 
+### 4.2.4 The residual split: meter disagreement vs unmonitored load
+
+`Reconciliation.unknown_residual_w` is `main_power_w - accounted`. It is one
+honest number, and it stays exactly that (contract 1.4.0 does not change its
+meaning). But when the home is metered **twice on the same conductors** — a
+canonical feed plus an aliased second panel — the residual mixes two physically
+different quantities:
+
+| Quantity | Field | What it means |
+| --- | --- | --- |
+| Instrument disagreement | `meter_disagreement_w` | Two CTs on one wire report different totals. Nothing is missing; two instruments disagree. |
+| Unmonitored load | `unmonitored_w` | Load that no CT or device accounts for. This is what a new CT would find. |
+
+Measured on the reference install: of a 580–648 W residual, ~166 W (mean) is
+the aliased Refoss main panel reading ~8.9 % below the canonical load manager on
+the *same* conductors, and ~470 W is genuinely unclamped load. Reporting all of
+it as "unknown load" overstates the gap and points the operator at the wrong
+fix.
+
+The split is a **decomposition, not a new estimate**:
+
+```text
+meter_disagreement_w = |canonical feed total - aliased feed total|      (never guessed)
+unmonitored_w        = max(0, unknown_residual_w - meter_disagreement_w)
+```
+
+so `unmonitored_w + meter_disagreement_w == unknown_residual_w` for a
+non-negative residual, and `accounted + unknown_residual_w == main_power_w`
+still holds exactly. `unknown_residual_w` is never rewritten to either part.
+
+`meter_disagreement_w` is `0.0` — and no claim is made — unless **all** of these
+hold:
+
+* there is at least one enabled alias channel (`alias_of_ct_id`);
+* the alias legs form a complete meter point (every leg of every node they
+  appear in is aliased, and all are fresh: not stale, missing or bad quality);
+* the canonical channels those legs alias are exactly the enabled
+  `effective_feeds()` of the home, so both totals cover the same conductors.
+
+An unmeasured, stale or half-measured meter is never evidence of disagreement,
+and a second meter that watches only some conductors is not a check on the
+whole-home total. When the split applies, the explanation says which part is
+which: `residual_includes_meter_disagreement:<W>_of_<total>W` and
+`unmonitored_residual_excludes_meter_disagreement:<W>W`, and
+`diagnostics["meter_disagreement"]` names the channels compared.
+
 ### 4.3 State constraints (not estimates)
 
 An explicitly OFF device with a model is given the upper bound
@@ -549,6 +595,26 @@ MainPower = main_power_w(graph, readings)
 * A node missing one of its legs sets `complete=False`, and an incomplete node
   never wins over a complete one when both measure the same conductor.
 
+### 5.1 L1/L2 versus the total: same-snapshot, not one publish behind
+
+`l1_power_w` / `l2_power_w` and `main_power_w` are produced **in the same call,
+from the same `main_power_w()` over the same window** (`engine.py::_reconcile` →
+`main_power_w(...)`, then `l1_power_w=main.l1_w`, `l2_power_w=main.l2_w`,
+`main_power_w=main.total_w`). There is no cached phase value and no separate
+publish path, so the phases cannot lag the total by a cycle.
+
+The invariant `l1_power_w + l2_power_w == main_power_w` holds **to within
+floating-point summation order**, not bit-exactly: `total_w` is
+`sum(per_channel.values())` while each phase is its own `sum(...)` of a subset,
+and IEEE-754 addition is not associative. On the reference capture (11 389 rows
+with both phases) the largest gap is `1.8e-12 W` — a relative error of ~1e-16,
+which is why a validator comparing with `!=` sees a non-zero "error". A
+genuine one-snapshot lag would show the *previous* snapshot's total against
+this snapshot's phases: on the same data that is off by a median ~12 W and up to
+~10 kW. `tests/unit/test_disaggregation.py::test_l1_l2_match_the_total_in_the_same_snapshot`
+pins both facts. Consumers must compare with a tolerance (or round to the
+reported precision), never with exact equality.
+
 ---
 
 ## 6. Identifiability
@@ -586,6 +652,17 @@ verified dedicated CT:
   reports the full load.
 * `usable=False` for missing, bad-quality, or older-than-`max_age_s` values, with
   machine-readable reasons (`stale_measurement:ct_x`, `missing_measurement`, …).
+* `usable=False` when a double-pole pair's two legs were sampled more than
+  `max_leg_skew_s` apart, with reason `leg_skew_exceeded:...`. This is the
+  **same** limit and the **same** per-leg time source (each reading's `age_s`
+  against the window instant) that the solver path uses in
+  `_exclude_partial_legs`; the constant is defined once, as
+  `electrical/direct.py::DEFAULT_MAX_LEG_SKEW_S`, and `DisaggregationEngine`
+  defaults to it. Before dev.12 the direct path had no skew check, so one missed
+  poll on a 15.7 s panel could put a pair's legs 31 s apart and the direct path
+  would sum two vintages into one device watt while the solver excluded the same
+  row. The pair is never repaired by averaging, by taking the newer leg, or by
+  falling back to one leg.
 * A **branch** CT is never direct measurement for a device, even when only one
   device currently draws power: the branch may carry unmodelled load.
 * A direct value is **never** replaced by a model estimate. Conflicts with a HA
@@ -732,7 +809,14 @@ row/device carries a diagnostic and confidence is reduced.
 Contract **1.3.0** added one additive field, `Reconciliation.topology_confirmed`
 (`bool`, default `false`), so a consumer can tell whether the balance was
 produced from a user-confirmed topology or from a `candidate` hypothesis. Older
-readers ignore it. The remaining observations are non-blocking:
+readers ignore it.
+
+Contract **1.4.0** added two more additive fields, `Reconciliation.unmonitored_w`
+and `Reconciliation.meter_disagreement_w` (both `float`, default `0.0`), which
+decompose the existing `unknown_residual_w` without changing it (§4.2.4). An
+older reader that ignores them still sees the same residual it always saw.
+
+The remaining observations are non-blocking:
 
 * `DeviceTopology` has no per-device phase-split fraction, so `α` is global
   (`ElectricalModel(phase_split_l1=...)`). A per-device override would require a

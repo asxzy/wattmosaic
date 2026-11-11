@@ -59,8 +59,16 @@ from wattmosaic_engine.disaggregation.configuration import (
 )
 from wattmosaic_engine.disaggregation.events import StepChange, StepTracker, detect_changes
 from wattmosaic_engine.disaggregation.tiers import TierInputs, grade
-from wattmosaic_engine.electrical.direct import DirectReading, resolve_direct
-from wattmosaic_engine.electrical.main_power import MainPower, main_power_w
+from wattmosaic_engine.electrical.direct import (
+    DEFAULT_MAX_LEG_SKEW_S,
+    DirectReading,
+    resolve_direct,
+)
+from wattmosaic_engine.electrical.main_power import (
+    MainPower,
+    main_power_w,
+    meter_disagreement_w,
+)
 from wattmosaic_engine.electrical.matrix import MeasurementMatrix, build_measurement_matrix
 from wattmosaic_engine.electrical.models import ModelView, resolve_model
 from wattmosaic_engine.electrical.solver import (
@@ -483,7 +491,7 @@ class DisaggregationEngine:
         off_tolerance_w: float = OFF_ATTRIBUTION_TOLERANCE_W,
         model_ridge: float = 0.0,
         tracker: StepTracker | None = None,
-        max_leg_skew_s: float = 20.0,
+        max_leg_skew_s: float = DEFAULT_MAX_LEG_SKEW_S,
     ) -> None:
         self.max_measurement_age_s = float(max_measurement_age_s)
         #: How far apart in time the two legs of a declared double-pole pair
@@ -491,6 +499,11 @@ class DisaggregationEngine:
         #: one circuit are sampled within a cycle of each other; a skew larger
         #: than this means one leg is a leftover from an earlier poll, so the
         #: row is a mix of two instants and neither leg may be used.
+        #:
+        #: The limit itself is defined once, in
+        #: :mod:`wattmosaic_engine.electrical.direct`, because ``resolve_direct``
+        #: enforces the same rule; two independent defaults would let the direct
+        #: path and the solver path disagree about which pairs are usable.
         self.max_leg_skew_s = float(max_leg_skew_s)
         self.phase_split_l1 = float(phase_split_l1)
         self.k_mad = float(k_mad)
@@ -637,7 +650,11 @@ class DisaggregationEngine:
 
         # ---- Level 1: direct measurement ---------------------------------
         direct = resolve_direct(
-            coerced, graph, max_age_s=self.max_measurement_age_s, at=coerced.at
+            coerced,
+            graph,
+            max_age_s=self.max_measurement_age_s,
+            max_leg_skew_s=self.max_leg_skew_s,
+            at=coerced.at,
         )
         diagnostics["direct_measurements"] = {d: r.as_dict() for d, r in direct.items()}
 
@@ -2100,6 +2117,33 @@ class DisaggregationEngine:
                     ),
                 }
 
+        # The residual is two physically different quantities when the home is
+        # metered twice on one conductor.  ``unknown_residual`` keeps its exact
+        # meaning (it is the whole gap and the balance identity depends on it);
+        # the split only names how much of it is instrument disagreement
+        # between two meters on the same wires and how much is genuinely
+        # unclamped load.  Nothing is re-estimated: the two parts add to the
+        # number that was already reported.
+        meter_disagreement = 0.0
+        if not (main.errors or not main.usable):
+            meter_disagreement, disagreeing_cts = meter_disagreement_w(
+                graph,
+                window.readings,
+                canonical_total_w=main.total_w,
+                max_age_s=self.max_measurement_age_s,
+                phase_split_l1=self.phase_split_l1,
+            )
+            if meter_disagreement > 0.0:
+                diagnostics["meter_disagreement"] = {
+                    "disagreement_w": meter_disagreement,
+                    "channels": list(disagreeing_cts),
+                    "reason": (
+                        "two CTs on the same conductors report different totals; "
+                        "the difference is instrument disagreement, not load"
+                    ),
+                }
+        unmonitored = max(0.0, unknown_residual - meter_disagreement)
+
         # Measurement-fit error: how well all attributed device power explains
         # the CT rows.  This is a *fit* diagnostic, not the power balance.
         prepared = matrix.prepare(window.readings)
@@ -2145,6 +2189,15 @@ class DisaggregationEngine:
             "main_power_sum_of_parallel_mains",
             "residual_never_redistributed",
         ]
+        if meter_disagreement > 0.0:
+            explanation.append(
+                f"residual_includes_meter_disagreement:{meter_disagreement:.1f}W"
+                f"_of_{unknown_residual:.1f}W"
+            )
+        if unmonitored > 0.0 and meter_disagreement > 0.0:
+            explanation.append(
+                f"unmonitored_residual_excludes_meter_disagreement:{unmonitored:.1f}W"
+            )
         if main.has_export:
             explanation.append("negative_power_export_preserved")
         if main.missing_channels:
@@ -2175,6 +2228,8 @@ class DisaggregationEngine:
             model_estimated_w=model_w,
             configured_prior_w=prior_w,
             unknown_residual_w=unknown_residual,
+            unmonitored_w=unmonitored,
+            meter_disagreement_w=meter_disagreement,
             reconciliation_error_w=recon_error,
             reconciliation_error_ratio=ratio,
             accounted_fraction=accounted_fraction,

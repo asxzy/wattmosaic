@@ -28,7 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from . import __version__ as ENGINE_VERSION
 
-CONTRACT_VERSION = "1.3.0"
+CONTRACT_VERSION = "1.4.0"
 
 
 def utcnow() -> datetime:
@@ -822,6 +822,17 @@ class Reconciliation(Model):
     model_estimated_w: float = 0.0
     configured_prior_w: float = 0.0
     unknown_residual_w: float = 0.0
+    #: The ``unknown_residual_w`` decomposition (contract 1.4.0, additive).
+    #: ``meter_disagreement_w`` is the absolute difference between the canonical
+    #: feed total and an aliased meter on the *same* conductors; it is 0.0 when
+    #: there is no alias or when either meter is not fresh.
+    #: ``unmonitored_w`` is the remainder -- ``unknown_residual_w -
+    #: meter_disagreement_w`` clamped at 0 -- which is genuinely unclamped load.
+    #: ``unmonitored_w + meter_disagreement_w == unknown_residual_w`` whenever
+    #: the residual is non-negative, and ``accounted + unknown_residual ==
+    #: main_power_w`` still holds exactly because the total is unchanged.
+    unmonitored_w: float = 0.0
+    meter_disagreement_w: float = 0.0
     reconciliation_error_w: float = 0.0
     reconciliation_error_ratio: float = 0.0
     accounted_fraction: float = 0.0

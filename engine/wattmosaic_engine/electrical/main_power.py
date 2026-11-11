@@ -29,7 +29,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
-from wattmosaic_engine.contracts import Phase, Polarity
+from wattmosaic_engine.contracts import Phase, Polarity, QualityStatus
 from wattmosaic_engine.electrical.topology import TopologyGraph
 
 #: A split-phase panel feed is published as two CTs whose ids differ only in the
@@ -386,3 +386,124 @@ def phase_power_w(
     """Convenience: ``{"l1": ..., "l2": ..., "total": ...}`` from main CTs."""
     mp = main_power_w(graph, readings)
     return {"l1": mp.l1_w, "l2": mp.l2_w, "total": mp.total_w}
+
+
+def _alias_node_total(
+    alias_names: Sequence[str],
+    values: Mapping[str, float | None],
+    nodes: Sequence[Sequence[str]],
+) -> float | None:
+    """Sum measured values of the alias legs, but only if the whole node is fresh.
+
+    A node is one meter point.  Half of one is not a second opinion about the
+    conductor: it is one leg's power, and comparing it to the canonical feed's
+    total would manufacture a disagreement out of a missing channel.  So every
+    leg of the node must have a value before this returns anything.
+    """
+    wanted = set(alias_names)
+    total = 0.0
+    matched = False
+    for node in nodes:
+        if not wanted.intersection(node):
+            continue
+        vals = [values.get(cid) for cid in node]
+        if any(v is None for v in vals):
+            return None
+        total += float(sum(v for v in vals if v is not None))
+        matched = True
+    return total if matched else None
+
+
+def meter_disagreement_w(
+    graph: TopologyGraph,
+    readings: Mapping[str, object],
+    *,
+    canonical_total_w: float | None = None,
+    max_age_s: float = 120.0,
+    phase_split_l1: float = 0.5,
+) -> tuple[float, tuple[str, ...]]:
+    """Meter-to-meter disagreement on the wires the mains measure, in watts.
+
+    Two CTs clamped on one service entrance are the same conductors, but they
+    are different instruments.  On the reference install the aliased Refoss
+    main panel reads ~8.9 % below the canonical load manager, so of a ~600 W
+    residual roughly 166 W is *instrument disagreement*, not unmonitored load.
+    Reporting both as "unknown load" overstates what the physics says is
+    missing and points the operator at the wrong fix.
+
+    The quantity is ``|canonical feed total - aliased feed total|``, and it is
+    computed only when both sides describe *the same wires*:
+
+    * there is at least one enabled alias channel (``alias_of_ct_id``);
+    * the alias legs are a complete meter point -- every leg of the node has a
+      fresh value, so no leg is missing;
+    * the canonical channels those legs alias are exactly the enabled
+      effective feeds of the home, so the two totals cover one conductor set.
+
+    Otherwise the answer is ``0.0`` and no claim is made.  A partial or stale
+    meter is not evidence of disagreement, and guessing zero agreement would be
+    as wrong as guessing the difference.
+
+    Returns ``(disagreement_w, alias_ct_ids)``; the ids name the pair the
+    reconciliation can cite.
+    """
+    aliases = [c for c in graph.alias_channels() if c.enabled]
+    if not aliases:
+        return 0.0, ()
+    alias_ids = {c.ct_id for c in aliases}
+
+    mains = graph.main_channels()
+    nodes = _measurement_nodes(mains)
+    by_id = {ch.ct_id: ch for ch in mains}
+
+    def fresh_value(cid: str) -> float | None:
+        ch = by_id.get(cid)
+        if ch is None:
+            return None
+        reading = readings.get(cid)
+        if reading is None:
+            return None
+        # A bare number carries no age or quality; it is the caller's statement
+        # that the channel is current, and ``_read_w`` applies polarity.
+        age = getattr(reading, "age_s", None)
+        if age is not None and float(age) > max_age_s:
+            return None
+        quality = getattr(reading, "quality", None)
+        if quality is not None and str(getattr(quality, "value", quality)) in (
+            QualityStatus.MISSING.value,
+            QualityStatus.BAD.value,
+        ):
+            return None
+        return graph.scale_w(cid, _read_w(readings, cid, channel_polarity=Polarity(ch.polarity)))
+
+    alias_legs: list[str] = []
+    for node in nodes:
+        inside = [cid for cid in node if cid in alias_ids]
+        if not inside:
+            continue
+        if len(inside) != len(node):
+            # One leg of a meter point is aliased and the other is not: not a
+            # second meter on the same wires, so nothing to compare.
+            return 0.0, ()
+        alias_legs.extend(inside)
+    if not alias_legs:
+        return 0.0, ()
+
+    # The alias must shadow the whole canonical feed.  Anything less means the
+    # two totals are over different conductor sets and their difference is not
+    # a meter disagreement.
+    canonical_of_alias = {graph.canonical_channel_id(cid) for cid in alias_legs}
+    if canonical_of_alias != set(graph.effective_feeds()):
+        return 0.0, ()
+
+    values = {cid: fresh_value(cid) for cid in alias_legs}
+    alias_total = _alias_node_total(alias_legs, values, nodes)
+    if alias_total is None:
+        return 0.0, ()
+
+    if canonical_total_w is None:
+        canonical_total_w = main_power_w(
+            graph, readings, phase_split_l1=phase_split_l1
+        ).total_w
+    return abs(float(canonical_total_w) - alias_total), tuple(sorted(alias_legs))
+

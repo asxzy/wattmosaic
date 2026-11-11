@@ -28,7 +28,7 @@ API_BASE_PATH = "/api/v1"
 #: here does not fail loudly -- it silently hides the fields a newer contract
 #: added.  ``tests/unit/test_contracts.py`` pins the engine side; this file is
 #: checked against it by ``tests/integration/test_ha_integration.py``.
-CONTRACT_VERSION = "1.3.0"
+CONTRACT_VERSION = "1.4.0"
 
 HEADER_API_TOKEN = "X-API-Token"
 HEADER_CONTRACT_VERSION = "X-WattMosaic-Contract-Version"

@@ -1425,3 +1425,74 @@ def test_solver_with_no_supported_columns_converges_to_zero():
     result = solve_constrained_nnls(A, y, device_ids=["a", "b", "c"])
     assert result.converged is True
     assert np.all(result.x == 0.0)
+
+
+# --------------------------------------------------------------------------- #
+# W6: the direct path enforces the same leg-skew rule as the solver path
+# --------------------------------------------------------------------------- #
+def test_direct_pair_with_legs_sampled_far_apart_is_not_usable():
+    """One missed poll must not make the direct path sum two vintages.
+
+    The solver path has excluded a pair whose legs are more than
+    ``max_leg_skew_s`` apart since dev.11.  ``resolve_direct`` did not: it
+    summed any two fresh legs, so on the reference install (Refoss panel polls
+    at 15.7 s) one missed poll put the legs 31 s apart and reported a 3-5 kW
+    device watt that the solver simultaneously refused to use.  Same rule,
+    same constant, same source of per-leg time.
+    """
+    graph = build_graph(_dedicated_topology())
+    window = ObservationWindow.from_values(
+        T0,
+        {"ct_tv": 0.0, "ct_tub_l1": 1400.0, "ct_tub_l2": 1300.0},
+        ages={"ct_tub_l1": 2.0, "ct_tub_l2": 33.0},
+    )
+    tub = resolve_direct(window, graph)["tub"]
+
+    assert tub.usable is False
+    assert any(r.startswith("leg_skew_exceeded") for r in tub.reasons)
+    # Not averaged, not the newer leg: the pair is simply not a measurement.
+    assert tub.ct_ids == ("ct_tub_l1", "ct_tub_l2")
+
+
+def test_direct_pair_with_legs_inside_the_skew_limit_still_sums():
+    """The guard must not fire on a healthy pair.
+
+    A 2 s gap is what the live 240 V pairs actually show; the limit exists for
+    the missed-poll case, not for normal jitter.
+    """
+    graph = build_graph(_dedicated_topology())
+    window = ObservationWindow.from_values(
+        T0,
+        {"ct_tv": 0.0, "ct_tub_l1": 1400.0, "ct_tub_l2": 1300.0},
+        ages={"ct_tub_l1": 2.0, "ct_tub_l2": 4.0},
+    )
+    tub = resolve_direct(window, graph)["tub"]
+
+    assert tub.usable is True
+    assert tub.power_w == pytest.approx(2700.0)
+    assert not any("leg_skew" in r for r in tub.reasons)
+
+
+def test_the_leg_skew_limit_has_one_definition():
+    """The direct path and the solver path must read the same constant.
+
+    A second default is how the two paths came to disagree in the first place.
+    """
+    from wattmosaic_engine.disaggregation import DisaggregationEngine
+    from wattmosaic_engine.electrical.direct import DEFAULT_MAX_LEG_SKEW_S
+
+    assert DisaggregationEngine().max_leg_skew_s == DEFAULT_MAX_LEG_SKEW_S
+
+
+def test_a_configured_skew_limit_reaches_the_direct_path():
+    from wattmosaic_engine.disaggregation import DisaggregationEngine
+
+    graph = build_graph(_dedicated_topology())
+    window = ObservationWindow.from_values(
+        T0,
+        {"ct_tv": 0.0, "ct_tub_l1": 1400.0, "ct_tub_l2": 1300.0},
+        ages={"ct_tub_l1": 2.0, "ct_tub_l2": 12.0},
+    )
+    assert resolve_direct(window, graph)["tub"].usable is True
+    strict = DisaggregationEngine(max_leg_skew_s=5.0)
+    assert strict.max_leg_skew_s == 5.0

@@ -291,6 +291,16 @@
           "title": "Unknown Residual W",
           "type": "number"
         },
+        "unmonitored_w": {
+          "default": 0.0,
+          "title": "Unmonitored W",
+          "type": "number"
+        },
+        "meter_disagreement_w": {
+          "default": 0.0,
+          "title": "Meter Disagreement W",
+          "type": "number"
+        },
         "reconciliation_error_w": {
           "default": 0.0,
           "title": "Reconciliation Error W",
@@ -388,5 +398,5 @@
   "title": "SnapshotResponse",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/snapshot_response.json",
-  "x-contract-version": "1.3.0"
+  "x-contract-version": "1.4.0"
 }

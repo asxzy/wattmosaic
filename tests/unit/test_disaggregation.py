@@ -1561,3 +1561,47 @@ def test_a_residual_with_no_transition_is_reported_not_fabricated():
     # It is a diagnostic, never an ambiguity: there is nothing to confuse.
     assert batch.diagnostics["ambiguity"]["ambiguous"] is False
     assert batch.reconciliation.unknown_residual_w == pytest.approx(1000.0, abs=50.0)
+
+
+# --------------------------------------------------------------------------- #
+# W7: l1/l2 are the same snapshot as the total, to floating-point precision
+# --------------------------------------------------------------------------- #
+def test_l1_l2_match_the_total_in_the_same_snapshot():
+    """Pin the *actual* semantics of the phase split against the total.
+
+    A validator reported ``l1_power_w + l2_power_w != main_power_w`` at one
+    instant and read it as "the phases lag the total by one publish".  They do
+    not: all three come from the same ``main_power_w()`` call over the same
+    window, in the same ``_reconcile``.  The gap is IEEE-754 summation order --
+    the total is ``sum(per_channel.values())`` and each phase is its own
+    ``sum()`` of a subset -- so it is ~1e-12 W here and ~1e-16 relative.
+
+    The test bag is deliberately split so the two orders disagree: if the
+    phases were one snapshot behind, the gap would be the previous snapshot's
+    total (thousands of watts), not a rounding tail.
+    """
+    topo = topology(
+        [
+            ch("main_l1", CTType.MAIN, phase=Phase.L1, resolution=1.0),
+            ch("main_l2", CTType.MAIN, phase=Phase.L2, resolution=1.0),
+        ],
+        [],
+    )
+    engine = DisaggregationEngine()
+    first = engine.infer(
+        window({"main_l1": 1000.0, "main_l2": 500.0}), device_states={}, models={}, topology=topo
+    ).reconciliation
+    second = engine.infer(
+        window({"main_l1": 1830.371, "main_l2": 1111.542}),
+        device_states={},
+        models={},
+        topology=topo,
+    ).reconciliation
+
+    # Same snapshot: exact sum within floating-point summation order.
+    assert second.l1_power_w + second.l2_power_w == pytest.approx(
+        second.main_power_w, abs=1e-9
+    )
+    # NOT one publish behind: the phases do not sum to the previous total.
+    assert second.l1_power_w + second.l2_power_w != pytest.approx(first.main_power_w, rel=1e-6)
+    assert second.main_power_w == pytest.approx(2941.913)

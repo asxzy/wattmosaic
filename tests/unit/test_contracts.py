@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_contract_version_present() -> None:
-    assert contracts.CONTRACT_VERSION == "1.3.0"
+    assert contracts.CONTRACT_VERSION == "1.4.0"
 
 
 def test_schema_files_match_contract_version() -> None:
