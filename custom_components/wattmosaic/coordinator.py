@@ -36,6 +36,14 @@ from .const import (
 )
 from .entity_values import explicit_device_link, merge_energy_choice
 from .flow_logic import TOPOLOGY_PUSH_TIMEOUT, TopologyPushState, async_replay_topology
+from .state_links import (
+    LinkResolution,
+    ct_entities_by_device,
+    device_ids,
+    registry_device_ids,
+    registry_rows,
+    resolve_links,
+)
 from .util import (
     coerce_snapshot,
     device_entities_available,
@@ -221,6 +229,55 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
 
     # -- topology replay ----------------------------------------------------- #
 
+    def resolve_state_links(self, topology: Any = None) -> LinkResolution:
+        """Turn ``CONF_DEVICE_LINKS`` into explicit per-device state entity ids.
+
+        This is the *only* place the Home Assistant entity registry is consulted
+        for learning evidence, and it is deliberately in the integration: the
+        engine may run outside Home Assistant and must never import
+        ``homeassistant.helpers``.  Only the resolved entity ids cross the
+        boundary.
+
+        ``topology`` is the engine's topology payload (or ``None`` when it could
+        not be read).  It supplies the device ids and each device's own CT
+        entities, so a link can never resolve to a measurement entity even when
+        the registry row carries no attributes.
+        """
+        links = {**self.entry.data, **self.entry.options}.get(CONF_DEVICE_LINKS)
+        if not isinstance(links, Mapping) or not links:
+            return LinkResolution()
+
+        rows: list[dict[str, Any]] = []
+        known_registry: list[str] | None = None
+        try:
+            from homeassistant.helpers import entity_registry as er
+
+            registry = er.async_get(self.hass)
+            rows = registry_rows(registry, entries_for_device=er.async_entries_for_device)
+            known_registry = registry_device_ids(registry)
+        except Exception:  # noqa: BLE001 - a registry hiccup must not block setup
+            # Resolution without the registry still accepts entity-id links; a
+            # device id then resolves to nothing and is *reported* as such
+            # rather than silently dropped.
+            _LOGGER.debug("WattMosaic entity registry read failed", exc_info=True)
+
+        return resolve_links(
+            links,
+            entities=rows,
+            engine_devices=device_ids(topology),
+            ct_entity_ids=ct_entities_by_device(topology),
+            registry_device_ids=known_registry,
+        )
+
+    def _state_link_inputs(self) -> str | None:
+        """Fingerprint of the stored links, or ``None`` when none are declared."""
+        links = {**self.entry.data, **self.entry.options}.get(CONF_DEVICE_LINKS)
+        if not isinstance(links, Mapping) or not links:
+            return None
+        return ";".join(
+            f"{key}={links[key]}" for key in sorted(links) if str(links[key] or "")
+        )
+
     async def async_ensure_topology_pushed(self) -> TopologyPushState:
         """Replay the stored topology declaration onto the engine if needed.
 
@@ -231,13 +288,21 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
         call on every poll because :func:`flow_logic.async_replay_topology`
         decides whether anything must be written.
 
+        It also replays the *resolved* device links: ``device_links`` may hold
+        an HA device-registry id, which no engine can interpret.  Resolving it
+        here and writing ``metadata.link_state_entity_ids`` is what lets a
+        transition reach the engine's learning intake at all.
+
         Never raises: a replay failure is recorded on :attr:`topology_push` and
         retried on the next poll.  Setup and entity availability must not depend
         on the engine accepting a write.
         """
         config = {**self.entry.data, **self.entry.options}
         assignments = config.get(CONF_CT_ASSIGNMENTS) or {}
-        if not isinstance(assignments, Mapping) or not assignments:
+        if not isinstance(assignments, Mapping):
+            assignments = {}
+        links_present = self._state_link_inputs() is not None
+        if not assignments and not links_present:
             # A fresh install has no declaration.  Never fabricate one.
             self.topology_push.reason = "no_assignments"
             self._topology_checked_once = True
@@ -259,6 +324,10 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
                     stored_version=config.get(CONF_TOPOLOGY_VERSION),
                     state=self.topology_push,
                     observed_version=observed,
+                    # A callable, not a value: the resolution needs the
+                    # topology the replay itself reads (device ids + CT ids).
+                    state_links=self.resolve_state_links if links_present else None,
+                    link_signature=self._state_link_inputs(),
                 ),
                 timeout=TOPOLOGY_PUSH_TIMEOUT,
             )

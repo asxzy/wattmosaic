@@ -71,7 +71,7 @@ real engine; three of them contained defects that "tests pass" did not reveal
 
 ## 3. Locked architectural decisions
 
-See `docs/decisions/README.md` (ADR-0001…ADR-0027). Summary:
+See `docs/decisions/README.md` (ADR-0001…ADR-0028). Summary:
 
 | ID | Decision |
 | --- | --- |
@@ -90,6 +90,7 @@ See `docs/decisions/README.md` (ADR-0001…ADR-0027). Summary:
 | D13 | Confidence tiers grade evidence kind; the 0–1 score stays, neither is calibrated |
 | D14 | A power entity is measurable, not state-bearing; only runtime entities write device state |
 | D15 | The App panel is static files under `script-src 'self'`, gated on ingress, read-only (ADR-0027) |
+| D16 | A `device_links` HA device id is resolved to state entities by the integration, never by the engine (ADR-0028) |
 
 ---
 
@@ -4236,6 +4237,116 @@ renamed, no entity added, published total unchanged. Absent fields coerce to
 `engine/wattmosaic_engine/__init__.py`); `v0.2.1-dev.11` is already tagged, so
 the release workflow publishes this tree as committed. Device watts and energy
 are unchanged from `dev.11`.
+
+---
+
+## 7u. Round 3 integrated: the split is stored, and the intake is alive (2026-11-11)
+
+Branch `integrate/r3` off `e02c216` (`0.2.1-dev.12`). Two independent lanes, both
+based on the released commit, merged in that order:
+`fix/residual-decomposition` (`8443274`, storage + algebra) then
+`fix/learning-intake` (`b900a4b`, device-registry resolution).
+
+### 7u.1 Merge conflicts (one textual, both sides kept)
+
+`custom_components/wattmosaic/flow_logic.py` — the replay's idempotency guard.
+Lane A (round 2 work, already in the base) had added
+`state.verified_confirmed_request or not confirmed`; lane B added `links_seen`.
+These guard *different* stale verdicts from the same cached return: a
+non-confirming poll's verdict must not answer a confirming request, and a poll
+before a newly declared link must not answer for the link either. Resolved by
+keeping **both** conditions, with a comment naming each. No other file
+conflicted; `contracts.py` did **not** collide (lane B never touched it — it
+carries the link in `metadata`, which already round-trips), so the only contract
+change is lane A's 1.5.0.
+
+### 7u.2 Contract version — four locations, one value
+
+| Location | Value |
+| --- | --- |
+| `engine/wattmosaic_engine/contracts.py` `CONTRACT_VERSION` | `1.5.0` |
+| `custom_components/wattmosaic/const.py` `CONTRACT_VERSION` | `1.5.0` |
+| `data/schemas/*.json` `x-contract-version` (19 files) | `1.5.0` |
+| `tests/unit/test_contracts.py` pin | `1.5.0` |
+
+`tools/dev/export_schemas.py --check` regenerates clean (19 schemas, 1.5.0), so
+the schema tree was produced by the exporter, not hand-merged. Fields added this
+round on `Reconciliation`: `meter_spread_w`, `meter_spread_exceeds_residual`.
+
+### 7u.3 Schema 7 verified
+
+`LATEST_VERSION == 7` (derived: `max(m.version for m in MIGRATIONS)`), exactly
+one `Migration(version=7, ...)`. Its `apply` adds seven columns to
+`reconciliation_results` via `add_column_if_missing` (a `PRAGMA table_info`
+guard): `unmonitored_w`, `meter_disagreement_w`, `meter_spread_w`,
+`meter_spread_exceeds_residual`, `configured_prior_w`,
+`measurement_uncertainty_w`, `topology_confirmed`. Idempotency is proved by
+`test_migrations_are_idempotent_across_reopens` (reopen, re-run, then a third
+pass) plus `test_a_pre_schema_7_database_keeps_its_rows`, which also checks the
+NULL→default read path.
+
+### 7u.4 The `state_entity_ids` chain, link by link
+
+| # | Link | File:line |
+| --- | --- | --- |
+| 1 | HA entity registry → rows | `coordinator.py:255-268` (`er.async_get`, `registry_rows`, `registry_device_ids`) |
+| 2 | rows + links → resolution | `coordinator.py:269-275` → `state_links.py:346` `resolve_links` |
+| 3 | resolution → topology metadata | `state_links.py:497` `apply_state_link_metadata` → `flow_logic.py:1479` |
+| 4 | plan sees the change | `flow_logic.py:1484-1500` (`links_changed`, `state_links_missing`) |
+| 5 | `PUT /topology` | `flow_logic.py:1560` → `api_client.py:341` → `server.py:350` |
+| 6 | engine stores metadata | `database.py:180-189` (`metadata_json`) |
+| 7 | engine reads it back | `database.py:246-253` (`metadata=json.loads(...)`) |
+| 8 | engine -> entity → device | `device_links.py:122/139/261` (`link_state_entity_ids`, `runtime_state_entities`, `state_entity_for_device`) |
+| 9 | event accepted as state | `main.py:803` (guard) → `main.py:834` (`_pending_transitions`) |
+| 10 | transitions → samples | `main.py:1138-1148` → backend → `learning_samples` |
+
+Links 1–4 and 8–10 were covered by `test_learning_intake.py`; **5–7 were not.**
+The replay tests assert the request body and the intake tests build the database
+in-process, so a schema that dropped device `metadata` would have passed both and
+left production dead. Added
+`test_link_state_entities_survive_the_http_and_sqlite_round_trip` in
+`tests/integration/test_engine_api_contract.py`: real `APIServer` → real SQLite
+file → reload with the engine's own reader → `runtime_state_entities()`. It also
+asserts the device's CT power entity is still refused as a state source.
+
+**Is the intake provably alive?** Yes, at the code level: a resolved link now
+reaches `_pending_transitions`, and
+`test_a_resolved_state_transition_matures_into_a_sample` drives the real engine
+at the 15 s cadence and observes `samples_seen >= 1`, `samples_rejected > 0`,
+`dominant_rejection_reason == ambiguous_topology`,
+`effective_state == "blocked"`. Live confirmation needs the deploy plus a human
+topology confirm (§7u.6).
+
+### 7u.5 What the merge did *not* change
+
+`AMBIGUOUS_TOPOLOGY` still rejects every sample on a `candidate` topology
+(`sample_filter.py:320`); lane B made samples *reach* the filter, it did not
+change the filter. No auto-confirm and no `CONF_TOPOLOGY_CONFIRMED` write exists
+on setup — the only writer is `topology_confirm.py:263-280`, reached from the
+button. `samples_seen == samples_accepted + samples_rejected` holds by
+construction (`reporting.py:99-120` increments all three in one `record`) and is
+pinned by `test_counters_are_monotonic_and_add_up`. The HA surface keeps both
+new readings: `meter_spread_power` (`entity_values.py:209`),
+`meter_spread_w` attributes (`sensor.py:244`), `devices_without_state_entity`
+(`diagnostics.py:136`). Old-engine tolerance holds: `as_float` returns `None`,
+never `0.0`, for an absent `meter_spread_w`.
+
+### 7u.6 Still open
+
+1. **Eight Refoss CTs are frozen.** The unbounded `meter_spread_w` (349 W live,
+   against a 166 W residual) makes the size of the instrument problem explicit;
+   the hardware is still unrepaired.
+2. **Topology still needs a user confirm.** Learning stays `blocked` until then.
+   The difference this round makes: it is now `blocked` with `samples_rejected >
+   0`, which is visible proof the pipeline runs.
+3. **No models yet.** Correct consequence of (2).
+
+### 7u.7 Release hygiene
+
+`0.2.1-dev.13` in all five fields via `tools/dev/bump_version.py --write`.
+`v0.2.1-dev.12` is already tagged, so the workflow publishes this tree as
+committed and requires the hand-written notes section it now has. Device watts
+and energy are unchanged from `dev.12`.
 
 ---
 

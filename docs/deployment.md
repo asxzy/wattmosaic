@@ -355,6 +355,31 @@ Supervisor does with `backup: cold`.
 Never restore a database into an **older** engine than the one that wrote it:
 migrations are forward-only.
 
+### Schema 7 — downgrade is NOT supported in place
+
+Schema **7** is the first bump since 0.1.6's schema 6. It adds five nullable
+columns to `reconciliation_results` (`unmonitored_w`, `meter_disagreement_w`,
+`configured_prior_w`, `measurement_uncertainty_w`, `topology_confirmed`) with
+`ALTER TABLE ... ADD COLUMN`. That is a metadata-only change: no table rewrite,
+no downtime, and existing rows keep `NULL` for the new columns (readers resolve
+`NULL` to the model default).
+
+**Every release from 0.1.6 up to and including 0.2.1-dev.12 is schema 6.**
+Upgrading is automatic and additive. **Downgrading from schema 7 to schema 6 in
+place is not supported**: the pre-deploy backup is the only supported rollback.
+If you roll the image back, restore the matching database backup as well:
+
+1. Stop the container/app.
+2. Replace `/data/wattmosaic.db` with the pre-deploy backup and remove stale
+   `wattmosaic.db-wal` / `-shm`.
+3. Start the older image.
+
+Do not run an older image against a schema-7 database and then re-upgrade it —
+the migration is idempotent, so it would not corrupt anything, but the split and
+the sibling fields written by the newer engine would be invisible to the older
+one, and any row written in between would keep `NULL`. Take the backup before
+every upgrade.
+
 ### Retention
 
 `WM_RETENTION_DAYS_RAW` / `WM_RETENTION_DAYS_AGGREGATES` bound growth. Pruning

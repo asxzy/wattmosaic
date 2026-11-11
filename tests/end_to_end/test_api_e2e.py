@@ -310,6 +310,49 @@ def test_reconciliation_residual_is_never_redistributed(core) -> None:
     assert "unknown_residual_w" in recon
 
 
+def test_persisted_reconciliation_survives_the_round_trip(core) -> None:
+    """The contract-1.4.0 residual split must reach the API from SQLite.
+
+    ``Reconciliation.unmonitored_w`` and ``.meter_disagreement_w`` were computed
+    correctly in memory and then dropped by storage: the table had no columns,
+    the INSERT named none, and the read path never populated them.  The API then
+    served the model's ``0.0`` defaults, so
+    ``unmonitored_w + meter_disagreement_w != unknown_residual_w`` by the whole
+    residual.  This asserts the round trip on real engine output, over HTTP.
+    """
+    _feed(core)
+    stored = core.db.latest_reconciliation()
+    assert stored is not None
+    # The columns exist on the persisted row (schema 7).
+    assert "unmonitored_w" in stored
+    assert "meter_disagreement_w" in stored
+
+    async def scenario() -> dict:
+        server = await _server(core)
+        try:
+            async with aiohttp.ClientSession(headers=TOKEN_HEADERS) as session:
+                status, snapshot, _ = await _get(session, server, "/snapshot")
+                assert status == 200
+                return snapshot["reconciliation"]
+        finally:
+            await server.stop()
+
+    recon = _run(scenario())
+    residual = float(recon["unknown_residual_w"])
+    split_sum = float(recon["unmonitored_w"]) + float(recon["meter_disagreement_w"])
+
+    # Either the simulator exercises an alias (split non-zero) or it does not
+    # (both parts are legitimately zero).  What must never happen is a non-zero
+    # residual published as a pair that sums to zero.
+    assert split_sum == pytest.approx(residual, abs=0.01), (
+        f"published split {recon['unmonitored_w']} + {recon['meter_disagreement_w']} "
+        f"does not sum to unknown_residual_w={residual}"
+    )
+    if float(recon["meter_disagreement_w"]) != 0.0:
+        # A real disagreement was measured; it must not be truncated to zero.
+        assert float(recon["unmonitored_w"]) + float(recon["meter_disagreement_w"]) > 0.0
+
+
 def test_energy_aggregation_after_inference(core) -> None:
     from wattmosaic_engine.aggregation.aggregator import EnergyAggregator
     from wattmosaic_engine.contracts import InferenceResult

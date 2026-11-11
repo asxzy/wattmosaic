@@ -11,7 +11,7 @@ from __future__ import annotations
 DOMAIN = "wattmosaic"
 NAME = "WattMosaic"
 MANUFACTURER = "WattMosaic"
-VERSION = "0.2.1-dev.12"
+VERSION = "0.2.1-dev.13"
 
 #: Platforms forwarded by ``async_setup_entry`` (strings, so no HA import).
 PLATFORMS: list[str] = ["sensor", "binary_sensor", "button"]
@@ -28,7 +28,7 @@ API_BASE_PATH = "/api/v1"
 #: here does not fail loudly -- it silently hides the fields a newer contract
 #: added.  ``tests/unit/test_contracts.py`` pins the engine side; this file is
 #: checked against it by ``tests/integration/test_ha_integration.py``.
-CONTRACT_VERSION = "1.4.0"
+CONTRACT_VERSION = "1.5.0"
 
 HEADER_API_TOKEN = "X-API-Token"
 HEADER_CONTRACT_VERSION = "X-WattMosaic-Contract-Version"

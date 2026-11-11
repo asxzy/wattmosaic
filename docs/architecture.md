@@ -84,6 +84,22 @@ main → api → disaggregation → electrical → contracts
 `contracts.py` imports nothing from the package. `storage` imports only
 `contracts`. This keeps the schema stable and testable in isolation.
 
+### 2.1 Where the Home Assistant registry boundary sits
+
+The engine must run outside Home Assistant (§1), so nothing under
+`engine/` may read HA's entity or device registry. A `device_links` entry
+stores an HA **device-registry id**, which is not an entity id and means nothing
+to the engine. The integration expands it — `custom_components/wattmosaic/state_links.py`,
+a pure module that takes the registry as plain rows — and crosses the boundary
+with resolved *entity ids* only, written into `DeviceTopology.metadata["link_state_entity_ids"]`.
+
+The engine side only reads that declaration:
+`engine/wattmosaic_engine/device_links.py` (`runtime_state_entities`,
+`state_entity_for_device`). A link that resolves to nothing is never guessed at;
+it is reported as `devices_without_state_entity` in the integration diagnostics.
+See **ADR-0028** in `docs/decisions/README.md` (and ADR-0011 for
+`config_load_entity_ids`, which is the user-declared sibling of this list).
+
 ## 3. Data flow (one inference cycle)
 
 1. **Ingest.** `HASource` receives `state_changed`. Power entities become

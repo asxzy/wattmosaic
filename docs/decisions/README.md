@@ -341,7 +341,8 @@ was never observed at all.
 
 1. Links carry **both** kinds of entity, because measurement needs both.
 2. Only **runtime state entities** — `state_entity_ids` ∪
-   `config_load_entity_ids` — may be written into `device_states`.
+   `config_load_entity_ids` ∪ `link_state_entity_ids` (ADR-0028) — may be written
+   into `device_states`.
 3. A CT power entity's event is still persisted (it is a real observation) but is
    counted under `power_events_not_state` and never becomes device state.
 4. `state_key` follows the same rule: an entity that is not a runtime source is
@@ -1466,3 +1467,83 @@ engine already decided.
   files reach the packaging directory.
 * Visual review: 21 screenshots (7 views × 390/900/1440 px) against a stub engine,
   with no console errors and no horizontal overflow.
+
+---
+
+## ADR-0028 — A device link is resolved by the integration, never by the engine
+
+**Status:** Accepted · 2026-11-11
+
+**Context.** `CONF_DEVICE_LINKS` stores `{engine_device_id: ha_device_id}`. It was
+written for *placement*: the power/energy entities of an inferred load are shown
+on the appliance's own Home Assistant device. Learning evidence was later read
+from the same map, and the two were conflated. An HA **device** id is not an
+entity id, so nothing could expand it:
+
+* the engine saw `metadata["state_entity_ids"]` empty,
+* `entity_links()` linked only the device's CT *power* channels,
+* every real transition hit the `power_events_not_state` bridge and returned
+  before the transition buffer.
+
+A live install showed the exact signature for days: `samples_seen: 0`,
+`samples_accepted: 0`, `samples_rejected: 0`, `dominant_rejection_count: 0`,
+`effective_state: blocked`, `dominant_rejection_reason: ambiguous_topology`. A
+candidate topology rejects every *offered* sample, so `rejected: 0` proves the
+offer stage was empty rather than the filter being selective.
+
+**Decision.**
+
+1. **The integration resolves, the engine reads.** Only Home Assistant's entity
+   registry can expand a device id, and `docs/architecture.md` §1 requires the
+   engine to run outside Home Assistant. Resolution therefore happens in
+   `custom_components/wattmosaic/state_links.py` (pure: the registry is passed in
+   as plain rows) and only the resulting **entity ids** cross the boundary. The
+   engine still never learns what a device registry is.
+2. **A separate metadata key.** Resolved ids are written to
+   `metadata["link_state_entity_ids"]`. `state_entity_ids` stays evidence-owned
+   (ADR-0011) and `config_load_entity_ids` stays configuration-owned, so
+   unlinking restores both exactly. `runtime_state_entities()` is the union of
+   the three, and `entity_links()`/`ambiguous_entities()` read that union.
+3. **Measurements are never state.** Domains in `STATE_DOMAINS` may be state
+   sources; power/energy/current/voltage domains, device classes and units may
+   not, and the device's own CT entity ids are excluded on the topology's
+   evidence even when the registry row carries no attributes.
+4. **Unresolvable is reported, not guessed.** No name matching, no area
+   heuristic, no fabricated binding. Each refusal becomes a record in
+   `devices_without_state_entity` with a reason code
+   (`only_measurement_entities`, `device_not_in_registry`,
+   `not_a_state_domain`, `no_state_entities`, `engine_device_not_in_topology`),
+   surfaced by diagnostics. A topology with no device is never written to: there
+   is nothing to carry the ids and creating one would fabricate topology.
+5. **The write is a replay, not a new path.** The resolved ids travel through the
+   existing `async_replay_topology` / `plan_topology_push` /
+   `build_topology_update` writer, with `state_links_missing` as its own plan
+   reason. A link added *after* setup changes no engine revision, so the replay
+   also fingerprints the declared links (`TopologyPushState.checked_links`) to
+   re-open exactly that check.
+6. **The transition rule is untouched.** `previous is not None and previous !=
+   new_state` is not modified: once a real state entity is declared, the existing
+   rule is what produces the transition. Adding a second state source does not
+   loosen it.
+
+**Consequences.** An install that declared a device link now produces learning
+samples (rejected as `ambiguous_topology` until the topology is confirmed, which
+is the honest state). An install whose link points at a measurement-only device
+produces none, and diagnostics says why. The contract, storage schema and
+`CONTRACT_VERSION` are unchanged: `metadata` already round-trips, so this is a
+producer of an existing field, not a new field.
+
+**Verification.**
+
+* `tests/integration/test_learning_intake.py` — a device id resolves to the
+  device's state entities and never to its CT/power/energy entities; the
+  resolved ids reach the topology metadata; the real `WattMosaicBackend` reports
+  `samples_seen > 0` **and** `samples_rejected > 0` with
+  `dominant_rejection_reason == ambiguous_topology` after the documented
+  maturity window (~68 s, simulated, no sleep); a power-only change still
+  produces no sample; a link-only install is replayed; an in-sync link is not
+  rewritten; a link added after setup re-opens the check; an unresolvable link
+  is reported rather than written.
+* Fail-before proof: with `engine/wattmosaic_engine/device_links.py` at `HEAD`
+  the intake tests reproduce the live signature verbatim (`samples_seen: 0`,
+  `samples_rejected: 0`, `dominant_rejection_count: 0`).
