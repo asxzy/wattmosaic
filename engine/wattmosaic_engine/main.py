@@ -73,6 +73,7 @@ from .device_links import (
 )
 from .diagnostics.report import redact, run_diagnostics
 from .electrical.nesting import infer_nesting
+from .electrical.panel_tree import TREE_VERSION, build_panel_tree
 from .ingestion.correlation import level_from_attributes
 from .ingestion.discovery import discover_candidate_topology
 from .ingestion.ha_source import HASource
@@ -1609,6 +1610,43 @@ class EngineCore:
         self.topology_cache = self.db.load_topology()
         self.db.log_system_event("info", "topology", "topology confirmed via API")
         return self.topology_cache or confirmed
+
+    def panel_tree(self, *, include_nesting: bool = False) -> dict[str, Any]:
+        """Read-time panel → circuits → devices hierarchy (contract §1).
+
+        Cheap by construction: it reads the already-loaded topology and the
+        in-memory ``latest_results`` map, and it never scans the database.  The
+        expensive nesting inference (a multi-second sample scan) runs **only**
+        when ``include_nesting`` is explicitly requested; even then it can only
+        merge duplicate panels or add advisory suggestions, never change leaf
+        counts.
+        """
+        topology = self._active_topology()
+        if topology is None:
+            return {
+                "version": TREE_VERSION,
+                "status": "candidate",
+                "generated_at": utcnow().isoformat().replace("+00:00", "Z"),
+                "topology_version": 0,
+                "stats": {
+                    "panels": 0,
+                    "circuits": 0,
+                    "devices": 0,
+                    "unplaced_devices": 0,
+                    "unplaced_circuits": 0,
+                    "max_depth": 0,
+                    "duplicate_feeds": 0,
+                },
+                "roots": [],
+                "flat": {"panels": [], "circuits": [], "devices": []},
+                "notes": ["no topology configured"],
+            }
+        nesting = self.nesting_candidates() if include_nesting else None
+        return build_panel_tree(
+            topology,
+            latest_results=self.latest_results,
+            nesting=nesting,
+        )
 
     def nesting_candidates(self, *, hours: float = 12.0) -> dict[str, Any]:
         """Propose parent links and duplicate feeds from stored history.

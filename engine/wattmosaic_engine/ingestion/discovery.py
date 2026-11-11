@@ -509,6 +509,8 @@ def _channel(
         enabled=bool(enabled),
         topology_status=TopologyStatus.CANDIDATE,
         metadata=metadata,
+        panel_id=_panel_prefix(panel),
+        panel_name=panel,
     )
 
 

@@ -374,6 +374,26 @@ async def topology_nesting(request: web.Request) -> web.Response:
     return _ok(await maybe_await(_facade(request).nesting_candidates(hours=hours)))
 
 
+#: Truthy spellings accepted by ``?include_nesting=``.  Anything else (including
+#: an empty value) is false: nesting is opt-in because it is the expensive path.
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+async def topology_tree(request: web.Request) -> web.Response:
+    """Panel → circuits → devices hierarchy (contract v1 §1).
+
+    Computed from declared data only; ``parent_ct_id`` is never written.  The
+    default answer is the cheap one: ``include_nesting`` is false unless the
+    caller explicitly asks, because nesting runs a multi-second sample scan and
+    can only add advisories on top of a tree that is already complete.
+    """
+    raw = request.query.get("include_nesting")
+    include_nesting = raw is not None and raw.strip().lower() in _TRUTHY
+    return _ok(
+        await maybe_await(_facade(request).panel_tree(include_nesting=include_nesting))
+    )
+
+
 async def quality(request: web.Request) -> web.Response:
     return _ok(await maybe_await(_facade(request).quality()))
 
@@ -480,6 +500,7 @@ def create_app(
     router.add_put(f"{base}/topology", topology_put)
     router.add_post(f"{base}/topology/confirm", topology_confirm)
     router.add_get(f"{base}/topology/nesting", topology_nesting)
+    router.add_get(f"{base}/topology/tree", topology_tree)
     router.add_get(f"{base}/quality", quality)
     router.add_get(f"{base}/diagnostics", diagnostics)
     router.add_get(f"{base}/models/{{device_id}}", models)
