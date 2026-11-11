@@ -243,6 +243,54 @@ def test_command_roundtrip(db: Database) -> None:
     assert asyncio.run(_with_server(db, run))
 
 
+def test_link_state_entities_survive_the_http_and_sqlite_round_trip(
+    db: Database,
+) -> None:
+    """The whole ``state_entity_ids`` chain, proved over the real wire.
+
+    The integration resolves an HA device id to state entity ids and writes them
+    into ``metadata.link_state_entity_ids`` on ``PUT /topology``.  Every other
+    test stops before the HTTP+SQLite boundary: the replay tests assert the
+    request body, and the intake tests build the database in-process.  A schema
+    that silently dropped device ``metadata`` would still pass both and leave
+    learning dead in production, which is exactly the class of defect this
+    release is fixing.  So drive the real server, a real SQLite file, and the
+    engine's own reader.
+    """
+    from wattmosaic_engine.device_links import (
+        runtime_state_entities,
+        state_entity_for_device,
+    )
+
+    linked = ["switch.hot_tub", "binary_sensor.hot_tub_status"]
+
+    async def run(session, base, headers):
+        payload = _topology().model_dump(mode="json")
+        payload["status"] = "candidate"
+        for device in payload["devices"]:
+            if device["device_id"] == "dev_fridge":
+                device["metadata"] = {"link_state_entity_ids": list(linked)}
+        async with session.put(f"{base}/topology", json=payload, headers=headers) as resp:
+            assert resp.status in (200, 201), await resp.text()
+        return True
+
+    assert asyncio.run(_with_server(db, run))
+
+    # Re-read from the file, not from the server's in-memory copy: the storage
+    # round-trip is the link under test.
+    reloaded = Database(db.path)
+    try:
+        topology = reloaded.load_topology()
+        assert topology is not None
+        device = topology.device_map()["dev_fridge"]
+        assert runtime_state_entities(device) == linked
+        assert state_entity_for_device(topology, "dev_fridge", "switch.hot_tub")
+        # The device's CT entity is a measurement, never a state source.
+        assert not state_entity_for_device(topology, "dev_fridge", "sensor.br1")
+    finally:
+        reloaded.close()
+
+
 def test_export_contains_no_secrets(db: Database) -> None:
     async def run(session, base, headers):
         async with session.get(f"{base}/export/dev_fridge", headers=headers) as resp:
