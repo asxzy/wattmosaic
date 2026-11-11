@@ -13,16 +13,35 @@ separate devices.
 Staleness and repeats are honoured: a stale value is returned with
 ``usable=False`` and a ``stale_measurement`` reason.  The inference layer then
 falls back to the model/unknown rather than presenting an old value as current.
+
+Two legs of one double-pole circuit are usable only *as a pair*.  A leg is not a
+measurement of the circuit at half its value: with the partner missing the sum
+is one leg's power, and with the legs polled a cycle apart the sum mixes two
+different instants.  Both cases are reported as reasons and never repaired by
+averaging, by taking the newer leg, or by falling back to one leg.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from wattmosaic_engine.contracts import QualityStatus
 from wattmosaic_engine.electrical.topology import TopologyGraph
 from wattmosaic_engine.electrical.window import ChannelReading, coerce_window
+
+#: How far apart in time the two legs of a declared double-pole pair may be
+#: before the pair stops describing one instant.  Two legs of one circuit are
+#: sampled within a cycle of each other (the reference install's Refoss panel
+#: polls at 15.7 s and its legs arrive ~2 s apart); a larger skew means one leg
+#: is a leftover from an earlier poll, so the pair is a mix of two instants and
+#: neither leg may be used.
+#:
+#: This is the *single* definition of the limit.  The solver path
+#: (``DisaggregationEngine._exclude_partial_legs``) and this direct path read the
+#: same constant, so they can never disagree about which pairs are usable.
+DEFAULT_MAX_LEG_SKEW_S = 20.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +80,7 @@ def resolve_direct(
     topology: TopologyGraph,
     *,
     max_age_s: float = 120.0,
+    max_leg_skew_s: float = DEFAULT_MAX_LEG_SKEW_S,
     at: datetime | None = None,
 ) -> dict[str, DirectReading]:
     """Return a :class:`DirectReading` for every device with a dedicated CT."""
@@ -80,6 +100,7 @@ def resolve_direct(
 
         legs: dict[str, float | None] = {}
         ages: list[float] = []
+        leg_ages: dict[str, float] = {}
         qualities: list[QualityStatus] = []
         reasons: list[str] = []
         repeated = False
@@ -96,6 +117,7 @@ def resolve_direct(
             # leg with ``measurement_multiplier=2.0`` sums to the full load.
             legs[cid] = topology.scale_w(cid, reading.signed_w())
             ages.append(reading.age_s)
+            leg_ages[cid] = reading.age_s
             qualities.append(reading.quality)
             repeated = repeated or reading.repeated
             if reading.quality in (QualityStatus.MISSING, QualityStatus.BAD):
@@ -114,6 +136,22 @@ def resolve_direct(
             power = raw_power
             if len(values) != len(legs):
                 reasons.append("partial_leg_measurement")
+            # Both legs present is not the same as both legs describing one
+            # instant.  The solver path has always enforced this
+            # (``_exclude_partial_legs``), but the direct path used to sum any
+            # two fresh legs, so one missed poll on the reference install's
+            # 15.7 s Refoss panel put the legs 31 s apart and the two paths
+            # disagreed by the whole load.  Same rule, same constant, same
+            # source of per-leg time (the reading's age against the window
+            # instant) -- the pair is unusable, and it is not repaired by
+            # averaging, by taking the newer leg, or by falling back to one.
+            if len(values) == len(legs) and len(leg_ages) == len(legs):
+                skew_s = abs(max(leg_ages.values()) - min(leg_ages.values()))
+                if math.isfinite(skew_s) and skew_s > max_leg_skew_s:
+                    reasons.append(
+                        f"leg_skew_exceeded:{ct_ids[0]}:{ct_ids[1]}:"
+                        f"{skew_s:.1f}s>{max_leg_skew_s:.1f}s"
+                    )
             if raw_power < 0.0:
                 # A *device* cannot consume negative average power.  Negative
                 # readings are legitimate on a panel main (export / reverse
@@ -130,7 +168,10 @@ def resolve_direct(
 
         usable = (
             power is not None
-            and not any(r.startswith(("stale_", "bad_quality", "missing_")) for r in reasons)
+            and not any(
+                r.startswith(("stale_", "bad_quality", "missing_", "leg_skew_"))
+                for r in reasons
+            )
             # A double-pole device measured by a declared pair needs *both*
             # legs.  With one leg missing the sum is not the device's power but
             # roughly half of it, which is worse than reporting nothing: the

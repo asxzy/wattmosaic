@@ -491,6 +491,105 @@ class TestPushOnSetup:
         assert engine.put_calls[0]["status"] == "candidate"
         assert state.pushed is True
 
+    def test_a_press_after_a_settled_poll_still_confirms(self) -> None:
+        """The live sequence: the button reuses the coordinator's push state.
+
+        Normal polls reconcile with ``confirmed=False``; once the declaration
+        matches they settle on ``reason="engine_matches"`` and the idempotency
+        guard caches that verdict.  The confirm button passes *the same*
+        ``TopologyPushState`` and the same observed version, so the guard used
+        to swallow the press: nothing was written, the engine stayed
+        ``candidate``, and learning stayed blocked forever.  The cached verdict
+        is only valid for the intent that produced it, so a confirming request
+        must re-examine the engine.
+        """
+        engine = FakeEngine(_engine_topology(version=1, status="candidate"))
+        state = flow.TopologyPushState()
+
+        # An engine that already matches the stored declaration (the live state
+        # after the declaration has been replayed), still at ``candidate``.
+        merged = flow.build_topology_update(
+            _engine_topology(version=1, status="candidate"), _assignments()
+        )
+        merged["version"] = 1
+        merged["status"] = "candidate"
+        for channel in merged["channels"]:
+            channel["topology_status"] = "candidate"
+        engine = FakeEngine(merged)
+
+        # Three ordinary polls: in sync, never confirmed.
+        for _ in range(3):
+            run(
+                flow.async_replay_topology(
+                    engine,
+                    _assignments(),
+                    confirmed=False,
+                    stored_version=1,
+                    observed_version=1,
+                    state=state,
+                )
+            )
+        assert engine.put_calls == [], "a non-confirming poll must not confirm"
+        assert state.reason in ("engine_matches", "in_sync")
+        assert state.verified_version == 1
+
+        # The user presses button.wattmosaic_confirm_topology.
+        result = run(
+            flow.async_replay_topology(
+                engine,
+                _assignments(),
+                confirmed=True,
+                stored_version=1,
+                observed_version=1,
+                state=state,
+            )
+        )
+
+        assert len(engine.put_calls) == 1, "the press must write the confirmation"
+        assert len(engine.confirm_calls) == 1, "and confirm it on the engine"
+        assert result.error is None
+        assert result.pushed is True
+
+    def test_the_confirmation_verdict_is_not_resurrected_by_later_polls(self) -> None:
+        """After confirming, ordinary polls go back to being read-only."""
+        engine = FakeEngine(_engine_topology(version=1, status="candidate"))
+        state = flow.TopologyPushState()
+        for _ in range(2):
+            run(
+                flow.async_replay_topology(
+                    engine,
+                    _assignments(),
+                    confirmed=False,
+                    stored_version=1,
+                    observed_version=1,
+                    state=state,
+                )
+            )
+        run(
+            flow.async_replay_topology(
+                engine,
+                _assignments(),
+                confirmed=True,
+                stored_version=1,
+                observed_version=1,
+                state=state,
+            )
+        )
+        writes = len(engine.put_calls)
+        for _ in range(3):
+            run(
+                flow.async_replay_topology(
+                    engine,
+                    _assignments(),
+                    confirmed=True,
+                    stored_version=3,
+                    observed_version=3,
+                    state=state,
+                )
+            )
+        assert len(engine.put_calls) == writes, "a confirmed engine is never rewritten"
+
+
     def test_topology_read_failure_is_not_fatal(self) -> None:
         engine = FakeEngine(
             _engine_topology(), topology_error=api_error("engine unreachable")

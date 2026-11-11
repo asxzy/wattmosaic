@@ -8,7 +8,7 @@ and forwards explicit user commands (learning/model/topology) to the engine.
 - Domain: `wattmosaic`
 - Target Home Assistant: **2026.11.0**
 - IoT class: `local_polling`
-- Contract version: **1.3.0** (`engine/wattmosaic_engine/contracts.py`)
+- Contract version: **1.4.0** (`engine/wattmosaic_engine/contracts.py`)
 - No device control: the integration never calls HA services that actuate
   devices, and the engine has no code path that can.
 
@@ -264,7 +264,7 @@ The evidence-tier entity additionally exposes `tier_reasons`.
 | Engine status | enum | `enum` | — | `ok` / `degraded` / `error` / `offline` (never `unavailable`: reserved by HA) |
 | Last snapshot | timestamp | `timestamp` | — | `SnapshotResponse.timestamp` |
 | Engine reachable | on/off | `connectivity` binary_sensor | — | last poll success |
-| Active learning | on/off | `running` binary_sensor | — | `HealthResponse.learning_active` |
+| Active learning | on/off | `running` binary_sensor | — | `HealthResponse.details.learning_status.effective_state` (`on` only when `learning`; `blocked` and `off` both read `off`) |
 
 ### 3.3 Availability semantics
 
@@ -497,7 +497,7 @@ requirement.
 
 ### 7.3 Contract alignment
 
-The integration consumes contract `1.3.0` and sends
+The integration consumes contract `1.4.0` and sends
 `X-WattMosaic-Contract-Version` on every request. It does **not** define a
 competing schema; response parsing is defensive and degrades to `unknown`
 instead of raising.
@@ -517,6 +517,11 @@ changing `contracts.py`:
 1. `InferenceResult` has no explicit model-validity or running flag, hence the
    derivations above.
 2. `HealthResponse.learning_active` is a bool; there is no paused/running enum.
+   `details.learning_status` (contract 1.4.0, additive, schema-free) is the
+   workaround: its `effective_state` distinguishes `learning` / `blocked` /
+   `off`, and it carries the counters, dominant rejection reason and remedy. An
+   engine older than 1.4.0 omits it, in which case the integration falls back to
+   `learning_active` and reports `accounting_available: false`.
 3. `ServiceResult` carries `data` as an untyped dict, so `export_device_data`
    and `run_diagnostics` responses are passed through unvalidated.
 4. `/devices` has no declared response model (`Device list`), so both a plain

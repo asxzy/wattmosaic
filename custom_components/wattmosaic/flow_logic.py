@@ -1198,6 +1198,14 @@ class TopologyPushState:
     #: coordinator re-checks only when the engine reports a different version
     #: (a reset or a bootstrap replaced the topology) or the last attempt failed.
     verified_version: int | None = None
+    #: The ``confirmed`` flag of the request that produced ``verified_version``.
+    #: The idempotency guard is only valid for the *same* intent: a normal
+    #: poll reconciles with ``confirmed=False`` and settles on
+    #: ``reason="engine_matches"``, and reusing that verdict for a user who just
+    #: pressed ``button.wattmosaic_confirm_topology`` would swallow the one
+    #: action that unblocks learning.  The confirmation is a different request,
+    #: so it must be allowed to re-examine the engine even at the same version.
+    verified_confirmed_request: bool = False
     #: A ``PUT`` landed but ``POST /topology/confirm`` did not.  Retrying the
     #: confirm alone avoids a second topology revision for the same declaration.
     pending_confirm: int | None = None
@@ -1305,6 +1313,12 @@ async def async_replay_topology(
         and state.verified_version is not None
         and state.verified_version == state.observed_version
         and state.polls_since_check < TOPOLOGY_RECHECK_POLLS
+        # A cached verdict from a non-confirming poll cannot answer a
+        # confirming request: the poll only proved "the declaration matches",
+        # never "the user may confirm now".  Re-examine instead of returning a
+        # stale ``engine_matches`` that the confirm path would read as
+        # "nothing was written".
+        and (state.verified_confirmed_request or not confirmed)
     ):
         return state
 
@@ -1337,6 +1351,7 @@ async def async_replay_topology(
             state.error = None
             state.pushed_at = now or utcnow()
             state.verified_version = state.observed_version
+            state.verified_confirmed_request = bool(confirmed)
         except Exception as err:  # noqa: BLE001 - retried on the next poll
             state.error = sanitize_text(err) or "topology confirmation failed"
             log.debug("WattMosaic topology confirm retry failed: %s", state.error)
@@ -1356,6 +1371,7 @@ async def async_replay_topology(
         state.verified_version = (
             plan.engine_version if plan.engine_version is not None else state.observed_version
         )
+        state.verified_confirmed_request = bool(confirmed)
         state.identical_pushes = 0
         return state
 
@@ -1399,6 +1415,7 @@ async def async_replay_topology(
         # ``PUT`` produces a new revision, so the version observed on the next
         # poll is the one to reconcile against (and it will already be in sync).
         state.verified_version = produced if produced is not None else state.observed_version
+        state.verified_confirmed_request = bool(confirmed)
         log.info(
             "Re-applied the stored WattMosaic topology declaration (engine v%s)",
             state.pushed_version,

@@ -11,10 +11,10 @@ from __future__ import annotations
 DOMAIN = "wattmosaic"
 NAME = "WattMosaic"
 MANUFACTURER = "WattMosaic"
-VERSION = "0.2.1-dev.11"
+VERSION = "0.2.1-dev.12"
 
 #: Platforms forwarded by ``async_setup_entry`` (strings, so no HA import).
-PLATFORMS: list[str] = ["sensor", "binary_sensor"]
+PLATFORMS: list[str] = ["sensor", "binary_sensor", "button"]
 
 #: Engine HTTP API base path.  The engine owns the schema; the integration is a
 #: read-mostly client and never computes inference (master spec §7.2, D3).
@@ -28,7 +28,7 @@ API_BASE_PATH = "/api/v1"
 #: here does not fail loudly -- it silently hides the fields a newer contract
 #: added.  ``tests/unit/test_contracts.py`` pins the engine side; this file is
 #: checked against it by ``tests/integration/test_ha_integration.py``.
-CONTRACT_VERSION = "1.3.0"
+CONTRACT_VERSION = "1.4.0"
 
 HEADER_API_TOKEN = "X-API-Token"
 HEADER_CONTRACT_VERSION = "X-WattMosaic-Contract-Version"
@@ -211,6 +211,14 @@ GLOBAL_SENSOR_KEYS: tuple[str, ...] = (
 )
 
 GLOBAL_BINARY_KEYS: tuple[str, ...] = ("engine_reachable", "learning_active")
+
+#: Global buttons.  Only one exists, and it is deliberately an explicit user
+#: action: confirming the topology is what lets learning accept samples, and
+#: the engine must never self-confirm a hypothesis (ADR-0008).
+GLOBAL_BUTTON_KEYS: tuple[str, ...] = ("confirm_topology",)
+#: The entity id users see.  Kept stable and explicit so the ``blocked``
+#: learning status can name it as the remedy in plain words.
+BUTTON_CONFIRM_TOPOLOGY_ENTITY_ID = "button.wattmosaic_confirm_topology"
 
 # --------------------------------------------------------------------------- #
 # Services

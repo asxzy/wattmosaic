@@ -811,11 +811,68 @@ class TestStaleness:
         ``EngineClient._check_contract`` only refuses a *major*-version
         difference, so a stale minor here does not fail loudly -- it silently
         hides every field the newer contract added (``topology_confirmed`` for
-        1.3.0).  The two constants must move together.
+        1.3.0, ``unmonitored_w``/``meter_disagreement_w`` for 1.4.0).  The two
+        constants must move together.
         """
         from wattmosaic_engine import contracts as engine_contracts
 
         assert const.CONTRACT_VERSION == engine_contracts.CONTRACT_VERSION
+
+    def test_residual_split_is_coerced_and_surfaced(self) -> None:
+        """Contract 1.4.0's split must survive coercion and reach the attributes.
+
+        The total residual keeps its exact meaning; the split only says what it
+        is made of.  If the integration dropped the two new fields, the
+        published "Unknown / unattributed power" would look identical while its
+        explanation silently vanished -- the same class of "nothing changed, so
+        nothing is wrong" defect this round is fixing.
+        """
+        snapshot = util.coerce_snapshot(
+            {
+                "timestamp": NOW.isoformat(),
+                "reconciliation": {
+                    "main_power_w": 1247.9,
+                    "quality_status": "good",
+                    "unknown_residual_w": 634.0,
+                    "unmonitored_w": 470.0,
+                    "meter_disagreement_w": 164.0,
+                },
+            }
+        )
+        reconciliation = snapshot["reconciliation"]
+        assert reconciliation["unmonitored_w"] == 470.0
+        assert reconciliation["meter_disagreement_w"] == 164.0
+        # The total is unchanged and the parts add up.
+        assert (
+            reconciliation["unmonitored_w"] + reconciliation["meter_disagreement_w"]
+            == reconciliation["unknown_residual_w"]
+        )
+
+        values = entity_values.global_values(
+            snapshot, {}, engine_available=True, now=NOW, stale_after=120
+        )
+        assert values["unknown_power"] == 634.0, "the published total is unchanged"
+        assert values["unmonitored_power"] == 470.0
+        assert values["meter_disagreement_power"] == 164.0
+
+    def test_an_older_engine_does_not_fabricate_a_zero_split(self) -> None:
+        """Absent must read as "not reported", never as "0 W of disagreement"."""
+        snapshot = util.coerce_snapshot(
+            {
+                "timestamp": NOW.isoformat(),
+                "reconciliation": {
+                    "main_power_w": 1247.9,
+                    "quality_status": "good",
+                    "unknown_residual_w": 634.0,
+                },
+            }
+        )
+        values = entity_values.global_values(
+            snapshot, {}, engine_available=True, now=NOW, stale_after=120
+        )
+        assert values["unknown_power"] == 634.0
+        assert values["unmonitored_power"] is None
+        assert values["meter_disagreement_power"] is None
 
 
 # --------------------------------------------------------------------------- #

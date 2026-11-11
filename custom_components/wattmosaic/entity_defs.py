@@ -236,3 +236,18 @@ GLOBAL_BINARY_SENSORS: dict[str, dict[str, Any]] = {
         "icon": "mdi:school-outline",
     },
 }
+
+# --------------------------------------------------------------------------- #
+# Buttons
+# --------------------------------------------------------------------------- #
+
+#: A button is the right shape for confirmation: it is one explicit user action
+#: with no target and no parameters, it is discoverable in the UI, and pressing
+#: it twice must be harmless.  A service would be invisible to a user reading a
+#: dashboard — which is exactly the state this feature exists to fix.
+GLOBAL_BUTTONS: dict[str, dict[str, Any]] = {
+    "confirm_topology": {
+        "name": "Confirm topology",
+        "icon": "mdi:check-decagram",
+    },
+}

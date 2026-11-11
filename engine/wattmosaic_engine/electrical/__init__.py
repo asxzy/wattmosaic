@@ -16,7 +16,12 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from wattmosaic_engine.contracts import Topology
-from wattmosaic_engine.electrical.direct import DirectReading, direct_power_w, resolve_direct
+from wattmosaic_engine.electrical.direct import (
+    DEFAULT_MAX_LEG_SKEW_S,
+    DirectReading,
+    direct_power_w,
+    resolve_direct,
+)
 from wattmosaic_engine.electrical.main_power import MainPower, main_power_w, phase_power_w
 from wattmosaic_engine.electrical.matrix import (
     MeasurementMatrix,
@@ -112,8 +117,19 @@ class ElectricalModel:
         return self.graph.validate()
 
     # -- convenience ---------------------------------------------------------
-    def resolve_direct(self, window: object, *, max_age_s: float = 120.0) -> dict[str, DirectReading]:
-        return resolve_direct(window, self.graph, max_age_s=max_age_s)
+    def resolve_direct(
+        self,
+        window: object,
+        *,
+        max_age_s: float = 120.0,
+        max_leg_skew_s: float = DEFAULT_MAX_LEG_SKEW_S,
+    ) -> dict[str, DirectReading]:
+        return resolve_direct(
+            window,
+            self.graph,
+            max_age_s=max_age_s,
+            max_leg_skew_s=max_leg_skew_s,
+        )
 
     def solve(
         self,
@@ -144,6 +160,7 @@ class ElectricalModel:
 __all__ = [
     "ABSOLUTE_DEVICE_CAP_W",
     "DEFAULT_CADENCE_S",
+    "DEFAULT_MAX_LEG_SKEW_S",
     "ChannelReading",
     "Discipline",
     "DirectReading",

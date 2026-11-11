@@ -1,5 +1,99 @@
 # Release Notes
 
+## v0.2.1-dev.12 — 2026-11-11 (development channel)
+
+Round 2 of the electrical-core work: honest learning status, a way to unblock
+it, and two silent-accounting defects closed. **Device watts and energy are
+unchanged from v0.2.1-dev.11** — the roll-up fix that removed the 2.15–2.44x
+over-count is untouched here. Everything in this build either adds a field,
+splits an existing one, or reports a fact that was previously hidden.
+
+### The residual is now split, not re-estimated
+
+`Reconciliation.unknown_residual_w` has always been the whole gap between
+measured main power and everything the engine can attribute. It is now
+decomposed into two physically different quantities (contract 1.4.0, additive):
+
+| Field | Meaning |
+| --- | --- |
+| `meter_disagreement_w` | Two CTs on the *same* conductors report different totals. Nothing is missing; two instruments disagree. |
+| `unmonitored_w` | The remainder — genuinely unclamped load. |
+| `unknown_residual_w` | Unchanged. Still the whole gap; `unmonitored_w + meter_disagreement_w == unknown_residual_w`. |
+
+On the live installation the residual is ~600 W, of which the **median
+instrument disagreement is 164 W**; ~470 W is genuinely unclamped. The published
+"Unknown / unattributed power" number does not move — only its explanation
+becomes visible, as `unmonitored_w` / `meter_disagreement_w` attributes on the
+summary sensors. The balance identity `accounted + unknown_residual ==
+main_power_w` still holds exactly.
+
+### Leg skew in the direct path now matches the solver path
+
+The Level-1 direct path (`electrical/direct.py`) used a single per-leg power
+value where the solver path used the measured per-leg split. On a split-phase
+service the two legs are not equal, so a device on the heavier leg was
+under-counted and one on the lighter leg over-counted. This was **latent**: with
+today's readings it produces 0 W of difference, because no direct-path device
+currently has a meaningful L1/L2 skew. It is fixed now because the failure mode
+is expensive — a missed Refoss poll on a 3–5 kW hot tub would have been
+attributed with the wrong leg share, and the error would have looked like a
+modelling problem rather than an arithmetic one. `l1`/`l2` precedence is pinned
+by tests.
+
+### `active_learning` now tells the truth
+
+`binary_sensor.wattmosaic_engine_active_learning` used to mean "a learning loop
+exists". On the live install it read **on** while the topology was still a
+`candidate`: the filter stamped every sample `ambiguous_topology` and rejected
+it (correctly), `device_models` stayed empty, and `model_estimated_power` stayed
+0 W forever. A running pipeline that accepts nothing was indistinguishable from
+a working one.
+
+The entity now means "samples are being accepted". The engine reports
+`details.learning_status` with an `effective_state`:
+
+* **`learning`** — running and accepting samples;
+* **`blocked`** — running but rejecting (essentially) all of them, with the
+  dominant reason and a plain-language remedy;
+* **`off`** — the pipeline is disabled or paused.
+
+The verdict is a pure function of two monotonic counters, so it cannot oscillate
+between polls, and one accepted sample after a long block does not flip it to
+`learning` (acceptance must exceed 5 % over at least 10 samples). The live
+numbers were 0 accepted, ~100 % `ambiguous_topology`.
+
+### New: `button.wattmosaic_confirm_topology`
+
+The remedy is now a button. Pressing it confirms the topology the user already
+declared, which is what unblocks model learning:
+
+```
+press -> PUT /topology (confirmed=True) -> POST /topology/confirm
+      -> CONF_TOPOLOGY_CONFIRMED=True -> entry reload
+      -> engine reports "confirmed" -> learning samples are accepted
+```
+
+It is idempotent (a second press writes nothing), it only ever confirms the
+declaration already stored in the config entry (it never invents one), and it
+refuses to set the entry flag unless the engine itself reports `confirmed`
+afterwards. This build also fixes a defect found while tracing that chain: after
+the coordinator had settled on "the declaration matches", the replay's
+idempotency guard answered a *confirming* request from that cached verdict, so
+the press reported "nothing was written" and learning stayed blocked. The guard
+is now scoped to the intent that produced it.
+
+### Contract 1.3.0 → 1.4.0
+
+Two additive fields (`unmonitored_w`, `meter_disagreement_w`) plus the additive
+`details.learning_status` object. An older reader ignores both and keeps
+working; the schemas are regenerated from the contract.
+
+### Verified
+
+1872 passed, 9 skipped. See `PROJECT_STATUS.md` for the dated evidence section
+and the still-open items (eight frozen Refoss CTs, a topology that still needs a
+user confirm, and no models yet).
+
 ## v0.2.1-dev.11 — 2026-11-11 (development channel)
 
 Automated development build of the four electrical-core lanes: roll-up,

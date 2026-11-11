@@ -4138,6 +4138,105 @@ C1 invariant). No behaviour claim was added to a doc that the code does not
 make true.
 
 
+## 7t. Round 2 integrated: honest learning, the confirm button, the residual split (2026-11-11)
+
+Two branches off `1286045` (released as `0.2.1-dev.11`) were integrated and
+released as **`0.2.1-dev.12`**: `fix/leg-skew-and-residual` (`32e857a`) and
+`fix/learning-reporting` (`7eb37b7`).
+
+### 7t.1 What each branch changed
+
+| Lane | Change | Evidence |
+| --- | --- | --- |
+| Electrical | Direct-path leg skew now uses the measured L1/L2 split, matching the solver path. Latent (0 W today); protects a 3–5 kW hot tub if a Refoss poll is missed. `l1`/`l2` precedence pinned. | `test_electrical.py`, `test_disaggregation.py` |
+| Electrical | `unknown_residual_w` decomposed into `unmonitored_w` + `meter_disagreement_w` (contract 1.4.0, additive). Total unchanged. | `test_reconciliation_split.py` (365 lines) |
+| Learning | `effective_state` (`learning` / `blocked` / `off`) from two monotonic counters, with dominant reason and remedy. | `test_learning_reporting.py`, `test_learning_status.py` |
+| Learning | `button.wattmosaic_confirm_topology`, HA diagnostics learning section, engine `details.learning_status`. | `test_learning_status.py` |
+
+### 7t.2 Semantic integration (no merge conflicts were textual)
+
+`git merge fix/learning-reporting` auto-resolved; both branches touched
+`contracts.py`, `integration.py`, `const.py` **and** `diagnostics.py`, but in
+different regions. Each was verified by inspection rather than trusted:
+
+* `CONTRACT_VERSION = "1.4.0"` in `engine/.../contracts.py`,
+  `custom_components/wattmosaic/const.py`, all 20 `data/schemas/*.json`
+  `x-contract-version` values, and the pin in `tests/unit/test_contracts.py`.
+  `export_schemas.py` regenerates to "1.4.0 / 19 schemas" with no diff.
+* `integration.py`: `samples_collected` / `samples_accepted` / `samples_rejected`
+  are properties off the accounting (the learning lane) **and**
+  `unmonitored_w` / `meter_disagreement_w` are reconciliation fields (the
+  electrical lane). No name collision; both used by `status()` and `_learning_summary()`.
+
+### 7t.3 A defect found while tracing the confirm chain (not in either branch's tests)
+
+The button shares the coordinator's `TopologyPushState`. After ordinary polls
+have settled on "the declaration matches" (`reason=engine_matches` /
+`in_sync`), the replay's idempotency guard returned that cached verdict for the
+next request — **including a confirming one**. The press then reported "nothing
+was written", the engine stayed `candidate`, and learning stayed blocked. Each
+link was individually tested; the composition was not.
+
+Reproduced before fixing (3 ordinary polls, then a press):
+`press ok=False entry_confirmed=False … puts=0 confirms=0`. Fixed by scoping
+the cached verdict to the intent that produced it
+(`TopologyPushState.verified_confirmed_request`). After the fix the same
+sequence writes one `PUT` and one confirm and the engine reports `confirmed`.
+
+New regression tests:
+
+* `tests/integration/test_topology_push.py` — `test_a_press_after_a_settled_poll_still_confirms`,
+  `test_the_confirmation_verdict_is_not_resurrected_by_later_polls`.
+* `tests/integration/test_confirm_topology_e2e.py` (new, 8 tests) — the whole
+  chain against a **real** `EngineCore` + SQLite + aiohttp server on loopback:
+  press → PUT → confirm → persisted `CONFIRMED` topology → health agrees →
+  `_topology_quality` stamps `confirmed` → the sample filter accepts, while the
+  same sample stamped `candidate` is still rejected `ambiguous_topology`.
+  Both new tests were confirmed to fail against the unfixed `flow_logic.py`.
+
+### 7t.4 `active_learning` cannot oscillate
+
+`build_learning_status` is a pure function of `(enabled, active, seen, accepted,
+rejected, reasons, topology_quality)`. Two polls over the same window have the
+same inputs, hence the same verdict — verified over 25 identical evaluations.
+Counters are monotonic, so the acceptance rate moves only upward by `1/seen` per
+accepted sample; one accepted sample after 999 rejections still reads `blocked`
+(rate 0.001). The threshold is `<= 5 % accepted over >= 10 samples`; checked
+against the live numbers (0 accepted, ~100 % `ambiguous_topology`) both branches
+of the rule agree, so the verdict does not depend on evaluation order. All four
+properties are pinned in `test_learning_reporting.py`.
+
+### 7t.5 HA surface
+
+The residual split was being **silently dropped** by the integration: neither
+`coerce_reconciliation` nor `global_values` carried the two fields. Added to
+both, exposed as `unmonitored_w` / `meter_disagreement_w` attributes on the
+"Unknown / unattributed power" and "Total incoming power" sensors — no entity
+renamed, no entity added, published total unchanged. Absent fields coerce to
+`None` (not `0.0`), so an older engine cannot fabricate "0 W of disagreement".
+
+### 7t.6 Still open (unchanged by this round)
+
+1. **Eight Refoss CTs are frozen.** The residual decomposition now *shows*
+   how much of the gap is instrument disagreement (median 164 W of ~600 W),
+   which is the diagnosis. The hardware is not fixed.
+2. **Topology still needs a user confirm.** The engine is `candidate` on the
+   live install. The button exists and is traced end-to-end, but pressing it is
+   a user action (§8). Learning stays `blocked` until it happens.
+3. **No models yet.** `device_models` is empty and `model_estimated_power` is
+   0 W; that is the correct consequence of (2), and `active_learning` now says
+   so instead of claiming otherwise.
+4. **No per-device ground truth** on the real house (§7s.6 item 2) — still the
+   reason accuracy stays measurement-side.
+
+### 7t.7 Release hygiene
+
+`0.2.1-dev.12` applied to all five fields via `tools/dev/bump_version.py
+--write` (`manifest.json`, `const.py`, `addon/config.yaml`, `pyproject.toml`,
+`engine/wattmosaic_engine/__init__.py`); `v0.2.1-dev.11` is already tagged, so
+the release workflow publishes this tree as committed. Device watts and energy
+are unchanged from `dev.11`.
+
 ---
 
 ## 8. Needs user authorization

@@ -45,6 +45,11 @@ from .util import energy_entity_available, published_energy, utcnow
 
 _LOGGER = logging.getLogger(__name__)
 
+#: Global keys that report the home-level residual, and therefore carry its
+#: contract-1.4.0 decomposition as attributes.  Kept here (not in
+#: ``entity_defs``) because it is an attribute decision, not an entity.
+_RESIDUAL_KEYS = frozenset({"unknown_power", "total_power"})
+
 _UNIT_MAP = {
     "W": UnitOfPower.WATT,
     "kWh": UnitOfEnergy.KILO_WATT_HOUR,
@@ -218,6 +223,19 @@ class WattMosaicGlobalSensor(_WattMosaicBase):
             attributes["topology_confirmed"] = data.reconciliation.get(
                 "topology_confirmed"
             )
+            # The residual decomposition (contract 1.4.0).  It belongs on the
+            # entities that *report* the residual, so the "Unknown / unattributed
+            # power" sensor can explain itself without a second entity: the
+            # total is unchanged, but a user can now see whether the gap is
+            # instrument disagreement or genuine unclamped load.  Absent keys
+            # stay ``None`` -- an older engine reported no split at all.
+            if self._key in _RESIDUAL_KEYS:
+                attributes["unmonitored_w"] = data.reconciliation.get(
+                    "unmonitored_w"
+                )
+                attributes["meter_disagreement_w"] = data.reconciliation.get(
+                    "meter_disagreement_w"
+                )
         else:
             attributes["last_success"] = (
                 self.coordinator.last_success.isoformat()

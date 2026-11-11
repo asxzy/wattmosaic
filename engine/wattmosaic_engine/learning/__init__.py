@@ -2,6 +2,11 @@
 
 from .pipeline import LearningPipeline
 from .promotion import PromotionDecision, PromotionManager
+from .reporting import (
+    CONFIRM_REMEDY,
+    LearningAccounting,
+    build_learning_status,
+)
 from .sample_collector import SampleCollector, extract_control
 from .sample_filter import SampleDecision, SampleEvidence, SampleFilter, rejection_summary
 from .stages import current_stage, recognize_stages, segment_cycle, stage_distinguishable
@@ -10,6 +15,8 @@ from .trainer import Trainer, TrainingResult, infer_model_type, training_quality
 from .validation import ValidationReport, compare_models, split_holdout, validate_model
 
 __all__ = [
+    "CONFIRM_REMEDY",
+    "LearningAccounting",
     "LearningPipeline",
     "LearningThresholds",
     "PromotionDecision",
@@ -21,6 +28,7 @@ __all__ = [
     "Trainer",
     "TrainingResult",
     "ValidationReport",
+    "build_learning_status",
     "compare_models",
     "current_stage",
     "extract_control",
