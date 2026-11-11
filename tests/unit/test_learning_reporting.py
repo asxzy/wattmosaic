@@ -37,6 +37,7 @@ from wattmosaic_engine.learning import (
 )
 from wattmosaic_engine.learning.reporting import (
     ALMOST_ALL_MIN_SAMPLES,
+    ALMOST_ALL_REJECTED,
     MAX_REJECTION_LABELS,
     OTHER_LABEL,
 )
@@ -288,6 +289,114 @@ def test_counters_cannot_exceed_seen() -> None:
     )
     assert status["samples_accepted"] == 3
     assert status["samples_rejected"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# Stability: the verdict cannot oscillate
+# --------------------------------------------------------------------------- #
+
+
+def test_identical_intervals_produce_an_identical_verdict() -> None:
+    """``effective_state`` must be a pure function of the counters.
+
+    Two consecutive polls over the same window take the same decision inputs,
+    so they must take the same decision.  A state derived from anything else
+    (a timer, a "last N samples" window, a random tie-break) would let the HA
+    binary sensor flicker between ``on`` and ``off`` once per scan interval,
+    which is worse than the untruthful ``on`` this round replaces.
+    """
+    arguments = dict(
+        enabled=True,
+        active=True,
+        samples_seen=100,
+        samples_accepted=0,
+        samples_rejected=100,
+        rejection_reasons={"ambiguous_topology": 100},
+        topology_quality=CANDIDATE,
+    )
+    verdicts = {build_learning_status(**arguments)["effective_state"] for _ in range(25)}
+    assert verdicts == {"blocked"}
+
+
+def test_a_single_accepted_sample_after_a_long_block_is_not_learning() -> None:
+    """One sample must not undo a thousand rejections.
+
+    The counters are monotonic, so the acceptance *rate* is the only thing that
+    moves -- and it moves by ``1/seen`` per accepted sample.  The live install
+    had ~0 accepted after a long block; a single accepted sample right after
+    confirming must still read ``blocked``, or the user would be told learning
+    works before a single model could exist.
+    """
+    status = build_learning_status(
+        enabled=True,
+        active=True,
+        samples_seen=1000,
+        samples_accepted=1,
+        samples_rejected=999,
+        rejection_reasons={"ambiguous_topology": 999},
+        topology_quality=CONFIRMED,
+    )
+    assert status["effective_state"] == "blocked"
+    assert status["acceptance_rate"] == pytest.approx(0.001)
+
+
+def test_the_verdict_improves_monotonically_with_accepted_samples() -> None:
+    """Once the rate clears the threshold the verdict flips, and never back.
+
+    Monotonic counters mean ``accepted`` can only grow while ``seen`` grows by
+    the same amount, so a sequence of increasing acceptance *counts* over a
+    fixed denominator is exactly the worst case.  Nothing may regress from
+    ``learning`` to ``blocked`` as ``accepted`` rises.
+    """
+    states = [
+        build_learning_status(
+            enabled=True,
+            active=True,
+            samples_seen=60,
+            samples_accepted=accepted,
+            samples_rejected=60 - accepted,
+            rejection_reasons={"missing_measurement": 60 - accepted},
+            topology_quality=CONFIRMED,
+        )["effective_state"]
+        for accepted in range(61)
+    ]
+    # Never regress: once "learning", never "blocked"/"off" again.
+    first_learning = states.index("learning")
+    assert all(state == "learning" for state in states[first_learning:])
+    # And the flip needs more than a token acceptance.
+    assert states[0] == "blocked"
+    assert states[1] == "blocked"
+
+
+def test_the_threshold_is_the_documented_one() -> None:
+    """Pin the two constants so a future tweak is a deliberate, tested change.
+
+    ``<= 5% accepted over >= 10 samples`` is ``blocked``.  On the live data
+    (0 accepted, 100% ``ambiguous_topology``) both sides of the rule agree, so
+    the verdict does not depend on which branch happens to run first.
+    """
+    assert ALMOST_ALL_REJECTED == 0.95
+    assert ALMOST_ALL_MIN_SAMPLES == 10
+    just_under = build_learning_status(
+        enabled=True,
+        active=True,
+        samples_seen=40,
+        samples_accepted=2,
+        samples_rejected=38,
+        rejection_reasons={"missing_measurement": 38},
+        topology_quality=CONFIRMED,
+    )
+    just_over = build_learning_status(
+        enabled=True,
+        active=True,
+        samples_seen=40,
+        samples_accepted=3,
+        samples_rejected=37,
+        rejection_reasons={"missing_measurement": 37},
+        topology_quality=CONFIRMED,
+    )
+    assert just_under["effective_state"] == "blocked", "5.0% accepted is still blocked"
+    assert just_over["effective_state"] == "learning", "7.5% accepted is learning"
 
 
 # --------------------------------------------------------------------------- #

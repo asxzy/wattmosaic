@@ -29,7 +29,7 @@ loopback-only deployments). A missing or wrong token yields:
 
 ```http
 HTTP/1.1 401 Unauthorized
-X-WattMosaic-Contract-Version: 1.3.0
+X-WattMosaic-Contract-Version: 1.4.0
 Content-Type: application/json
 
 {"error": "unauthorized", "detail": "missing or invalid X-API-Token", "retryable": false}
@@ -72,7 +72,7 @@ curl -sS -X POST http://127.0.0.1:8787/api/v1/commands \
 
 ```http
 HTTP/1.1 400 Bad Request
-X-WattMosaic-Contract-Version: 1.3.0
+X-WattMosaic-Contract-Version: 1.4.0
 
 {"error": "bad_request", "detail": "[{\"type\":\"literal_error\",\"loc\":[\"command\"],...}]", "retryable": false}
 ```
@@ -89,7 +89,7 @@ Liveness/readiness without touching the inference path. `status` is one of
 ```json
 {
   "status": "ok",
-  "contract_version": "1.3.0",
+  "contract_version": "1.4.0",
   "engine_version": "<version>",
   "database": "ok",
   "ha_connected": true,
@@ -138,7 +138,7 @@ Operational summary: engine, database, ingestion and inference counters.
 ```json
 {
   "status": "ok",
-  "contract_version": "1.3.0",
+  "contract_version": "1.4.0",
   "engine_version": "<version>",
   "started_at": "2026-11-05T23:39:59.100000+00:00",
   "uptime_seconds": 128.4,
@@ -183,6 +183,8 @@ Latest inference results for every device plus the current reconciliation.
     "inferred_w": 22.049,
     "model_estimated_w": 0.0,
     "unknown_residual_w": 8607.988,
+    "unmonitored_w": 8443.988,
+    "meter_disagreement_w": 164.0,
     "reconciliation_error_w": 8607.988,
     "reconciliation_error_ratio": 0.683,
     "accounted_fraction": 0.317,
@@ -204,7 +206,13 @@ Latest inference results for every device plus the current reconciliation.
 ```
 
 `unknown_residual_w` is always reported and is **never** redistributed across
-devices.
+devices. It is decomposed (contract 1.4.0, additive) into
+`meter_disagreement_w` — the difference between a feed and its declared alias
+on the same conductors, i.e. instrument error — and `unmonitored_w`, the
+remainder that is genuinely unclamped load. `unmonitored_w +
+meter_disagreement_w == unknown_residual_w` for a non-negative residual, and
+the published total is unchanged by the split. Both default to `0.0`; older
+engines omit them and an older reader ignores them.
 
 ### 3.4 `GET /devices`
 
@@ -492,7 +500,7 @@ wattmosaic_queue_depth 0
 wattmosaic_uptime_seconds 132.6
 # HELP wattmosaic_contract_info Contract version
 # TYPE wattmosaic_contract_info gauge
-wattmosaic_contract_info{version="1.3.0",engine="<version>"} 1
+wattmosaic_contract_info{version="1.4.0",engine="<version>"} 1
 ```
 
 Metrics must never fail a scrape: if the backend cannot produce them, a
@@ -502,7 +510,7 @@ fallback exposition built from `/health` is returned with status `200`.
 
 ## 4. Versioning
 
-`CONTRACT_VERSION` (`1.3.0`) follows semantic versioning:
+`CONTRACT_VERSION` (`1.4.0`) follows semantic versioning:
 
 | Change | Version bump |
 | --- | --- |

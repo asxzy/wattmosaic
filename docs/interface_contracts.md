@@ -1,6 +1,6 @@
 # Interface Contracts (authoritative)
 
-**Contract version: `1.3.0`** — mirrors `engine/wattmosaic_engine/contracts.py`.
+**Contract version: `1.4.0`** — mirrors `engine/wattmosaic_engine/contracts.py`.
 
 `contracts.py` is the single source of truth. JSON schemas are exported from it to
 `data/schemas/` by `tools/dev/export_schemas.py`. No component may define a
@@ -141,6 +141,13 @@ Guarantees:
 - `Reconciliation.topology_confirmed` (contract 1.3.0) states whether the
   topology behind the balance is user-confirmed or still a `candidate`
   hypothesis. It is additive; older readers ignore it.
+- `Reconciliation.unmonitored_w` and `Reconciliation.meter_disagreement_w`
+  (contract 1.4.0) decompose `unknown_residual_w`. `meter_disagreement_w` is
+  the absolute difference between a canonical feed and its declared alias on
+  the same conductors; `unmonitored_w` is the remainder, genuinely unclamped
+  load. Both are additive and default to `0.0`; `unknown_residual_w` keeps its
+  exact meaning, and `unmonitored_w + meter_disagreement_w == unknown_residual_w`
+  for a non-negative residual.
 
 ### 3.5 Learning (`learning/`)
 

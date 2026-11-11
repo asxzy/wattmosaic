@@ -267,6 +267,11 @@ Do not read `confidence: 0.8` as "80% chance this is exactly right". Read it as
 | Data quality score | Aggregate channel health. |
 | Engine status | `ok` / `degraded` / `error`. |
 
+The *Unknown / unattributed* and *Total incoming power* sensors also carry two
+attributes that say what the unknown part is made of — `unmonitored_w`
+(genuinely unclamped load) and `meter_disagreement_w` (two meters on the same
+wires disagreeing). See section 9a.
+
 If "unknown" is large, that is the system being honest, not broken. Check
 whether it is a genuinely unmonitored load (a branch with no CT) or a topology
 error.
@@ -452,6 +457,44 @@ What gets rejected, and why you may see it:
 A device may stay at `model_status: pending` for a long time. That is correct if
 its usage is always concurrent with other loads.
 
+### 7a. Confirming the topology (this is what unblocks learning)
+
+Learning samples are only accepted against a topology you have **confirmed**.
+WattMosaic never confirms one itself: the panel tree it derives is a
+*hypothesis*, and training a model on a guessed association would teach it
+something false. Until you confirm, every sample is rejected as
+`ambiguous_topology` — correctly — and no model can exist.
+
+The **Active learning** binary sensor tells you which state you are in:
+
+| State | Meaning |
+| --- | --- |
+| `on` | Learning is running **and accepting** samples. |
+| `off` | Learning is not accepting samples — because it is paused/disabled, or because it is blocked. |
+| `blocked` (diagnostics) | Running, but rejecting (nearly) all samples. The diagnostics download names the dominant reason and the remedy. |
+
+If it reports `blocked` with `ambiguous_topology`, there is one action:
+
+> Press **Confirm topology** — `button.wattmosaic_confirm_topology`, on the
+> WattMosaic Engine device.
+
+It confirms the CT mapping **already stored in your configuration**. It never
+invents one, and it only marks the entry as confirmed when the engine itself
+reports `confirmed` afterwards. A second press writes nothing, and the button
+is unavailable once the engine is confirmed (there is nothing left to do).
+
+What you should see afterwards, on the next poll:
+
+1. The engine's topology status changes from `candidate` to `confirmed`.
+2. `Active learning` becomes `on` once samples start being accepted (the first
+   one may take an inference window or two).
+3. `Model power` starts moving off 0 W as models are promoted.
+
+If the button is unavailable, it says why in its attributes: no stored
+declaration (run the setup wizard and confirm the mapping there), or the engine
+is unreachable. Confirming a topology that does not match reality is worse than
+leaving it unconfirmed — check the CT assignment first (section 4).
+
 ## 8. Operating stages
 
 For multi-stage appliances (washer, dishwasher, dryer), WattMosaic tracks stages:
@@ -476,6 +519,30 @@ It is never divided among devices. A large residual usually means one of:
 
 Use `GET /api/v1/snapshot` and the per-device `explanation` field to see which
 measurements supported each estimate.
+
+### 9a. Why part of the residual may not be real load
+
+If your home is metered twice on the same conductors (for example a main panel
+CT and a second meter upstream of it), the two instruments never agree exactly.
+Part of the residual is then **instrument disagreement**, not missing load.
+Since contract 1.4.0 the snapshot splits it for you:
+
+| Field | Meaning |
+| --- | --- |
+| `unknown_residual_w` | Unchanged: the whole gap. |
+| `meter_disagreement_w` | Two CTs on the *same* wires disagree by this much. Nothing is missing. |
+| `unmonitored_w` | The rest — genuinely unclamped load. |
+
+`unmonitored_w + meter_disagreement_w == unknown_residual_w`, and the balance
+identity `accounted + unknown_residual == main_power_w` still holds exactly.
+Nothing is re-estimated: the published total is the same number as before, only
+explained. Both values are attributes on the *Unknown / unattributed* and *Total
+incoming power* sensors.
+
+The disagreement is `0` — and no claim is made — unless both meters are fresh,
+on the same phase, and actually aliased to each other. On the reference
+installation the residual is ~600 W, of which the median disagreement is 164 W;
+~470 W is genuine unclamped load.
 
 ## 10. Using the services
 

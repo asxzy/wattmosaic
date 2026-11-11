@@ -408,6 +408,30 @@ measurement_uncertainty_w  = √(Σ_rows σ²)
   (`duplicate_feeds_counted_once: ...`); the residual is computed from that
   resolved total rather than being abandoned.
 
+### 7.0.1 What the residual is made of (contract 1.4.0)
+
+`unknown_residual_w` keeps its exact meaning — the whole gap, signed, with the
+balance identity intact. It is additionally decomposed, additively:
+
+```text
+meter_disagreement_w = |canonical feed total − aliased meter total|   (never guessed)
+unmonitored_w        = max(0, unknown_residual_w − meter_disagreement_w)
+```
+
+`meter_disagreement_w` is non-zero **only** when two CTs are declared aliases of
+one another on the same conductors, both are fresh, and both measure the same
+phase. It is instrument error, not missing load. `unmonitored_w` is the
+remainder — load no CT and no model clamps. Nothing is re-estimated:
+`unmonitored_w + meter_disagreement_w == unknown_residual_w` for a
+non-negative residual, and the published total is unchanged. An unmeasured,
+stale or half-measured meter is never evidence of disagreement: in that case
+`meter_disagreement_w` is `0.0` and no claim is made.
+
+`Reconciliation.explanation` records both:
+`residual_includes_meter_disagreement:<W>_of_<total>W` and
+`unmonitored_residual_excludes_meter_disagreement:<W>W`, and
+`diagnostics["meter_disagreement"]` names the channels compared.
+
 ### 7.1 Worked example
 
 ```text
@@ -467,7 +491,47 @@ batch never aborts.
 
 ---
 
-## 10. Complexity and determinism
+## 11. Learning status: is learning actually learning?
+
+A running loop is not evidence that anything is being learned. The filter
+rejects a sample whenever its association cannot be trusted — an unconfirmed
+topology is the common cause — so a pipeline can be "on" forever while accepting
+nothing and producing no model.
+
+The engine therefore reports `details.learning_status` (additive, contract
+1.4.0) derived from two **monotonic** counters and a bounded reason tally:
+
+```text
+state = off       if the pipeline is absent, disabled or paused
+state = blocked   if every sample was rejected (seen > 0, accepted == 0)
+                  or the acceptance rate <= 5 % over >= 10 samples
+                  or nothing was accepted yet and the topology is unconfirmed
+state = learning  otherwise
+```
+
+Properties that matter:
+
+* **Deterministic.** The verdict is a pure function of
+  `(enabled, active, seen, accepted, rejected, reasons, topology_quality)`.
+  Two polls over the same window produce the same verdict, so the HA binary
+  sensor cannot flicker.
+* **Bounded work.** One integer increment and one dict increment per sample; a
+  report copies at most 16 reason labels. A week of rejections costs the same
+  memory as one sample.
+* **Monotonic.** Counters only increase, so the acceptance rate moves by
+  `1/seen` per accepted sample. A single accepted sample after a long block does
+  not flip `blocked` to `learning`; that would tell a user learning works before
+  a model could exist.
+* **Explains itself.** `blocked` carries the dominant rejection reason and a
+  remedy. When the topology is the cause the remedy names
+  `button.wattmosaic_confirm_topology`.
+
+The rejection *rules* are unchanged. Only the reporting is new — an unconfirmed
+topology still rejects, because the association is unverified.
+
+---
+
+## 12. Complexity and determinism
 
 * Matrix build `O(m·n)`; solve `O(m·n²)` for `nnls` / trust-region iterations.
   Typical house: `m ≈ 20` rows, `n ≈ 40` devices — microseconds to low ms.

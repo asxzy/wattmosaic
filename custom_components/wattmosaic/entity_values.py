@@ -189,6 +189,16 @@ def global_values(
         "inferred_power": as_float(reconciliation.get("inferred_w")),
         "model_estimated_power": as_float(reconciliation.get("model_estimated_w")),
         "unknown_power": as_float(reconciliation.get("unknown_residual_w")),
+        #: The same residual, decomposed (contract 1.4.0).  ``unknown_power``
+        #: above keeps its exact meaning -- the whole gap -- so a dashboard that
+        #: reads only it sees no change.  These two say *what the gap is made
+        #: of*: instrument disagreement between two meters on the same wires vs
+        #: genuinely unclamped load.  ``None`` when the engine did not report
+        #: them (an older engine), never a fabricated 0 W.
+        "unmonitored_power": as_float(reconciliation.get("unmonitored_w")),
+        "meter_disagreement_power": as_float(
+            reconciliation.get("meter_disagreement_w")
+        ),
         "reconciliation_error": as_float(reconciliation.get("reconciliation_error_w")),
         "accounted_fraction": as_percentage(reconciliation.get("accounted_fraction")),
         "topology_confirmed": bool(reconciliation.get("topology_confirmed", False)),

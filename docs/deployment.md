@@ -392,7 +392,7 @@ rollback.
 
 ### Version compatibility
 
-The engine reports `contract_version` (`1.3.0`) on every response. The
+The engine reports `contract_version` (`1.4.0`) on every response. The
 integration refuses to run against an incompatible contract rather than
 misinterpreting data. Upgrade the integration and app together when the contract
 version changes.

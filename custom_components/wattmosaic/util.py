@@ -423,6 +423,13 @@ def coerce_reconciliation(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         "inferred_w": as_float(raw.get("inferred_w")),
         "model_estimated_w": as_float(raw.get("model_estimated_w")),
         "unknown_residual_w": as_float(raw.get("unknown_residual_w")),
+        #: The contract 1.4.0 decomposition of ``unknown_residual_w``.  Both are
+        #: coerced like every other optional number, so an engine that predates
+        #: the split (or a snapshot from before a restart) degrades to ``None``
+        #: instead of a fabricated 0 W -- "not reported" and "zero watts of
+        #: instrument disagreement" are different facts.
+        "unmonitored_w": _opt("unmonitored_w"),
+        "meter_disagreement_w": _opt("meter_disagreement_w"),
         "reconciliation_error_w": as_float(raw.get("reconciliation_error_w")),
         "reconciliation_error_ratio": as_float(raw.get("reconciliation_error_ratio")),
         "accounted_fraction": as_float(raw.get("accounted_fraction")),
