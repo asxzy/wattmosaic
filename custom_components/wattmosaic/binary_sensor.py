@@ -124,6 +124,9 @@ class WattMosaicGlobalBinarySensor(_Base):
         values = self._values()
         if self._key == "engine_reachable":
             return bool(self.coordinator.engine_available)
+        # ``learning_active`` means "samples are being accepted", not "a loop
+        # exists".  An unconfirmed topology runs the pipeline and rejects every
+        # sample, so this is ``off`` and the attributes say why (and what to do).
         return bool(values.get("learning_active"))
 
     @property
@@ -137,7 +140,24 @@ class WattMosaicGlobalBinarySensor(_Base):
                 "last_success": last_success.isoformat() if last_success else None,
                 "last_error": last_error,
             }
-        return {}
+        # ``learning_active``: expose the accounting so a dashboard can explain
+        # itself instead of showing a bare "off" with no cause or remedy.
+        values = self._values()
+        attributes: dict[str, Any] = {
+            "effective_state": values.get("effective_state"),
+            "dominant_rejection_reason": values.get("dominant_rejection_reason"),
+            "samples_seen": values.get("samples_seen"),
+            "samples_accepted": values.get("samples_accepted"),
+            "samples_rejected": values.get("samples_rejected"),
+            "acceptance_rate": values.get("acceptance_rate"),
+            "topology_quality": values.get("topology_quality"),
+            "learning_summary": values.get("learning_summary"),
+            "accounting_available": values.get("accounting_available"),
+        }
+        remedy = values.get("learning_remedy")
+        if remedy:
+            attributes["learning_remedy"] = remedy
+        return attributes
 
 
 class WattMosaicDeviceBinarySensor(_Base):

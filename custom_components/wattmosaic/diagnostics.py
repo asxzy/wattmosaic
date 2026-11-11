@@ -13,17 +13,20 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .const import (
+    BUTTON_CONFIRM_TOPOLOGY_ENTITY_ID,
     CONF_API_TOKEN,
     CONF_BASE_URL,
     CONF_CT_ASSIGNMENTS,
     CONF_SCAN_INTERVAL,
     CONF_STALE_AFTER,
+    CONF_TOPOLOGY_CONFIRMED,
     CONF_UNAVAILABLE_AFTER,
     DOMAIN,
     VERSION,
 )
 from .coordinator import WattMosaicCoordinator
 from .flow_logic import normalise_channels
+from .topology_confirm import confirm_availability
 from .util import redact_config
 
 _LOGGER = logging.getLogger(__name__)
@@ -58,6 +61,7 @@ async def async_get_config_entry_diagnostics(
         "config": safe_config,
         "coordinator": {},
         "engine": {},
+        "learning": {},
         "topology": {},
         "models": {},
         "last_errors": [],
@@ -102,6 +106,14 @@ async def async_get_config_entry_diagnostics(
         },
     }
 
+    # The honest learning accounting, straight from the engine's health
+    # ``details``.  ``effective_state == "blocked"`` plus a dominant
+    # ``ambiguous_topology`` is the diagnosis a user can act on; the remedy text
+    # names the confirm button.
+    diagnostics["learning"] = _learning_section(
+        health, config, coordinator, entry
+    )
+
     # Topology summary + model status (read-only; failures degrade gracefully).
     try:
         topology = await client.topology()
@@ -137,6 +149,51 @@ async def async_get_config_entry_diagnostics(
         diagnostics["coordinator"]["last_success"] = health.get("inference_last_run_at")
 
     return diagnostics
+
+
+def _learning_section(
+    health: dict[str, Any],
+    config: dict[str, Any],
+    coordinator: Any,
+    entry: ConfigEntry,
+) -> dict[str, Any]:
+    """Learning accounting plus the one fact the engine cannot know.
+
+    The engine reports ``effective_state``/counts/remedy; the integration adds
+    whether *this entry* says the topology was confirmed and whether the confirm
+    button is currently actionable.  Those two can disagree with the engine
+    (a database reset, a failed confirm) and that disagreement is exactly what a
+    diagnostics download should reveal.
+    """
+    details = health.get("details") if isinstance(health, dict) else None
+    status = details.get("learning_status") if isinstance(details, dict) else None
+    learning = dict(status) if isinstance(status, dict) else {
+        "effective_state": "off" if not health.get("learning_active") else "learning",
+        "accounting_available": False,
+        "summary": "The engine did not report learning accounting.",
+    }
+    topology = getattr(coordinator, "engine_topology", None) or {}
+    assignments = config.get(CONF_CT_ASSIGNMENTS) or {}
+    try:
+        availability = confirm_availability(
+            topology,
+            assignments,
+            engine_available=bool(getattr(coordinator, "engine_available", False)),
+        )
+        learning["confirm_button"] = {
+            **availability.as_attributes(),
+            "available": availability.available,
+            "entity_id": BUTTON_CONFIRM_TOPOLOGY_ENTITY_ID,
+        }
+    except Exception:  # noqa: BLE001 - diagnostics must never fail
+        learning["confirm_button"] = {"entity_id": BUTTON_CONFIRM_TOPOLOGY_ENTITY_ID}
+    learning["entry_topology_confirmed"] = bool(
+        config.get(CONF_TOPOLOGY_CONFIRMED, False)
+    )
+    learning["engine_topology_confirmed"] = str(
+        topology.get("status") or ""
+    ).strip().lower() == "confirmed"
+    return learning
 
 
 def _safe_status(health: dict[str, Any]) -> dict[str, Any]:

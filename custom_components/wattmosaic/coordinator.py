@@ -274,6 +274,39 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
         return self.topology_push.as_diagnostics()
 
     @property
+    def engine_topology(self) -> dict[str, Any] | None:
+        """The engine's topology status as reported by ``/health``.
+
+        Read from ``details.topology`` rather than by calling ``GET /topology``:
+        the health probe is already polled every cycle, so the confirm button
+        costs no extra request.  ``None`` means the engine did not report a
+        topology (an older engine, or one that has none configured) — callers
+        must treat that as "unknown", never as "candidate".
+        """
+        data = self.data
+        health = data.health if data is not None else None
+        details = health.get("details") if isinstance(health, Mapping) else None
+        topology = details.get("topology") if isinstance(details, Mapping) else None
+        if not isinstance(topology, Mapping):
+            return None
+        if not topology.get("configured", True):
+            # A topology-less engine still reports a reason; keep the dict so
+            # the button can explain itself, but there is no status to confirm.
+            return dict(topology)
+        return dict(topology)
+
+    @property
+    def topology_confirmed(self) -> bool:
+        """Whether the engine's own topology is confirmed.
+
+        This is the engine's word, not the config entry's flag: the two can
+        disagree (a database reset, a failed confirm), and the engine's answer is
+        the one that decides whether learning accepts samples.
+        """
+        topology = self.engine_topology or {}
+        return str(topology.get("status") or "").strip().lower() == "confirmed"
+
+    @property
     def topology_pushed(self) -> bool:
         """Whether the stored declaration has been accepted by the engine."""
         return self.topology_push.pushed

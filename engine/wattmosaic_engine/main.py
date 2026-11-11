@@ -1273,6 +1273,11 @@ class EngineCore:
                 "inference_error": self.inference_error,
                 "ha_state": self.hasource.state.value,
                 "topology": topology,
+                # The honest answer to "is learning actually learning?".  It is
+                # in ``details`` (an additive, schema-free object) rather than a
+                # new top-level field so an older HA integration keeps parsing
+                # the response unchanged.
+                "learning_status": self._learning_status_payload(),
                 "samples_ingested": self.samples_ingested,
                 "events_ingested": self.events_ingested,
                 "queue": self.persist_queue.stats(),
@@ -1287,6 +1292,39 @@ class EngineCore:
                 },
             },
         )
+
+    def _learning_status_payload(self) -> dict[str, Any]:
+        """The backend's learning counters + ``effective_state``, or a reason.
+
+        Never raises: ``/health`` is polled every few seconds by the App
+        watchdog, and a backend accounting bug must not turn that into a 500.
+        """
+        backend = self.inference_backend
+        if backend is None:
+            return {
+                "enabled": False,
+                "active": False,
+                "effective_state": "off",
+                "summary": "No inference backend is installed.",
+            }
+        status_fn = getattr(backend, "learning_status", None)
+        if not callable(status_fn):
+            return {
+                "enabled": bool(getattr(backend, "learning", None) is not None),
+                "active": bool(getattr(backend, "learning_active", False)),
+                "effective_state": "off",
+                "summary": "This inference backend does not report learning accounting.",
+            }
+        try:
+            payload = status_fn()
+        except Exception as exc:  # noqa: BLE001 - health must never fail
+            return {
+                "enabled": bool(getattr(backend, "learning", None) is not None),
+                "active": bool(getattr(backend, "learning_active", False)),
+                "effective_state": "off",
+                "summary": f"learning accounting failed: {type(exc).__name__}",
+            }
+        return dict(payload) if isinstance(payload, dict) else {}
 
     def inference_backend_status(self) -> dict[str, Any] | None:
         """Backend self-description for ``/status`` and diagnostics.
@@ -1335,7 +1373,10 @@ class EngineCore:
                 "cycles": self.cycles,
                 "backend_status": self.inference_backend_status(),
             },
-            "learning": {"active": self.learning_active},
+            "learning": {
+                "active": self.learning_active,
+                "effective_state": self._learning_status_payload().get("effective_state"),
+            },
             "database": db_stats,
             "quality": (
                 {"overall_score": quality.overall_score, "issues": len(quality.issues)}
