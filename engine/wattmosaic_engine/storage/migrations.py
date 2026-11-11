@@ -93,6 +93,27 @@ def _add_residual_split_columns(conn: sqlite3.Connection) -> None:
     add_column_if_missing(conn, "reconciliation_results", "topology_confirmed", "INTEGER")
 
 
+def _add_panel_identity_columns(conn: sqlite3.Connection) -> None:
+    """Persist the distribution board each channel belongs to (contract 1.5.0).
+
+    ``CTChannel.panel_id``/``panel_name`` are what make the Topology tab a
+    *hierarchy* rather than a list.  Without a column, ``save_topology`` writes
+    an explicit column list and drops them, and ``load_topology`` rebuilds
+    channels without them: every channel comes back with ``panel_id=None`` and
+    the tree collapses into a single implicit "Installation" board -- one flat
+    list of 32 circuits where the user expects the main panel and its sub panel.
+    Discovery derives the panel for every channel, so dropping it discards the
+    only structural fact the installer already established.
+
+    Same round-trip defect that version 6 fixed for
+    ``alias_of_ct_id``/``measurement_multiplier``.  Both columns are nullable, so
+    an older topology that never declared a panel still loads and the hierarchy
+    falls back to one implicit board.
+    """
+    add_column_if_missing(conn, "ct_channels", "panel_id", "TEXT")
+    add_column_if_missing(conn, "ct_channels", "panel_name", "TEXT")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
@@ -434,6 +455,18 @@ MIGRATIONS: tuple[Migration, ...] = (
         version=7,
         name="reconciliation_persisted_fields",
         apply=_add_residual_split_columns,
+    ),
+    Migration(
+        version=8,
+        name="ct_channel_panel_identity",
+        # ``apply`` rather than ``statements``: SQLite has no
+        # ``ADD COLUMN IF NOT EXISTS``, and this must be a no-op on a database
+        # that already carries the columns.  Version 8, not 7 -- version 7 is
+        # taken by ``reconciliation_persisted_fields``, and reusing a number
+        # would make ``apply_migrations`` skip this migration on every install
+        # that already ran the other one, leaving ``save_topology`` to fail with
+        # "no column named panel_id" on each write.
+        apply=_add_panel_identity_columns,
     ),
 )
 

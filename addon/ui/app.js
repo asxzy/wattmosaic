@@ -1959,7 +1959,11 @@
       row.append(el('span', { class: 'hier-count' }, String(childCount)));
     } else if (kind === 'panel') {
       row.append(el('span', { class: 'hier-label' }, node.label || node.panel_id || 'Panel'));
-      if (node.monitor) row.append(el('span', { class: 'hier-sub' }, node.monitor));
+      // ``monitor`` is often the same words as the board name (a panel named
+      // after its monitor); printing both reads as a stutter.
+      if (node.monitor && String(node.monitor) !== String(node.label || '')) {
+        row.append(el('span', { class: 'hier-sub' }, node.monitor));
+      }
       if (node.is_service_entry) row.append(badge('Service entry', 'accent'));
       for (const item of nodeBadges(node)) row.append(item);
       const feeds = Array.isArray(node.feed_ct_ids) ? node.feed_ct_ids : [];

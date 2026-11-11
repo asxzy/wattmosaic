@@ -1616,35 +1616,46 @@ class EngineCore:
             return None
         return str(getattr(tier, "value", tier))
 
-    def devices(self) -> list[dict[str, Any]]:
-        topology = self._active_topology()
-        devices = topology.devices if topology else []
-        configurations = self._effective_configurations(topology)
-        # ``latest_inference_results()`` is a whole-table GROUP BY over
-        # ``inference_results``.  Asking it once per device is an N+1 query:
-        # measured at ~670 ms for 28 devices against a 343 560-row table, which
-        # would stall the event loop on every ``/devices`` call.  Fetch it once
-        # and index it instead (~25 ms), which is the same rows -- the SQL
-        # already returns exactly one row per ``device_id``, so indexing cannot
-        # change which result a device maps to.
-        # The in-memory ``latest_results`` still wins, exactly as before, so a
-        # result computed since the last persist is not shadowed by an older row.
+    def _latest_results_map(self) -> dict[str, Any]:
+        """Latest known result per device: in-memory first, stored rows second.
+
+        ``latest_inference_results()`` is a whole-table GROUP BY over
+        ``inference_results``.  Asking it once per device is an N+1 query:
+        measured at ~670 ms for 28 devices against a 343 560-row table, which
+        would stall the event loop on every caller.  Fetch it once, index it,
+        and let the in-memory map win, so a result computed since the last
+        persist is not shadowed by an older row.
+
+        The database fallback matters for more than speed.  Right after a
+        restart ``latest_results`` is empty until the first inference cycle, so
+        a reader that consulted only the in-memory map would report every
+        device as unknown/0 W while ``/devices`` reported real power -- the
+        same install showing two different answers on two tabs.
+        """
         try:
             latest_rows = self.db.latest_inference_results()
         except Exception:  # noqa: BLE001
             latest_rows = []
-        from_db: dict[str, InferenceResult] = {}
+        merged: dict[str, Any] = {}
         for row in latest_rows:
             device_key = row.get("device_id")
             if not device_key:
                 continue
             try:
-                from_db[str(device_key)] = row_to_inference_result(row)
+                merged[str(device_key)] = row_to_inference_result(row)
             except Exception:  # noqa: BLE001
                 continue
+        merged.update(self.latest_results)
+        return merged
+
+    def devices(self) -> list[dict[str, Any]]:
+        topology = self._active_topology()
+        devices = topology.devices if topology else []
+        configurations = self._effective_configurations(topology)
+        recorded_results = self._latest_results_map()
         out: list[dict[str, Any]] = []
         for dev in devices:
-            recorded = self.latest_results.get(dev.device_id) or from_db.get(dev.device_id)
+            recorded = recorded_results.get(dev.device_id)
             out.append(
                 {
                     "device_id": dev.device_id,
@@ -1772,12 +1783,12 @@ class EngineCore:
     def panel_tree(self, *, include_nesting: bool = False) -> dict[str, Any]:
         """Read-time panel → circuits → devices hierarchy (contract §1).
 
-        Cheap by construction: it reads the already-loaded topology and the
-        in-memory ``latest_results`` map, and it never scans the database.  The
-        expensive nesting inference (a multi-second sample scan) runs **only**
-        when ``include_nesting`` is explicitly requested; even then it can only
-        merge duplicate panels or add advisory suggestions, never change leaf
-        counts.
+        Cheap by construction: it reads the already-cached topology and one
+        indexed query for the latest result per device (the same ~25 ms query
+        ``/devices`` makes), and it never scans CT samples.  The expensive
+        nesting inference runs **only** when ``include_nesting`` is explicitly
+        requested; even then it can only merge duplicate panels or add advisory
+        suggestions, never change leaf counts.
         """
         topology = self._active_topology()
         if topology is None:
@@ -1802,7 +1813,7 @@ class EngineCore:
         nesting = self.nesting_candidates() if include_nesting else None
         return build_panel_tree(
             topology,
-            latest_results=self.latest_results,
+            latest_results=self._latest_results_map(),
             nesting=nesting,
         )
 

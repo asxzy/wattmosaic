@@ -216,15 +216,15 @@ class Database:
                         """INSERT INTO ct_channels(ct_id, entity_id, name, ct_type, phase, parent_ct_id,
                         polarity, device_id, paired_ct_id, alias_of_ct_id, measurement_multiplier,
                         enabled, resolution_w, expected_interval_s,
-                        reliability, topology_status, metadata_json, updated_at)
-                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        reliability, topology_status, metadata_json, panel_id, panel_name, updated_at)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (
                             ch.ct_id, ch.entity_id, ch.name, ch.ct_type, ch.phase, ch.parent_ct_id,
                             ch.polarity, ch.device_id, ch.paired_ct_id, ch.alias_of_ct_id,
                             float(ch.measurement_multiplier),
                             int(ch.enabled), ch.resolution_w,
                             ch.expected_interval_s, ch.reliability, ch.topology_status,
-                            json.dumps(ch.metadata), now,
+                            json.dumps(ch.metadata), ch.panel_id, ch.panel_name, now,
                         ),
                     )
                 for dev in topology.devices:
@@ -260,6 +260,13 @@ class Database:
             ).fetchone()
         if not chans and not devs:
             return None
+        # ``panel_id``/``panel_name`` were added to ``ct_channels`` in schema 8.
+        # A database copied from an older install may still lack them, so the
+        # column set is probed once rather than assumed.
+        # ``sqlite3.Row`` iterates *values*, so the column names must be asked
+        # for explicitly; binding them first also keeps the check readable.
+        column_names = list(chans[0].keys()) if chans else []
+        has_panel_columns = "panel_id" in column_names
         # The per-row tables carry channels/devices only; the *topology-level*
         # status lives on ``topology_versions``.  Reading it back matters: a
         # user-confirmed topology that reloaded as ``candidate`` would have every
@@ -293,6 +300,14 @@ class Database:
                     resolution_w=r["resolution_w"], expected_interval_s=r["expected_interval_s"],
                     reliability=r["reliability"], topology_status=r["topology_status"],
                     metadata=json.loads(r["metadata_json"]),
+                    # ``panel_*`` arrived in schema 8.  Reading them through a
+                    # membership test keeps this working against a connection
+                    # opened before the migration ran, or against a hand-copied
+                    # database from an older install, instead of raising
+                    # KeyError on every load.  (``sqlite3.Row.__contains__``
+                    # tests *values*, so the column set has to be explicit.)
+                    panel_id=r["panel_id"] if has_panel_columns else None,
+                    panel_name=r["panel_name"] if has_panel_columns else None,
                 )
                 for r in chans
             ],
