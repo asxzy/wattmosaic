@@ -278,7 +278,191 @@ The active `Topology`:
 }
 ```
 
-### 3.7 `PUT /topology`
+### 3.7 `GET /topology/tree`
+
+The engine-owned panel → circuits → devices hierarchy. The client paints this
+verbatim: it never re-derives structure from entity-id prefixes or friendly
+names, which is how the previous view produced a branch under a panel that does
+not feed it and repeated devices. The tree is computed at read time from
+declared topology facts only (`panel_id`, `parent_ct_id`, `alias_of_ct_id`,
+device attribution); the endpoint writes nothing and never modifies
+`parent_ct_id`.
+
+Query parameter: `include_nesting` (`bool`, default `false`). `1`, `true`,
+`yes` and `on` are true; any other value, including an empty one, is false.
+The default is false because nesting runs a multi-second CT sample scan.
+When true the scan's duplicate candidates can merge panels whose feeds alias
+each other — the merged node lists every feed in `feed_ct_ids` and, when more
+than one distinct monitor name contributed, carries a `"<n> monitors"` badge —
+and a `suggestions` object is added. A suggestion is advisory: a candidate
+parent never becomes a tree edge, and a duplicate is an alias, so circuit and
+device counts are unchanged. Declared `alias_of_ct_id` merges apply whether or
+not nesting is requested; the scan only contributes what the stored topology
+does not already declare. A merge can lower `stats.panels` and raise
+`stats.duplicate_feeds`; `stats.circuits` and `stats.devices` cannot move.
+
+Every node carries the same seven fields:
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Stable `"<kind>:<identifier>"` key, e.g. `circuit:br_fridge`. |
+| `kind` | `panel`, `circuit`, `device` or `group`. |
+| `label` | Display name; falls back to the underlying id when none is declared. |
+| `subtitle` | Short secondary line, e.g. `"branch · l1"` or `"2 node(s)"`. |
+| `badges` | `[{"text": ..., "tone": ...}]`; tone is `ok`, `warn`, `bad`, `info` or `muted`. |
+| `depth_hint` | 0-based depth, for indentation without measuring the tree. |
+| `children` | Always present, `[]` for a leaf. |
+
+Kind-specific fields:
+
+| `kind` | Additional fields |
+| --- | --- |
+| `panel` | `panel_id`, `monitor`, `monitors`, `feed_ct_ids`, `is_service_entry` |
+| `circuit` | `ct_id`, `ct_type`, `phase`, `entity_id`, `enabled`, `parent_ct_id`, `paired_ct_id`, `alias_of_ct_id`, `topology_status`, `polarity`, `measurement_multiplier`, `latest_power_w` |
+| `device` | `device_id`, `phase`, `topology_status`, `source`, `latest_power_w`, `confidence`, `via_ct_id`, and `double_pole` only when true |
+| `group` | `role`: `circuits`, `devices` or `subpanels`. The trailing fallback group for unplaceable rows is labelled `Unattributed`. |
+
+Empty groups are omitted, not rendered as empty nodes. A device appears
+exactly once: under the single circuit it references, or in the panel's
+`DEVICES` group when it spans two CTs or references no single circuit of that
+board. A device whose CTs resolve to no panel is listed under `Unattributed`
+and counted in `stats.unplaced_devices`. A circuit node carries
+`latest_power_w` for shape compatibility but does not populate it; the live
+reading lives on the device node.
+
+Top-level fields:
+
+| Field | Meaning |
+| --- | --- |
+| `version` | Payload schema version (currently `2`). |
+| `status` | Topology status: `candidate`, `confirmed` or `rejected`. |
+| `generated_at` | ISO-8601 UTC, `Z`-suffixed. |
+| `topology_version` | Stored topology version; `0` when none is configured. |
+| `stats` | Counts: `panels`, `circuits`, `devices`, `unplaced_devices`, `unplaced_circuits`, `max_depth`, `duplicate_feeds`, plus `channels`/`feed_circuits` (present for a built tree). |
+| `roots` | Root `panel` nodes; the service entry is first, then name order. |
+| `flat` | Every panel, circuit and device as a summary row, in tree order. |
+| `notes` | Diagnostics about fallbacks, merges, cycles and dropped ids. |
+| `suggestions` | Only when nesting was requested and a topology exists: `candidate_parents`, `duplicate_aliases`, `applied`, `note`. |
+
+`flat` exists so a client can build a filter or a list view from one pass over
+the summaries instead of walking `roots`, and without duplicating the tree in
+its own state.
+
+```json
+{
+  "version": 2,
+  "status": "confirmed",
+  "generated_at": "2026-11-11T22:25:35.431020Z",
+  "topology_version": 3,
+  "stats": {
+    "panels": 1,
+    "circuits": 1,
+    "devices": 1,
+    "unplaced_devices": 0,
+    "unplaced_circuits": 0,
+    "max_depth": 3,
+    "duplicate_feeds": 0,
+    "channels": 2,
+    "feed_circuits": 1
+  },
+  "roots": [
+    {
+      "id": "panel:main_panel",
+      "kind": "panel",
+      "label": "Main Panel",
+      "subtitle": "service entry · 1 circuits",
+      "badges": [],
+      "depth_hint": 0,
+      "children": [
+        {
+          "id": "group:main_panel:circuits",
+          "kind": "group",
+          "label": "CIRCUITS",
+          "subtitle": "1 node(s)",
+          "badges": [],
+          "depth_hint": 1,
+          "children": [
+            {
+              "id": "circuit:br_fridge",
+              "kind": "circuit",
+              "label": "Fridge",
+              "subtitle": "branch · l1",
+              "badges": [{"text": "confirmed", "tone": "ok"}],
+              "depth_hint": 2,
+              "children": [
+                {
+                  "id": "device:dev_fridge",
+                  "kind": "device",
+                  "label": "Fridge",
+                  "subtitle": "l1",
+                  "badges": [{"text": "confirmed", "tone": "ok"}],
+                  "depth_hint": 3,
+                  "children": [],
+                  "device_id": "dev_fridge",
+                  "phase": "l1",
+                  "topology_status": "confirmed",
+                  "source": null,
+                  "latest_power_w": null,
+                  "confidence": null,
+                  "via_ct_id": "br_fridge"
+                }
+              ],
+              "ct_id": "br_fridge",
+              "ct_type": "branch",
+              "phase": "l1",
+              "entity_id": "sensor.br_fridge_power",
+              "enabled": true,
+              "parent_ct_id": "main_l1",
+              "paired_ct_id": null,
+              "alias_of_ct_id": null,
+              "topology_status": "confirmed",
+              "polarity": "normal",
+              "measurement_multiplier": 1.0,
+              "latest_power_w": null
+            }
+          ],
+          "role": "circuits"
+        }
+      ],
+      "panel_id": "main_panel",
+      "monitor": "Main Panel",
+      "monitors": ["Main Panel"],
+      "feed_ct_ids": ["main_l1"],
+      "is_service_entry": true
+    }
+  ],
+  "flat": {
+    "panels": [
+      {"id": "panel:main_panel", "panel_id": "main_panel", "label": "Main Panel", "monitor": "Main Panel", "feed_ct_ids": ["main_l1"], "is_service_entry": true, "depth": 0}
+    ],
+    "circuits": [
+      {"id": "circuit:br_fridge", "ct_id": "br_fridge", "label": "Fridge", "ct_type": "branch", "phase": "l1", "parent_ct_id": "main_l1", "topology_status": "confirmed", "depth": 2}
+    ],
+    "devices": [
+      {"id": "device:dev_fridge", "device_id": "dev_fridge", "label": "Fridge", "phase": "l1", "topology_status": "confirmed", "via_ct_id": "br_fridge", "latest_power_w": null, "confidence": null, "source": null, "depth": 3}
+    ]
+  },
+  "notes": [
+    "Read-time view: parent_ct_id is never modified by this endpoint.",
+    "A panel's feed is the set of 'main' CTs declaring that panel.",
+    "A duplicate feed is an alias, not a child: panels measured by two monitors are merged into one node.",
+    "Devices spanning two CTs (double-pole) are listed in the panel's DEVICES group; no single circuit owns them."
+  ]
+}
+```
+
+- **200** — the tree.
+- **200** — with empty `roots` when no topology is configured. This is not an
+  error: `status` is `candidate`, `topology_version` is `0`, `stats` counts are
+  zero (and omit `channels`/`feed_circuits`), and `notes` is
+  `["no topology configured"]`.
+- **503** — no inference backend/facade is wired (same as every endpoint).
+
+Ordering is deterministic for a given topology and latest-results map: roots,
+circuits, devices and flat rows are sorted by stable keys, so two responses
+differ only in `generated_at` and can be diffed directly.
+
+### 3.8 `PUT /topology`
 
 Replaces the topology. The body is a complete `Topology` document; unknown
 fields are rejected.
@@ -313,7 +497,7 @@ curl -sS -X PUT http://127.0.0.1:8787/api/v1/topology \
 
 Returns the stored topology (with the database-assigned `version`).
 
-### 3.8 `POST /topology/confirm`
+### 3.9 `POST /topology/confirm`
 
 Promotes the current candidate topology to `confirmed`. No body required.
 
@@ -323,7 +507,7 @@ Promotes the current candidate topology to `confirmed`. No body required.
 
 `404` when no topology is configured.
 
-### 3.9 `GET /quality`
+### 3.10 `GET /quality`
 
 `DataQualityReport` for the latest evaluation:
 
@@ -372,7 +556,7 @@ Notes:
 - Repeated identical values are flagged `repeated: true` and are not treated as
   new measurements.
 
-### 3.10 `GET /diagnostics`
+### 3.11 `GET /diagnostics`
 
 Redacted support bundle: engine health, Home Assistant status, per-channel
 health, model state, database integrity, recent errors, configuration, and the
@@ -403,7 +587,7 @@ inference backend self-description.
 Every sensitive value (tokens, passwords, keys) is replaced by `"***"`
 recursively before the response is written.
 
-### 3.11 `GET /models/{device_id}`
+### 3.12 `GET /models/{device_id}`
 
 Model versions available for a device, with the currently active one.
 
@@ -429,7 +613,7 @@ Model versions available for a device, with the currently active one.
 - **404** — no model has been learned for the device yet (facade returns
   `None`/raises `NotFound`).
 
-### 3.12 `POST /commands`
+### 3.13 `POST /commands`
 
 Sends a `ServiceCommand`. The body is validated; unknown commands or fields are
 `400`, never `422`.
@@ -460,7 +644,7 @@ reason — it is a valid request that the engine declined, not a malformed one:
 {"ok": false, "command": "rebuild_model", "detail": "rebuild_model requires the learning backend, which is not installed"}
 ```
 
-### 3.13 `GET /export/{device_id}`
+### 3.14 `GET /export/{device_id}`
 
 JSON export of everything the engine knows about a device: samples, inferred
 results, learning samples, model versions and metadata.
@@ -478,7 +662,7 @@ results, learning samples, model versions and metadata.
 
 `404` when the device is unknown to both the database and the topology.
 
-### 3.14 `GET /metrics`
+### 3.15 `GET /metrics`
 
 Prometheus exposition format (`text/plain`). Example:
 

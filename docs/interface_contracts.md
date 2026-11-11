@@ -45,6 +45,7 @@ Base path `/api/v1`.
 | GET | `/devices` | device list with latest result + model state |
 | GET | `/devices/{device_id}` | one device detail |
 | GET | `/topology` | current `Topology` |
+| GET | `/topology/tree` | panel → circuits → devices hierarchy (`?include_nesting=`) |
 | PUT | `/topology` | replace topology (candidate by default) |
 | POST | `/topology/confirm` | confirm candidate topology |
 | GET | `/quality` | `DataQualityReport` |
@@ -112,6 +113,17 @@ class ElectricalModel:
 `MeasurementMatrix` carries `A` (m × n), row channel ids, column device ids, and
 per-row uncertainty. Nested CTs must not both appear as independent rows for the
 same physical quantity unless explicitly modelled.
+
+`CTChannel.panel_id` and `CTChannel.panel_name` (contract 1.4.0, additive and
+optional) name the distribution board a channel sits in. A panel's feed is the
+set of `main` CTs sharing one `panel_id`; an ordinary circuit belongs to the
+board its own `panel_id` names. Discovery derives both from the monitor it
+discovered, so the grouping is declared data rather than a string re-parsed at
+render time. Both default to `null`, so a topology stored before the fields
+existed still validates and the hierarchy falls back to one implicit panel. They
+are persisted in `ct_channels` (schema 7): `save_topology` writes an explicit
+column list, so a field with no column would vanish silently on every save and
+collapse the tree into a single implicit board.
 
 ### 3.4 Disaggregation (`disaggregation/`)
 
