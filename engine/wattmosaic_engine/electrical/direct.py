@@ -131,6 +131,13 @@ def resolve_direct(
         usable = (
             power is not None
             and not any(r.startswith(("stale_", "bad_quality", "missing_")) for r in reasons)
+            # A double-pole device measured by a declared pair needs *both*
+            # legs.  With one leg missing the sum is not the device's power but
+            # roughly half of it, which is worse than reporting nothing: the
+            # inference layer may still recover the device from its branch row,
+            # but it must not trust the half reading.  The reason is flagged so
+            # callers can tell a partial reading from an absent one.
+            and len(values) == len(legs)
             and quality in (QualityStatus.GOOD, QualityStatus.DEGRADED)
         )
         if repeated:

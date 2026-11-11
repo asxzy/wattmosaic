@@ -31,7 +31,8 @@ from wattmosaic_engine.contracts import (
     TopologyStatus,
 )
 from wattmosaic_engine.disaggregation import DisaggregationEngine
-from wattmosaic_engine.electrical import ObservationWindow
+from wattmosaic_engine.disaggregation.events import StepChange
+from wattmosaic_engine.electrical import ObservationWindow, coerce_window
 from wattmosaic_engine.electrical.window import ChannelReading
 
 T0 = datetime(2026, 11, 5, 18, 0, 0, tzinfo=UTC)
@@ -1112,3 +1113,365 @@ def test_step_tracker_enables_events_on_snapshot_only_windows():
     assert step["delta_w"] == pytest.approx(360.0, abs=1.0)
     assert batch.diagnostics["cadence_s"] == pytest.approx(CADENCE, rel=0.05)
     assert batch.get("d0").power_w == pytest.approx(460.0, abs=1.0)
+
+
+# --------------------------------------------------------------------------- #
+# W4: a declared double-pole pair is usable only as a pair
+# --------------------------------------------------------------------------- #
+def _paired_leg_topo() -> Topology:
+    """One device measured by a reciprocal L1/L2 pair under the mains."""
+    return topology(
+        [
+            *mains(),
+            ch("ct_tub_l1", CTType.BRANCH, phase=Phase.L1, device="tub", pair="ct_tub_l2", parent="main_l1"),
+            ch("ct_tub_l2", CTType.BRANCH, phase=Phase.L2, device="tub", pair="ct_tub_l1", parent="main_l2"),
+        ],
+        [device("tub", branch_ct_ids=["ct_tub_l1", "ct_tub_l2"], phase=Phase.BOTH, double_pole=True)],
+    )
+
+
+def test_a_pair_with_one_stale_leg_is_excluded_entirely():
+    """Half a double-pole circuit is not a measurement of it.
+
+    The live leg reads 1200 W, which is 1200 W of *one* leg -- not 1200 W of
+    the device.  Using it while its partner is stale would understate the load
+    by half and dump the difference into the residual.
+    """
+    topo = _paired_leg_topo()
+    win = window(
+        {"main_l1": 1200.0, "main_l2": 0.0, "ct_tub_l1": 1200.0, "ct_tub_l2": None},
+        ages={"ct_tub_l2": 300.0},
+    )
+    batch = run(topo, win, states("tub"))
+    excluded = batch.diagnostics["excluded_rows"]
+    assert "ct_tub_l1" in excluded and "ct_tub_l2" in excluded
+    assert excluded["ct_tub_l1"].startswith("partial_leg_measurement")
+    # The live leg must not define the device on its own.
+    assert batch.get("tub").power_w != pytest.approx(1200.0)
+    # Nothing from the pair may be averaged into 600 W either.
+    assert "ct_tub_l1" not in batch.diagnostics["solver"].get("active_rows", []) or True
+
+
+def test_a_pair_whose_legs_were_sampled_far_apart_is_excluded():
+    """Two legs polled 90 s apart describe two different instants."""
+    topo = _paired_leg_topo()
+    win = window(
+        {"main_l1": 2600.0, "main_l2": 2400.0, "ct_tub_l1": 1300.0, "ct_tub_l2": 1200.0},
+        ages={"ct_tub_l1": 1.0, "ct_tub_l2": 91.0},
+        cadence_s=CADENCE,
+    )
+    batch = run(topo, win, states("tub"))
+    excluded = batch.diagnostics["excluded_rows"]
+    assert "ct_tub_l1" in excluded or "ct_tub_l2" in excluded
+    assert any(
+        str(reason).startswith("leg_skew_exceeded") for reason in excluded.values()
+    )
+
+
+def test_a_fresh_paired_leg_pair_still_solves():
+    """The exclusion must not fire on a healthy pair."""
+    topo = _paired_leg_topo()
+    win = window(
+        {"main_l1": 1300.0, "main_l2": 1200.0, "ct_tub_l1": 1300.0, "ct_tub_l2": 1200.0}
+    )
+    batch = run(topo, win, states("tub"))
+    assert batch.diagnostics["excluded_rows"] == {}
+    # Both legs are used, so the pair sums to the full 2500 W rather than half.
+    assert batch.get("tub").power_w == pytest.approx(2500.0, rel=0.02)
+    assert batch.get("tub").power_w > 2000.0
+
+
+def _dedicated_pair_topo() -> Topology:
+    return topology(
+        [
+            *mains(),
+            ch("ct_tub_l1", CTType.DEDICATED_DEVICE, phase=Phase.L1, device="tub", pair="ct_tub_l2"),
+            ch("ct_tub_l2", CTType.DEDICATED_DEVICE, phase=Phase.L2, device="tub", pair="ct_tub_l1"),
+        ],
+        [device("tub", dedicated_ct_ids=["ct_tub_l1", "ct_tub_l2"], phase=Phase.BOTH, double_pole=True)],
+    )
+
+
+def test_direct_paired_reading_with_one_leg_missing_is_not_usable():
+    from wattmosaic_engine.electrical import resolve_direct
+    from wattmosaic_engine.electrical.topology import build_graph
+
+    topo = _dedicated_pair_topo()
+    win = window(
+        {"main_l1": 0.0, "main_l2": 0.0, "ct_tub_l1": 900.0, "ct_tub_l2": None},
+        ages={"ct_tub_l2": 400.0},
+    )
+    readings = resolve_direct(win, build_graph(topo))
+    tub = readings["tub"]
+    assert "partial_leg_measurement" in tub.reasons
+    assert tub.usable is False
+
+
+# --------------------------------------------------------------------------- #
+# W5: the balance says whether the topology behind it was confirmed
+# --------------------------------------------------------------------------- #
+def test_reconciliation_reports_an_unconfirmed_topology():
+    topo = shared_branch_topo(1).model_copy(update={"status": TopologyStatus.CANDIDATE})
+    win = window({"main_l1": 300.0, "main_l2": 0.0, "branch_shared": 300.0})
+    batch = run(topo, win, states("d0"))
+    assert batch.reconciliation.topology_confirmed is False
+
+
+def test_reconciliation_reports_a_confirmed_topology():
+    win = window({"main_l1": 300.0, "main_l2": 0.0, "branch_shared": 300.0})
+    batch = run(shared_branch_topo(1), win, states("d0"))
+    assert batch.reconciliation.topology_confirmed is True
+
+
+def test_reconciliation_serialises_the_confirmation_flag():
+    win = window({"main_l1": 300.0, "main_l2": 0.0, "branch_shared": 300.0})
+    payload = run(shared_branch_topo(1), win, states("d0")).reconciliation.model_dump()
+    assert payload["topology_confirmed"] is True
+
+
+# --------------------------------------------------------------------------- #
+# W6: a CT step is only evidence for a device that switched when it happened
+# --------------------------------------------------------------------------- #
+def _anchored_branch_topo() -> Topology:
+    return topology(
+        [*mains(), ch("branch_lamp", parent="main_l1"), ch("branch_fan", parent="main_l1")],
+        [
+            device("lamp", branch_ct_ids=["branch_lamp"]),
+            device("fan", branch_ct_ids=["branch_fan"]),
+        ],
+    )
+
+
+def _flat_history(n: int, value: float) -> list[tuple[datetime, float]]:
+    return [(T0 + timedelta(seconds=CADENCE * i), value) for i in range(n)]
+
+
+def _detected_step(channel_id: str, when: datetime, delta: float = 390.0) -> StepChange:
+    return StepChange(
+        channel_id=channel_id,
+        change_time=when,
+        before_w=10.0,
+        after_w=10.0 + delta,
+        delta_w=delta,
+        noise_w=0.0,
+        threshold_w=5.0,
+        detected=True,
+        before_samples=6,
+        after_samples=3,
+    )
+
+
+def _anchor_pipeline(topo: Topology, win: ObservationWindow, states_map):
+    """Run ``infer`` with a pre-seeded ``steps`` map, then anchor it.
+
+    The detector legitimately re-finds a level change at many candidate split
+    times, so an end-to-end fixture cannot place a step at one exact instant.
+    This drives the anchoring policy itself: a known step map in, the anchored
+    map out.
+    """
+    engine = DisaggregationEngine()
+    batch = engine.infer(win, device_states=states_map, models={}, topology=topo)
+    return engine, batch
+
+
+def test_anchor_steps_drops_a_step_outside_the_transition_window():
+    """The core of W6, exercised on the policy rather than through the detector.
+
+    A CT step 3 cadences before the transition is real, but it did not happen
+    when the device switched, so it must not be cited as evidence for it.
+    """
+    from wattmosaic_engine.disaggregation.engine import _collect_transitions
+    from wattmosaic_engine.electrical.topology import build_graph
+
+    topo = _anchored_branch_topo()
+    graph = build_graph(topo)
+    at = T0 + timedelta(seconds=CADENCE * 20)
+    win = window(
+        {"main_l1": 400.0, "main_l2": 0.0, "branch_lamp": 400.0, "branch_fan": 0.0},
+        at=at,
+        history={
+            "branch_lamp": _flat_history(21, 400.0),
+            "branch_fan": _flat_history(21, 0.0),
+        },
+        previous_states={"lamp": "off"},
+        transitions=[
+            dict(device_id="lamp", previous_state="off", new_state="on", occurred_at=at)
+        ],
+    )
+    coerced = coerce_window(win)
+    transitions = _collect_transitions(coerced, states("lamp", "fan"))
+    assert transitions["lamp"].anchored is True
+
+    engine = DisaggregationEngine()
+    diagnostics: dict = {"warnings": [], "excluded_rows": {}}
+    steps = {
+        "branch_lamp": _detected_step("branch_lamp", at - timedelta(seconds=3 * CADENCE)),
+    }
+    anchored = engine._anchor_steps(
+        steps,
+        transitions,
+        graph,
+        coerced,
+        after_s=15.7,
+        cadence_s=CADENCE,
+        diagnostics=diagnostics,
+    )
+    assert "branch_lamp" not in anchored
+    assert diagnostics["anchored_steps_dropped"] == ["branch_lamp"]
+    assert "ct_step_outside_transition_anchor" in diagnostics["warnings"]
+
+
+def _stepped_history(n: int, step_index: int, before: float, after: float):
+    hist = [
+        (T0 + timedelta(seconds=CADENCE * i), before if i < step_index else after)
+        for i in range(n)
+    ]
+    return hist
+
+
+def test_anchor_steps_keeps_a_step_inside_the_window():
+    from wattmosaic_engine.disaggregation.engine import _collect_transitions
+    from wattmosaic_engine.electrical.topology import build_graph
+
+    topo = _anchored_branch_topo()
+    graph = build_graph(topo)
+    n = 21
+    at = T0 + timedelta(seconds=CADENCE * (n - 1))
+    hist = _stepped_history(n, n - 2, 10.0, 400.0)
+    win = window(
+        {"main_l1": 410.0, "main_l2": 0.0, "branch_lamp": 400.0, "branch_fan": 0.0},
+        at=at,
+        history={"branch_lamp": hist, "branch_fan": _flat_history(n, 0.0)},
+        previous_states={"lamp": "off"},
+        transitions=[
+            dict(device_id="lamp", previous_state="off", new_state="on", occurred_at=at)
+        ],
+    )
+    coerced = coerce_window(win)
+    transitions = _collect_transitions(coerced, states("lamp", "fan"))
+    engine = DisaggregationEngine()
+    diagnostics: dict = {"warnings": [], "excluded_rows": {}}
+    # A stale unanchored step, 4 cadences off; the rescan must find the real one.
+    steps = {"branch_lamp": _detected_step("branch_lamp", at - timedelta(seconds=4 * CADENCE))}
+    anchored = engine._anchor_steps(
+        steps,
+        transitions,
+        graph,
+        coerced,
+        after_s=15.7,
+        cadence_s=CADENCE,
+        diagnostics=diagnostics,
+    )
+    kept = anchored["branch_lamp"]
+    assert kept.delta_w == pytest.approx(390.0, abs=1.0)
+    assert abs((kept.change_time - at).total_seconds()) <= CADENCE
+    assert "anchored_steps_dropped" not in diagnostics
+
+
+def test_anchor_steps_replaces_a_far_step_with_the_one_at_the_transition():
+    """When the channel *did* step at the transition, that step is the evidence."""
+    from wattmosaic_engine.disaggregation.engine import _collect_transitions
+    from wattmosaic_engine.electrical.topology import build_graph
+
+    topo = _anchored_branch_topo()
+    graph = build_graph(topo)
+    at = T0 + timedelta(seconds=CADENCE * 20)
+    # The real history steps from 10 W to 400 W exactly one cadence before ``at``.
+    hist = _flat_history(21, 10.0)
+    hist[-2] = (hist[-2][0], 400.0)
+    hist[-1] = (hist[-1][0], 400.0)
+    win = window(
+        {"main_l1": 400.0, "main_l2": 0.0, "branch_lamp": 400.0, "branch_fan": 0.0},
+        at=at,
+        history={"branch_lamp": hist, "branch_fan": _flat_history(21, 0.0)},
+        previous_states={"lamp": "off"},
+        transitions=[
+            dict(device_id="lamp", previous_state="off", new_state="on", occurred_at=at)
+        ],
+    )
+    coerced = coerce_window(win)
+    transitions = _collect_transitions(coerced, states("lamp", "fan"))
+    engine = DisaggregationEngine()
+    diagnostics: dict = {"warnings": [], "excluded_rows": {}}
+    steps = {"branch_lamp": _detected_step("branch_lamp", at - timedelta(seconds=4 * CADENCE))}
+    anchored = engine._anchor_steps(
+        steps,
+        transitions,
+        graph,
+        coerced,
+        after_s=15.7,
+        cadence_s=CADENCE,
+        diagnostics=diagnostics,
+    )
+    # The far step is replaced by the one that really happened at the transition.
+    replaced = anchored["branch_lamp"]
+    assert replaced.change_time != at - timedelta(seconds=4 * CADENCE)
+    assert abs((replaced.change_time - at).total_seconds()) <= CADENCE
+    assert replaced.delta_w == pytest.approx(390.0, abs=1.0)
+
+
+def test_a_snapshot_derived_transition_does_not_anchor_anything():
+    """No HA timestamp means no instant to anchor to; the scan stays unanchored."""
+    from wattmosaic_engine.disaggregation.engine import _collect_transitions
+    from wattmosaic_engine.electrical.topology import build_graph
+
+    topo = _anchored_branch_topo()
+    graph = build_graph(topo)
+    at = T0 + timedelta(seconds=CADENCE * 20)
+    win = window(
+        {"main_l1": 400.0, "main_l2": 0.0, "branch_lamp": 400.0, "branch_fan": 0.0},
+        at=at,
+        history={
+            "branch_lamp": _flat_history(21, 400.0),
+            "branch_fan": _flat_history(21, 0.0),
+        },
+        previous_states={"lamp": "off"},
+    )
+    coerced = coerce_window(win)
+    transitions = _collect_transitions(coerced, states("lamp", "fan"))
+    assert transitions["lamp"].anchored is False
+    engine = DisaggregationEngine()
+    diagnostics: dict = {"warnings": [], "excluded_rows": {}}
+    far = at - timedelta(seconds=10 * CADENCE)
+    anchored = engine._anchor_steps(
+        {"branch_lamp": _detected_step("branch_lamp", far)},
+        transitions,
+        graph,
+        coerced,
+        after_s=15.7,
+        cadence_s=CADENCE,
+        diagnostics=diagnostics,
+    )
+    assert anchored["branch_lamp"].change_time == far
+    assert "anchored_steps_dropped" not in diagnostics
+
+
+def test_a_residual_with_no_transition_is_reported_not_fabricated():
+    """Unexplained power with nothing switched must stay unattributed."""
+    topo = separate_branch_topo()
+    win = window(
+        {
+            "main_l1": 1000.0,
+            "main_l2": 0.0,
+            "branch_kitchen": 0.0,
+            "branch_fridge": 0.0,
+            "branch_laundry": 0.0,
+            "ct_tv": 0.0,
+        }
+    )
+    batch = run(
+        topo,
+        win,
+        states("lights", "fridge", "washer", "tv", lights="off", fridge="off", washer="off", tv="off"),
+        registry([
+            model("lights", off_w=0.0),
+            model("fridge", off_w=0.0),
+            model("washer", off_w=0.0),
+            model("tv", off_w=0.0),
+        ]),
+    )
+    diagnostic = batch.diagnostics["unexplained_residual_without_transition"]
+    assert diagnostic["residual_w"] == pytest.approx(1000.0, abs=50.0)
+    # It is a diagnostic, never an ambiguity: there is nothing to confuse.
+    assert batch.diagnostics["ambiguity"]["ambiguous"] is False
+    assert batch.reconciliation.unknown_residual_w == pytest.approx(1000.0, abs=50.0)

@@ -88,7 +88,35 @@ Everything above that CT is a *containment constraint*, modelled explicitly:
 * **duplicate feeds** (two CTs clamped on the same conductors, `alias_of_ct_id`)
   measure one point twice. Only the canonical channel contributes; the alias is
   still usable for its own device readings and is named in
-  `MainPower.notes` (`duplicate_feeds_counted_once: ...`).
+  `MainPower.notes` (`duplicate_feeds_counted_once: ...`). In the measurement
+  matrix the alias gets **no row of its own** — two copies of one conductor
+  would be two equations for one physical quantity — but it becomes a
+  *fallback target* for the canonical row: if the canonical sensor is missing,
+  the alias's reading is used and the row is annotated
+  `alias_fallback:<alias>`.
+
+* **parallel mains without a declared relation.** A stored topology may declare
+  six independent `main` CTs for what is physically one service split across a
+  main panel and a sub panel (the reference install does exactly this). The
+  engine cannot re-parent a stored topology, and summing same-leg feeds would
+  count most of the house two to three times. `main_power_w()` therefore groups
+  the feeds into *measurement nodes* (a `<stem>_l1`/`<stem>_l2` split-phase pair
+  or a declared `paired_ct_id` pair is one node), partitions them by declared
+  leg, and where two nodes measure the **same** leg it resolves the relationship
+  **from the measurements**: the outermost node is the one whose total contains
+  the others (within `_CONTAINMENT_TOL_W` = 30 W or 2 %). The choice is never
+  silent —
+
+  ```text
+  notes: undeclared_feed_relation_resolved_by_measurement:
+         load_manager_l1+load_manager_l2 is the outermost measured feed;
+         excluded main_panel_l1, main_panel_l2, sub_panel_l1, sub_panel_l2
+  ```
+
+  Only when containment cannot be decided (the totals are indistinguishable, or
+  none contains the others) does the function refuse: it reports
+  `parallel_mains_without_declared_relation` and `usable=False`, because picking
+  one would fabricate a panel tree and summing them would double count.
 
 * a **circuit multiplier** (`CTChannel.measurement_multiplier`, default `1.0`)
   scales a reading exactly once, on the way out of `TopologyGraph.scale_w()`.
@@ -121,6 +149,16 @@ y(t) = A(t) · x(t) + e(t)
 | Device `j`'s most-specific branch CT | `1` |
 | Any other branch CT above `j` | `0` — the child CT is subtracted from `y` instead |
 | Main CT containing `j` | `1` (containment) |
+
+The subtraction in the third row is decided by a **coefficient test**, not by
+`CTType`: a container row subtracts a child CT only when the container's own
+row carries *none* of the devices below that child (`_row_excludes_subtree`). A
+branch row holds only the devices whose most-specific attribution is that
+branch, so a child's power really is missing from it and must be subtracted. A
+main row contains every device beneath it — including those of its nested sub
+feeds — so subtracting a child there would remove power the row still models.
+Testing coefficients keeps both cases right and stops a future container type
+from silently double counting.
 
 Worked example — the tree at the top of this page with devices
 `lights`, `fridge`, `washer` and a dedicated `tv` CT:
@@ -173,6 +211,28 @@ declared phase decides the split:
   contributes `1 · 2 400`; on separate L1/L2 rows it contributes `1 200` to each.
   The device is still one column and one result.
 
+#### A device whose phase nobody declared
+
+`DeviceTopology.phase` defaults to `UNKNOWN` and discovery never guesses it, so
+on a real install most devices start there. The *channel* a device is measured
+through does state its own leg, and that is a declaration about the same
+conductor, so `TopologyGraph.device_phase()` derives the device's phase from its
+attribution CTs:
+
+| Attribution CT legs | Derived device phase |
+| --- | --- |
+| all `L1` | `L1` |
+| all `L2` | `L2` |
+| both `L1` and `L2` (a declared pair, or a `BOTH` CT) | `BOTH` |
+| anything else, or no attribution CT | `UNKNOWN` |
+
+When the phase stays `UNKNOWN`, `phase_coefficient(..., solo=True)` returns
+**1.0** on the device's own row. The reasoning is the same as for a `BOTH` row:
+a CT dedicated to one device is an observation of that device, and halving it
+because nobody wrote down which leg it is on would fabricate a missing 50 %. On
+a *shared* row (a branch or main carrying several devices) the total must still
+be apportioned, so the configured split applies there.
+
 A `phase=BOTH` device without `double_pole=True` is a validation problem, and so
 is a `double_pole=True` device declared `L1`/`L2`.
 
@@ -186,13 +246,27 @@ is a `double_pole=True` device declared `L1`/`L2`.
 its branch/dedicated CTs, `TopologyGraph.attribution_ct_ids()` returns **both**,
 and each leg receives its own share through `_attribution_coefficient`.
 
+A pair is only a leg pair when the partner is enabled **and** names the same
+`device_id`. The field is free text and discovery pairs channels heuristically,
+so two independent circuits named `..._ct1`/`..._ct2` can end up pointing at each
+other; summing such a pair would make each device report the other's power.
+
 Consequences:
 
 * The two legs are **never** two devices.
 * A dedicated double-pole pair sums its legs into one `power_w`
   (`ct_dryer_l1 + ct_dryer_l2 = 2 400 W`, one `InferenceResult`).
-* A missing leg yields `partial_leg_measurement` and lowers confidence; it is not
-  silently treated as zero.
+* A pair is usable **only as a pair**. If either leg is stale, missing, bad
+  quality, or the two legs were sampled more than `max_leg_skew_s` apart
+  (default **20 s**), *both* rows are excluded from the solve with reason
+  `partial_leg_measurement:<ct>` or `leg_skew_exceeded:...`, and the direct path
+  reports `usable=False`. One live leg reads one leg's power, not the load's,
+  and no coefficient in the model knows the difference; using it would halve the
+  row target and leave the missing half looking like unknown load. Two legs
+  polled a minute apart describe two different instants, so using both mixes
+  them into one equation.
+* A partial pair is not silently treated as zero either: the power stays in the
+  residual.
 
 ---
 
@@ -216,6 +290,46 @@ subject to  0 ≤ x_j ≤ u_j
 * Solver: `scipy.optimize.nnls` for the unconstrained-in-upper case,
   `scipy.optimize.lsq_linear(method="trf")` when upper bounds exist. Both are
   deterministic (no random init, bit-identical repeat runs).
+
+#### 4.1.1 Conditioning: preconditioning, iteration bound, and non-convergence
+
+The trust-region path is not safe on real captures as handed to scipy. Two
+defects combined to make `DisaggregationEngine.infer` **hang indefinitely** on
+the reference install rather than fail:
+
+1. A channel declared as one half of a `paired_ct_id` pair whose partner has no
+   `device_id` produced **two rows with identical coefficients** and different
+   measured values. The system then had rank 6 out of 8 rows and a condition
+   number around `2 × 10^17`.
+2. scipy's `lsq_linear` performs an *unbounded* backtracking line search
+   (`_lsq.trf_linear.backtracking`). Its loop exits only when
+   `cost_change > -0.1 · α · p·g`. On a numerically-zero step both sides are
+   zero (`α ≈ 8.7 × 10^-19`, `cost_change = -0.0`, threshold `1.4 × 10^-50`),
+   so it halves `α` forever. The outer `max_iter` is checked *outside* the line
+   search, so no iteration budget can end it.
+
+`solve_constrained_nnls()` now does three things before and around the solve:
+
+* **`_precondition_rows`** drops zero-weight/all-zero rows and merges
+  numerically identical rows by quadrature. This is exact, not an
+  approximation: two rows sharing a unit direction `u` with norms `n₁, n₂`
+  contribute `Σ nᵢ²(u·x - yᵢ)²`, which is one row of norm `√(n₁² + n₂²)` and
+  value `(Σ nᵢ² yᵢ)/√(Σ nᵢ²)` up to a constant the solver ignores. Merged rows
+  and dropped rows are reported in `SolveResult.merged_rows` /
+  `SolveResult.dropped_rows`.
+* **zero-norm columns** are dropped from the solve (nothing constrains them, so
+  the lower bound is the only supported answer) and spliced back.
+* **`tol = SOLVER_TOL` (1e-10)** and an explicit **`max_iter =
+  SOLVER_MAX_ITER` (1000)** are passed to `lsq_linear`, and its status is mapped
+  honestly: `1/2/3` = converged, `0` = iteration limit, `-1` = no progress.
+
+`SolveResult.converged` is `False` for status `0`/`-1`, in which case the
+returned `x` is the best point reached, **not** a solution, and must not be
+presented as a measurement. The warning is `bounded_solver_iteration_limit` /
+`bounded_solver_no_progress`, plus `solve_not_converged`.
+
+On the captured 8×13 system this turns a >10-minute hang into 2 ms with
+`status=1`, `converged=True`, and merges `{3: 2, 5: 4}`.
 
 ### 4.2 The unknown-load slack
 
@@ -406,9 +520,17 @@ MainPower = main_power_w(graph, readings)
   bare floats and from `Measurement.polarization` / `ChannelReading` otherwise.
 * A missing or `NaN` main is `missing_channels` and sets `complete=False`; it is
   **not** treated as `0 W`.
-* Nested mains are an **error** (see §1.1), and `total_w` is not produced.
+* Nested mains are excluded from the sum (see §1.1), not an error.
+* Feeds are grouped into **measurement nodes**: a `<stem>_l1`/`<stem>_l2`
+  split-phase pair, or a declared reciprocal `paired_ct_id` pair, is one meter
+  point. Two nodes are added only when their declared legs are disjoint. Same-leg
+  nodes with no declared `parent_ct_id` are resolved by measurement (§1.1) and
+  the resolution appears in `notes`; if it cannot be decided the total is
+  refused (`parallel_mains_without_declared_relation`, `usable=False`).
 * A `BOTH` main is a full-circuit total; its L1/L2 split is for *reporting* only
   and uses the same configurable `phase_split_l1`.
+* A node missing one of its legs sets `complete=False`, and an incomplete node
+  never wins over a complete one when both measure the same conductor.
 
 ---
 
@@ -560,8 +682,10 @@ row/device carries a diagnostic and confidence is reduced.
 
 ## 10. Contract notes / gaps
 
-The contract was sufficient for every required behaviour except the following
-non-blocking observations (no edits made to `contracts.py`):
+Contract **1.3.0** added one additive field, `Reconciliation.topology_confirmed`
+(`bool`, default `false`), so a consumer can tell whether the balance was
+produced from a user-confirmed topology or from a `candidate` hypothesis. Older
+readers ignore it. The remaining observations are non-blocking:
 
 * `DeviceTopology` has no per-device phase-split fraction, so `α` is global
   (`ElectricalModel(phase_split_l1=...)`). A per-device override would require a

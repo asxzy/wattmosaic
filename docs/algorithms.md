@@ -137,6 +137,45 @@ Detected steps appear in `diagnostics["ct_steps"]`; a two-point fallback using
 the previous inference cycle is marked `source="previous_snapshot"` and is used
 only when it exceeds the threshold and no anchor window applies.
 
+##### How `infer` wires the anchor
+
+The unanchored scan answers "did this channel move somewhere in the buffer",
+which is not the same question as "did it move when this device switched". On a
+real capture the two differ by up to a minute (15.7 s CT cadence, 5 s engine
+cadence). So after the unanchored scan:
+
+1. Only transitions that HA timestamped itself are eligible. `_Transition`
+   records `anchored=True` for these; a transition derived from the previous
+   cycle's snapshot carries `window.at` — the time we *looked* — and anchors
+   nothing, because that is not when the device switched.
+2. For each anchored transition, the channels that observe that device
+   (`graph.device_channels`) are rescanned with
+   `anchor=occurred_at`, `anchor_before_s = anchor_after_s = after_s`,
+   `anchor_grace_s = cadence_s`, `cadence_s = cadence_s`.
+3. A channel that produced a step in the anchored rescan takes that step.
+4. A channel whose unanchored step sits outside
+   `[anchor − after_s − cadence, anchor + after_s + cadence]` loses it, and the
+   loss is reported in `diagnostics["anchored_steps_dropped"]` plus the warning
+   `ct_step_outside_transition_anchor`. The movement belongs to some other load,
+   so citing it would credit one device with another circuit's power.
+5. A `ValueError` from a naive/aware mismatch is swallowed per device: the data
+   cannot be anchored, so the unanchored scan stands rather than aborting
+   inference. The device is listed in `diagnostics["anchor_skipped_devices"]`.
+
+A channel shared by several devices survives if *any* of its anchored devices'
+windows contains the step.
+
+##### Unexplained residual with no transition
+
+Ambiguity requires at least two claimants, so `_detect_ambiguity` returns
+nothing when fewer than two devices changed state. That is not the same as
+"solved": a residual that is large while nothing switched is an event the state
+layer never saw (an always-on load cycling, a device with no state entity, a
+manual switch). `_reconcile` records it in
+`diagnostics["unexplained_residual_without_transition"]` with the residual and
+main power, and leaves the power in `unknown_residual_w`. It is a diagnostic,
+never an ambiguity and never a fabricated claimant.
+
 ### 3.5 Supplying history in production (`StepTracker`)
 
 The production synchroniser (`synchronization.AlignedWindow`) intentionally

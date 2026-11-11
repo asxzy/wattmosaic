@@ -1112,3 +1112,187 @@ def test_attribution_never_borrows_a_cross_device_partner() -> None:
     graph = build_graph(topo)
     assert graph.attribution_ct_ids("fridge_1") == ("fridge_1",)
     assert graph.attribution_ct_ids("fridge_2") == ("fridge_2",)
+
+
+# --------------------------------------------------------------------------- #
+# W2: an undeclared device phase must not halve its own measurement
+# --------------------------------------------------------------------------- #
+def test_undeclared_device_on_its_own_ct_is_not_phase_split():
+    """A device whose phase nobody declared still owns its whole reading.
+
+    ``phase_coefficient`` splits a *double-pole* device across the legs, because
+    a single-phase row only sees half of it.  A device of unknown phase has no
+    declared leg to split, so on its own attribution row the CT is the only
+    observation there is: halving it would fabricate a missing 50 %.
+    """
+    topo = Topology(
+        channels=[
+            *two_mains(),
+            _ch("ct_lamp", CTType.DEDICATED_DEVICE, device="lamp"),
+        ],
+        devices=[
+            # phase deliberately left at the default (UNKNOWN)
+            DeviceTopology(device_id="lamp", dedicated_ct_ids=["ct_lamp"]),
+        ],
+        status=TopologyStatus.CONFIRMED,
+    )
+    graph = build_graph(topo)
+    matrix = build_measurement_matrix(graph, ["lamp"])
+    j = matrix.col_index("lamp")
+    row = matrix.row_index("ct_lamp")
+    assert matrix.A[row, j] == pytest.approx(1.0)
+
+    # And the direct path reports the measured value, not half of it.
+    window = ObservationWindow.from_values(T0, {"ct_lamp": 240.0})
+    readings = resolve_direct(window, graph)
+    assert readings["lamp"].power_w == pytest.approx(240.0)
+
+
+def test_solo_flag_controls_the_unknown_phase_split():
+    topo = Topology(
+        channels=[*two_mains(), _ch("ct_lamp", CTType.DEDICATED_DEVICE, device="lamp")],
+        devices=[DeviceTopology(device_id="lamp", dedicated_ct_ids=["ct_lamp"])],
+        status=TopologyStatus.CONFIRMED,
+    )
+    graph = build_graph(topo)
+    assert graph.device_phase("lamp") == Phase.L1  # derived from its own CT leg
+    # A shared row still apportions, because the total has to be divided somehow.
+    assert graph.phase_coefficient("lamp", Phase.L1, solo=False) == pytest.approx(1.0)
+    assert graph.phase_coefficient("lamp", Phase.L2, solo=False) == pytest.approx(0.0)
+
+
+def test_device_phase_is_derived_from_its_attribution_legs():
+    """Discovery leaves ``phase`` unset; the CT it is wired through does not."""
+    topo = Topology(
+        channels=[
+            *two_mains(),
+            _ch("ct_a", CTType.DEDICATED_DEVICE, device="a", phase=Phase.L2),
+            _ch("ct_pair_l1", CTType.DEDICATED_DEVICE, device="pair", phase=Phase.L1, pair="ct_pair_l2"),
+            _ch("ct_pair_l2", CTType.DEDICATED_DEVICE, device="pair", phase=Phase.L2, pair="ct_pair_l1"),
+        ],
+        devices=[
+            DeviceTopology(device_id="a", dedicated_ct_ids=["ct_a"]),
+            DeviceTopology(device_id="pair", dedicated_ct_ids=["ct_pair_l1", "ct_pair_l2"]),
+            DeviceTopology(device_id="unknown"),
+        ],
+        status=TopologyStatus.CONFIRMED,
+    )
+    graph = build_graph(topo)
+    assert graph.device_phase("a") == Phase.L2
+    assert graph.device_phase("pair") == Phase.BOTH
+    assert graph.device_phase("unknown") == Phase.UNKNOWN
+
+
+# --------------------------------------------------------------------------- #
+# W1: aliases and nested mains in the measurement matrix
+# --------------------------------------------------------------------------- #
+def test_alias_channel_does_not_get_its_own_row_and_is_a_fallback():
+    """Two CTs on one wire must not become two equations."""
+    topo = Topology(
+        channels=[
+            _ch("service", CTType.MAIN, phase=Phase.BOTH),
+            _ch("service_shadow", CTType.MAIN, phase=Phase.BOTH, alias="service"),
+            _ch("branch", parent="service"),
+        ],
+        devices=[
+            DeviceTopology(device_id="lamp", branch_ct_ids=["branch"], phase=Phase.L1)
+        ],
+        status=TopologyStatus.CONFIRMED,
+    )
+    graph = build_graph(topo)
+    matrix = build_measurement_matrix(graph, ["lamp"])
+    assert "service" in matrix.row_channel_ids
+    assert "service_shadow" not in matrix.row_channel_ids
+    assert matrix.channel_aliases["service"] == ("service_shadow",)
+
+    # Canonical present: canonical wins.
+    prepared = matrix.prepare({"service": 900.0, "service_shadow": 940.0, "branch": 40.0})
+    assert prepared.y[matrix.row_index("service")] == pytest.approx(900.0)
+    # Canonical missing: the alias measures the same wire, so use it.
+    fallback = matrix.prepare({"service_shadow": 940.0, "branch": 40.0})
+    assert fallback.mask[matrix.row_index("service")]
+    assert fallback.y[matrix.row_index("service")] == pytest.approx(940.0)
+    assert any(
+        note.startswith("alias_fallback:") for note in matrix.row_notes["service"]
+    )
+
+
+def test_a_nested_main_is_not_subtracted_from_its_outer_main():
+    """A main row already contains every device below it, sub feeds included."""
+    topo = Topology(
+        channels=[
+            _ch("service", CTType.MAIN, phase=Phase.BOTH),
+            _ch("panel", CTType.MAIN, phase=Phase.BOTH, parent="service"),
+            _ch("branch", parent="panel"),
+        ],
+        devices=[
+            DeviceTopology(device_id="lamp", branch_ct_ids=["branch"], phase=Phase.L1),
+        ],
+        status=TopologyStatus.CONFIRMED,
+    )
+    graph = build_graph(topo)
+    matrix = build_measurement_matrix(graph, ["lamp"])
+    # The service row carries the lamp...
+    assert matrix.A[matrix.row_index("service"), matrix.col_index("lamp")] > 0.0
+    # ...and therefore must not subtract the panel that measures it too.
+    assert "panel" not in matrix.nested_children.get("service", ())
+    # The branch row genuinely omits the lamp, so the panel has nothing to
+    # subtract for it either: only *child rows* whose devices are missing from
+    # the parent qualify.
+    prepared = matrix.prepare({"service": 900.0, "panel": 500.0, "branch": 100.0})
+    assert prepared.y[matrix.row_index("service")] == pytest.approx(900.0)
+
+
+# --------------------------------------------------------------------------- #
+# W3: the solver must not hang on duplicated rows
+# --------------------------------------------------------------------------- #
+def test_duplicate_rows_from_a_partnerless_pair_are_merged():
+    """The exact 8x13 system from the real capture that used to hang forever.
+
+    Two ``paired_ct_id`` channels whose ``device_id`` is ``None`` produce
+    identical coefficient rows.  scipy's trust-region line search then halves
+    ``alpha`` forever on a numerically-zero step.  The solver must merge them,
+    report the merge, and return.
+    """
+    from pathlib import Path
+
+    npz = Path(
+        "/private/var/folders/wy/06f64nbx6kz8z88km48c3b3h0000gn/T/opencode/hang_system.npz"
+    )
+    if not npz.exists():  # pragma: no cover - fixture is local-only
+        pytest.skip("saved hanging system is not present")
+    saved = np.load(npz)
+    A, y, hi = saved["A"], saved["y"], saved["hi"]
+    result = solve_constrained_nnls(
+        A, y, device_ids=[f"d{i}" for i in range(A.shape[1])], upper=hi
+    )
+    assert result.converged is True
+    assert result.merged_rows == {3: 2, 5: 4}
+    assert np.all(np.isfinite(result.x))
+    assert np.all(result.x >= 0.0)
+
+
+def test_solver_reports_duplicate_merges_in_a_tiny_system():
+    A = np.array([[1.0, 1.0], [1.0, 1.0], [1.0, 0.0]])
+    y = np.array([300.0, 340.0, 120.0])
+    result = solve_constrained_nnls(A, y, device_ids=["a", "b"])
+    # Rows 0 and 1 are identical: one equation with the combined weight.
+    assert result.merged_rows == {1: 0}
+    assert result.converged is True
+    assert result.x == pytest.approx([120.0, 200.0], abs=1.0)
+
+
+def test_solver_drops_zero_rows_and_reports_it():
+    A = np.array([[0.0, 0.0], [1.0, 0.0]])
+    y = np.array([999.0, 250.0])
+    result = solve_constrained_nnls(A, y, device_ids=["a", "b"])
+    assert result.dropped_rows == [0]
+    assert result.x == pytest.approx([250.0, 0.0])
+
+
+def test_solver_with_no_supported_columns_converges_to_zero():
+    A = np.zeros((2, 3))
+    y = np.array([100.0, 200.0])
+    result = solve_constrained_nnls(A, y, device_ids=["a", "b", "c"])
+    assert result.converged is True
+    assert np.all(result.x == 0.0)

@@ -109,10 +109,15 @@
       },
       "title": "Explanation",
       "type": "array"
+    },
+    "topology_confirmed": {
+      "default": false,
+      "title": "Topology Confirmed",
+      "type": "boolean"
     }
   },
   "title": "Reconciliation",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/reconciliation.json",
-  "x-contract-version": "1.2.0"
+  "x-contract-version": "1.3.0"
 }

@@ -25,16 +25,18 @@ tests guard are invisible on the simulator and obvious on the real capture:
 Defect IDs
 ----------
 ``E2-1`` is the shipped-topology double count (independent mains, no declared
-panel tree). It is the defect ``test_real_replay_reports_whole_home_once``
-currently xfails on. The engine-fix agent owns it; these tests are the gate that
-must flip to XPASS when it is fixed.
+panel tree). ``test_real_replay_reports_whole_home_once`` pins it.
 
 ``E2-2`` is the companion solver defect: on real data the six independent feeds
-make the bounded least-squares problem ill-conditioned enough that
-``DisaggregationEngine.infer`` **does not terminate** (measured >10 min on a
+made the bounded least-squares problem ill-conditioned enough that
+``DisaggregationEngine.infer`` **did not terminate** (measured >10 min on a
 one-minute window). ``test_shipped_replay_terminates`` pins it. Any tool that
-replays the capture must therefore impose a hard deadline; see
+replays the capture must still impose a hard deadline; see
 ``tools/audit/replay_capture.py``.
+
+Both are fixed in the engine (``electrical/main_power.py`` resolves undeclared
+parallel feeds, ``electrical/solver.py`` preconditions and bounds the solve).
+The fixtures keep the deadline so a regression fails fast instead of hanging CI.
 """
 
 from __future__ import annotations
@@ -110,9 +112,10 @@ def capture(shipped_topology):
 def shipped_replay(capture, shipped_topology):
     """Replay with a hard deadline; ``None`` means the solver did not stop.
 
-    The shipped topology is known not to terminate (E2-2), so the test does not
-    *assume* a result: it records the timeout as the finding.  This keeps the
-    suite fast and makes the failure mode visible instead of a hung CI job.
+    E2-2 is fixed, so this normally returns a result in about a second.  The
+    deadline stays: a solver regression must fail in 20 s with a named reason,
+    not hang CI.  ``None`` is therefore a *failure* the tests below assert on
+    rather than a finding they record.
     """
     from tools.audit.replay_capture import ReplayTimeout, _Deadline, replay
 
@@ -140,11 +143,11 @@ def nested_replay(capture, nested_topology):
 def test_shipped_topology_declares_nested_parents(shipped_topology, nested_topology) -> None:
     """The captured wiring must be expressible as a panel tree.
 
-    The *shipped* topology declares no parents at all -- that is defect E2-1.
-    What this test pins is that the install genuinely has a sub panel fed from a
-    main panel, so the nested variant describes real wiring and does not invent
-    it: the sub-panel feeds are mains with a ``parent_ct_id`` pointing at a root
-    feed.
+    The *shipped* topology declares no parents at all, so the engine must
+    resolve the panel relation from measurements (defect E2-1).  What this test
+    pins is that the install genuinely has a sub panel fed from a main panel, so
+    the nested variant describes real wiring and does not invent it: the
+    sub-panel feeds are mains with a ``parent_ct_id`` pointing at a root feed.
     """
     # As shipped: every main is independent.  Asserted so a "fix" that only
     # edits the local database cannot pass unnoticed.
@@ -258,18 +261,6 @@ def test_parentless_topology_double_count_is_caught(shipped_topology, capture) -
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "E2-1/E2-2: the shipped topology declares six independent mains instead of "
-        "one service feed with a nested sub panel, so main_power_w sums root+panel+sub "
-        "(measured 3943 W vs 1600 W on a 120 min window, ratio 2.46) and the "
-        "ill-conditioned system does not terminate on real data. Fixing E2-1 must "
-        "make this XPASS; if the fix only re-parents the CTs in the local database "
-        "this test will still fail, because it builds both variants from the stored "
-        "topology."
-    ),
-)
 def test_real_replay_reports_whole_home_once(shipped_replay, nested_replay) -> None:
     """Both topology variants must report the same whole-home power.
 
@@ -278,9 +269,15 @@ def test_real_replay_reports_whole_home_once(shipped_replay, nested_replay) -> N
     than 5%, one of them is counting part of the house twice -- and since the
     nested one is the physically correct tree, the as-shipped number is wrong.
 
-    The as-shipped run is also the control for the solver hang: ``shipped_replay``
+    The as-shipped run is the control for the solver hang: ``shipped_replay``
     is ``None`` when it exceeded its deadline, which is itself a failure of the
     shipped topology and is reported as such.
+
+    No longer an xfail: E2-1 is fixed in the engine. ``main_power_w`` cannot
+    re-parent a stored topology, but it *can* tell that six ``main`` feeds with
+    mutually consistent measurements describe one service split across panels,
+    and resolve which feed is outermost by measurement. The as-shipped total
+    therefore no longer sums the panel tree.
     """
     assert shipped_replay is not None, (
         "the shipped topology did not terminate within "
@@ -320,31 +317,34 @@ def test_nested_replay_terminates_and_balances(nested_replay) -> None:
 def test_shipped_replay_terminates(shipped_replay) -> None:
     """E2-2: the shipped topology must terminate on real data within the deadline.
 
-    Currently it does not, so this is an xfail that names the defect. It flips to
-    XPASS when the engine's conditioning fix lands.
+    It used to hang because the six independent feeds produced a rank-deficient
+    bounded least-squares system, and scipy's trust-region line search could loop
+    forever on a numerically-zero step. The solver now preconditions duplicate
+    rows and bounds the iteration count, so the deadline is a plain assertion
+    rather than an xfail.
     """
-    if shipped_replay is None:
-        pytest.xfail(
-            f"E2-2: shipped topology did not terminate within {REPLAY_TIMEOUT_S:.0f}s"
-        )
+    assert shipped_replay is not None, (
+        f"E2-2: shipped topology did not terminate within {REPLAY_TIMEOUT_S:.0f}s"
+    )
     assert shipped_replay.n_windows > 0
 
 
-def test_shipped_replay_double_counts_relative_to_nested(
+def test_shipped_replay_does_not_double_count(
     shipped_replay, nested_replay
 ) -> None:
-    """Quantify E2-1: the shipped total exceeds the nested total materially.
+    """E2-1 is fixed in the engine: the shipped total matches the nested one.
 
-    Not an xfail, because it asserts the *defect exists* rather than that it is
-    fixed. It fails when E2-1 is fixed, and that is intentional: the message says
-    which test to update.
+    The inverse of the old ``..._double_counts_relative_to_nested`` gate.  A
+    stored topology cannot be re-parented by the engine, so this asserts the
+    thing the engine can actually do: resolve six mutually-consistent ``main``
+    feeds into one service total instead of summing the panel tree.
     """
-    if shipped_replay is None:
-        pytest.skip("shipped topology did not terminate; see E2-2")
-    assert shipped_replay.main_power_w > nested_replay.main_power_w * 1.05, (
-        "the shipped topology no longer over-reports whole-home power; E2-1 may "
-        "be fixed -- update this test and remove the xfail on "
-        "test_real_replay_reports_whole_home_once"
+    assert shipped_replay is not None, "shipped topology did not terminate; see E2-2"
+    ratio = shipped_replay.main_power_w / nested_replay.main_power_w
+    assert 0.95 <= ratio <= 1.05, (
+        f"as-shipped main {shipped_replay.main_power_w:.1f} W vs nested "
+        f"{nested_replay.main_power_w:.1f} W (ratio {ratio:.3f}); the shipped "
+        "topology is counting the panel tree more than once again (E2-1)"
     )
 
 

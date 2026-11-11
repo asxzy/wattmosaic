@@ -28,7 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from . import __version__ as ENGINE_VERSION
 
-CONTRACT_VERSION = "1.2.0"
+CONTRACT_VERSION = "1.3.0"
 
 
 def utcnow() -> datetime:
@@ -828,6 +828,11 @@ class Reconciliation(Model):
     measurement_uncertainty_w: float = 0.0
     quality_status: QualityStatus = QualityStatus.GOOD
     explanation: list[str] = Field(default_factory=list)
+    #: Whether the topology that produced this balance was user-confirmed.
+    #: A ``candidate`` topology is a hypothesis: main power and the residual are
+    #: still reported, but consumers must not present the split as verified.  The
+    #: flag is additive (contract 1.3.0) so older readers keep working.
+    topology_confirmed: bool = False
 
 
 class DataQualityReport(Model):

@@ -485,15 +485,50 @@ class TopologyGraph:
         return Phase(ch.phase) if ch else Phase.UNKNOWN
 
     def device_phase(self, device_id: str) -> Phase:
+        """The declared phase of a device, else the one its own CTs establish.
+
+        ``DeviceTopology.phase`` is the strongest statement, but it is frequently
+        left ``UNKNOWN`` -- discovery never guesses it, and the wizard makes it
+        optional.  The channel a device is measured by does state its own leg,
+        and that is a declaration about the same conductor, so it is evidence
+        for the device rather than a guess:
+
+        * every attribution CT on one leg -> that leg;
+        * attribution CTs on both legs -> ``BOTH`` (the pair is the device);
+        * anything else (unknown labels, or no attribution CT) -> ``UNKNOWN``.
+
+        Deriving here rather than at each call site keeps the coefficient, the
+        matrix and the reporting consistent.
+        """
         dev = self._devices.get(device_id)
         if dev is None:
             return Phase.UNKNOWN
         phase = Phase(dev.phase)
         if phase == Phase.UNKNOWN and dev.double_pole:
             return Phase.BOTH
-        return phase
+        if phase != Phase.UNKNOWN:
+            return phase
+        legs: set[Phase] = set()
+        for cid in self.attribution_ct_ids(device_id):
+            ch = self._channels.get(cid)
+            if ch is None:
+                continue
+            declared = Phase(ch.phase)
+            if declared in (Phase.L1, Phase.L2):
+                legs.add(declared)
+            elif declared == Phase.BOTH:
+                legs.update({Phase.L1, Phase.L2})
+        if legs == {Phase.L1}:
+            return Phase.L1
+        if legs == {Phase.L2}:
+            return Phase.L2
+        if legs == {Phase.L1, Phase.L2}:
+            return Phase.BOTH
+        return Phase.UNKNOWN
 
-    def phase_coefficient(self, device_id: str, row_phase: Phase | str) -> float:
+    def phase_coefficient(
+        self, device_id: str, row_phase: Phase | str, *, solo: bool = False
+    ) -> float:
         """Fraction of a device's total power that appears on ``row_phase``.
 
         * single-phase device on its own line -> ``1.0``
@@ -501,6 +536,10 @@ class TopologyGraph:
         * double-pole device on a ``BOTH`` row -> ``1.0`` (total power)
         * double-pole device on a single line -> ``phase_split_l1`` for L1 and
           ``1 - phase_split_l1`` for L2 (default 0.5/0.5, configurable)
+        * a device whose phase nobody declared: ``1.0`` when the row is *its own*
+          measurement (``solo``), because there the CT is an observation of the
+          whole device and halving it would invent a missing leg; otherwise the
+          split, because a shared row's total has to be apportioned somehow.
 
         The split is only applied when the topology declares the device as
         double-pole / BOTH.  A single-phase device is never arbitrarily split
@@ -519,8 +558,13 @@ class TopologyGraph:
                 return 1.0 - self.phase_split_l1
             return 0.0
         if dev_phase == Phase.UNKNOWN:
-            # Unknown placement: model as a BOTH device so no energy is lost,
-            # but flag it during validation.
+            # Nobody stated the placement.  On the device's own row the CT is a
+            # direct observation of it, so the whole reading belongs to the
+            # device -- halving it would fabricate a second leg.  On a
+            # containing row the total must be apportioned, and the declared
+            # split is the only honest denominator available.
+            if solo:
+                return 1.0
             return 1.0 if row == Phase.BOTH else self.phase_split_l1
         if row == Phase.BOTH:
             return 1.0

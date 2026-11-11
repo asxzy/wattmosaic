@@ -357,26 +357,46 @@ WATTMOSAIC_REAL_DB=/path/to/wattmosaic.db \
 | `test_nested_check_is_not_vacuous` | `nested_check_records > 0` for the nested tree, so `nested_double_count_records == 0` means something |
 | `test_parentless_topology_double_count_is_caught` | With every parent stripped, the measurement-derived split still finds the sub feed and still flags "sum every main" |
 | `test_nested_replay_terminates_and_balances` | The declared tree terminates, reports positive main power, conserves power, and is not flagged |
-| `test_real_replay_reports_whole_home_once` | **xfail (E2-1/E2-2)** — shipped and nested replays must agree within 5 % |
-| `test_shipped_replay_terminates` | **xfail (E2-2)** — the shipped topology must finish inside the deadline |
-| `test_shipped_replay_double_counts_relative_to_nested` | Documents that the defect still exists; fails deliberately when it is fixed |
+| `test_real_replay_reports_whole_home_once` | Shipped and nested replays agree within 5 % (E2-1 fixed) |
+| `test_shipped_replay_terminates` | The shipped topology finishes inside the deadline (E2-2 fixed) |
+| `test_shipped_replay_does_not_double_count` | The inverse of the old defect gate: shipped / nested ratio is within 5 % |
 
-The two `xfail`s are non-strict on purpose: the point of the pair is to flip to
-`XPASS` when the engine is fixed, and the reason strings name the defect. The
-third test is the inverse — it asserts the *bug is present*, so it fails when
-someone fixes the engine without updating the suite. That failure is the
-reminder, not an accident.
+The gates are plain assertions now. Both were `xfail`s naming E2-1/E2-2 while
+the engine was broken; they flipped to passes when the fixes landed, and a
+future regression fails the test instead of silently XPASSing.
 
-**Why the gate is not a simulator test.** The shipped topology declares the load
-manager, the main panel and the sub panel as six parallel mains. Physically
-there is one service feed, one main panel and one sub panel, so summing them
-counts most of the house two to three times. Measured on a 120-minute window:
-`main_power_w` is **3943 W** as shipped against **1600 W** with the tree
-declared — a ratio of **2.46**. The same six independent feeds also make the
-bounded least-squares problem ill-conditioned enough that
-`DisaggregationEngine.infer` does **not terminate** on real data (>150 s on a
-five-minute window, while the nested variant finishes in 0.9 s). Neither number
-can be produced by the simulator, whose topology always declares its tree.
+**What was fixed, and why the gate is not a simulator test.** The shipped
+topology declares the load manager, the main panel and the sub panel as six
+parallel mains. Physically there is one service feed, one main panel and one sub
+panel, so naively summing them counts most of the house two to three times;
+measuring that on the 120-minute window gave `main_power_w` **3943 W** as
+shipped against **1600 W** with the tree declared — ratio **2.46** — plus a
+non-terminating solve.
+
+The engine cannot re-parent a stored topology, so the fixes are behavioural:
+
+* `electrical/main_power.py` groups the six feeds into measurement nodes, finds
+  that the load-manager pair measures the same two legs as the main-panel pair
+  and the sub-panel pair, and resolves which is outermost **from the
+  measurements**. The excluded feeds and the reason are named in
+  `MainPower.notes` (`undeclared_feed_relation_resolved_by_measurement`); it
+  refuses (`parallel_mains_without_declared_relation`) only when containment
+  cannot be decided.
+* `electrical/solver.py` preconditions duplicate rows and bounds the iteration
+  count, so the ill-conditioned system converges instead of hanging.
+
+Measured on the five-minute replay (`REPLAY_MINUTES=5`, `REPLAY_TICK_S=15.7`):
+
+```text
+as-shipped   main 1247.9 W   accounted 650.6 W   residual 597.4 W   0.89 s
+nested       main 1233.0 W   accounted 650.6 W   residual 582.4 W   0.41 s
+ratio 1.012
+```
+
+Neither number can be produced by the simulator, whose topology always declares
+its tree. The failing mode that used to be invisible — a hung solve — is still
+guarded by the fixture's hard deadline, so a regression fails in 20 s rather
+than hanging CI.
 
 ### 3.3 The two documented validation commands
 
