@@ -15,6 +15,21 @@ It never calls a service and never changes HA configuration.
 
 Usage:
     python tools/audit/passive_validation.py --minutes 20 --out docs/real_ha_validation.md
+
+Offline replay
+--------------
+``--from`` renders the report from a previously captured JSON instead of
+talking to Home Assistant.  The committed worked example was produced that way,
+so the documented reproduction command works with no HA instance, no network and
+no credentials:
+
+    python tools/audit/passive_validation.py \\
+        --from data/examples/reference_house/passive_validation.json
+
+The accepted file shape is exactly what this tool writes after a live run --
+``generated_at``, ``minutes``, ``synthetic``, ``power_entity_count``, ``states``
+and the already-computed ``result`` (or ``channels``) -- so a real capture and
+the synthetic example are interchangeable inputs.
 """
 
 from __future__ import annotations
@@ -277,11 +292,101 @@ def _num(value: object) -> float | None:
         return None
 
 
+def load_capture(path: Path) -> dict:
+    """Load a previously captured validation payload from JSON.
+
+    Accepts the two shapes this tool can produce:
+
+    * a live/synthetic capture written by :func:`main` -- ``states``,
+      ``power_entity_count`` and the computed ``result``;
+    * a raw ``analyse()`` dump -- ``series`` instead of ``states``.
+
+    ``result`` is recomputed from ``states``/``series`` when it is missing, so a
+    file that only holds observations still renders.  Nothing here touches Home
+    Assistant: ``--from`` exists precisely so the report can be reproduced
+    offline.
+    """
+    if not path.exists():
+        raise SystemExit(f"no capture at {path}")
+    try:
+        payload = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"{path} is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise SystemExit(f"{path} must contain a JSON object")
+
+    states = payload.get("states")
+    series = payload.get("series")
+    if states is None and series is None:
+        raise SystemExit(
+            f"{path} has neither 'states' nor 'series'; it is not a "
+            "passive-validation capture"
+        )
+
+    result = payload.get("result")
+    if not isinstance(result, dict) or "channels" not in result:
+        source = {"series": series or {}, "states": states or []}
+        result = analyse(source)
+
+    return {
+        "generated_at": payload.get("generated_at"),
+        "minutes": float(payload.get("minutes", 20.0)),
+        "synthetic": bool(payload.get("synthetic", False)),
+        "power_entity_count": int(
+            payload.get("power_entity_count")
+            or len(states or [])
+            or len(series or {})
+        ),
+        "states": list(states or []),
+        "result": result,
+    }
+
+
 async def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--minutes", type=float, default=20)
     ap.add_argument("--out", default=str(ROOT / "docs/real_ha_validation.md"))
+    ap.add_argument(
+        "--from",
+        dest="from_path",
+        metavar="JSON",
+        default=None,
+        help=(
+            "render the report from a captured JSON file instead of querying a "
+            "live Home Assistant (no network, no credentials)"
+        ),
+    )
     args = ap.parse_args()
+
+    if args.from_path:
+        capture = load_capture(Path(args.from_path))
+        result = capture["result"]
+        raw = {
+            "states": capture["states"],
+            "power_entity_count": capture["power_entity_count"],
+        }
+        minutes = capture["minutes"]
+        out = Path(args.out)
+        write_report(
+            result,
+            raw,
+            out,
+            minutes,
+            synthetic=capture["synthetic"],
+            generated_at=capture["generated_at"],
+        )
+        print(
+            json.dumps(
+                {
+                    "channels_observed": result["channels_observed"],
+                    "report": str(out),
+                    "source": str(args.from_path),
+                },
+                indent=2,
+            )
+        )
+        return
+
     raw = await collect(args.minutes)
     result = analyse(raw)
     out = Path(args.out)
