@@ -41,7 +41,7 @@ from .entity_values import (
     resolve_binding_target,
 )
 from .hub_device import via_device_for_entry
-from .util import published_energy, utcnow
+from .util import energy_entity_available, published_energy, utcnow
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -506,18 +506,28 @@ class WattMosaicDeviceSensor(_WattMosaicBase, RestoreEntity):
     @property
     def available(self) -> bool:
         result = self.coordinator.device_result(self._device_id)
+        if self._key == "energy":
+            # A cumulative total is not a "current measurement", but it is also
+            # not always readable: with no publishable reading *and* no history
+            # there is no number to show, so the entity must be unavailable
+            # rather than reporting a frozen value.  The last total is kept on
+            # ``_energy`` and surfaced as the ``last_value`` attribute so the
+            # number itself is never lost while the entity is unavailable.
+            return energy_entity_available(
+                engine_available=self._engine_available,
+                publishable=self._publishable(result),
+                last_value=self._energy,
+            )
         if result is None or not self._engine_available:
             return False
         if self._key in (
             "last_inference",
             "data_quality",
             "model_validity",
-            "energy",
             "confidence_tier",
         ):
             # Descriptive entities stay readable so the user can see the
-            # staleness itself, and a cumulative energy total is not a
-            # "current measurement".  Neither ever reports a fresh power value.
+            # staleness itself.  None of them ever reports a fresh power value.
             return True
         return bool(self._values()["available"])
 
@@ -528,8 +538,9 @@ class WattMosaicDeviceSensor(_WattMosaicBase, RestoreEntity):
             # through a *stale* engine so a gap does not blank the meter.  It is
             # only advanced by a publishable reading, in
             # ``_handle_coordinator_update``; reading it here has no side
-            # effects.  An unreachable engine still makes the entity
-            # unavailable, like every other time series.
+            # effects.  Whether the entity is *readable* is decided by
+            # ``available`` — with no reading and no history it goes
+            # unavailable, and the held total stays in ``last_value``.
             return self._energy
 
         values = self._values()
@@ -567,6 +578,10 @@ class WattMosaicDeviceSensor(_WattMosaicBase, RestoreEntity):
             )
         if self._key == "energy":
             attributes["energy_source"] = "engine"
+            # The number survives an outage even though the entity itself goes
+            # unavailable: dashboards and automations can read the held total
+            # from here instead of seeing the value disappear.
+            attributes["last_value"] = self._energy
         if self._key == "sample_count":
             attributes["source"] = result.get("source")
         return attributes

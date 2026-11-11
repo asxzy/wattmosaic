@@ -652,11 +652,31 @@ class Database:
                 (device_id, iso(bucket_start), bucket_s, energy_kwh),
             )
 
-    def energy_total(self, device_id: str) -> float:
+    def energy_total(self, device_id: str, bucket_s: int | None = None) -> float:
+        """Sum persisted energy for exactly one bucket size.
+
+        ``energy_aggregates`` stores the *same* physical energy once per
+        resolution (default 300 s and 3600 s), so summing every row would count
+        the same kWh once per bucket size.  Mirroring
+        ``DeviceRunRepository.energy_total``, ``bucket_s=None`` therefore picks
+        the smallest persisted size (the most detailed series) and sums only
+        that one.
+        """
         with self._lock:
+            if bucket_s is None:
+                row = self._conn.execute(
+                    "SELECT MIN(bucket_s) AS size FROM energy_aggregates WHERE device_id=?",
+                    (device_id,),
+                ).fetchone()
+                size = int(row["size"]) if row and row["size"] is not None else None
+            else:
+                size = int(bucket_s)
+            if size is None:
+                return 0.0
             row = self._conn.execute(
-                "SELECT COALESCE(SUM(energy_kwh),0) AS e FROM energy_aggregates WHERE device_id=?",
-                (device_id,),
+                "SELECT COALESCE(SUM(energy_kwh),0) AS e FROM energy_aggregates "
+                "WHERE device_id=? AND bucket_s=?",
+                (device_id, size),
             ).fetchone()
         return float(row["e"]) if row else 0.0
 

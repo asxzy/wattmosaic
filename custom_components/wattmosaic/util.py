@@ -204,6 +204,33 @@ def published_energy(
     return raw if raw >= 0.0 else 0.0
 
 
+def energy_entity_available(
+    *,
+    engine_available: bool,
+    publishable: bool,
+    last_value: float | None,
+) -> bool:
+    """Whether the cumulative ``energy`` entity may report a state.
+
+    A cumulative total is not a *current measurement*, but it is also not
+    always readable.  It is available exactly when the engine is reachable and
+    there is something to show:
+
+    * a publishable reading (the normal case), **or**
+    * a previously stored total (``last_value``), so a gap in engine data does
+      not blank a meter that has real history behind it.
+
+    With neither, the entity must be ``unavailable`` rather than re-reporting a
+    held number that no longer has any evidence behind it — that is what made a
+    frozen 2.041 kWh meter look live while its power sensor was ``unavailable``.
+    The held number itself is never lost: the sensor exposes it as the
+    ``last_value`` attribute.
+    """
+    if not engine_available:
+        return False
+    return bool(publishable) or last_value is not None
+
+
 def integrate_energy(
     previous: float | None,
     power_w: float | None,

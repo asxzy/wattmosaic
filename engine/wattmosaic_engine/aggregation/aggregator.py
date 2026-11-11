@@ -8,6 +8,15 @@ Integration rules
 * An interval longer than ``stale_after_s`` is a *gap*: no energy is accrued
   across it.  This prevents a sensor/engine outage from being silently turned
   into consumed kWh.
+* A result that is not a measurement at all is never integrated.  ``Source.
+  UNKNOWN``, a placeholder watt value (``provenance["power_w_is_placeholder"]``)
+  and ``quality_status`` of ``bad``/``missing`` contribute no kWh — the energy
+  deliverable must not be built from a number that does not describe the load.
+* The interval is additionally clamped to the *freshness* of the newest
+  measurement: a reading that is already ``measurement_age_s`` old can only
+  describe ``max(0, stale_after_s - measurement_age_s)`` seconds of the
+  interval.  A CT that stopped updating therefore stops accruing energy as soon
+  as its held value goes stale, instead of integrating frozen watts.
 * The interval is split at bucket boundaries so a 5-minute bucket never
   inherits energy from a neighbouring bucket, even when results are sparse.
 * Buckets are persisted through the storage layer's public
@@ -30,12 +39,12 @@ import logging
 import math
 import uuid
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from ..contracts import InferenceResult, OperatingStage, Source, StageStatus
+from ..contracts import InferenceResult, OperatingStage, QualityStatus, Source, StageStatus
 from ..storage.database import Database
 from .models import DeviceRun, EnergyBucket, _RunTracker
 from .repository import DeviceRunRepository
@@ -148,12 +157,25 @@ class EnergyAggregator:
     # ------------------------------------------------------------------ #
     # Ingestion
     # ------------------------------------------------------------------ #
-    def add_result(self, result: InferenceResult, at: datetime | None = None) -> None:
+    def add_result(
+        self,
+        result: InferenceResult,
+        at: datetime | None = None,
+        *,
+        measurement_age_s: float | None = None,
+    ) -> None:
         """Ingest one inference result.
 
         Out-of-order samples are ignored for integration (the interval would be
         negative); they still contribute no energy.  This keeps replay
         deterministic.
+
+        ``measurement_age_s`` is the age of the measurement(s) the result was
+        derived from.  The interval that *ends* at this result is clamped to
+        ``max(0, stale_after_s - measurement_age_s)``: a value already 130 s old
+        contributes nothing, one 60 s old at most 60 s.  ``None`` (the default)
+        applies no clamp, which preserves the behaviour of callers that do not
+        know the age.
         """
         at = _as_utc(at or result.timestamp)
         device = self._devices.get(result.device_id)
@@ -164,6 +186,13 @@ class EnergyAggregator:
         if power != power or math.isinf(power):
             return
         source = result.source.value if hasattr(result.source, "value") else str(result.source)
+
+        if not self._is_measurable(result, source):
+            # A placeholder / unknown / failed result describes no load: it
+            # accrues no energy, contributes no power sample and cannot open or
+            # extend a run.  The previous real baseline is kept, so a gap in
+            # evidence is never mistaken for consumption (matching the NaN path).
+            return
 
         if device.last_at is None:
             self._seed(device, result.device_id, at, power, source)
@@ -176,7 +205,18 @@ class EnergyAggregator:
             return
         elapsed = (at - previous_at).total_seconds()
         if elapsed <= self.max_interval_s:
-            self._accrue(device, result.device_id, previous_at, device.last_power_w, at, power)
+            max_seconds = None
+            if measurement_age_s is not None and math.isfinite(float(measurement_age_s)):
+                max_seconds = max(0.0, self.stale_after_s - max(0.0, float(measurement_age_s)))
+            self._accrue(
+                device,
+                result.device_id,
+                previous_at,
+                device.last_power_w,
+                at,
+                power,
+                max_seconds=max_seconds,
+            )
         # else: gap — deliberately no energy across it.
 
         for bucket_s in self.bucket_sizes:
@@ -203,6 +243,28 @@ class EnergyAggregator:
         device.last_source = source
         self._start_run_if_needed(device, device_id, at, power, source)
 
+    @staticmethod
+    def _is_measurable(result: InferenceResult, source: str) -> bool:
+        """Whether this result describes an actual load measurement.
+
+        Energy is the deliverable, so a number that does not describe the load
+        must not be integrated:
+
+        * ``Source.UNKNOWN`` — the engine explicitly could not attribute power
+          (the watt value is a placeholder, not a measurement);
+        * ``provenance["power_w_is_placeholder"]`` — the engine marks its
+          fabricated 0 W this way even when a stronger source is claimed;
+        * ``quality_status`` of ``bad`` / ``missing`` — the reading failed.
+        """
+        if str(source) == Source.UNKNOWN.value:
+            return False
+        provenance = result.provenance
+        if isinstance(provenance, Mapping) and bool(provenance.get("power_w_is_placeholder")):
+            return False
+        quality = result.quality_status
+        quality_value = quality.value if hasattr(quality, "value") else str(quality)
+        return quality_value not in (QualityStatus.BAD.value, QualityStatus.MISSING.value)
+
     def _accrue(
         self,
         device: _DeviceState,
@@ -211,10 +273,22 @@ class EnergyAggregator:
         p0: float,
         t1: datetime,
         p1: float,
+        *,
+        max_seconds: float | None = None,
     ) -> None:
         total_s = (t1 - t0).total_seconds()
         if total_s <= 0 or total_s > self.max_interval_s:
             return
+        if max_seconds is not None:
+            # Only the part of the interval the newest measurement can actually
+            # describe is integrated.  Drop the oldest tail (the power value at
+            # ``t0`` is what has already been held too long), keeping the
+            # trapezoid over the newest sample: a 60 s-old reading at most 60 s
+            # of energy, a 130 s-old one none at all.
+            total_s = min(total_s, max(0.0, float(max_seconds)))
+            if total_s <= 0.0:
+                return
+            t0 = t1 - timedelta(seconds=total_s)
 
         def power_at(offset_s: float) -> float:
             if total_s <= 0:

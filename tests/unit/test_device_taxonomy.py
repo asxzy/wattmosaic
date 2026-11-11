@@ -238,8 +238,17 @@ def test_unrecognised_domain_is_neither_load_nor_mode() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_monitoring_is_derived_from_cooccupancy_not_ct_type() -> None:
-    """A branch CT a device owns alone is dedicated in fact (hot tub, heater…)."""
+def test_monitoring_is_derived_from_the_dedicated_channel_only() -> None:
+    """A branch CT a device owns alone is *not* a direct measurement.
+
+    Sole occupancy of a branch CT used to be labelled ``DEDICATED``, although
+    ``resolve_direct`` only ever reads a ``DEDICATED_DEVICE`` channel and can
+    therefore never produce a reading for it.  The label overstated the
+    capability and fed tiers/confidence.  The level stays ``SHARED`` and the
+    fact is surfaced as ``sole_occupant`` instead — a narrower label, with the
+    same watts (``shared_unmodelled`` stays ``False``, so the row is still
+    treated as fully attributable).
+    """
     topology = Topology(
         channels=[
             CTChannel(
@@ -252,7 +261,12 @@ def test_monitoring_is_derived_from_cooccupancy_not_ct_type() -> None:
         devices=[DeviceTopology(device_id="heater", branch_ct_ids=["br_solo"], phase=Phase.L1)],
     )
     graph = build_graph(topology)
-    assert derive_monitoring(topology.devices[0], graph, topology=topology) == MonitoringLevel.DEDICATED
+    assert derive_monitoring(topology.devices[0], graph, topology=topology) == MonitoringLevel.SHARED
+    effective = effective_config("heater", topology=topology, graph=graph)
+    assert effective.sole_occupant is True
+    assert effective.shared_unmodelled is False
+    assert effective.allows_direct_measurement is False
+    assert "sole_occupant_branch_ct_not_direct_measurable" in effective.notes
 
 
 def test_branch_shared_by_two_devices_is_shared() -> None:
