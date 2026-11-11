@@ -23,6 +23,7 @@ from ..models.base import enum_text
 from ..models.registry import ModelRegistry
 from ..storage.database import Database
 from .promotion import PromotionDecision, PromotionManager
+from .reporting import FILTER_ERROR_LABEL, LearningAccounting
 from .sample_collector import SampleCollector
 from .sample_filter import SampleFilter
 from .thresholds import LearningThresholds
@@ -49,6 +50,12 @@ class LearningPipeline:
         self.trainer = Trainer(self.thresholds)
         self.registry = registry or ModelRegistry(database)
         self.promoter = PromotionManager(database, self.registry, self.thresholds)
+        #: Monotonic accepted/rejected accounting for the "is learning actually
+        #: learning?" question.  O(1) per sample, no per-sample storage.
+        self.accounting = LearningAccounting()
+        #: Rejected samples from the last ``consider`` call (kept for callers
+        #: that report one batch; the accounting above is cumulative).
+        self.last_rejected: list[LearningSample] = []
 
     # -- sample collection ------------------------------------------------ #
     def consider(self, events: Sequence[Any], window: Any) -> list[LearningSample]:
@@ -65,8 +72,10 @@ class LearningPipeline:
                 decision = self.filter.evaluate(sample)
             except Exception as exc:  # pragma: no cover - defensive
                 _LOGGER.warning("sample filter failed: %s", exc)
+                self.accounting.record(False, FILTER_ERROR_LABEL)
                 continue
             annotated = decision.apply(sample)
+            self.accounting.record(annotated.accepted, annotated.rejection_reason)
             if not annotated.accepted:
                 self.last_rejected.append(annotated)
             try:
@@ -84,6 +93,7 @@ class LearningPipeline:
         for sample in samples:
             decision = self.filter.evaluate(sample)
             annotated = decision.apply(sample)
+            self.accounting.record(annotated.accepted, annotated.rejection_reason)
             (accepted if annotated.accepted else rejected).append(annotated)
             try:
                 self._db.insert_learning_sample(annotated)

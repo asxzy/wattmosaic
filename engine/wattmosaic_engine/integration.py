@@ -56,6 +56,7 @@ from .device_links import (
 from .disaggregation.engine import DisaggregationEngine, InferenceBatch
 from .disaggregation.events import StepTracker
 from .electrical.topology import build_graph
+from .learning.reporting import build_learning_status
 from .models.protocols import window_time as _window_time
 
 log = logging.getLogger("wattmosaic.integration")
@@ -156,8 +157,6 @@ class WattMosaicBackend:
         self.max_measurement_age_s = float(max_measurement_age_s)
 
         self.cycles = 0
-        self.samples_collected = 0
-        self.samples_accepted = 0
         self.training_attempts = 0
         self.models_promoted = 0
         self.energy_updates = 0
@@ -168,6 +167,10 @@ class WattMosaicBackend:
         self._cycles_since_flush = 0
         self._ambiguous: dict[str, list[str]] = {}
         self._topology_signature: tuple[int, int] | None = None
+        #: Quality of the topology the last learning pass judged samples against
+        #: (``confirmed`` / ``candidate``).  Reported in ``learning_status`` so a
+        #: ``candidate`` topology is explained before the first rejection lands.
+        self._topology_quality_seen: str | None = None
 
         if database is not None:
             try:
@@ -210,6 +213,64 @@ class WattMosaicBackend:
                 except Exception:  # noqa: BLE001 - learning is optional
                     log.warning("learning pipeline unavailable; no model training")
                     self.learning = None
+
+    # -- learning counters ------------------------------------------------ #
+    #: Kept as properties (not plain attributes) so the single source of truth is
+    #: :class:`~wattmosaic_engine.learning.reporting.LearningAccounting`.  Two
+    #: counters that can drift apart are how "learning: on" and "0 accepted"
+    #: coexisted on a live install.
+    @property
+    def _accounting(self) -> Any | None:
+        return getattr(self.learning, "accounting", None)
+
+    @property
+    def samples_collected(self) -> int:
+        """Samples the filter has *evaluated* since start (accepted + rejected)."""
+        accounting = self._accounting
+        return int(getattr(accounting, "seen", 0) or 0)
+
+    @property
+    def samples_accepted(self) -> int:
+        """Samples the filter has accepted since start."""
+        accounting = self._accounting
+        return int(getattr(accounting, "accepted", 0) or 0)
+
+    @property
+    def samples_rejected(self) -> int:
+        """Samples the filter has rejected since start."""
+        accounting = self._accounting
+        return int(getattr(accounting, "rejected", 0) or 0)
+
+    def learning_status(self) -> dict[str, Any]:
+        """Honest learning status: counters + effective_state + remedy.
+
+        ``effective_state`` is ``learning`` only when the pipeline runs **and**
+        accepts samples; ``blocked`` when it runs but rejects all of them (an
+        unconfirmed topology is the common cause); ``off`` when the pipeline is
+        absent or paused.  O(1) with no per-sample storage.
+        """
+        pipeline = self.learning
+        accounting = self._accounting
+        if pipeline is None:
+            return build_learning_status(
+                enabled=False,
+                active=False,
+                topology_quality=self._topology_quality_seen,
+            )
+        snapshot = (
+            accounting.snapshot()
+            if accounting is not None
+            else {"samples_seen": 0, "samples_accepted": 0, "samples_rejected": 0, "rejection_reasons": {}}
+        )
+        return build_learning_status(
+            enabled=True,
+            active=bool(self.learning_active),
+            samples_seen=int(snapshot.get("samples_seen") or 0),
+            samples_accepted=int(snapshot.get("samples_accepted") or 0),
+            samples_rejected=int(snapshot.get("samples_rejected") or 0),
+            rejection_reasons=snapshot.get("rejection_reasons") or {},
+            topology_quality=self._topology_quality_seen,
+        )
 
     # -- the interface main.py calls -------------------------------------- #
     def process(
@@ -537,6 +598,11 @@ class WattMosaicBackend:
         pipeline = self.learning
         if pipeline is None or not self.learning_active:
             return
+        # Record the topology quality this pass will stamp onto every sample, so
+        # ``learning_status`` can explain a 100%-rejection pipeline (an
+        # unconfirmed topology rejects by construction) before it has even seen
+        # one sample.  One attribute assignment per cycle.
+        self._topology_quality_seen = self._topology_quality(topology)
         now = _window_time(window)
         mature: list[Any] = []
         still_pending: list[Any] = []
@@ -566,9 +632,6 @@ class WattMosaicBackend:
             return
         if not samples and not getattr(pipeline, "last_rejected", None):
             return
-        rejected = list(getattr(pipeline, "last_rejected", []) or [])
-        self.samples_collected += len(samples) + len(rejected)
-        self.samples_accepted += len(samples)
         self._maybe_train(topology)
 
     def _maybe_train(self, topology: Topology) -> None:
@@ -679,6 +742,7 @@ class WattMosaicBackend:
             "active": self.learning_active,
             "samples_collected": self.samples_collected,
             "samples_accepted": self.samples_accepted,
+            "samples_rejected": self.samples_rejected,
             "samples_rejected_last_batch": len(rejected),
             "training_attempts": self.training_attempts,
             "models_promoted": self.models_promoted,
@@ -687,16 +751,23 @@ class WattMosaicBackend:
 
     # -- lifecycle hooks the facade may call ------------------------------ #
     def status(self) -> dict[str, Any]:
+        learning = self.learning_status()
         return {
             "backend": "WattMosaicBackend",
             "disaggregation": type(self.engine).__name__,
             "model_registry": self.registry is not None,
             "learning": self.learning is not None,
             "learning_active": self.learning_active,
+            # ``effective_state`` is the honest one: ``learning`` only when
+            # samples are actually being accepted, ``blocked`` when every sample
+            # is rejected.  ``learning_active`` above stays the loop's own flag.
+            "learning_status": learning,
+            "learning_effective_state": learning["effective_state"],
             "energy_aggregation": self.aggregator is not None,
             "cycles": self.cycles,
             "samples_collected": self.samples_collected,
             "samples_accepted": self.samples_accepted,
+            "samples_rejected": self.samples_rejected,
             "training_attempts": self.training_attempts,
             "models_promoted": self.models_promoted,
             "energy_updates": self.energy_updates,
