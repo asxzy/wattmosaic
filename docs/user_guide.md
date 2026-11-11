@@ -495,6 +495,26 @@ declaration (run the setup wizard and confirm the mapping there), or the engine
 is unreachable. Confirming a topology that does not match reality is worse than
 leaving it unconfirmed — check the CT assignment first (section 4).
 
+#### What "blocked" looks like, and how to tell blocked from dead
+
+These are different failures and they need different actions:
+
+| Engine `/health` → `details.learning_status` | What it means | Action |
+| --- | --- | --- |
+| `samples_seen: 0`, `samples_rejected: 0` | **Dead intake.** No state change ever reached the engine, so there is nothing to reject. | Check diagnostics → `state_links` and `devices_without_state_entity`. A link must resolve to a `binary_sensor` / `switch` / `climate` / `light`, never to a power or energy sensor. |
+| `samples_seen: N > 0`, `samples_rejected: N`, dominant `ambiguous_topology` | **Alive and blocked.** Samples reach the filter and are refused because the topology is still a candidate — by design. | Press **Confirm topology** (above). |
+| `samples_accepted > 0` | Learning works. | Nothing. |
+
+Before `0.2.1-dev.13` a `device_links` entry could store a Home Assistant
+*device-registry id* and resolve to no state entity at all, which produced the
+first row above for days. The integration now expands it through the entity
+registry and lists every link that resolved to nothing, with a reason
+(`only_measurement_entities`, `device_not_in_registry`, `not_a_state_domain`,
+`no_state_entities`, `engine_device_not_in_topology`), in
+`diagnostics.devices_without_state_entity`. If that list is empty and
+`samples_seen` is still 0, the device genuinely has not changed state — turn
+something on and watch for a sample.
+
 ## 8. Operating stages
 
 For multi-stage appliances (washer, dishwasher, dryer), WattMosaic tracks stages:

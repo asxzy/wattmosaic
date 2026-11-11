@@ -1,5 +1,100 @@
 # Release Notes
 
+## v0.2.1-dev.13 — 2026-11-11 (development channel)
+
+Two defects that each hid themselves. The residual split was computed correctly
+and then thrown away by storage; the learning pipeline was alive and never
+offered a single sample. Both are now fixed and both are proved end-to-end
+rather than at the boundary where they were noticed. **Device watts and energy
+are unchanged from v0.2.1-dev.12.**
+
+### Schema 7 — the residual split was stored wrong (first schema bump since 0.1.6)
+
+`insert_reconciliation` writes an explicit column list. `reconciliation_results`
+never had the newer columns, so SQLite did what it does with an unknown column:
+it failed only if you named one, and here the columns were simply *absent from
+the list*, so five fields were silently dropped on every write:
+
+| Field | Introduced in | Symptom when dropped |
+| --- | --- | --- |
+| `unmonitored_w` | 1.4.0 | the split read back as `0.0` from every API path |
+| `meter_disagreement_w` | 1.4.0 | same |
+| `configured_prior_w` | 1.1.0 | accounted power under-stated (it is part of `accounted`) |
+| `measurement_uncertainty_w` | 1.2.0 | fit uncertainty always 0 |
+| `topology_confirmed` | 1.3.0 | a confirmed balance read back as a `candidate` hypothesis |
+
+Migration 7 adds seven columns. Five are the truncated fields above, plus
+`meter_spread_w` and `meter_spread_exceeds_residual` from the 1.5.0 algebra,
+folded into the same version on purpose — see below. **This is the first schema
+bump since 0.1.6.** Schema 7 was authored but never deployed, so extending it in
+place is safe and avoids a version 8 that no reader would ever want.
+
+> **Rollback caveat.** A downgrade from schema 7 to 6 in place is **not
+> supported** — the v6 code has no column list for the new fields, and the
+> SQLite file will keep them while the old code ignores them, which looks like
+> working software. Restoring the **pre-deploy backup** is the only supported
+> rollback path. Take one before updating.
+
+### The residual algebra was unsatisfiable; it is now exact
+
+The old identity was `unmonitored_w + meter_disagreement_w == unknown_residual_w`
+with `meter_disagreement_w = |canonical - alias|`. On the live install the
+residual is 166.4 W and the meter spread is 348.9 W: `meter_disagreement` was
+clipped to the residual, `unmonitored` went to 0, and the identity still came
+out at 348.9 ≠ 166.4. The two numbers were never the same kind of quantity.
+
+Contract 1.5.0 separates them:
+
+| Field | Definition | Bounded? |
+| --- | --- | --- |
+| `meter_spread_w` | `|canonical feed total − aliased feed total|` | **unbounded** diagnostic |
+| `meter_disagreement_w` | `min(spread, max(0, residual))` — the spread's contribution to the residual | `[0, residual]` |
+| `unmonitored_w` | `residual − meter_disagreement_w` | `[0, residual]` |
+
+So `unmonitored_w + meter_disagreement_w == unknown_residual_w` holds exactly,
+`meter_spread_w` never gets summed into it, and a new additive flag
+`meter_spread_exceeds_residual` says when the meters disagree by more than the
+whole residual — which is the case where `unmonitored_w == 0` means "we cannot
+tell", not "everything is metered". The published "Unknown / unattributed power"
+number is unchanged; its attributes now tell the truth.
+
+### Learning intake unblocked — but learning is still blocked
+
+`samples_seen: 0` with `samples_rejected: 0` for days. A `candidate` topology
+rejects *every* sample it is offered, so zero rejected is proof the offer stage
+was empty, not that the filter was selective.
+
+Root cause: `device_links` stores Home Assistant **device-registry ids**
+(32 hex characters, no domain). Nothing expanded them, so no device had a
+runtime state entity, every transition returned early at the
+`power_events_not_state` bridge, and no sample was ever offered.
+
+Only HA's entity registry can expand that id, and the engine runs outside HA
+(architecture §1), so resolution now happens at the integration boundary in a
+new pure module (`state_links.py`); only the resolved entity ids cross into the
+topology as `metadata.link_state_entity_ids`. Refusals are never guessed at: a
+link that resolves to nothing is listed in `devices_without_state_entity` with a
+reason code and surfaced in diagnostics.
+
+**Learning will still be blocked after this update** until a human confirms the
+topology. That is by design — confirmation is a human decision, never automatic.
+What changes is the evidence you can check:
+
+* `samples_rejected > 0` with `dominant_rejection_reason: ambiguous_topology` —
+  the pipeline is **alive**; samples reach the filter and are refused for the
+  documented reason. This is the state you should now see instead of
+  `seen: 0, rejected: 0`.
+* `samples_accepted > 0` — only after you press **Confirm topology**, which is
+  what promotes the engine's `candidate` topology to `confirmed`.
+
+### Contract 1.4.0 → 1.5.0 (additive)
+
+Three new `Reconciliation` fields (`meter_spread_w`,
+`meter_spread_exceeds_residual`) and a corrected `meter_disagreement_w`
+definition. The per-device state-entity link travels in the existing
+`metadata` object, so it needs no contract field. Schemas regenerated; the
+`x-contract-version` marker moved to 1.5.0 in all 19 files.
+
 ## v0.2.1-dev.12 — 2026-11-11 (development channel)
 
 Round 2 of the electrical-core work: honest learning status, a way to unblock
