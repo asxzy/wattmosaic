@@ -211,6 +211,13 @@ class WattMosaicGlobalSensor(_WattMosaicBase):
             )
             attributes["last_error"] = data.last_error
             attributes["topology_version"] = data.reconciliation.get("topology_version")
+            # The balance is only verified when the topology is confirmed; a
+            # ``candidate`` topology is a hypothesis.  Exposing the flag on the
+            # home-level entities is what lets a dashboard or automation tell
+            # "measured 1247 W" from "guessed 1247 W".
+            attributes["topology_confirmed"] = data.reconciliation.get(
+                "topology_confirmed"
+            )
         else:
             attributes["last_success"] = (
                 self.coordinator.last_success.isoformat()

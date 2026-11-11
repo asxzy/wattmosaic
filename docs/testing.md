@@ -309,7 +309,7 @@ or a `ct_events.jsonl` written by `collect_samples.py`; the database is opened
     --jsonl data/raw/ct_events.jsonl --topology-nested --out /tmp/replay.json
 ```
 
-Three design decisions matter when reading its output:
+Four design decisions matter when reading its output:
 
 * **It ticks on a cadence, not per sample.** The engine is called once per
   audited CT interval (`--minutes` worth of `15.7 s` ticks), because the aligner
@@ -322,6 +322,17 @@ Three design decisions matter when reading its output:
   reported: whole-home power, the reconciliation balance, per-device attribution
   and the nested-double-count invariants. Grading the engine against its own
   output would be the failure mode §1 describes.
+* **A refused total is missing, not `0 W`.** When the engine declines to state a
+  whole-home total for an instant — `main_power.usable is False`, for example an
+  undecidable same-leg feed relation — the reconciliation is
+  `quality_status=MISSING`. The replay counts that window in
+  `n_unavailable_windows` and **excludes it from every mean**; it never appends
+  `0.0`. `docs/electrical_model.md` §5 states the rule for a single reading
+  ("a missing main is `missing_channels`; it is **not** treated as `0 W`") and it
+  applies just as much to an aggregate over a replay. Because the two topology
+  variants refuse different instants, the shipped-vs-nested comparison is also
+  **paired per shared instant** (`_paired_comparison`), not two means over
+  different window sets.
 * **Every run has a hard deadline.** `SIGALRM` raises `ReplayTimeout`, and a
   watchdog thread calls `os._exit(124)` if the solver swallows it inside a C
   loop. A wedged solver must not wedge CI. The default deadline is 120 s, and
@@ -357,9 +368,10 @@ WATTMOSAIC_REAL_DB=/path/to/wattmosaic.db \
 | `test_nested_check_is_not_vacuous` | `nested_check_records > 0` for the nested tree, so `nested_double_count_records == 0` means something |
 | `test_parentless_topology_double_count_is_caught` | With every parent stripped, the measurement-derived split still finds the sub feed and still flags "sum every main" |
 | `test_nested_replay_terminates_and_balances` | The declared tree terminates, reports positive main power, conserves power, and is not flagged |
-| `test_real_replay_reports_whole_home_once` | Shipped and nested replays agree within 5 % (E2-1 fixed) |
+| `test_real_replay_reports_whole_home_once` | Shipped and nested replays agree within 5 % on the instants **both** produced a total (paired, E2-1 fixed) |
+| `test_real_replay_excludes_refused_totals_from_the_mean` | A window where the engine refuses a total is counted as unavailable and excluded from every mean, never averaged in as `0 W` |
 | `test_shipped_replay_terminates` | The shipped topology finishes inside the deadline (E2-2 fixed) |
-| `test_shipped_replay_does_not_double_count` | The inverse of the old defect gate: shipped / nested ratio is within 5 % |
+| `test_shipped_replay_does_not_double_count` | The inverse of the old defect gate: shipped / nested paired ratio is within 5 % |
 
 The gates are plain assertions now. Both were `xfail`s naming E2-1/E2-2 while
 the engine was broken; they flipped to passes when the fixes landed, and a
@@ -385,17 +397,35 @@ The engine cannot re-parent a stored topology, so the fixes are behavioural:
 * `electrical/solver.py` preconditions duplicate rows and bounds the iteration
   count, so the ill-conditioned system converges instead of hanging.
 
-Measured on the five-minute replay (`REPLAY_MINUTES=5`, `REPLAY_TICK_S=15.7`):
+Measured on the shipped gate window (`REPLAY_MINUTES=120`, `REPLAY_TICK_S=15.7`,
+459 windows / 13 681 samples):
 
 ```text
-as-shipped   main 1247.9 W   accounted 650.6 W   residual 597.4 W   0.89 s
-nested       main 1233.0 W   accounted 650.6 W   residual 582.4 W   0.41 s
-ratio 1.012
+as-shipped   main 1568.9 W   accounted 1033.8 W   residual 535.2 W   11.5 s
+             24/459 windows refused (no whole-home total; excluded from the mean)
+nested       main 1599.1 W   accounted 1082.9 W   residual 516.2 W    9.9 s
+paired on 435 shared instants: shipped 1568.9 W vs nested 1555.0 W   ratio 1.009
 ```
+
+The window is 120 minutes, not 5, because the defect this gate now also covers
+is *invisible* on a five-minute tail. The shipped topology's six independent
+mains are usually separable by measurement — the load-manager pair contains the
+others — but on 24 of 459 instants the three panel feeds sit inside the 30 W /
+2 % containment tolerance of each other and `main_power_w` correctly refuses
+(`parallel_mains_without_declared_relation`, `quality_status=MISSING`). The
+replay harness used to append `rec.main_power_w` (i.e. `0.0`) for those windows
+and average them in, which pulled the shipped mean **7 %** below the nested one
+and failed the ratio gate for a reason that had nothing to do with double
+counting: the engine was right and the aggregation invented a collapse to no
+load. `docs/electrical_model.md` §5 already forbids exactly that ("a missing
+main is `missing_channels`; it is **not** treated as `0 W`"), so the fix is in
+the harness: refused windows are counted (`n_unavailable_windows`) and excluded
+from every mean, and the two variants are compared **per shared instant** rather
+than as two means over different window sets.
 
 Neither number can be produced by the simulator, whose topology always declares
 its tree. The failing mode that used to be invisible — a hung solve — is still
-guarded by the fixture's hard deadline, so a regression fails in 20 s rather
+guarded by the fixture's hard deadline, so a regression fails in 60 s rather
 than hanging CI.
 
 ### 3.3 The two documented validation commands

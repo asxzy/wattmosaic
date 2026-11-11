@@ -118,6 +118,14 @@ Everything above that CT is a *containment constraint*, modelled explicitly:
   `parallel_mains_without_declared_relation` and `usable=False`, because picking
   one would fabricate a panel tree and summing them would double count.
 
+  A refusal is **per instant, not per topology**. On the reference capture the
+  three panel feeds sit inside the 30 W / 2 % containment tolerance on 24 of 459
+  windows of a 120-minute replay; on those instants no feed provably contains
+  the others and the total is refused, while on the other 435 the load-manager
+  pair does contain them and is chosen. The engine is behaving as designed. See
+  §5 for how a refusal must be aggregated: it is a missing measurement, never
+  `0 W`.
+
 * a **circuit multiplier** (`CTChannel.measurement_multiplier`, default `1.0`)
   scales a reading exactly once, on the way out of `TopologyGraph.scale_w()`.
   It exists for one CT on one leg of a 240 V load; it is never inferred from
@@ -527,6 +535,11 @@ MainPower = main_power_w(graph, readings)
   nodes with no declared `parent_ct_id` are resolved by measurement (§1.1) and
   the resolution appears in `notes`; if it cannot be decided the total is
   refused (`parallel_mains_without_declared_relation`, `usable=False`).
+  A refusal is a **missing** total: `complete=False`, `quality_status=MISSING`,
+  and — like any other missing main — it must not be aggregated as `0 W`. A
+  consumer that averages windows (a replay tool, a daily summary) has to exclude
+  the instant and report how many it excluded, or it fabricates a collapse to no
+  load whenever the wiring is momentarily undecidable.
 * A `BOTH` main is a full-circuit total; its L1/L2 split is for *reporting* only
   and uses the same configurable `phase_split_l1`.
 * A node missing one of its legs sets `complete=False`, and an incomplete node

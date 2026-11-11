@@ -47,6 +47,7 @@ from pathlib import Path
 import pytest
 
 from tests.simulation.metrics import evaluate, panel_channel_map
+from tools.audit.replay_capture import _compare
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 #: The capture is git-ignored and local-only, so the path is overridable. A
@@ -65,14 +66,16 @@ pytestmark = pytest.mark.skipif(
     ),
 )
 
-#: The replay window.  Short on purpose: the shipped topology does not terminate
-#: on this data, so a larger window only makes the failure slower.  One tick per
-#: audited 15.7 s cadence over five minutes is ~19 windows, enough for a mean.
-REPLAY_MINUTES = 5
+#: The replay window.  Long enough to include the instants where the shipped
+#: topology's six independent mains are within the containment tolerance of each
+#: other and the feed relation genuinely cannot be resolved.  A five-minute tail
+#: happens not to contain one, which is exactly why the defect below hid there:
+#: on 120 minutes the shipped variant refuses 24 of 459 windows.
+REPLAY_MINUTES = 120
 REPLAY_TICK_S = 15.7
-#: Deadline for a replay that is expected to finish.  The nested variant takes
-#: ~0.5 s; this is 40x headroom, not a performance assertion.
-REPLAY_TIMEOUT_S = 20.0
+#: Deadline for a replay that is expected to finish.  The shipped variant takes
+#: ~12 s on 120 minutes; this is headroom, not a performance assertion.
+REPLAY_TIMEOUT_S = 60.0
 
 
 # --------------------------------------------------------------------------- #
@@ -269,6 +272,14 @@ def test_real_replay_reports_whole_home_once(shipped_replay, nested_replay) -> N
     than 5%, one of them is counting part of the house twice -- and since the
     nested one is the physically correct tree, the as-shipped number is wrong.
 
+    The comparison is **paired per instant**, because the two variants do not
+    refuse the same windows: the shipped topology has to resolve an undeclared
+    feed relation, so on some instants it correctly reports no total at all.
+    Comparing two means over different window sets would compare two different
+    samples of the day and can disagree by several percent with neither variant
+    wrong. A refused total is a missing measurement, never ``0 W``
+    (``docs/electrical_model.md`` §5).
+
     The as-shipped run is the control for the solver hang: ``shipped_replay``
     is ``None`` when it exceeded its deadline, which is itself a failure of the
     shipped topology and is reported as such.
@@ -284,15 +295,58 @@ def test_real_replay_reports_whole_home_once(shipped_replay, nested_replay) -> N
         f"{REPLAY_TIMEOUT_S:.0f}s on real data; the six independent mains make the "
         "bounded solver ill-conditioned (E2-2)"
     )
-    shipped_main = shipped_replay.main_power_w
-    nested_main = nested_replay.main_power_w
-    assert nested_main > 0.0, "nested replay inferred no main power"
-    ratio = shipped_main / nested_main
-    assert 0.95 <= ratio <= 1.05, (
-        f"as-shipped main {shipped_main:.1f} W vs nested {nested_main:.1f} W "
-        f"(ratio {ratio:.3f}); the shipped topology counts the panel tree more "
+    assert nested_replay.main_power_w > 0.0, "nested replay inferred no main power"
+    delta = _compare(shipped_replay, nested_replay)
+    paired = delta["paired"]
+    assert paired["shared_n"] > 0, "the two variants share no usable instant"
+    # Pairing must cover the great majority of the day, or the gate is measuring
+    # a handful of instants and calling it a whole-home result.
+    assert paired["shared_n"] >= 0.9 * shipped_replay.n_windows, (
+        f"only {paired['shared_n']} of {shipped_replay.n_windows} shipped windows "
+        "are usable in both variants; the paired gate would be unrepresentative"
+    )
+    assert paired["agreement_within_5pct"], (
+        f"{paired['summary']}; the shipped topology counts the panel tree more "
         "than once (E2-1)"
     )
+
+
+def test_real_replay_excludes_refused_totals_from_the_mean(
+    shipped_replay, nested_replay
+) -> None:
+    """A refused total must be reported as unavailable, not averaged in as ``0 W``.
+
+    The shipped topology cannot always decide which same-leg feed is outermost:
+    on this 120-minute capture the three panel feeds are within the containment
+    tolerance on 24 instants and the engine correctly refuses
+    (``parallel_mains_without_declared_relation``).  Treating those as ``0 W``
+    used to pull the shipped mean 7 % below the nested one and fail the ratio
+    gate for the wrong reason -- the engine was right, the *aggregation* was
+    inventing a collapse to no load.
+
+    This pins the honest reading in both directions: the refusals exist and are
+    counted, and they are absent from the usable series.
+    """
+    # Unconditional invariants.  These hold whatever the capture contains.
+    assert len(shipped_replay.main_by_window) == (
+        shipped_replay.n_windows - shipped_replay.n_unavailable_windows
+    ), "a refused window leaked into the usable series"
+    assert len(nested_replay.main_by_window) == (
+        nested_replay.n_windows - nested_replay.n_unavailable_windows
+    ), "a refused window leaked into the nested usable series"
+    assert shipped_replay.main_power_w > 0.0
+    assert nested_replay.n_unavailable_windows == 0, (
+        "the nested topology declares its tree and must never need to refuse"
+    )
+    # Stale-capture / stale-resolution detector, in the same spirit as
+    # ``test_shipped_topology_declares_nested_parents``: if this fires, the
+    # 120-minute tail no longer exercises the refusal path and this gate needs
+    # re-pinning against a window that does.
+    assert shipped_replay.n_unavailable_windows > 0, (
+        "the 120-minute shipped replay resolved every window; the capture no "
+        "longer contains an undecidable feed relation, so this gate is stale"
+    )
+    assert any("excluded from every mean" in note for note in shipped_replay.notes)
 
 
 def test_nested_replay_terminates_and_balances(nested_replay) -> None:
@@ -340,11 +394,10 @@ def test_shipped_replay_does_not_double_count(
     feeds into one service total instead of summing the panel tree.
     """
     assert shipped_replay is not None, "shipped topology did not terminate; see E2-2"
-    ratio = shipped_replay.main_power_w / nested_replay.main_power_w
-    assert 0.95 <= ratio <= 1.05, (
-        f"as-shipped main {shipped_replay.main_power_w:.1f} W vs nested "
-        f"{nested_replay.main_power_w:.1f} W (ratio {ratio:.3f}); the shipped "
-        "topology is counting the panel tree more than once again (E2-1)"
+    paired = _compare(shipped_replay, nested_replay)["paired"]
+    assert paired["agreement_within_5pct"], (
+        f"{paired['summary']}; the shipped topology is counting the panel tree "
+        "more than once again (E2-1)"
     )
 
 

@@ -116,6 +116,7 @@ def global_values(
         "unknown_power": as_float(reconciliation.get("unknown_residual_w")),
         "reconciliation_error": as_float(reconciliation.get("reconciliation_error_w")),
         "accounted_fraction": as_percentage(reconciliation.get("accounted_fraction")),
+        "topology_confirmed": bool(reconciliation.get("topology_confirmed", False)),
         "quality_score": as_percentage(quality.get("overall_score")),
         "engine_status": engine_status,
         "last_update": timestamp,

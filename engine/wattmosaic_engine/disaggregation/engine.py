@@ -588,7 +588,7 @@ class DisaggregationEngine:
             after_s=after_s,
             k_mad=self.k_mad,
             min_delta_w=self.min_delta_w,
-            noise_floor_w=self.noise_floor_w,
+            noise_floor_w=self._noise_floors(coerced),
             previous_values=previous_values,
             multipliers={cid: graph.multiplier_for(cid) for cid in coerced.readings},
         )
@@ -609,6 +609,7 @@ class DisaggregationEngine:
             coerced,
             after_s=after_s,
             cadence_s=diagnostics["cadence_s"],
+            noise_floors=self._noise_floors(coerced),
             diagnostics=diagnostics,
         )
         diagnostics["events"] = [
@@ -730,6 +731,39 @@ class DisaggregationEngine:
     # ------------------------------------------------------------------ #
     # Anchored step detection
     # ------------------------------------------------------------------ #
+    def _noise_floors(self, window: CoercedWindow) -> dict[str, float]:
+        """Per-channel noise floor: the measured MAD where one exists.
+
+        ``noise_floor_w`` on the constructor is a single scalar, but a house has
+        a 0.3 W resolution inverter CT next to a 30 W-resolution load manager.
+        One scalar is either far too small for the noisy channel (every tick
+        becomes an event) or far too large for the quiet one (a real 40 W step
+        is invisible).  The quality layer already measures the innovation MAD
+        per channel (``SampleAligner.channel_health().noise_mad_w``); the facade
+        publishes it as ``metadata["channel_noise_floor_w"]``.
+
+        The scalar stays the *floor* of every entry, not a default that a
+        mapping replaces: a measured MAD below the configured floor would
+        otherwise lower the threshold below what the caller asked for.  A
+        channel with no measurement keeps the scalar, which is the historical
+        behaviour, so a capture with no health data behaves exactly as before.
+        """
+        floors: dict[str, float] = {
+            cid: self.noise_floor_w for cid in window.readings
+        }
+        raw = window.metadata.get("channel_noise_floor_w")
+        if not isinstance(raw, Mapping):
+            return floors
+        for cid, value in raw.items():
+            try:
+                measured = float(value)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(measured) or measured < 0.0:
+                continue
+            floors[str(cid)] = max(self.noise_floor_w, measured)
+        return floors
+
     def _anchor_steps(
         self,
         steps: Mapping[str, StepChange],
@@ -739,6 +773,7 @@ class DisaggregationEngine:
         *,
         after_s: float,
         cadence_s: float,
+        noise_floors: Mapping[str, float] | None = None,
         diagnostics: dict[str, Any],
     ) -> dict[str, StepChange]:
         """Confine CT steps to the instant HA says the device switched.
@@ -771,6 +806,12 @@ class DisaggregationEngine:
             return dict(steps)
         out = dict(steps)
         multipliers = {cid: graph.multiplier_for(cid) for cid in window.readings}
+        # The anchored rescan must use the same per-channel floor as the
+        # unanchored scan.  Falling back to the scalar here would let a noisy
+        # channel pass the unanchored threshold and then fail (or vice versa) in
+        # the rescan, so a step's detected-ness would depend on which path
+        # measured it.
+        floors = dict(noise_floors or {})
         #: For each channel that observes an anchored transition, the instants it
         #: is allowed to have stepped at.  A channel shared by several devices
         #: (a branch or a main) is valid if *any* of its devices can explain it.
@@ -798,7 +839,9 @@ class DisaggregationEngine:
                     after_s=after_s,
                     k_mad=self.k_mad,
                     min_delta_w=self.min_delta_w,
-                    noise_floor_w=self.noise_floor_w,
+                    noise_floor_w={
+                        cid: floors.get(cid, self.noise_floor_w) for cid in channels
+                    },
                     multipliers={
                         cid: multipliers[cid] for cid in channels if cid in multipliers
                     },

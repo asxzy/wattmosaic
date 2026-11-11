@@ -11,6 +11,7 @@ double counted.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
@@ -1240,6 +1241,91 @@ def _anchored_branch_topo() -> Topology:
             device("fan", branch_ct_ids=["branch_fan"]),
         ],
     )
+
+
+def test_per_channel_noise_floor_reaches_detect_changes():
+    """The quality layer's measured MAD must gate detection, not a scalar.
+
+    ``DisaggregationEngine(noise_floor_w=...)`` is one number, but a house has
+    a sub-watt inverter CT next to a 30 W-resolution load manager.  One scalar
+    either turns every tick on the noisy channel into an event or hides a real
+    step on the quiet one.  The engine accepts a per-channel mapping through
+    ``detect_changes`` but nothing on the inference path supplied one, so the
+    measured MAD was unreachable in production.
+
+    A 6 W step is used because it is above the 1 W scalar floor and below the
+    20 W measured floor: it is detected with the scalar and suppressed with the
+    measurement, which is the whole point of the mapping.
+    """
+    from wattmosaic_engine.disaggregation.engine import DisaggregationEngine
+    from wattmosaic_engine.disaggregation.events import detect_changes
+
+    engine = DisaggregationEngine()
+    win = replace(
+        window(
+            {"main_l1": 100.0, "main_l2": 0.0, "branch_lamp": 100.0, "branch_fan": 0.0}
+        ),
+        metadata={"channel_noise_floor_w": {"branch_lamp": 20.0}},
+    )
+    coerced = coerce_window(win)
+    floors = engine._noise_floors(coerced)
+    assert floors["branch_lamp"] == pytest.approx(20.0)
+    assert floors["main_l1"] == pytest.approx(1.0)  # scalar floor, unchanged
+
+    steps = detect_changes(
+        coerced.readings,
+        coerced.at,
+        before_s=60.0,
+        after_s=30.0,
+        noise_floor_w=floors,
+    )
+    assert steps["branch_lamp"].threshold_w >= 20.0 * 4.0
+
+
+def test_a_measured_noise_floor_below_the_scalar_does_not_lower_the_threshold():
+    """The scalar is a floor, not a default a mapping may replace.
+
+    A perfectly flat stretch of a quiet channel gives MAD 0.  If that replaced
+    the configured floor, the threshold would collapse to ``min_delta_w`` and a
+    one-tick blip would be reported as an event -- the exact defect the 1 W
+    floor exists to prevent.
+    """
+    from wattmosaic_engine.disaggregation.engine import DisaggregationEngine
+
+    engine = DisaggregationEngine(noise_floor_w=8.0)
+    win = replace(
+        window(
+            {"main_l1": 100.0, "main_l2": 0.0, "branch_lamp": 100.0, "branch_fan": 0.0}
+        ),
+        metadata={"channel_noise_floor_w": {"branch_lamp": 0.0}},
+    )
+    floors = engine._noise_floors(coerce_window(win))
+    assert floors["branch_lamp"] == pytest.approx(8.0)
+
+
+def test_a_window_can_carry_metadata_through_dataclasses_replace():
+    """``AlignedWindow`` must accept ``metadata``; production replaced it blind.
+
+    ``EngineCore.run_inference_once`` attaches ``device_levels`` (and now the
+    per-channel noise floors) with ``dataclasses.replace(window, metadata=...)``.
+    ``AlignedWindow`` had no ``metadata`` field, so the first cycle in which any
+    dimmer reported a level raised ``TypeError`` and the whole inference run
+    aborted -- every device fell back to the failure path.
+    """
+    from wattmosaic_engine.synchronization.aligner import AlignedWindow
+
+    base = AlignedWindow(at=T0, max_age_s=120.0)
+    patched = replace(
+        base,
+        metadata={
+            "device_levels": {"lamp": 0.4},
+            "channel_noise_floor_w": {"branch_lamp": 3.0},
+        },
+    )
+    assert patched.metadata["device_levels"] == {"lamp": 0.4}
+    # And the coercion into the inference window carries it to the engine.
+    coerced = coerce_window(patched)
+    assert coerced.metadata["channel_noise_floor_w"] == {"branch_lamp": 3.0}
 
 
 def _flat_history(n: int, value: float) -> list[tuple[datetime, float]]:

@@ -574,6 +574,89 @@ def test_main_power_requires_a_main_ct():
 
 
 # --------------------------------------------------------------------------- #
+# W1: undeclared same-leg feeds resolve by measurement, and still refuse when
+# the measurements cannot decide
+# --------------------------------------------------------------------------- #
+def _same_leg_feeds(*ids: str) -> Topology:
+    return Topology(
+        channels=[_ch(cid, CTType.MAIN, phase=Phase.L1) for cid in ids],
+        status=TopologyStatus.CANDIDATE,
+    )
+
+
+def test_one_measured_feed_containing_the_others_resolves_to_the_outermost():
+    """Two same-leg feeds with no declared parent: the larger one is outermost.
+
+    This is the E2-1 case.  Before the fix the total was refused outright, which
+    left the household with *no* home power.  One conductor is fed from one
+    place, so when one measured feed provably contains the others, the
+    containment is measurement evidence for which is outer.  The excluded feed
+    must be named, because only the user can confirm the wiring.
+    """
+    result = main_power_w(build_graph(_same_leg_feeds("a", "b")), {"a": 1500.0, "b": 1000.0})
+    assert result.errors == ()
+    assert result.total_w == 1500.0
+    assert result.per_channel_w == {"a": 1500.0}
+    assert result.excluded_channels == ("b",)
+    assert any(n.startswith("undeclared_feed_relation_resolved_by_measurement") for n in result.notes)
+    assert result.complete is True
+
+
+def test_a_genuinely_ambiguous_same_leg_pair_still_refuses():
+    """Indistinguishable feeds must not be guessed into a panel tree.
+
+    Two equal readings inside the containment tolerance cannot say which feed is
+    outer: either could be the other measured twice.  Summing them would double
+    count; picking one would fabricate a wiring fact.  Refusing is the honest
+    answer, and the refusal must be *visible* (``errors`` + ``complete=False``)
+    rather than a silent zero.
+    """
+    for values in ({"a": 1000.0, "b": 1000.0}, {"a": 1000.0, "b": 1000.2}):
+        result = main_power_w(build_graph(_same_leg_feeds("a", "b")), values)
+        assert "parallel_mains_without_declared_relation" in result.errors
+        assert result.complete is False
+        assert result.usable is False
+        assert result.total_w == 0.0
+
+
+def test_three_way_same_leg_ambiguity_still_refuses():
+    """The refusal is not just a two-feed special case."""
+    graph = build_graph(_same_leg_feeds("a", "b", "c"))
+    result = main_power_w(graph, {"a": 795.0, "b": 790.0, "c": 800.0})
+    assert "parallel_mains_without_declared_relation" in result.errors
+    assert result.complete is False
+
+
+def test_the_measurement_resolution_is_deterministic():
+    """Same readings must give the same outermost feed, run after run.
+
+    ``dominates`` iterates candidate *objects*, so an accidental dependence on
+    dict/set iteration order would make the whole-home number flicker between
+    polls.  The choice is a pure function of the readings; this pins it.
+    """
+    graph = build_graph(_same_leg_feeds("a", "b", "c"))
+    values = {"a": 1500.0, "b": 1000.0, "c": 1400.0}
+    totals = {main_power_w(graph, dict(values)).total_w for _ in range(50)}
+    assert totals == {1500.0}
+    assert main_power_w(graph, dict(values)).per_channel_w == {"a": 1500.0}
+
+
+def test_a_provably_smaller_feed_is_not_chosen_as_outer():
+    """Guard against a resolution that simply picks the largest *single* CT.
+
+    ``b`` and ``c`` each contain only themselves; ``a`` contains both.  The
+    only feed that dominates every other candidate is ``a``, and the excluded
+    set must be complete -- dropping one of them would leave a feed silently
+    unaccounted for in the roll-up.
+    """
+    graph = build_graph(_same_leg_feeds("a", "b", "c"))
+    result = main_power_w(graph, {"a": 2000.0, "b": 900.0, "c": 800.0})
+    assert result.total_w == 2000.0
+    assert set(result.excluded_channels) == {"b", "c"}
+    assert result.complete is True
+
+
+# --------------------------------------------------------------------------- #
 # Solver
 # --------------------------------------------------------------------------- #
 def test_solver_recovers_exact_solution():

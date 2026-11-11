@@ -411,6 +411,11 @@ def coerce_reconciliation(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         "present": present,
         "timestamp": parse_datetime(raw.get("timestamp")),
         "topology_version": as_int(raw.get("topology_version")) or 1,
+        #: Whether the balance came from a user-confirmed topology or a
+        #: ``candidate`` hypothesis (contract 1.3.0, additive).  Coerced through
+        #: ``as_bool`` because an older engine simply omits the key -- absent
+        #: must read as "not confirmed", never as ``True``.
+        "topology_confirmed": as_bool(raw.get("topology_confirmed"), default=False),
         "main_power_w": as_float(raw.get("main_power_w")),
         "l1_power_w": _opt("l1_power_w"),
         "l2_power_w": _opt("l2_power_w"),

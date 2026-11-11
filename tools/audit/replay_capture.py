@@ -393,6 +393,12 @@ class ReplayResult:
     n_samples: int
     n_windows: int
     n_records: int
+    #: Windows where the engine refused to state a whole-home total (an
+    #: undecidable feed relation, no usable main, ...).  They are **excluded**
+    #: from every mean below rather than counted as ``0 W``: a refused total is
+    #: a missing measurement, and averaging it as zero invents a load drop that
+    #: never happened.  See ``docs/electrical_model.md`` §5.
+    n_unavailable_windows: int
     main_power_w: float
     residual_w: float
     accounted_w: float
@@ -400,6 +406,12 @@ class ReplayResult:
     sum_of_all_mains_w: float
     per_device_power_w: dict[str, float]
     per_source: dict[str, float]
+    #: Whole-home power keyed by the inference instant (ISO-8601), for the
+    #: windows that *did* produce a total.  A refused window is present in
+    #: ``n_windows`` but absent here, so a comparison between two topology
+    #: variants can be paired per instant instead of comparing two means taken
+    #: over different window sets.
+    main_by_window: dict[str, float] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     timed_out: bool = False
     elapsed_s: float = 0.0
@@ -446,6 +458,7 @@ def replay(
     so consecutive samples of one channel add nothing) and take hours on a
     day-long capture.  ``tick_s`` defaults to the audited CT cadence.
     """
+    from wattmosaic_engine.contracts import QualityStatus
     from wattmosaic_engine.disaggregation import DisaggregationEngine
     from wattmosaic_engine.electrical.topology import build_graph
     from wattmosaic_engine.synchronization.aligner import SampleAligner
@@ -467,6 +480,7 @@ def replay(
     device_power: dict[str, float] = defaultdict(float)
     source_power: dict[str, float] = defaultdict(float)
     main_values: list[float] = []
+    main_by_window: dict[str, float] = {}
     residuals: list[float] = []
     accounted_values: list[float] = []
     nested_checked = 0
@@ -486,6 +500,7 @@ def replay(
         ticks.append(end)
 
     n_windows = 0
+    n_unavailable = 0
     index = 0
     for at in ticks:
         # Feed everything that had arrived by this tick, in capture order.
@@ -503,7 +518,19 @@ def replay(
             topology=topology,
         )
         rec = batch.reconciliation
+        if rec.quality_status == QualityStatus.MISSING:
+            # The engine declined to state a whole-home total -- for example an
+            # undeclared same-leg feed relation it cannot decide from this
+            # instant's measurements.  That is a *missing* measurement, not a
+            # measured zero: ``docs/electrical_model.md`` §5 is explicit that a
+            # missing main is not treated as 0 W.  Averaging it in as 0 W would
+            # fabricate a collapse to no load and bias the replay against the
+            # variant whose feed relation needs resolving.  Every mean below is
+            # therefore over *usable* windows only, and the count is reported.
+            n_unavailable += 1
+            continue
         main_values.append(float(rec.main_power_w))
+        main_by_window[at.isoformat()] = float(rec.main_power_w)
         residuals.append(float(rec.unknown_residual_w))
         accounted_values.append(float(rec.main_power_w) - float(rec.unknown_residual_w))
         for result in batch.results:
@@ -546,11 +573,17 @@ def replay(
     elapsed = time.monotonic() - started
     if not main_values:
         notes.append("no inference tick had a usable measurement; nothing was inferred")
+    if n_unavailable:
+        notes.append(
+            f"{n_unavailable}/{n_windows} windows reported no whole-home total "
+            "(engine refusal, not 0 W) and are excluded from every mean"
+        )
     return ReplayResult(
         topology_variant=variant,
         n_samples=len(capture.samples),
         n_windows=n_windows,
         n_records=n_windows,
+        n_unavailable_windows=n_unavailable,
         main_power_w=sum(main_values) / n if main_values else 0.0,
         residual_w=sum(residuals) / n if residuals else 0.0,
         accounted_w=sum(accounted_values) / n if accounted_values else 0.0,
@@ -558,6 +591,7 @@ def replay(
         sum_of_all_mains_w=sum(all_mains_values),
         per_device_power_w={k: v / n for k, v in sorted(device_power.items())},
         per_source={k: v / n for k, v in sorted(source_power.items())},
+        main_by_window=main_by_window,
         notes=notes + list(capture.notes),
         elapsed_s=elapsed,
         invariants={
@@ -565,17 +599,21 @@ def replay(
             "nested_double_count_records": nested_double,
             "negative_residual_records": negative_residual,
             "checked_records": n_windows,
+            "unavailable_records": n_unavailable,
+            "usable_records": n_windows - n_unavailable,
             # Per-device error is not computable: a real house has no truth.
             "per_device_error_available": False,
         },
         reconciliation={
-            "n": n_windows,
+            "n": len(main_values),
+            "n_unavailable": n_unavailable,
             "main_power_w": sum(main_values) / n if main_values else 0.0,
             "unknown_residual_w": sum(residuals) / n if residuals else 0.0,
             "accounted_w": sum(accounted_values) / n if accounted_values else 0.0,
         },
         coverage={
-            "n": n_windows,
+            "n": len(main_values),
+            "n_unavailable": n_unavailable,
             "attributed_w": sum(accounted_values) / n if accounted_values else 0.0,
             "coverage": (
                 (sum(accounted_values) / sum(main_values))
@@ -641,6 +679,7 @@ def evaluation_shape(result: ReplayResult, *, topology_version: int) -> dict[str
         "replay": {
             "n_samples": result.n_samples,
             "n_windows": result.n_windows,
+            "n_unavailable_windows": result.n_unavailable_windows,
             "main_power_w": result.main_power_w,
             "residual_w": result.residual_w,
             "accounted_w": result.accounted_w,
@@ -657,6 +696,11 @@ def evaluation_shape(result: ReplayResult, *, topology_version: int) -> dict[str
 def _print_report(result: ReplayResult, *, delta: dict[str, Any]) -> None:
     print(f"topology variant      : {result.topology_variant}")
     print(f"windows / samples     : {result.n_windows} / {result.n_samples}")
+    if result.n_unavailable_windows:
+        print(
+            f"unavailable windows   : {result.n_unavailable_windows} "
+            "(no whole-home total; excluded from every mean, not counted as 0 W)"
+        )
     print(f"feeds used            : {', '.join(result.feeds_used) or '(none)'}")
     print(f"main_power_w          : {result.main_power_w:.1f}")
     print(f"sum of all mains (W)  : {result.sum_of_all_mains_w:.1f}")
@@ -826,7 +870,16 @@ def main() -> int:
 
 
 def _compare(primary: ReplayResult, other: ReplayResult) -> dict[str, Any]:
-    """Nested-vs-shipped difference, expressed in watts and as a ratio."""
+    """Nested-vs-shipped difference, expressed in watts and as a ratio.
+
+    Two comparisons are reported, and the gate uses the **paired** one:
+
+    * ``unpaired`` -- mean over each variant's own usable windows.  Simple, but
+      the two variants refuse different instants, so this compares two different
+      samples of the day.
+    * ``paired`` -- mean over the instants where both variants produced a total.
+      Same instants, same house: this is the quantity the gate should assert.
+    """
     nested, shipped = (
         (primary, other) if primary.topology_variant == "nested" else (other, primary)
     )
@@ -834,19 +887,72 @@ def _compare(primary: ReplayResult, other: ReplayResult) -> dict[str, Any]:
     nested_main = nested.main_power_w
     delta_w = shipped_main - nested_main
     ratio = (shipped_main / nested_main) if nested_main else 0.0
+    paired = _paired_comparison(shipped, nested)
     return {
         "shipped_main_power_w": round(shipped_main, 3),
         "nested_main_power_w": round(nested_main, 3),
         "delta_w": round(delta_w, 3),
         "ratio": round(ratio, 4),
+        "shipped_unavailable_windows": shipped.n_unavailable_windows,
+        "nested_unavailable_windows": nested.n_unavailable_windows,
         "shipped_feeds": shipped.feeds_used,
         "nested_feeds": nested.feeds_used,
-        "agreement_within_5pct": bool(
-            nested_main and abs(delta_w) <= 0.05 * abs(nested_main)
-        ),
+        "agreement_within_5pct": paired["agreement_within_5pct"],
+        "paired": paired,
+        "unpaired": {
+            "shipped_mean_w": round(shipped_main, 3),
+            "nested_mean_w": round(nested_main, 3),
+            "ratio": round(ratio, 4),
+            "agreement_within_5pct": bool(
+                nested_main and abs(delta_w) <= 0.05 * abs(nested_main)
+            ),
+            "note": (
+                "each mean is over that variant's own usable windows; the two "
+                "variants refuse different instants, so use 'paired' for the gate"
+            ),
+        },
+        "summary": paired["summary"],
+    }
+
+
+def _paired_comparison(shipped: ReplayResult, nested: ReplayResult) -> dict[str, Any]:
+    """Compare the two variants on the instants where **both** produced a total.
+
+    The two variants do not refuse the same windows: the shipped topology must
+    resolve an undeclared feed relation, so it has strictly fewer usable
+    windows.  Comparing the mean over all of one variant's windows against the
+    mean over all of the other's compares two *different* samples of the day and
+    can disagree by several percent purely from the window sets differing.
+
+    Pairing on the shared instants answers the question the gate actually asks:
+    for the same measurement instant, do the two topology variants report the
+    same whole-home power?  ``shared_n`` says how much of the day that covers.
+    """
+    shared = sorted(set(shipped.main_by_window) & set(nested.main_by_window))
+    if not shared:
+        return {
+            "shared_n": 0,
+            "shipped_n": len(shipped.main_by_window),
+            "nested_n": len(nested.main_by_window),
+            "agreement_within_5pct": False,
+            "reason": "no instant was usable in both variants",
+        }
+    a = [shipped.main_by_window[k] for k in shared]
+    b = [nested.main_by_window[k] for k in shared]
+    mean_a = sum(a) / len(a)
+    mean_b = sum(b) / len(b)
+    ratio = (mean_a / mean_b) if mean_b else 0.0
+    return {
+        "shared_n": len(shared),
+        "shipped_n": len(shipped.main_by_window),
+        "nested_n": len(nested.main_by_window),
+        "shipped_mean_w": round(mean_a, 3),
+        "nested_mean_w": round(mean_b, 3),
+        "ratio": round(ratio, 4),
+        "agreement_within_5pct": bool(mean_b and abs(mean_a - mean_b) <= 0.05 * abs(mean_b)),
         "summary": (
-            f"shipped {shipped_main:.1f} W vs nested {nested_main:.1f} W "
-            f"(delta {delta_w:+.1f} W, ratio {ratio:.3f})"
+            f"paired on {len(shared)} shared instants: shipped {mean_a:.1f} W vs "
+            f"nested {mean_b:.1f} W (ratio {ratio:.3f})"
         ),
     }
 

@@ -963,6 +963,39 @@ class EngineCore:
                 out[channel.ct_id] = replace(entry, channel=channel.ct_id)
         return out
 
+    def _channel_noise_floors(self) -> dict[str, float]:
+        """Measured innovation MAD per topology ``ct_id``, for CT step detection.
+
+        The quality layer already computes this for every channel
+        (``SampleAligner.channel_health().noise_mad_w``, a scaled MAD of
+        consecutive-sample differences).  Recomputing it here would be a second
+        definition of the same quantity and could disagree with the number the
+        quality report shows, so it is read back and only re-keyed from the
+        aligner's entity name to the topology's ``ct_id``.
+
+        A channel with no health entry is simply absent: the detector then uses
+        its configured scalar floor, which is the historical behaviour.
+        """
+        topology = self._active_topology()
+        if topology is None:
+            return {}
+        by_key = {
+            self._aligner_key(channel): channel.ct_id
+            for channel in topology.channels
+            if not self._topology_energy_channel(channel)
+        }
+        if not by_key:
+            return {}
+        floors: dict[str, float] = {}
+        for key, health in self.aligner.channel_health().items():
+            cid = by_key.get(key)
+            if cid is None or health.noise_mad_w is None:
+                continue
+            value = float(health.noise_mad_w)
+            if value >= 0.0 and value == value:  # finite, non-negative
+                floors[cid] = value
+        return floors
+
     def _energy_window_for(
         self, topology: Topology | None, max_age_s: float
     ) -> EnergyWindow:
@@ -1059,12 +1092,28 @@ class EngineCore:
             return {"skipped": "no topology configured"}
         self._topology_skip_logged = False
         window = self._power_window(topology)
-        # Publish each device's last measured output level.  Attribution reads it
-        # to interpolate a measured dimming curve, so a light at 40 % reports its
-        # watts at 40 % rather than its full-on value.  Devices with no reported
-        # level are absent from the mapping, never defaulted to 100 %.
+        # Per-cycle context the disaggregation engine reads back off the window.
+        # Built in one dict so the frozen window is replaced once.
+        #
+        # ``device_levels`` publishes each device's last measured output level.
+        # Attribution reads it to interpolate a measured dimming curve, so a
+        # light at 40 % reports its watts at 40 % rather than its full-on value.
+        # Devices with no reported level are absent from the mapping, never
+        # defaulted to 100 %.
+        #
+        # ``channel_noise_floor_w`` publishes the quality layer's per-channel
+        # measured MAD (innovation sigma).  A single scalar floor cannot serve a
+        # 0.3 W inverter CT and a 30 W load-manager CT at once: too small turns
+        # every tick into an event, too large hides a real step.  Without this
+        # the detector's per-channel mapping was never reachable in production.
+        metadata = dict(window.metadata)
         if self.device_levels:
-            window = replace(window, metadata={**window.metadata, "device_levels": dict(self.device_levels)})
+            metadata["device_levels"] = dict(self.device_levels)
+        noise_floors = self._channel_noise_floors()
+        if noise_floors:
+            metadata["channel_noise_floor_w"] = noise_floors
+        if metadata != dict(window.metadata):
+            window = replace(window, metadata=metadata)
         # Attach the declared-link transitions observed since the last cycle.
         # Without this the engine's ``_collect_transitions`` sees neither
         # ``state_transitions`` nor ``previous_states`` and reports no events at

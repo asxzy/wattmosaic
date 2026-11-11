@@ -766,6 +766,57 @@ class TestStaleness:
         assert values["available"] is True
         assert values["reconciliation_available"] is False
 
+    def test_topology_confirmed_is_coerced_and_surfaced(self) -> None:
+        """Contract 1.3.0's ``topology_confirmed`` must reach the summary sensor.
+
+        The engine reports whether the balance came from a user-confirmed
+        topology or a ``candidate`` hypothesis.  If the integration drops the
+        field on coercion, a dashboard cannot distinguish a measured balance
+        from one computed over a guessed panel tree -- which is exactly the
+        failure that made a double-counted 2.14x total look trustworthy.
+        """
+        confirmed = util.coerce_snapshot(
+            {
+                "timestamp": NOW.isoformat(),
+                "reconciliation": {
+                    "main_power_w": 1247.9,
+                    "quality_status": "good",
+                    "topology_confirmed": True,
+                },
+            }
+        )
+        assert confirmed["reconciliation"]["topology_confirmed"] is True
+        values = entity_values.global_values(
+            confirmed, {}, engine_available=True, now=NOW, stale_after=120
+        )
+        assert values["topology_confirmed"] is True
+
+    def test_topology_confirmed_absent_reads_as_not_confirmed(self) -> None:
+        """An older engine omits the key; absence must never read as ``True``."""
+        snapshot = util.coerce_snapshot(
+            {
+                "timestamp": NOW.isoformat(),
+                "reconciliation": {"main_power_w": 10.0, "quality_status": "good"},
+            }
+        )
+        assert snapshot["reconciliation"]["topology_confirmed"] is False
+        values = entity_values.global_values(
+            snapshot, {}, engine_available=True, now=NOW, stale_after=120
+        )
+        assert values["topology_confirmed"] is False
+
+    def test_integration_contract_version_matches_the_engine(self) -> None:
+        """The consumer's expectation must not lag the engine's contract.
+
+        ``EngineClient._check_contract`` only refuses a *major*-version
+        difference, so a stale minor here does not fail loudly -- it silently
+        hides every field the newer contract added (``topology_confirmed`` for
+        1.3.0).  The two constants must move together.
+        """
+        from wattmosaic_engine import contracts as engine_contracts
+
+        assert const.CONTRACT_VERSION == engine_contracts.CONTRACT_VERSION
+
 
 # --------------------------------------------------------------------------- #
 # Flags read back from stored options

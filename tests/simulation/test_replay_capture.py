@@ -18,7 +18,7 @@ Nothing here needs the real database, the network or Home Assistant.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -212,3 +212,126 @@ def test_panel_map_classifies_the_audited_topology() -> None:
     panel = module._panel_map(REAL_HOME_TOPOLOGY.to_contract_topology())
     assert set(panel["root"]) == {"ct_main_l1", "ct_main_l2"}
     assert panel["sub"], "the audited topology nests a sub feed"
+
+
+# --------------------------------------------------------------------------- #
+# A refused total is missing, not zero
+# --------------------------------------------------------------------------- #
+def test_a_refused_total_is_excluded_not_counted_as_zero(simulated) -> None:
+    """A window with no whole-home total must not drag the mean down.
+
+    This is the defect the 120-minute real-capture gate exposed. The shipped
+    topology has to resolve an undeclared same-leg feed relation from the
+    measurements, and on a subset of instants the feeds are within the
+    containment tolerance of each other, so ``main_power_w`` correctly refuses:
+    ``parallel_mains_without_declared_relation``, ``usable=False``,
+    ``quality_status=MISSING``. That is a *missing* measurement.
+
+    The replay used to append ``rec.main_power_w`` (``0.0`` on refusal) to the
+    series and average it in, so a variant that refuses 24 of 459 windows
+    reported a whole-home draw 7 % below a variant that never refuses. The
+    engine was right and the harness invented a collapse to no load. This test
+    pins the rule from ``docs/electrical_model.md`` §5 -- a missing main is not
+    ``0 W`` -- at the aggregation point where it was broken.
+    """
+    module = _replay_module()
+    from tools.simulator import REAL_HOME_TOPOLOGY
+
+    opened = module.Capture(
+        samples=_capture_from_records(simulated).samples,
+        source="simulator",
+        window_start=_capture_from_records(simulated).window_start,
+        window_end=_capture_from_records(simulated).window_end,
+    )
+    result = module.replay(
+        opened, REAL_HOME_TOPOLOGY.to_contract_topology(), variant="nested", tick_s=15.0
+    )
+    # The clean simulation never refuses; nothing may be excluded from it.
+    assert result.n_unavailable_windows == 0
+    assert result.main_power_w > 0.0
+    # Every usable window is represented exactly once in the per-window series,
+    # so a paired comparison of two variants is possible at all.
+    assert len(result.main_by_window) == result.n_windows - result.n_unavailable_windows
+
+
+def test_unavailable_windows_are_reported_and_excluded() -> None:
+    """A real refusal must be excluded from the mean and counted in the report.
+
+    Builds a two-feed, same-leg capture whose feeds are indistinguishable within
+    the containment tolerance.  ``main_power_w`` must refuse that instant, and
+    the replay must then (a) not add ``0 W`` to the series, (b) count the window
+    as unavailable, and (c) say so in the payload a reader sees.
+    """
+    module = _replay_module()
+    from wattmosaic_engine.contracts import (
+        CTChannel,
+        CTType,
+        Phase,
+        Topology,
+        TopologyStatus,
+    )
+
+    topology = Topology(
+        channels=[
+            CTChannel(ct_id="a", entity_id="sensor.a", name="A", ct_type=CTType.MAIN, phase=Phase.L1),
+            CTChannel(ct_id="b", entity_id="sensor.b", name="B", ct_type=CTType.MAIN, phase=Phase.L1),
+        ],
+        status=TopologyStatus.CANDIDATE,
+    )
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    samples = []
+    for i in range(3):
+        at = start + timedelta(seconds=15 * i)
+        for ct_id in ("a", "b"):
+            # Equal readings: neither feed contains the other, so the relation
+            # is undecidable and the total must be refused, not guessed.
+            samples.append(
+                module.CaptureSample(
+                    ct_id=ct_id,
+                    entity_id=f"sensor.{ct_id}",
+                    value_w=1000.0,
+                    state_timestamp=at,
+                    received_at=at,
+                )
+            )
+    capture = module.Capture(
+        samples=samples,
+        source="synthetic",
+        window_start=start,
+        window_end=start + timedelta(seconds=30),
+    )
+    result = module.replay(capture, topology, variant="as-shipped", tick_s=15.0)
+
+    assert result.n_windows > 0
+    assert result.n_unavailable_windows == result.n_windows, (
+        "every window should have been refused: equal same-leg feeds are "
+        "indistinguishable, and picking one would fabricate a panel tree"
+    )
+    # The refusal must NOT become a measured 0 W in the series.
+    assert result.main_by_window == {}
+    assert result.main_power_w == 0.0
+    assert any("excluded from every mean" in note for note in result.notes)
+
+    payload = module.evaluation_shape(result, topology_version=1)
+    assert payload["replay"]["n_unavailable_windows"] == result.n_windows
+    assert payload["invariants"]["unavailable_records"] == result.n_windows
+    assert payload["invariants"]["usable_records"] == 0
+    assert payload["reconciliation"]["n"] == 0
+
+
+def test_paired_comparison_needs_a_shared_instant() -> None:
+    """Two disjoint usable sets cannot be paired; that must be said, not faked."""
+    module = _replay_module()
+
+    def _result(variant: str, key: str) -> object:
+        return module.ReplayResult(
+            topology_variant=variant, n_samples=1, n_windows=1, n_records=1,
+            n_unavailable_windows=0, main_power_w=100.0, residual_w=0.0,
+            accounted_w=100.0, feeds_used=[], sum_of_all_mains_w=0.0,
+            per_device_power_w={}, per_source={}, main_by_window={key: 100.0},
+        )
+
+    paired = module._paired_comparison(_result("as-shipped", "t0"), _result("nested", "t1"))
+    assert paired["shared_n"] == 0
+    assert paired["agreement_within_5pct"] is False
+    assert "no instant was usable in both" in paired["reason"]
