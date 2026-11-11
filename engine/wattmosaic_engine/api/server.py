@@ -361,6 +361,14 @@ async def topology_nesting(request: web.Request) -> web.Response:
 
     Read-only: nothing here writes a parent link.  The integration wizard turns a
     candidate into a parent only when the user confirms it.
+
+    The computation is CPU- and SQLite-bound (tens of milliseconds of Python and
+    a few hundred milliseconds of row materialisation for a 12 h window), so it
+    runs in a worker thread.  Doing it inline blocked the event loop for the whole
+    response time, which starved ``/health``, ingestion and every other request
+    for seconds.  ``EngineCore.nesting_candidates`` is a pure read, and the
+    database connection is shared and lock-protected (``check_same_thread=False``
+    plus ``Database._lock``), so a thread is safe here.
     """
     raw = request.query.get("hours")
     hours = 12.0
@@ -371,7 +379,14 @@ async def topology_nesting(request: web.Request) -> web.Response:
             raise InvalidRequest("hours must be a number") from exc
         if not math.isfinite(hours) or hours <= 0 or hours > 24 * 90:
             raise InvalidRequest("hours must be greater than 0 and at most 2160")
-    return _ok(await maybe_await(_facade(request).nesting_candidates(hours=hours)))
+    facade = _facade(request)
+    method = getattr(facade, "nesting_candidates", None)
+    if method is None:
+        raise FacadeUnavailable("nesting candidates are not supported by this backend")
+    # ``to_thread`` copies the current context, so logging/correlation behaves
+    # exactly as it did inline; only the blocking part moves off the loop.
+    payload = await asyncio.to_thread(method, hours=hours)
+    return _ok(await maybe_await(payload))
 
 
 #: Truthy spellings accepted by ``?include_nesting=``.  Anything else (including

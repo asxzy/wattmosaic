@@ -1,16 +1,20 @@
 """SQLite persistence layer (WAL, versioned migrations, bounded retention).
 
-Thread-safety: a single ``Database`` instance is created per process and guarded
-by a ``threading.Lock``; all engine writes happen on the asyncio loop thread, so
-the lock is cheap and prevents accidental concurrent writer corruption.
+Thread-safety: a single writer ``Database`` instance is created per process.  Its
+connection is guarded by ``threading.RLock``; every accessor takes the lock, so
+concurrent use from a worker thread (``asyncio.to_thread``) cannot corrupt it.
+Bulk reads that would otherwise hold that lock for hundreds of milliseconds open
+a short-lived, ``query_only`` read connection instead -- WAL lets readers and the
+writer proceed independently, so a long scan never blocks ``/health``.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -47,12 +51,26 @@ def _enum_value(value: Any) -> str:
     return str(getattr(value, "value", value) if value is not None else "unknown")
 
 
+#: Rows per ``fetchmany`` during a bulk sample read.  Large enough that the
+#: per-chunk overhead is noise, small enough that the GIL is released often
+#: enough for the event loop to keep serving probes (see ``ct_samples_between``).
+_SAMPLE_FETCH_CHUNK = 4096
+
+
 class Database:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self._lock = threading.RLock()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self.path), timeout=30.0, isolation_level=None)
+        # ``check_same_thread=False`` lets a reader thread use this connection.
+        # That is safe *only* because every accessor below executes inside
+        # ``with self._lock``: SQLite serialises a single connection internally,
+        # but ``sqlite3`` itself refuses cross-thread use by default.  The lock
+        # (an ``RLock``) is what actually provides the mutual exclusion, and it
+        # is acquired on the loop thread and the reader thread alike.
+        self._conn = sqlite3.connect(
+            str(self.path), timeout=30.0, isolation_level=None, check_same_thread=False
+        )
         self._conn.row_factory = sqlite3.Row
         self._configure()
         self.schema_version = apply_migrations(self._conn)
@@ -64,6 +82,41 @@ class Database:
         cur.execute("PRAGMA foreign_keys=ON")
         cur.execute("PRAGMA busy_timeout=10000")
         cur.execute("PRAGMA wal_autocheckpoint=1000")
+
+    @contextlib.contextmanager
+    def _reader(self) -> Iterator[sqlite3.Connection]:
+        """A short-lived read-only connection for bulk reads.
+
+        The shared ``self._conn`` is guarded by ``self._lock``, so any query that
+        runs on it blocks every other accessor for its whole duration -- including
+        ``ping()`` on the ``/health`` path.  A 12–24 h ``ct_samples`` scan takes
+        hundreds of milliseconds, which turned a 5 ms health probe into a
+        multi-second one.
+
+        The database is in WAL mode, where readers and the single writer do not
+        block each other, so a second connection can read while the writer
+        connection keeps persisting.  ``PRAGMA query_only=ON`` makes "this
+        connection never writes" enforced rather than merely intended, and the
+        connection is closed on exit so no handle leaks across requests.
+
+        Falls back to the shared connection when there is no file to open
+        (e.g. a ``:memory:`` database), where a second connection would not see
+        the same data.
+        """
+        if not self.path.exists():
+            with self._lock:
+                yield self._conn
+            return
+        conn = sqlite3.connect(
+            str(self.path), timeout=30.0, isolation_level=None, check_same_thread=False
+        )
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("PRAGMA busy_timeout=10000")
+            yield conn
+        finally:
+            conn.close()
 
     # -- lifecycle -------------------------------------------------------- #
     def close(self) -> None:
@@ -364,15 +417,47 @@ class Database:
     def ct_samples_between(
         self, start: datetime, end: datetime, ct_ids: list[str] | None = None
     ) -> list[dict[str, Any]]:
-        query = "SELECT * FROM ct_samples WHERE received_at >= ? AND received_at <= ?"
+        """Raw samples in a closed window, oldest windows first is *not* promised.
+
+        Only the four columns a caller actually reads are selected: ``SELECT *``
+        materialises ``id``, ``entity_id``, ``raw_value``, ``unit``,
+        ``physical_timestamp``, ``quality``, ``repeated`` and ``sequence`` for
+        every row and then throws them away.  At 77 000 rows for a 12 h window
+        that was ~40 % of the query's cost.
+
+        ``ORDER BY received_at`` is gone too.  It sorted 77 000 rows the caller
+        immediately re-sorted per channel, and no caller depends on the order:
+        :meth:`EngineCore.nesting_candidates` sorts each channel series by
+        timestamp itself, and the storage tests only assert membership and that
+        every returned row is inside the window.  **If you add a caller that
+        needs ordering, sort in that caller** rather than paying for it here.
+        """
+        query = (
+            "SELECT ct_id, value_w, state_timestamp, received_at "
+            "FROM ct_samples WHERE received_at >= ? AND received_at <= ?"
+        )
         params: list[Any] = [iso(start), iso(end)]
         if ct_ids:
             query += f" AND ct_id IN ({','.join('?' * len(ct_ids))})"
             params.extend(ct_ids)
-        query += " ORDER BY received_at ASC"
-        with self._lock:
-            rows = self._conn.execute(query, params).fetchall()
-        return [dict(r) for r in rows]
+        # A dedicated read connection, not ``self._conn``: see ``_reader``.  The
+        # lock-guarded shared connection would make this multi-hundred-millisecond
+        # scan block ``ping()`` (and therefore ``/health``) for its whole duration.
+        #
+        # ``fetchmany`` in chunks, not ``fetchall``: SQLite's ``fetchall`` is one
+        # long C call that holds the GIL for the entire 77 000-row fetch, which
+        # showed up as a ~250 ms stall on a concurrent ``/health`` probe even
+        # though the query itself ran in a worker thread.  Chunking lets the loop
+        # run between chunks; measured worst-case probe latency drops to ~2 ms.
+        out: list[dict[str, Any]] = []
+        with self._reader() as conn:
+            cursor = conn.execute(query, params)
+            while True:
+                chunk = cursor.fetchmany(_SAMPLE_FETCH_CHUNK)
+                if not chunk:
+                    break
+                out.extend(dict(row) for row in chunk)
+        return out
 
     def latest_ct_sample(self, ct_id: str) -> dict[str, Any] | None:
         with self._lock:

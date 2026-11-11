@@ -86,6 +86,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
+
 #: A child at or below this fraction of its parent at essentially every instant
 #: is consistent with being fed by it.  Set high on purpose: a nested feed is a
 #: measurement relationship, not a statistical tendency.
@@ -219,6 +221,63 @@ def _median(values: Sequence[float]) -> float:
     return (ordered[mid - 1] + ordered[mid]) / 2.0
 
 
+def _as_float_array(values: Sequence[float]) -> np.ndarray:
+    """``float64`` copy of ``values`` with exactly ``_finite``'s acceptance rule.
+
+    Every kernel below used to be a Python loop guarded by ``_finite``, which
+    accepts ``int``/``float`` and *nothing else*: ``None``, strings, ``Decimal``
+    and even ``numpy.float32`` scalars are dropped.  ``np.asarray`` is more
+    permissive than that (it happily parses ``"12.5"`` and widens ``float32``),
+    so the fast path is only taken for dtypes that can only have come from an
+    accepted Python scalar -- ``float64``, integer and ``bool``.  Anything else
+    falls back to the elementwise strict conversion, so a value the loop
+    rejected is still rejected.
+
+    Rejected elements become ``nan``, which every kernel already filters out, so
+    the distinction between "absent" and "not a number" is preserved -- neither
+    is ever treated as zero.
+    """
+    if isinstance(values, np.ndarray) and values.dtype == np.float64:
+        return values
+    array = np.asarray(values)
+    if array.dtype == np.float64:
+        return array
+    if array.dtype.kind in "iub":
+        return array.astype(np.float64)
+    out = np.full(len(values), math.nan, dtype=np.float64)
+    for i, value in enumerate(values):
+        if isinstance(value, (int, float)):
+            out[i] = float(value)
+    return out
+
+
+def _finite_max(values: np.ndarray) -> float:
+    """``max([v for v in values if finite])``, or ``0.0`` when nothing is finite."""
+    finite = values[np.isfinite(values)]
+    return float(finite.max()) if finite.size else 0.0
+
+
+def _finite_abs_max(values: np.ndarray) -> float:
+    """``max([abs(v) for v in values if finite])``, or ``0.0`` when nothing is finite."""
+    finite = values[np.isfinite(values)]
+    return float(np.abs(finite).max()) if finite.size else 0.0
+
+
+def _partition_median(values: np.ndarray) -> float:
+    """``_median`` on an array that is already known to be finite and non-empty.
+
+    Same value as :func:`_median` (including the mean of the two middle
+    elements for an even count) but ``O(n)`` instead of ``O(n log n)``, which
+    matters because this runs once per candidate pair over ~77 000 instants.
+    """
+    n = values.size
+    mid = n // 2
+    if n % 2:
+        return float(np.partition(values, mid)[mid])
+    part = np.partition(values, (mid - 1, mid))
+    return float((part[mid - 1] + part[mid]) / 2.0)
+
+
 def containment(
     outer: Sequence[float],
     inner: Sequence[float],
@@ -235,21 +294,16 @@ def containment(
     """
     if len(outer) != len(inner):
         raise ValueError("series must have the same length")
-    ok = 0
-    comparable = 0
-    for o, i in zip(outer, inner, strict=True):
-        if not _finite(o) or not _finite(i):
-            continue
-        o = float(o)
-        i = float(i)
-        if o < min_outer_w:
-            continue
-        comparable += 1
-        if i <= o + tol_w:
-            ok += 1
-    if comparable == 0:
+    outer_array = _as_float_array(outer)
+    inner_array = _as_float_array(inner)
+    comparable = np.isfinite(outer_array) & np.isfinite(inner_array) & (outer_array >= min_outer_w)
+    count = int(np.count_nonzero(comparable))
+    if count == 0:
         return 0.0, 0
-    return ok / comparable, comparable
+    # ``i <= o + tol_w`` is exactly the loop's test; both sides are already
+    # ``float`` and non-finite instants were removed by ``comparable``.
+    ok = int(np.count_nonzero(inner_array[comparable] <= outer_array[comparable] + tol_w))
+    return ok / count, count
 
 
 def duplicate_evidence(
@@ -270,29 +324,27 @@ def duplicate_evidence(
     """
     if len(a) != len(b):
         raise ValueError("series must have the same length")
-    joint: list[tuple[float, float]] = []
-    either = 0
-    for x, y in zip(a, b, strict=True):
-        if not _finite(x) or not _finite(y):
-            continue
-        x = float(x)
-        y = float(y)
-        active_x = abs(x) >= activity_min_w
-        active_y = abs(y) >= activity_min_w
-        if active_x or active_y:
-            either += 1
-        if active_x and active_y:
-            joint.append((x, y))
-    if not joint or either == 0:
+    array_a = _as_float_array(a)
+    array_b = _as_float_array(b)
+    finite = np.isfinite(array_a) & np.isfinite(array_b)
+    active_a = np.abs(array_a) >= activity_min_w
+    active_b = np.abs(array_b) >= activity_min_w
+    either = int(np.count_nonzero(finite & (active_a | active_b)))
+    joint = finite & active_a & active_b
+    joint_instants = int(np.count_nonzero(joint))
+    if joint_instants == 0 or either == 0:
         return None
 
-    diffs = [abs(x - y) / max(abs(x), abs(y), 1.0) for x, y in joint]
-    med_a = _median([x for x, _ in joint])
-    med_b = _median([y for _, y in joint])
+    x = array_a[joint]
+    y = array_b[joint]
+    # |x - y| / max(|x|, |y|, 1.0), elementwise, exactly as the loop computed it.
+    diffs = np.abs(x - y) / np.maximum(np.maximum(np.abs(x), np.abs(y)), 1.0)
+    med_a = _partition_median(x)
+    med_b = _partition_median(y)
     return DuplicateEvidence(
-        joint_instants=len(joint),
-        activity_ratio=len(joint) / either,
-        rel_diff=_median(diffs),
+        joint_instants=joint_instants,
+        activity_ratio=joint_instants / either,
+        rel_diff=_partition_median(diffs),
         ratio=max(abs(med_a), abs(med_b)) / max(min(abs(med_a), abs(med_b)), 1e-9),
         median_a_w=med_a,
         median_b_w=med_b,
@@ -318,25 +370,20 @@ def closure_fraction(
     """
     if len(parent) != len(accounted):
         raise ValueError("series must have the same length")
-    ok = 0
-    comparable = 0
-    remainders: list[float] = []
-    for p, a in zip(parent, accounted, strict=True):
-        if not _finite(p) or not _finite(a):
-            continue
-        p = float(p)
-        a = float(a)
-        if p < min_parent_w:
-            continue
-        comparable += 1
-        remainder = p - a
-        remainders.append(remainder)
-        if remainder >= -tol_w:
-            ok += 1
+    parent_array = _as_float_array(parent)
+    accounted_array = _as_float_array(accounted)
+    comparable_mask = (
+        np.isfinite(parent_array) & np.isfinite(accounted_array) & (parent_array >= min_parent_w)
+    )
+    comparable = int(np.count_nonzero(comparable_mask))
     if comparable == 0:
         return 0.0, 0, 0.0
-    remainders.sort()
-    return ok / comparable, comparable, remainders[len(remainders) // 2]
+    remainders = parent_array[comparable_mask] - accounted_array[comparable_mask]
+    ok = int(np.count_nonzero(remainders >= -tol_w))
+    # ``_median`` of the remainders: same value as the loop's
+    # ``sorted(...)[len // 2]`` (odd count -> middle element, even count ->
+    # *upper* middle element, which is what indexing ``len // 2`` does).
+    return ok / comparable, comparable, float(np.partition(remainders, comparable // 2)[comparable // 2])
 
 
 # --------------------------------------------------------------------------- #
@@ -426,17 +473,17 @@ def _node_series(
         length = len(series[present[0]])
         if any(len(series[m]) != length for m in present):
             raise ValueError("member series must have the same length")
-        values: list[float] = []
-        for i in range(length):
-            total = 0.0
-            seen = False
-            for member in present:
-                raw = series[member][i]
-                if _finite(raw):
-                    total += float(raw)
-                    seen = True
-            values.append(total if seen else math.nan)
-        out[node_id] = values
+        # Sum the members elementwise; an instant is unknown only when *no*
+        # member has a reading, which is the loop's ``seen`` flag.  Members that
+        # are not finite contribute nothing, exactly as ``if _finite(raw)`` did.
+        total = np.zeros(length, dtype=np.float64)
+        seen = np.zeros(length, dtype=bool)
+        for member in present:
+            values = _as_float_array(series[member])
+            finite = np.isfinite(values)
+            total += np.where(finite, values, 0.0)
+            seen |= finite
+        out[node_id] = np.where(seen, total, math.nan).tolist()
     return out
 
 
@@ -457,14 +504,24 @@ def _node_own_loads(
     length = len(contributing[0])
     if any(len(values) != length for values in contributing):
         raise ValueError("direct_load series must have the same length")
-    out: list[float | None] = []
-    for i in range(length):
-        total: float | None = None
-        for values in contributing:
-            raw = values[i]
-            if _finite(raw):
-                total = float(raw) + (total or 0.0)
-        out.append(total)
+    # Elementwise, in member order, so the float accumulation order (and thus
+    # the bits) is exactly the loop's.  ``total or 0.0`` collapsed a negative
+    # zero at every step; ``np.where(total == 0.0, 0.0, ...)`` does the same
+    # (``-0.0 == 0.0``), and a non-finite member contributes nothing.
+    total = np.zeros(length, dtype=np.float64)
+    seen = np.zeros(length, dtype=bool)
+    for values in contributing:
+        array = _as_float_array(values)
+        finite = np.isfinite(array)
+        total = np.where(total == 0.0, 0.0, total)
+        total = total + np.where(finite, array, 0.0)
+        seen |= finite
+    # ``None`` stays ``None`` (unknown), never ``0.0``: an instant none of the
+    # loads covered must not be read as "this container has no own load".
+    totals = total.tolist()
+    out: list[float | None] = [
+        value if covered else None for value, covered in zip(totals, seen.tolist(), strict=True)
+    ]
     return out
 
 
@@ -568,6 +625,17 @@ def infer_nesting(
     nodes = build_nodes({cid: channels[cid] for cid in ids})
     diagnostics["nodes"] = [node.as_dict() for node in nodes.values()]
     node_series = _node_series(nodes, series)
+    # One ``float64`` array per node, built once: every kernel below filters
+    # non-finite instants itself, so handing it the array instead of the list
+    # avoids re-converting the same 77 000 values for every pair.
+    node_arrays = {node_id: np.asarray(values, dtype=np.float64) for node_id, values in node_series.items()}
+    # Hoisted per-node peaks.  ``signed_peak`` is what the containment loop used
+    # (``max`` of the finite values); ``activity_peak`` is the largest *absolute*
+    # finite reading, which is exactly the predicate ``duplicate_evidence``
+    # applies per instant.  Both are pure functions of the series, so computing
+    # them once cannot change a result.
+    signed_peak = {node_id: _finite_max(values) for node_id, values in node_arrays.items()}
+    activity_peak = {node_id: _finite_abs_max(values) for node_id, values in node_arrays.items()}
 
     # -- duplicates first: they change how every other pair is read ----------
     node_ids = sorted(node_series)
@@ -579,6 +647,17 @@ def infer_nesting(
             node_b = nodes[b]
             if set(node_a.members) & set(node_b.members):
                 continue
+            if not (set(node_a.members) & containers or set(node_b.members) & containers):
+                # Two smart plugs on one appliance is not a topology question.
+                # Checked *before* the scan: 231 of 437 pairs on the reference
+                # installation are discarded here, and scanning them first was
+                # 53 % of the endpoint's CPU.
+                continue
+            if activity_peak[a] < ACTIVITY_MIN_W and activity_peak[b] < ACTIVITY_MIN_W:
+                # Neither node ever reaches the activity floor, so no instant can
+                # be evidence and ``duplicate_evidence`` would return ``None``.
+                # Skipping the scan is therefore observationally identical.
+                continue
             # Declared facts are not re-derived.
             if any(_declared_pair(x, y, channels) for x in node_a.members for y in node_b.members):
                 continue
@@ -586,7 +665,7 @@ def infer_nesting(
                 continue
             if any(_ancestor_of(y, x, channels) for x in node_a.members for y in node_b.members):
                 continue
-            evidence = duplicate_evidence(node_series[a], node_series[b])
+            evidence = duplicate_evidence(node_arrays[a], node_arrays[b])
             if evidence is None:
                 continue
             if evidence.activity_ratio < DUPLICATE_ACTIVITY_RATIO_MIN:
@@ -598,9 +677,6 @@ def infer_nesting(
             if evidence.ratio > DUPLICATE_RATIO_MAX:
                 # One reports a consistent fraction of the other: a circuit
                 # multiplier, not the same wire.
-                continue
-            if not (set(node_a.members) & containers or set(node_b.members) & containers):
-                # Two smart plugs on one appliance is not a topology question.
                 continue
             canonical, alias = sorted((a, b))
             duplicate_pairs.append((canonical, alias, evidence))
@@ -666,8 +742,7 @@ def infer_nesting(
                 }
             )
             continue
-        child_values = [float(v) for v in node_series[child] if _finite(v)]
-        peak = max(child_values) if child_values else 0.0
+        peak = signed_peak[child]
         if peak <= 0.0:
             diagnostics["suppressed"].append(
                 {"ct_id": child_node.members[0], "node_id": child, "reason": "never_active"}
@@ -677,16 +752,15 @@ def infer_nesting(
         for parent in canonical_containers:
             if parent == canonical_node(child):
                 continue
-            parent_series = node_series.get(parent)
-            if parent_series is None or len(parent_series) != len(node_series[child]):
+            parent_series = node_arrays.get(parent)
+            if parent_series is None or len(parent_series) != len(node_arrays[child]):
                 continue
             fraction, comparable = containment(
-                parent_series, node_series[child], tol_w=tol_w, min_outer_w=min_parent_w
+                parent_series, node_arrays[child], tol_w=tol_w, min_outer_w=min_parent_w
             )
             if comparable == 0 or fraction < containment_min:
                 continue
-            parent_values = [float(v) for v in parent_series if _finite(v)]
-            parent_peak = max(parent_values) if parent_values else 0.0
+            parent_peak = signed_peak[parent]
             if parent_peak <= 0.0 or peak / parent_peak < excitation_min_ratio:
                 # An idle circuit is contained by everything; that is not
                 # evidence of being fed by it.
