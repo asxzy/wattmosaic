@@ -75,13 +75,20 @@ promoted.
 
 The audited topology's channels name **power** entities (`sensor.*_power`), but
 HA emits state changes on **state** entities (`switch.*`, `climate.*`). A device
-declares those in `DeviceTopology.metadata["state_entity_ids"]`. Name similarity,
-HA areas and the HA device registry are deliberately **not** used: a guessed
-association would fabricate attribution. When two devices claim one entity,
-`ambiguous_entities()` reports it and the sample is rejected rather than resolved.
+declares those in `DeviceTopology.metadata["state_entity_ids"]` (evidence-derived,
+ADR-0011), `config_load_entity_ids` (configuration) or
+`link_state_entity_ids` (resolved from a `device_links` entry, ADR-0028). Name
+similarity and HA areas are deliberately **not** used: a guessed association
+would fabricate attribution. The HA device *registry* is consulted, but only by
+the integration, and only to expand a device id the user themselves declared into
+that device's state entities — never to guess one. When two devices claim one
+entity, `ambiguous_entities()` reports it and the sample is rejected rather than
+resolved.
 
-Consequence, and it is intended: a topology with **no** `state_entity_ids` cannot
-link real HA events, so no real learning sample can mature.
+Consequence, and it is intended: a topology with **no** runtime state entity of
+any of those three kinds cannot link real HA events, so no real learning sample
+can mature. An unresolvable `device_links` entry is reported in diagnostics under
+`devices_without_state_entity` with a reason code.
 
 ### Evidence-derived mapping (now populated for 8 of 28 devices)
 

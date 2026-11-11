@@ -71,7 +71,7 @@ real engine; three of them contained defects that "tests pass" did not reveal
 
 ## 3. Locked architectural decisions
 
-See `docs/decisions/README.md` (ADR-0001…ADR-0027). Summary:
+See `docs/decisions/README.md` (ADR-0001…ADR-0028). Summary:
 
 | ID | Decision |
 | --- | --- |
@@ -90,6 +90,7 @@ See `docs/decisions/README.md` (ADR-0001…ADR-0027). Summary:
 | D13 | Confidence tiers grade evidence kind; the 0–1 score stays, neither is calibrated |
 | D14 | A power entity is measurable, not state-bearing; only runtime entities write device state |
 | D15 | The App panel is static files under `script-src 'self'`, gated on ingress, read-only (ADR-0027) |
+| D16 | A `device_links` HA device id is resolved to state entities by the integration, never by the engine (ADR-0028) |
 
 ---
 
