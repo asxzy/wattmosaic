@@ -29,12 +29,13 @@ import dataclasses
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import numpy as np
 
 from wattmosaic_engine.contracts import (
+    CONTRACT_VERSION,
     InferenceResult,
     MonitoringLevel,
     PowerBehavior,
@@ -43,6 +44,7 @@ from wattmosaic_engine.contracts import (
     Source,
     StageStatus,
     Topology,
+    TopologyStatus,
 )
 from wattmosaic_engine.device_links import STATE_OVERRIDES_KEY
 from wattmosaic_engine.disaggregation.confidence import (
@@ -217,6 +219,11 @@ class _Transition:
     new: str | None
     at: datetime | None
     direction: str | None
+    #: True only when ``at`` is the instant HA reported the state change.
+    #: Transitions inferred from the previous cycle's snapshot also carry a
+    #: timestamp (``window.at``), but that is when we *looked*, not when the
+    #: device switched, so it must never be used to anchor CT step detection.
+    anchored: bool = False
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -225,6 +232,7 @@ class _Transition:
             "new_state": self.new,
             "occurred_at": None if self.at is None else self.at.isoformat(),
             "direction": self.direction,
+            "anchored": self.anchored,
         }
 
 
@@ -260,6 +268,7 @@ def _collect_transitions(
                 None if new is None else str(new),
                 overrides.get(str(did)),
             ),
+            anchored=at is not None,
         )
     # Derive transitions from previous_states vs current device_states.
     for did in device_states:
@@ -275,6 +284,7 @@ def _collect_transitions(
             new=current,
             at=window.at,
             direction=_transition_direction(previous, current, overrides.get(did)),
+            anchored=False,
         )
     return out
 
@@ -473,8 +483,15 @@ class DisaggregationEngine:
         off_tolerance_w: float = OFF_ATTRIBUTION_TOLERANCE_W,
         model_ridge: float = 0.0,
         tracker: StepTracker | None = None,
+        max_leg_skew_s: float = 20.0,
     ) -> None:
         self.max_measurement_age_s = float(max_measurement_age_s)
+        #: How far apart in time the two legs of a declared double-pole pair
+        #: may be before the pair stops describing one instant.  Two legs of
+        #: one circuit are sampled within a cycle of each other; a skew larger
+        #: than this means one leg is a leftover from an earlier poll, so the
+        #: row is a mix of two instants and neither leg may be used.
+        self.max_leg_skew_s = float(max_leg_skew_s)
         self.phase_split_l1 = float(phase_split_l1)
         self.k_mad = float(k_mad)
         self.min_delta_w = float(min_delta_w)
@@ -526,7 +543,7 @@ class DisaggregationEngine:
         unknown_state_devices = [d for d in device_states if d not in graph.devices]
 
         diagnostics: dict[str, Any] = {
-            "contract": "1.2.0",
+            "contract": CONTRACT_VERSION,
             "topology_version": topology.version,
             "topology_status": str(topology.status),
             "topology_problems": graph.validate(),
@@ -571,12 +588,30 @@ class DisaggregationEngine:
             after_s=after_s,
             k_mad=self.k_mad,
             min_delta_w=self.min_delta_w,
-            noise_floor_w=self.noise_floor_w,
+            noise_floor_w=self._noise_floors(coerced),
             previous_values=previous_values,
             multipliers={cid: graph.multiplier_for(cid) for cid in coerced.readings},
         )
         state_overrides = _device_state_overrides(topology)
         transitions = _collect_transitions(coerced, device_states, state_overrides)
+        # ---- anchored step detection -------------------------------------
+        # A CT step only explains a device if it happened when the device
+        # switched.  For every transition HA timestamped itself, rescan the
+        # channels that observe that device with the transition instant as an
+        # anchor, and drop unanchored steps on those channels that sit outside
+        # the anchor window.  Without this, a lamp switching on could claim a
+        # CT step tens of seconds away and be credited with another circuit's
+        # power.
+        steps = self._anchor_steps(
+            steps,
+            transitions,
+            graph,
+            coerced,
+            after_s=after_s,
+            cadence_s=diagnostics["cadence_s"],
+            noise_floors=self._noise_floors(coerced),
+            diagnostics=diagnostics,
+        )
         diagnostics["events"] = [
             {**t.as_dict(), "source": "ha_state_or_previous_state"}
             for t in transitions.values()
@@ -694,8 +729,249 @@ class DisaggregationEngine:
         )
 
     # ------------------------------------------------------------------ #
+    # Anchored step detection
+    # ------------------------------------------------------------------ #
+    def _noise_floors(self, window: CoercedWindow) -> dict[str, float]:
+        """Per-channel noise floor: the measured MAD where one exists.
+
+        ``noise_floor_w`` on the constructor is a single scalar, but a house has
+        a 0.3 W resolution inverter CT next to a 30 W-resolution load manager.
+        One scalar is either far too small for the noisy channel (every tick
+        becomes an event) or far too large for the quiet one (a real 40 W step
+        is invisible).  The quality layer already measures the innovation MAD
+        per channel (``SampleAligner.channel_health().noise_mad_w``); the facade
+        publishes it as ``metadata["channel_noise_floor_w"]``.
+
+        The scalar stays the *floor* of every entry, not a default that a
+        mapping replaces: a measured MAD below the configured floor would
+        otherwise lower the threshold below what the caller asked for.  A
+        channel with no measurement keeps the scalar, which is the historical
+        behaviour, so a capture with no health data behaves exactly as before.
+        """
+        floors: dict[str, float] = {
+            cid: self.noise_floor_w for cid in window.readings
+        }
+        raw = window.metadata.get("channel_noise_floor_w")
+        if not isinstance(raw, Mapping):
+            return floors
+        for cid, value in raw.items():
+            try:
+                measured = float(value)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(measured) or measured < 0.0:
+                continue
+            floors[str(cid)] = max(self.noise_floor_w, measured)
+        return floors
+
+    def _anchor_steps(
+        self,
+        steps: Mapping[str, StepChange],
+        transitions: Mapping[str, _Transition],
+        graph: TopologyGraph,
+        window: CoercedWindow,
+        *,
+        after_s: float,
+        cadence_s: float,
+        noise_floors: Mapping[str, float] | None = None,
+        diagnostics: dict[str, Any],
+    ) -> dict[str, StepChange]:
+        """Confine CT steps to the instant HA says the device switched.
+
+        ``steps`` is the unanchored scan.  It answers "did this channel move
+        somewhere in the buffered history", which is not the same question as
+        "did it move when this device switched".  On a real capture the two
+        differ by up to a minute: the CT cadence is 15.7 s and the engine runs
+        every 5 s, so a lamp switched on at t can be matched to a sister
+        circuit's step at t−47 s.
+
+        Every transition HA timestamped itself (``anchored``) gets a rescan of
+        exactly the channels that observe its device, restricted to
+        ``[at − after_s − cadence, at + after_s + cadence]``: one observation
+        window either side, which is the physical uncertainty of *when* a CT
+        published a step.  A step on one of those channels that lands outside
+        the window is discarded, because that channel's movement is not evidence
+        about this transition.
+
+        A transition derived from the previous cycle's snapshot carries no
+        instant -- only the time we looked -- so it anchors nothing and the
+        unanchored result stands for it.
+        """
+        if not steps:
+            return dict(steps)
+        anchored = {
+            did: t for did, t in transitions.items() if t.anchored and t.at is not None
+        }
+        if not anchored:
+            return dict(steps)
+        out = dict(steps)
+        multipliers = {cid: graph.multiplier_for(cid) for cid in window.readings}
+        # The anchored rescan must use the same per-channel floor as the
+        # unanchored scan.  Falling back to the scalar here would let a noisy
+        # channel pass the unanchored threshold and then fail (or vice versa) in
+        # the rescan, so a step's detected-ness would depend on which path
+        # measured it.
+        floors = dict(noise_floors or {})
+        #: For each channel that observes an anchored transition, the instants it
+        #: is allowed to have stepped at.  A channel shared by several devices
+        #: (a branch or a main) is valid if *any* of its devices can explain it.
+        windows: dict[str, list[tuple[datetime, datetime]]] = {}
+        dropped: list[str] = []
+        skipped: list[str] = []
+        for did, transition in anchored.items():
+            at = transition.at
+            if at is None:  # pragma: no cover - filtered above
+                continue
+            lo = at - timedelta(seconds=after_s + cadence_s)
+            hi = at + timedelta(seconds=after_s + cadence_s)
+            channels = {
+                cid: window.readings[cid]
+                for cid in graph.device_channels(did)
+                if cid in window.readings
+            }
+            if not channels:
+                continue
+            try:
+                rescued = detect_changes(
+                    channels,
+                    window.at,
+                    before_s=after_s,
+                    after_s=after_s,
+                    k_mad=self.k_mad,
+                    min_delta_w=self.min_delta_w,
+                    noise_floor_w={
+                        cid: floors.get(cid, self.noise_floor_w) for cid in channels
+                    },
+                    multipliers={
+                        cid: multipliers[cid] for cid in channels if cid in multipliers
+                    },
+                    anchor=at,
+                    anchor_before_s=after_s,
+                    anchor_after_s=after_s,
+                    anchor_grace_s=cadence_s,
+                    cadence_s=cadence_s,
+                )
+            except ValueError:
+                # Naive/aware mismatch between the transition instant and the
+                # window.  The data cannot be anchored, so the unanchored scan
+                # stands rather than raising out of inference.
+                skipped.append(did)
+                continue
+            for cid in channels:
+                windows.setdefault(cid, []).append((lo, hi))
+                rescued_step = rescued.get(cid)
+                if rescued_step is not None and rescued_step.detected:
+                    out[cid] = rescued_step
+                elif cid not in rescued:
+                    # No candidate split at all near the transition: leave the
+                    # unanchored step in place for the window test below to
+                    # judge.
+                    continue
+                else:
+                    # A split exists but is below threshold.  That is evidence
+                    # the channel did *not* move at the transition, so an
+                    # unanchored step elsewhere cannot be cited for it.
+                    out.pop(cid, None)
+                    dropped.append(cid)
+        for cid, spans in windows.items():
+            step = out.get(cid)
+            if step is None or not step.detected:
+                continue
+            when = step.change_time
+            if any(lo <= when <= hi for lo, hi in spans):
+                continue
+            # The channel moved, but not when any device that observes it
+            # switched: the movement belongs to an unrelated load and citing it
+            # would credit one device with another circuit's power.
+            dropped.append(cid)
+            out.pop(cid, None)
+        if dropped:
+            diagnostics["anchored_steps_dropped"] = sorted(dropped)
+            diagnostics["warnings"].append("ct_step_outside_transition_anchor")
+        if skipped:
+            diagnostics["anchor_skipped_devices"] = sorted(skipped)
+        return out
+
+    # ------------------------------------------------------------------ #
     # Solver plumbing
     # ------------------------------------------------------------------ #
+    def _exclude_partial_legs(
+        self,
+        matrix: MeasurementMatrix,
+        graph: TopologyGraph,
+        window: CoercedWindow,
+        mask: np.ndarray,
+        excluded: dict[str, str],
+    ) -> None:
+        """Drop rows that are one leg of a declared pair whose other leg is unusable.
+
+        ``paired_ct_id`` declares that two CTs measure the two legs of *one*
+        circuit.  A leg alone is not a measurement of that circuit at half its
+        value -- it is a measurement of half of it at full scale, and no
+        coefficient in the model knows that.  Using the live leg while its
+        partner is stale silently halves the row target (the residual then
+        absorbs the missing half and looks like unknown load), and using both
+        when they are polling apart mixes two instants into one equation.
+
+        So a pair is usable only as a pair: both legs fresh, both within
+        ``max_leg_skew_s`` of each other.  Otherwise both rows are excluded and
+        the reason says why, which is what lets reconciliation report the power
+        as unknown instead of misattributing it.
+        """
+        if not mask.any():
+            return
+        rows = matrix.row_channel_ids
+        seen: set[str] = set()
+        for cid in rows:
+            partner = self._declared_leg_partner(graph, cid)
+            if partner is None:
+                continue
+            pair = cid if cid < partner else partner
+            if pair in seen:
+                continue
+            seen.add(pair)
+            # The partner must also be modelled as a row; if it is disabled or
+            # has no coefficients there is nothing to compare against.
+            i = matrix.row_index(cid)
+            k = matrix.row_index(partner)
+            if i is None or k is None:
+                continue
+            reasons: list[str] = []
+            for leg in (cid, partner):
+                reading = window.readings.get(leg)
+                if reading is None or not reading.is_usable(self.max_measurement_age_s):
+                    reasons.append(f"partial_leg_measurement:{leg}")
+            if not reasons:
+                a = window.readings[cid].age_s
+                b = window.readings[partner].age_s
+                if math.isfinite(a) and math.isfinite(b) and abs(a - b) > self.max_leg_skew_s:
+                    reasons.append(
+                        f"leg_skew_exceeded:{cid}:{partner}:"
+                        f"{abs(a - b):.1f}s>{self.max_leg_skew_s:.1f}s"
+                    )
+            if not reasons:
+                continue
+            reason = reasons[0]
+            for leg, row in ((cid, i), (partner, k)):
+                mask[row] = False
+                excluded.setdefault(leg, reason)
+
+    @staticmethod
+    def _declared_leg_partner(graph: TopologyGraph, ct_id: str) -> str | None:
+        """The reciprocal ``paired_ct_id`` partner of ``ct_id``, if any.
+
+        Reciprocity matters: a one-sided pointer is a discovery artefact, not a
+        declaration that the two channels are legs of the same circuit.
+        """
+        ch = graph.channel(ct_id)
+        partner_id = getattr(ch, "paired_ct_id", None) if ch is not None else None
+        if not partner_id:
+            return None
+        partner = graph.channel(partner_id)
+        if partner is None or getattr(partner, "paired_ct_id", None) != ct_id:
+            return None
+        return partner_id
+
     def _solve_system(
         self,
         matrix: MeasurementMatrix,
@@ -737,6 +1013,8 @@ class DisaggregationEngine:
                 continue
             if reading.repeated:
                 weights[i] *= 0.5
+
+        self._exclude_partial_legs(matrix, graph, window, mask, excluded)
 
         # Direct powers, used to remove known contributions from y.
         x_direct = np.zeros(n)
@@ -1086,6 +1364,10 @@ class DisaggregationEngine:
     ) -> set[str]:
         changed = [d for d, t in transitions.items() if t.direction is not None]
         if len(changed) < 2:
+            # Ambiguity needs at least two claimants.  A *single* changed device
+            # that the measurements cannot separate is not ambiguous: there is
+            # nothing it could be confused with.  (An unexplained residual with
+            # no transition at all is flagged in ``_reconcile`` instead.)
             return set()
         unidentifiable = set(ident.unidentifiable)
         ambiguous: set[str] = set()
@@ -1795,6 +2077,28 @@ class DisaggregationEngine:
             diagnostics["warnings"].append("main_power_unavailable")
         else:
             unknown_residual = main.total_w - accounted
+            # A residual large enough to matter, with no state transition in
+            # this cycle, is an event the state layer never saw: a load cycling
+            # on its own, a device with no state entity, or a manual switch.
+            # The engine cannot attribute it and must not invent a claimant, so
+            # it records the fact and leaves the power in the residual.  This is
+            # a diagnostic, not an ambiguity: ambiguity requires two candidates.
+            has_transition = any(
+                event.get("direction") for event in diagnostics.get("events", ())
+            )
+            if (
+                not has_transition
+                and main.complete
+                and unknown_residual > max(50.0, 0.05 * abs(main.total_w))
+            ):
+                diagnostics["unexplained_residual_without_transition"] = {
+                    "residual_w": unknown_residual,
+                    "main_power_w": main.total_w,
+                    "reason": (
+                        "measured power is not explained by any device or state "
+                        "transition; left unattributed rather than fabricated"
+                    ),
+                }
 
         # Measurement-fit error: how well all attributed device power explains
         # the CT rows.  This is a *fit* diagnostic, not the power balance.
@@ -1877,6 +2181,10 @@ class DisaggregationEngine:
             measurement_uncertainty_w=uncertainty,
             quality_status=quality,
             explanation=explanation,
+            topology_confirmed=(
+                str(getattr(graph.topology.status, "value", graph.topology.status))
+                == TopologyStatus.CONFIRMED.value
+            ),
         )
 
     # ------------------------------------------------------------------ #

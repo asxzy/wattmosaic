@@ -1,5 +1,84 @@
 # Release Notes
 
+## v0.2.1-dev.11 — 2026-11-11 (development channel)
+
+Automated development build of the four electrical-core lanes: roll-up,
+energy quality, event anchoring and HA topology push.
+
+### What this build fixes
+
+**The whole-home total no longer counts the panel tree more than once (E2-1).**
+The installed topology declares six independent mains; physically there is one
+service feed, one main panel and one sub panel. Summing all six gave a total
+2.5x the real draw. `electrical/main_power.py` now groups the feeds into
+measurement nodes and resolves which one is outermost **from the measurements**,
+naming the excluded feeds in `notes`. When containment cannot be decided it
+still refuses (`parallel_mains_without_declared_relation`) rather than guessing.
+
+**The solver terminates on real data (E2-2).** Root cause was scipy's
+trust-region line search backtracking forever on a numerically dead direction
+(|p| ~ 1e-15, cost_change -0.0) produced by duplicated rows. `electrical/solver.py`
+now preconditions duplicate rows, drops zero-norm columns, caps iterations and
+maps non-convergence to an explicit warning.
+
+**A refused total is never averaged in as 0 W.** The real-capture replay harness
+counted an engine refusal as a measurement of zero and averaged it, inventing a
+collapse to no load. Refused windows are now counted
+(`n_unavailable_windows`) and excluded from every mean, and two topology
+variants are compared per shared instant rather than as two means over different
+window sets.
+
+**A missing main feed can no longer be silently absorbed.** When one feed of a
+provably additive group (or of an undecidable same-leg group) has no reading,
+the roll-up used to drop it and still report `complete=True` -- publishing a
+partial total as the whole-home power. `complete` is now `False` and the
+unmeasured feed is named in `notes` as `feed_group_unmeasured`.
+
+**Energy is never integrated from a non-measurement.** `Source.UNKNOWN`, a
+placeholder watt value, and `bad`/`missing` quality contribute no kWh; an
+interval is additionally clamped to the freshness of its newest measurement, so
+a CT that stops updating stops accruing energy instead of integrating frozen
+watts. `Database.energy_total` sums exactly one bucket size, so the same energy
+stored at two resolutions is counted once (real capture: 56.94 -> 31.12 kWh,
+selecting the 300 s series across all 28 devices).
+
+**A 0 W direct measurement now says why.** The Level-1 path requires a
+`DEDICATED_DEVICE` channel, and 10 of this installation's circuits are `branch`
+by declaration (ADR-0026), so a 0 W direct count can be legitimate. The batch
+diagnostics now carry `direct_availability`
+(`measured` / `explained_unavailable` / `no_dedicated_ct` /
+`unexplained_unavailable`), `direct_capable_count` and
+`unexplained_direct_devices`, and `Reconciliation.explanation` names the count
+by reason. A permanently-dead direct path is distinguishable from an install
+that genuinely has no dedicated CTs.
+
+**HA topology push replays the stored declaration.** The integration pushes the
+topology on setup and on a version change, with a bounded replay
+(`TOPOLOGY_PUSH_TIMEOUT = 15.0` s, `TOPOLOGY_RECHECK_POLLS = 60`,
+`MAX_IDENTICAL_PUSHES = 2`) and a poll re-check, instead of assuming the first
+refresh landed.
+
+### Measured on the real capture (120 minutes, 13 681 samples, 459 windows)
+
+```text
+naive sum of all six mains   3943.3 W mean   (2.512x the resolved total)
+resolved whole-home total    1568.9 W mean
+  as-shipped  main 1568.9 W  accounted 1033.8 W  residual 535.2 W  11.8 s
+              24/459 windows refused (excluded from the mean)
+  nested      main 1599.1 W  accounted 1082.9 W  residual 516.2 W  10.1 s
+  paired on 435 shared instants: 1568.9 W vs 1555.0 W, ratio 1.009
+```
+
+Attribution coverage 0.659, unknown-load share 0.341, false attribution 0.
+The 24 refusals are honest: on those instants the three panel feeds sit inside
+the 30 W / 2 % containment tolerance and the engine declines to state a total.
+
+### Verified
+
+Full suite and all release gates pass; see `PROJECT_STATUS.md` for the dated
+evidence section, the negative verification of each new guard, and the residual
+risks.
+
 ## v0.2.1-dev.10 — 2026-11-10 (development channel)
 
 Automatic development build.

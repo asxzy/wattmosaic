@@ -18,6 +18,21 @@ Run::
 
     python tools/dev/make_reference_house.py            # writes data/examples/reference_house/
     python tools/dev/make_reference_house.py --stdout   # print instead of writing
+    python tools/dev/make_reference_house.py --passive-validation
+
+``--passive-validation`` additionally writes
+``data/examples/reference_house/passive_validation.json``: the *real* passive
+analysis code (``tools/audit/passive_validation.py``) run over a deterministic
+simulator capture.  That file is the input to the documented offline
+reproduction command, so the whole validation report can be rebuilt without a
+Home Assistant instance:
+
+    python tools/dev/make_reference_house.py --passive-validation
+    python tools/audit/passive_validation.py \\
+        --from data/examples/reference_house/passive_validation.json
+
+The payload is byte-identical to the one ``tools/dev/render_validation_docs.py``
+writes, so the two tools cannot drift apart.
 
 ``ct_update_profile.json`` is *not* produced here: its cadence statistics are
 measured from a real simulator run by ``tools/dev/render_validation_docs.py``,
@@ -398,15 +413,43 @@ def build_state_entities() -> dict[str, Any]:
     }
 
 
+def build_passive_validation() -> dict[str, Any]:
+    """Run the *real* passive analysis over the synthetic reference household.
+
+    Deliberately delegates to ``tools/dev/render_validation_docs.py`` instead of
+    re-implementing the pipeline: that module is the single source of the
+    committed worked example, so this flag and the docs renderer cannot produce
+    different files.  Imported lazily so ``--stdout`` stays cheap.
+    """
+    here = Path(__file__).resolve().parent
+    sys.path.insert(0, str(ROOT))
+    sys.path.insert(0, str(ROOT / "tools" / "audit"))
+    sys.path.insert(0, str(here))
+    import render_validation_docs
+
+    committed_raw, *_ = render_validation_docs.build()
+    return committed_raw
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--stdout", action="store_true", help="print instead of writing")
+    ap.add_argument(
+        "--passive-validation",
+        action="store_true",
+        help=(
+            "also write data/examples/reference_house/passive_validation.json "
+            "by running the real passive-analysis code over a simulator capture"
+        ),
+    )
     args = ap.parse_args()
 
     payloads = {
         "ha_environment_audit.json": build_audit(),
         "state_entity_candidates.json": build_state_entities(),
     }
+    if args.passive_validation:
+        payloads["passive_validation.json"] = build_passive_validation()
 
     if args.stdout:
         for name, payload in payloads.items():

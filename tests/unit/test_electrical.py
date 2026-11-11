@@ -574,6 +574,135 @@ def test_main_power_requires_a_main_ct():
 
 
 # --------------------------------------------------------------------------- #
+# W1: undeclared same-leg feeds resolve by measurement, and still refuse when
+# the measurements cannot decide
+# --------------------------------------------------------------------------- #
+def _same_leg_feeds(*ids: str) -> Topology:
+    return Topology(
+        channels=[_ch(cid, CTType.MAIN, phase=Phase.L1) for cid in ids],
+        status=TopologyStatus.CANDIDATE,
+    )
+
+
+def test_one_measured_feed_containing_the_others_resolves_to_the_outermost():
+    """Two same-leg feeds with no declared parent: the larger one is outermost.
+
+    This is the E2-1 case.  Before the fix the total was refused outright, which
+    left the household with *no* home power.  One conductor is fed from one
+    place, so when one measured feed provably contains the others, the
+    containment is measurement evidence for which is outer.  The excluded feed
+    must be named, because only the user can confirm the wiring.
+    """
+    result = main_power_w(build_graph(_same_leg_feeds("a", "b")), {"a": 1500.0, "b": 1000.0})
+    assert result.errors == ()
+    assert result.total_w == 1500.0
+    assert result.per_channel_w == {"a": 1500.0}
+    assert result.excluded_channels == ("b",)
+    assert any(n.startswith("undeclared_feed_relation_resolved_by_measurement") for n in result.notes)
+    assert result.complete is True
+
+
+def test_a_genuinely_ambiguous_same_leg_pair_still_refuses():
+    """Indistinguishable feeds must not be guessed into a panel tree.
+
+    Two equal readings inside the containment tolerance cannot say which feed is
+    outer: either could be the other measured twice.  Summing them would double
+    count; picking one would fabricate a wiring fact.  Refusing is the honest
+    answer, and the refusal must be *visible* (``errors`` + ``complete=False``)
+    rather than a silent zero.
+    """
+    for values in ({"a": 1000.0, "b": 1000.0}, {"a": 1000.0, "b": 1000.2}):
+        result = main_power_w(build_graph(_same_leg_feeds("a", "b")), values)
+        assert "parallel_mains_without_declared_relation" in result.errors
+        assert result.complete is False
+        assert result.usable is False
+        assert result.total_w == 0.0
+
+
+def test_three_way_same_leg_ambiguity_still_refuses():
+    """The refusal is not just a two-feed special case."""
+    graph = build_graph(_same_leg_feeds("a", "b", "c"))
+    result = main_power_w(graph, {"a": 795.0, "b": 790.0, "c": 800.0})
+    assert "parallel_mains_without_declared_relation" in result.errors
+    assert result.complete is False
+
+
+def test_a_missing_feed_in_a_conflict_group_is_not_silently_dropped():
+    """A feed with no reading must make the total incomplete, not invisible.
+
+    Two feeds on the same leg with no declared parent are one conductor measured
+    twice *or* one nested inside the other.  When only one of them reports, the
+    missing one may be the outermost feed -- so the visible reading is a lower
+    bound, never a whole-home total.  Before this was fixed the member simply
+    vanished from the conflict group and ``complete`` stayed ``True``, which is
+    exactly the silent partial total the module docstring forbids.
+    """
+    result = main_power_w(build_graph(_same_leg_feeds("a", "b")), {"a": 1500.0})
+    assert result.total_w == 1500.0
+    assert result.complete is False
+    assert "b" in result.missing_channels
+    assert any(n.startswith("feed_group_unmeasured") for n in result.notes)
+    assert any("b" in n for n in result.notes if n.startswith("feed_group_unmeasured"))
+
+
+def test_a_missing_feed_on_an_additive_leg_also_blocks_completeness():
+    """Disjoint phases add, so a missing leg is missing half the household.
+
+    ``l1`` and ``l2`` are provably additive feeds.  With ``l2`` absent the sum
+    is one leg's draw, not the service total; reporting ``complete=True`` there
+    would let a consumer publish half the house as the whole.  A single panel
+    feed measured on both legs is *not* affected (it is one node, already
+    covered by ``partial_leg_measurement``).
+    """
+    topology = Topology(
+        channels=[
+            _ch("panel_a_l1", CTType.MAIN, phase=Phase.L1),
+            _ch("panel_b_l2", CTType.MAIN, phase=Phase.L2),
+        ]
+    )
+    result = main_power_w(build_graph(topology), {"panel_a_l1": 1500.0})
+    assert result.total_w == 1500.0
+    assert result.complete is False
+    assert result.missing_channels == ("panel_b_l2",)
+    assert any(n.startswith("feed_group_unmeasured") for n in result.notes)
+    # And the fully measured case is still complete, so the guard is surgical.
+    both = main_power_w(
+        build_graph(topology), {"panel_a_l1": 1500.0, "panel_b_l2": 900.0}
+    )
+    assert both.complete is True
+    assert both.total_w == 2400.0
+
+
+def test_the_measurement_resolution_is_deterministic():
+    """Same readings must give the same outermost feed, run after run.
+
+    ``dominates`` iterates candidate *objects*, so an accidental dependence on
+    dict/set iteration order would make the whole-home number flicker between
+    polls.  The choice is a pure function of the readings; this pins it.
+    """
+    graph = build_graph(_same_leg_feeds("a", "b", "c"))
+    values = {"a": 1500.0, "b": 1000.0, "c": 1400.0}
+    totals = {main_power_w(graph, dict(values)).total_w for _ in range(50)}
+    assert totals == {1500.0}
+    assert main_power_w(graph, dict(values)).per_channel_w == {"a": 1500.0}
+
+
+def test_a_provably_smaller_feed_is_not_chosen_as_outer():
+    """Guard against a resolution that simply picks the largest *single* CT.
+
+    ``b`` and ``c`` each contain only themselves; ``a`` contains both.  The
+    only feed that dominates every other candidate is ``a``, and the excluded
+    set must be complete -- dropping one of them would leave a feed silently
+    unaccounted for in the roll-up.
+    """
+    graph = build_graph(_same_leg_feeds("a", "b", "c"))
+    result = main_power_w(graph, {"a": 2000.0, "b": 900.0, "c": 800.0})
+    assert result.total_w == 2000.0
+    assert set(result.excluded_channels) == {"b", "c"}
+    assert result.complete is True
+
+
+# --------------------------------------------------------------------------- #
 # Solver
 # --------------------------------------------------------------------------- #
 def test_solver_recovers_exact_solution():
@@ -1112,3 +1241,187 @@ def test_attribution_never_borrows_a_cross_device_partner() -> None:
     graph = build_graph(topo)
     assert graph.attribution_ct_ids("fridge_1") == ("fridge_1",)
     assert graph.attribution_ct_ids("fridge_2") == ("fridge_2",)
+
+
+# --------------------------------------------------------------------------- #
+# W2: an undeclared device phase must not halve its own measurement
+# --------------------------------------------------------------------------- #
+def test_undeclared_device_on_its_own_ct_is_not_phase_split():
+    """A device whose phase nobody declared still owns its whole reading.
+
+    ``phase_coefficient`` splits a *double-pole* device across the legs, because
+    a single-phase row only sees half of it.  A device of unknown phase has no
+    declared leg to split, so on its own attribution row the CT is the only
+    observation there is: halving it would fabricate a missing 50 %.
+    """
+    topo = Topology(
+        channels=[
+            *two_mains(),
+            _ch("ct_lamp", CTType.DEDICATED_DEVICE, device="lamp"),
+        ],
+        devices=[
+            # phase deliberately left at the default (UNKNOWN)
+            DeviceTopology(device_id="lamp", dedicated_ct_ids=["ct_lamp"]),
+        ],
+        status=TopologyStatus.CONFIRMED,
+    )
+    graph = build_graph(topo)
+    matrix = build_measurement_matrix(graph, ["lamp"])
+    j = matrix.col_index("lamp")
+    row = matrix.row_index("ct_lamp")
+    assert matrix.A[row, j] == pytest.approx(1.0)
+
+    # And the direct path reports the measured value, not half of it.
+    window = ObservationWindow.from_values(T0, {"ct_lamp": 240.0})
+    readings = resolve_direct(window, graph)
+    assert readings["lamp"].power_w == pytest.approx(240.0)
+
+
+def test_solo_flag_controls_the_unknown_phase_split():
+    topo = Topology(
+        channels=[*two_mains(), _ch("ct_lamp", CTType.DEDICATED_DEVICE, device="lamp")],
+        devices=[DeviceTopology(device_id="lamp", dedicated_ct_ids=["ct_lamp"])],
+        status=TopologyStatus.CONFIRMED,
+    )
+    graph = build_graph(topo)
+    assert graph.device_phase("lamp") == Phase.L1  # derived from its own CT leg
+    # A shared row still apportions, because the total has to be divided somehow.
+    assert graph.phase_coefficient("lamp", Phase.L1, solo=False) == pytest.approx(1.0)
+    assert graph.phase_coefficient("lamp", Phase.L2, solo=False) == pytest.approx(0.0)
+
+
+def test_device_phase_is_derived_from_its_attribution_legs():
+    """Discovery leaves ``phase`` unset; the CT it is wired through does not."""
+    topo = Topology(
+        channels=[
+            *two_mains(),
+            _ch("ct_a", CTType.DEDICATED_DEVICE, device="a", phase=Phase.L2),
+            _ch("ct_pair_l1", CTType.DEDICATED_DEVICE, device="pair", phase=Phase.L1, pair="ct_pair_l2"),
+            _ch("ct_pair_l2", CTType.DEDICATED_DEVICE, device="pair", phase=Phase.L2, pair="ct_pair_l1"),
+        ],
+        devices=[
+            DeviceTopology(device_id="a", dedicated_ct_ids=["ct_a"]),
+            DeviceTopology(device_id="pair", dedicated_ct_ids=["ct_pair_l1", "ct_pair_l2"]),
+            DeviceTopology(device_id="unknown"),
+        ],
+        status=TopologyStatus.CONFIRMED,
+    )
+    graph = build_graph(topo)
+    assert graph.device_phase("a") == Phase.L2
+    assert graph.device_phase("pair") == Phase.BOTH
+    assert graph.device_phase("unknown") == Phase.UNKNOWN
+
+
+# --------------------------------------------------------------------------- #
+# W1: aliases and nested mains in the measurement matrix
+# --------------------------------------------------------------------------- #
+def test_alias_channel_does_not_get_its_own_row_and_is_a_fallback():
+    """Two CTs on one wire must not become two equations."""
+    topo = Topology(
+        channels=[
+            _ch("service", CTType.MAIN, phase=Phase.BOTH),
+            _ch("service_shadow", CTType.MAIN, phase=Phase.BOTH, alias="service"),
+            _ch("branch", parent="service"),
+        ],
+        devices=[
+            DeviceTopology(device_id="lamp", branch_ct_ids=["branch"], phase=Phase.L1)
+        ],
+        status=TopologyStatus.CONFIRMED,
+    )
+    graph = build_graph(topo)
+    matrix = build_measurement_matrix(graph, ["lamp"])
+    assert "service" in matrix.row_channel_ids
+    assert "service_shadow" not in matrix.row_channel_ids
+    assert matrix.channel_aliases["service"] == ("service_shadow",)
+
+    # Canonical present: canonical wins.
+    prepared = matrix.prepare({"service": 900.0, "service_shadow": 940.0, "branch": 40.0})
+    assert prepared.y[matrix.row_index("service")] == pytest.approx(900.0)
+    # Canonical missing: the alias measures the same wire, so use it.
+    fallback = matrix.prepare({"service_shadow": 940.0, "branch": 40.0})
+    assert fallback.mask[matrix.row_index("service")]
+    assert fallback.y[matrix.row_index("service")] == pytest.approx(940.0)
+    assert any(
+        note.startswith("alias_fallback:") for note in matrix.row_notes["service"]
+    )
+
+
+def test_a_nested_main_is_not_subtracted_from_its_outer_main():
+    """A main row already contains every device below it, sub feeds included."""
+    topo = Topology(
+        channels=[
+            _ch("service", CTType.MAIN, phase=Phase.BOTH),
+            _ch("panel", CTType.MAIN, phase=Phase.BOTH, parent="service"),
+            _ch("branch", parent="panel"),
+        ],
+        devices=[
+            DeviceTopology(device_id="lamp", branch_ct_ids=["branch"], phase=Phase.L1),
+        ],
+        status=TopologyStatus.CONFIRMED,
+    )
+    graph = build_graph(topo)
+    matrix = build_measurement_matrix(graph, ["lamp"])
+    # The service row carries the lamp...
+    assert matrix.A[matrix.row_index("service"), matrix.col_index("lamp")] > 0.0
+    # ...and therefore must not subtract the panel that measures it too.
+    assert "panel" not in matrix.nested_children.get("service", ())
+    # The branch row genuinely omits the lamp, so the panel has nothing to
+    # subtract for it either: only *child rows* whose devices are missing from
+    # the parent qualify.
+    prepared = matrix.prepare({"service": 900.0, "panel": 500.0, "branch": 100.0})
+    assert prepared.y[matrix.row_index("service")] == pytest.approx(900.0)
+
+
+# --------------------------------------------------------------------------- #
+# W3: the solver must not hang on duplicated rows
+# --------------------------------------------------------------------------- #
+def test_duplicate_rows_from_a_partnerless_pair_are_merged():
+    """The exact 8x13 system from the real capture that used to hang forever.
+
+    Two ``paired_ct_id`` channels whose ``device_id`` is ``None`` produce
+    identical coefficient rows.  scipy's trust-region line search then halves
+    ``alpha`` forever on a numerically-zero step.  The solver must merge them,
+    report the merge, and return.
+    """
+    from pathlib import Path
+
+    npz = Path(
+        "/private/var/folders/wy/06f64nbx6kz8z88km48c3b3h0000gn/T/opencode/hang_system.npz"
+    )
+    if not npz.exists():  # pragma: no cover - fixture is local-only
+        pytest.skip("saved hanging system is not present")
+    saved = np.load(npz)
+    A, y, hi = saved["A"], saved["y"], saved["hi"]
+    result = solve_constrained_nnls(
+        A, y, device_ids=[f"d{i}" for i in range(A.shape[1])], upper=hi
+    )
+    assert result.converged is True
+    assert result.merged_rows == {3: 2, 5: 4}
+    assert np.all(np.isfinite(result.x))
+    assert np.all(result.x >= 0.0)
+
+
+def test_solver_reports_duplicate_merges_in_a_tiny_system():
+    A = np.array([[1.0, 1.0], [1.0, 1.0], [1.0, 0.0]])
+    y = np.array([300.0, 340.0, 120.0])
+    result = solve_constrained_nnls(A, y, device_ids=["a", "b"])
+    # Rows 0 and 1 are identical: one equation with the combined weight.
+    assert result.merged_rows == {1: 0}
+    assert result.converged is True
+    assert result.x == pytest.approx([120.0, 200.0], abs=1.0)
+
+
+def test_solver_drops_zero_rows_and_reports_it():
+    A = np.array([[0.0, 0.0], [1.0, 0.0]])
+    y = np.array([999.0, 250.0])
+    result = solve_constrained_nnls(A, y, device_ids=["a", "b"])
+    assert result.dropped_rows == [0]
+    assert result.x == pytest.approx([250.0, 0.0])
+
+
+def test_solver_with_no_supported_columns_converges_to_zero():
+    A = np.zeros((2, 3))
+    y = np.array([100.0, 200.0])
+    result = solve_constrained_nnls(A, y, device_ids=["a", "b", "c"])
+    assert result.converged is True
+    assert np.all(result.x == 0.0)

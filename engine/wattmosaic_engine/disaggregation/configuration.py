@@ -130,6 +130,12 @@ class EffectiveConfig:
     dimming_curve: tuple[tuple[float, float], ...] = ()
     #: True when the user asserted a shared circuit we cannot fully separate.
     shared_unmodelled: bool = False
+    #: True when this device is the only topology device on its attribution
+    #: rows, yet those rows are **not** a ``DEDICATED_DEVICE`` CT.  A sole
+    #: occupant of a branch CT looks dedicated in fact, but the Level-1 direct
+    #: path only ever reads a dedicated channel, so the label must stay
+    #: ``shared`` and this flag records why the direct path is not available.
+    sole_occupant: bool = False
     #: Reasons surfaced in ``InferenceResult.tier_reasons``.
     notes: tuple[str, ...] = ()
 
@@ -158,10 +164,18 @@ def derive_monitoring(
 ) -> MonitoringLevel:
     """Monitoring level, honouring an explicit declaration over the CT graph.
 
-    ``CTType`` alone is not enough: several appliances in a typical installation
-    sit on *branch* CTs that only they occupy.  Calling those ``shared`` would
-    wrongly demote a correct dedicated measurement.  What matters is whether
-    another topology device shares the same attribution rows.
+    ``DEDICATED`` means one thing and one thing only: the topology graph yields
+    a **``DEDICATED_DEVICE`` channel** for the device (``dedicated_channel_for``).
+    That is the same gate the Level-1 direct path uses, so the label and the
+    capability cannot disagree.
+
+    A device that is the *sole occupant* of a branch CT used to be labelled
+    ``DEDICATED`` as well.  It is monitored alone in practice, but the direct
+    path can never produce a reading for it, so the label overstated the
+    evidence and fed the tiers/confidence with a capability the engine did not
+    have.  Such a device stays ``SHARED`` and is flagged separately
+    (``EffectiveConfig.sole_occupant``), which narrows a label without changing
+    any watts.
     """
     if declared != MonitoringLevel.UNKNOWN:
         return declared
@@ -171,17 +185,38 @@ def derive_monitoring(
         return MonitoringLevel.UNKNOWN
     if graph.dedicated_channel_for(device.device_id) is not None:
         return MonitoringLevel.DEDICATED
-    topology = topology if topology is not None else graph.topology
     rows = set(graph.attribution_ct_ids(device.device_id))
     if not rows:
         return MonitoringLevel.HOME_TOTAL_ONLY
+    # Attribution rows without a dedicated channel are a shared/branch circuit
+    # as far as measurement capability goes — including the sole-occupant case.
+    return MonitoringLevel.SHARED
+
+
+def is_sole_occupant(
+    device: DeviceTopology | None,
+    graph: TopologyGraph | None,
+    *,
+    topology: Topology | None = None,
+) -> bool:
+    """True when no other topology device shares this device's attribution rows.
+
+    Purely informational: it explains why a device is labelled ``SHARED`` even
+    though nothing else draws on its circuit, and why the direct path still
+    produced 0 W.  It never grants a measurement.
+    """
+    if device is None or graph is None or graph.dedicated_channel_for(device.device_id) is not None:
+        return False
+    topology = topology if topology is not None else graph.topology
+    rows = set(graph.attribution_ct_ids(device.device_id))
+    if not rows:
+        return False
     for other in topology.devices:
         if other.device_id == device.device_id:
             continue
-        other_rows = set(other.dedicated_ct_ids) | set(other.branch_ct_ids)
-        if rows & other_rows:
-            return MonitoringLevel.SHARED
-    return MonitoringLevel.DEDICATED
+        if rows & (set(other.dedicated_ct_ids) | set(other.branch_ct_ids)):
+            return False
+    return True
 
 
 def _declared_light_watts(config: DeviceConfiguration) -> float | None:
@@ -377,7 +412,17 @@ def effective_config(
             notes.append("no_confirmed_controller_watt_map")
 
     shared_unmodelled = False
-    if monitoring == MonitoringLevel.SHARED:
+    # A device that used to be labelled ``DEDICATED`` only because it was the
+    # sole occupant of a *branch* CT is now ``SHARED``.  That relabel must not
+    # change the solver: the row was already treated as fully attributable
+    # (no unknown slack) when the label was ``DEDICATED``, and it must stay
+    # that way.  Only the *label* narrows; the watts are untouched.
+    derived_dedicated_downgrade = (
+        declared == MonitoringLevel.UNKNOWN
+        and monitoring == MonitoringLevel.SHARED
+        and is_sole_occupant(device, graph, topology=topology)
+    )
+    if monitoring == MonitoringLevel.SHARED and not derived_dedicated_downgrade:
         observed = set(declared_cts)
         if not observed and device is not None:
             observed = set(device.dedicated_ct_ids) | set(device.branch_ct_ids)
@@ -422,6 +467,10 @@ def effective_config(
     if shared_unmodelled:
         notes.append("shared_circuit_without_modelled_siblings")
 
+    sole_occupant = is_sole_occupant(device, graph, topology=topology)
+    if derived_dedicated_downgrade:
+        notes.append("sole_occupant_branch_ct_not_direct_measurable")
+
     return EffectiveConfig(
         device_id=device_id,
         monitoring=monitoring,
@@ -436,6 +485,7 @@ def effective_config(
         expected_standby_w=expected_standby,
         expected_tolerance_w=tolerance,
         shared_unmodelled=shared_unmodelled,
+        sole_occupant=sole_occupant,
         notes=tuple(notes),
         dimming_curve=_measured_curve(config),
     )
@@ -854,5 +904,6 @@ __all__ = [
     "has_ct_type",
     "interpolate_curve",
     "is_mode_only",
+    "is_sole_occupant",
     "project_configuration",
 ]

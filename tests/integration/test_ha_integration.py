@@ -766,6 +766,57 @@ class TestStaleness:
         assert values["available"] is True
         assert values["reconciliation_available"] is False
 
+    def test_topology_confirmed_is_coerced_and_surfaced(self) -> None:
+        """Contract 1.3.0's ``topology_confirmed`` must reach the summary sensor.
+
+        The engine reports whether the balance came from a user-confirmed
+        topology or a ``candidate`` hypothesis.  If the integration drops the
+        field on coercion, a dashboard cannot distinguish a measured balance
+        from one computed over a guessed panel tree -- which is exactly the
+        failure that made a double-counted 2.14x total look trustworthy.
+        """
+        confirmed = util.coerce_snapshot(
+            {
+                "timestamp": NOW.isoformat(),
+                "reconciliation": {
+                    "main_power_w": 1247.9,
+                    "quality_status": "good",
+                    "topology_confirmed": True,
+                },
+            }
+        )
+        assert confirmed["reconciliation"]["topology_confirmed"] is True
+        values = entity_values.global_values(
+            confirmed, {}, engine_available=True, now=NOW, stale_after=120
+        )
+        assert values["topology_confirmed"] is True
+
+    def test_topology_confirmed_absent_reads_as_not_confirmed(self) -> None:
+        """An older engine omits the key; absence must never read as ``True``."""
+        snapshot = util.coerce_snapshot(
+            {
+                "timestamp": NOW.isoformat(),
+                "reconciliation": {"main_power_w": 10.0, "quality_status": "good"},
+            }
+        )
+        assert snapshot["reconciliation"]["topology_confirmed"] is False
+        values = entity_values.global_values(
+            snapshot, {}, engine_available=True, now=NOW, stale_after=120
+        )
+        assert values["topology_confirmed"] is False
+
+    def test_integration_contract_version_matches_the_engine(self) -> None:
+        """The consumer's expectation must not lag the engine's contract.
+
+        ``EngineClient._check_contract`` only refuses a *major*-version
+        difference, so a stale minor here does not fail loudly -- it silently
+        hides every field the newer contract added (``topology_confirmed`` for
+        1.3.0).  The two constants must move together.
+        """
+        from wattmosaic_engine import contracts as engine_contracts
+
+        assert const.CONTRACT_VERSION == engine_contracts.CONTRACT_VERSION
+
 
 # --------------------------------------------------------------------------- #
 # Flags read back from stored options
@@ -2740,3 +2791,99 @@ class TestPlacementRequestParameters:
         assert flow.placement_request_parameters(
             {"auto_placement": False}, {"apply": True}
         ) == {"apply": True}
+
+
+# --------------------------------------------------------------------------- #
+# Topology replay: the stored declaration survives a database reset
+# --------------------------------------------------------------------------- #
+
+
+class TestTopologyReplayAgainstTheRealClient:
+    """The replay through the real ``EngineClient`` + stub session.
+
+    ``test_topology_push.py`` pins the decision logic against a recording fake.
+    This class proves the *same* semantics hold through the production HTTP
+    client, i.e. that the request bodies and the confirm order are what the
+    engine contract expects.
+    """
+
+    ASSIGNMENTS = {
+        "main_l1": {"role": "main", "phase": "l1"},
+        "panel_l1": {"role": "main", "phase": "l1", "alias_of_ct_id": "main_l1"},
+        "sub_l1": {"role": "main", "phase": "l1", "parent_ct_id": "main_l1"},
+    }
+
+    def _topology(self) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "status": "candidate",
+            "channels": [
+                {"ct_id": "main_l1", "entity_id": "sensor.m", "name": "Main",
+                 "ct_type": "main", "phase": "l1", "polarity": "normal"},
+                {"ct_id": "panel_l1", "entity_id": "sensor.p", "name": "Panel",
+                 "ct_type": "main", "phase": "l1", "polarity": "normal"},
+                {"ct_id": "sub_l1", "entity_id": "sensor.s", "name": "Sub",
+                 "ct_type": "main", "phase": "l1", "polarity": "normal"},
+            ],
+            "devices": [{"device_id": "d", "name": "D"}],
+        }
+
+    def _client(self, responses: list[Any]) -> tuple[api.EngineClient, StubSession]:
+        session = StubSession(responses)
+        client = api.EngineClient(
+            session,
+            "http://engine.local:8787",
+            api_token="token-abc",
+            sleep=TestApiClient._no_sleep,
+        )
+        return client, session
+
+    def test_replay_puts_then_confirms(self) -> None:
+        updated = self._topology()
+        updated["version"] = 2
+        client, session = self._client(
+            [json_response(self._topology()), json_response(updated), json_response(updated)]
+        )
+        state = run(
+            flow.async_replay_topology(
+                client,
+                self.ASSIGNMENTS,
+                confirmed=True,
+                stored_version=5,
+                observed_version=1,
+            )
+        )
+        assert state.pushed is True
+        methods = [call["method"] for call in session.calls]
+        assert methods == ["GET", "PUT", "POST"]
+        assert session.calls[1]["url"].endswith("/api/v1/topology")
+        assert session.calls[2]["url"].endswith("/api/v1/topology/confirm")
+        assert session.calls[2]["json"] == {"version": 2}
+
+        body = session.calls[1]["json"]
+        by_id = {channel["ct_id"]: channel for channel in body["channels"]}
+        assert by_id["panel_l1"]["alias_of_ct_id"] == "main_l1"
+        assert by_id["sub_l1"]["parent_ct_id"] == "main_l1"
+        assert body["status"] == "confirmed"
+
+    def test_an_unreachable_engine_is_an_error_not_an_exception(self) -> None:
+        client, _ = self._client([api.EngineUnavailable("engine unreachable")])
+        state = run(
+            flow.async_replay_topology(
+                client,
+                self.ASSIGNMENTS,
+                confirmed=True,
+                stored_version=5,
+                observed_version=1,
+            )
+        )
+        assert state.pushed is False
+        assert state.error
+        assert state.attempts == 1
+
+    def test_the_engine_never_sees_the_api_token_in_the_audit_text(self) -> None:
+        state = flow.TopologyPushState(
+            error=util.sanitize_text("failed with X-API-Token: token-abc")
+        )
+        view = state.as_diagnostics()
+        assert "token-abc" not in json.dumps(view)

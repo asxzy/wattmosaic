@@ -1,6 +1,6 @@
 # WattMosaic Architecture
 
-**Contract version:** 1.2.0 · **Engine version:** reported at runtime as
+**Contract version:** 1.3.0 · **Engine version:** reported at runtime as
 `wattmosaic_engine.__version__` (development builds carry `X.Y.Z-dev.N`)
 
 WattMosaic is three cooperating pieces with one narrow, versioned boundary

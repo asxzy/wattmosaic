@@ -83,6 +83,9 @@ async def async_get_config_entry_diagnostics(
         "snapshot_age_stale": coordinator.summary_stale(),
         "device_count": len(coordinator.data.results) if coordinator.data else 0,
         "last_error": coordinator.data.last_error if coordinator.data else None,
+        # Audit trail of the topology replay: "pushed v5 at 12:03, engine now
+        # v5" is answerable from a diagnostics download alone.
+        **coordinator.topology_push_diagnostics,
     }
     if coordinator.data and coordinator.data.last_error:
         diagnostics["last_errors"].append(coordinator.data.last_error)

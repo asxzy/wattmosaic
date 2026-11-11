@@ -1,6 +1,6 @@
 # Interface Contracts (authoritative)
 
-**Contract version: `1.2.0`** — mirrors `engine/wattmosaic_engine/contracts.py`.
+**Contract version: `1.3.0`** — mirrors `engine/wattmosaic_engine/contracts.py`.
 
 `contracts.py` is the single source of truth. JSON schemas are exported from it to
 `data/schemas/` by `tools/dev/export_schemas.py`. No component may define a
@@ -138,6 +138,9 @@ Guarantees:
 - `unknown` sources carry `power_w` for residual accounting only in
   `Reconciliation.unknown_residual_w`, never as a fabricated device value.
 - Sum of attributed power is never forced to equal main power.
+- `Reconciliation.topology_confirmed` (contract 1.3.0) states whether the
+  topology behind the balance is user-confirmed or still a `candidate`
+  hypothesis. It is additive; older readers ignore it.
 
 ### 3.5 Learning (`learning/`)
 

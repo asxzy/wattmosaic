@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from wattmosaic_engine.contracts import CTType, Phase
+from wattmosaic_engine.contracts import Phase
 from wattmosaic_engine.electrical.topology import TopologyGraph
 
 DEFAULT_NOISE_FLOOR_W = 1.0
@@ -96,10 +96,14 @@ class MeasurementMatrix:
     row_notes: dict[str, list[str]] = field(default_factory=dict)
     nested_children: dict[str, tuple[str, ...]] = field(default_factory=dict)
     channel_polarity: dict[str, str] = field(default_factory=dict)
-    #: Per-channel circuit multiplier (default 1.0).  Applied once, inside
-    #: :meth:`_reading_w`, so every row of the fit sees a consistently scaled
-    #: measurement and the multiplier is never applied twice.
+    # Per-channel circuit multiplier (default 1.0).  Applied once, inside
+    # :meth:`_reading_w`, so every row of the fit sees a consistently scaled
+    # measurement and the multiplier is never applied twice.
     channel_multiplier: dict[str, float] = field(default_factory=dict)
+    #: Non-canonical channels that measure a canonical row's conductors.  Their
+    #: readings are a fallback target when the canonical channel has none, and
+    #: they never get a row of their own (that would be the same wire twice).
+    channel_aliases: dict[str, tuple[str, ...]] = field(default_factory=dict)
     unobserved_devices: list[str] = field(default_factory=list)
     topology_version: int = 1
     phase_split_l1: float = 0.5
@@ -180,6 +184,32 @@ class MeasurementMatrix:
     def _channel_multiplier(self, channel_id: str) -> float:
         return float(self.channel_multiplier.get(channel_id, 1.0) or 1.0)
 
+    def _value_with_aliases(
+        self,
+        readings: Mapping[str, object],
+        channel_id: str,
+        extra_target_map: Mapping[str, float],
+    ) -> float | None:
+        """The row target for ``channel_id``, falling back to its aliases.
+
+        An alias measures the same conductors as the canonical channel, so its
+        value is a valid substitute when the canonical sensor is missing.  It is
+        only ever a *fallback*: the canonical reading wins whenever present, so
+        two sensors on one wire cannot fight over a row.
+        """
+        value = extra_target_map.get(channel_id)
+        if value is None:
+            value = self._reading_w(readings, channel_id)
+        if value is not None:
+            return value
+        for alias in self.channel_aliases.get(channel_id, ()):
+            value = extra_target_map.get(alias)
+            if value is None:
+                value = self._reading_w(readings, alias)
+            if value is not None:
+                return value
+        return None
+
     def prepare(
         self,
         readings: Mapping[str, object],
@@ -198,9 +228,7 @@ class MeasurementMatrix:
         excluded: dict[str, str] = {}
         extra_target_map = extra_target_map or {}
         for i, cid in enumerate(self.row_channel_ids):
-            value = extra_target_map.get(cid)
-            if value is None:
-                value = self._reading_w(readings, cid)
+            value = self._value_with_aliases(readings, cid, extra_target_map)
             if value is None:
                 mask[i] = False
                 excluded[cid] = "missing_measurement"
@@ -209,9 +237,7 @@ class MeasurementMatrix:
             subtotal = 0.0
             child_missing: list[str] = []
             for child in children:
-                child_value = extra_target_map.get(child)
-                if child_value is None:
-                    child_value = self._reading_w(readings, child)
+                child_value = self._value_with_aliases(readings, child, extra_target_map)
                 if child_value is None:
                     child_missing.append(child)
                 else:
@@ -224,6 +250,10 @@ class MeasurementMatrix:
             self.row_notes.setdefault(cid, [])
             if children:
                 note = "subtracts_nested_cts:" + ",".join(children)
+                if note not in self.row_notes[cid]:
+                    self.row_notes[cid].append(note)
+            if cid in self.channel_aliases:
+                note = "alias_fallback:" + ",".join(self.channel_aliases[cid])
                 if note not in self.row_notes[cid]:
                     self.row_notes[cid].append(note)
         return PreparedSystem(
@@ -263,10 +293,27 @@ def build_measurement_matrix(
         if any(did in _descendant_devices(graph, main.ct_id) for did in devices):
             informative.add(main.ct_id)
 
+    # Alias resolution happens *before* rows are built.  An alias is the same
+    # wire measured by a second CT: giving it its own row would put two copies
+    # of one conductor in the fit, which is both a double count and -- when the
+    # alias has different coefficients -- an inconsistent system.  The canonical
+    # channel keeps the row; its aliases become fallback targets.  An alias is
+    # therefore informative exactly when the channel it shadows is.
+    for alias in graph.alias_channels():
+        if graph.canonical_channel_id(alias.ct_id) in informative:
+            informative.add(alias.ct_id)
+    aliases: dict[str, list[str]] = {}
+    for cid in sorted(informative):
+        canonical = graph.canonical_channel_id(cid)
+        if canonical != cid:
+            aliases.setdefault(canonical, []).append(cid)
+
     rows = [
         cid
         for cid in graph.channel_ids
-        if cid in informative and graph.is_enabled(cid)
+        if cid in informative
+        and graph.is_enabled(cid)
+        and graph.canonical_channel_id(cid) == cid
     ]
     row_index = {cid: i for i, cid in enumerate(rows)}
     A = np.zeros((len(rows), n), dtype=float)
@@ -311,16 +358,27 @@ def build_measurement_matrix(
             A[row_index[main], j] += graph.phase_coefficient(did, phase)
             _note(row_notes, main, "containment_row")
 
-    # Nested branch CT modelling: a parent branch row subtracts its direct
-    # enabled children that are measured as rows.
+    # Nested CT modelling: a container row subtracts a direct enabled child CT
+    # when the parent row does *not* itself carry the child's devices.
+    #
+    # The rule is stated in terms of coefficients rather than channel type,
+    # because type is not what makes subtraction correct.  A branch row holds
+    # only the devices whose most specific attribution is that branch, so a
+    # child CT's power is genuinely missing from it and must be subtracted.  A
+    # main row, by contrast, contains every device below it -- including the
+    # devices of its nested sub feeds -- so subtracting the child there would
+    # remove power the row still models.  Testing the coefficients keeps both
+    # cases right and stops a future container type from silently double
+    # counting.
     for cid in rows:
-        ch = graph.channels[cid]
-        if ch.ct_type != CTType.BRANCH:
-            continue
         child_rows = tuple(
             child
             for child in graph.children.get(cid, ())
-            if child in row_index and graph.is_enabled(child)
+            if child in row_index
+            and graph.is_enabled(child)
+            and _row_excludes_subtree(
+                A, row_index, {k: tuple(v) for k, v in graph.children.items()}, cid, child
+            )
         )
         if child_rows:
             nested[cid] = child_rows
@@ -341,11 +399,58 @@ def build_measurement_matrix(
             cid: str(graph.channels[cid].polarity) for cid in rows
         },
         channel_multiplier={cid: graph.multiplier_for(cid) for cid in rows},
+        channel_aliases={cid: tuple(members) for cid, members in aliases.items()},
         unobserved_devices=[d for d in devices if np.allclose(A[:, dev_index[d]], 0.0)],
         topology_version=graph.topology.version,
         phase_split_l1=graph.phase_split_l1,
     )
     return mm
+
+
+def _subtree_device_cols(
+    A: np.ndarray,
+    row_index: Mapping[str, int],
+    child: str,
+    children_of: Mapping[str, Sequence[str]],
+) -> set[int]:
+    """Device columns modelled by ``child``'s row and every row beneath it."""
+    cols: set[int] = set()
+    stack = [child]
+    seen: set[str] = set()
+    while stack:
+        cid = stack.pop()
+        if cid in seen or cid not in row_index:
+            continue
+        seen.add(cid)
+        cols.update(int(j) for j in np.flatnonzero(np.abs(A[row_index[cid]]) > 0.0))
+        stack.extend(children_of.get(cid, ()))
+    return cols
+
+
+def _row_excludes_subtree(
+    A: np.ndarray,
+    row_index: Mapping[str, int],
+    children_of: Mapping[str, Sequence[str]],
+    parent: str,
+    child: str,
+) -> bool:
+    """True when ``parent``'s row does not model the devices under ``child``.
+
+    A parent row that already carries those devices must not also subtract the
+    CT that measures them: the device would be counted twice, once positively
+    and once negatively.  A parent row that carries *none* of them is a
+    branch-like row whose measured value genuinely omits the child's circuit, so
+    the child's reading must be subtracted.
+
+    Stated as a coefficient test rather than a ``ct_type`` test, because type is
+    not what makes subtraction correct: a ``branch`` row holds only the devices
+    whose most specific attribution is that branch, while a ``main`` row
+    contains every device below it -- including those of nested sub feeds.
+    """
+    cols = _subtree_device_cols(A, row_index, child, children_of)
+    if not cols:
+        return True
+    return not np.any(np.abs(A[row_index[parent], sorted(cols)]) > 0.0)
 
 
 def _note(notes: dict[str, list[str]], cid: str, note: str) -> None:
@@ -365,7 +470,8 @@ def _attribution_coefficient(
 
     For a symmetric double-pole pair of branch/dedicated CTs each leg carries
     its own share of the total.  For any other CT the standard phase
-    coefficient applies.
+    coefficient applies, with ``solo=True``: this row is the device's own
+    measurement, so an undeclared device phase must not halve it.
     """
     ch = graph.channels[ct_id]
     if ch.paired_ct_id and len(attribution) >= 2 and graph.device(device_id) is not None:
@@ -378,7 +484,7 @@ def _attribution_coefficient(
             if row_phase == Phase.L2:
                 return 1.0 - graph.phase_split_l1
             return 0.0
-    return graph.phase_coefficient(device_id, row_phase)
+    return graph.phase_coefficient(device_id, row_phase, solo=True)
 
 
 def _descendant_devices(graph: TopologyGraph, ct_id: str) -> set[str]:

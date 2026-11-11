@@ -58,6 +58,15 @@ class SimulatorConfig:
     outage_windows: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
     include_unknown_loads: bool = True
     simultaneous_event_batches: int = 6
+    #: Per-device lag (seconds) applied to the Home Assistant *state* timestamp.
+    #: The CT sample path and the device-state path are independent in HA: a
+    #: `binary_sensor` can be reported later than the wattage it explains, so
+    #: `last_updated` is not the instant the load physically changed.  A lag
+    #: here reproduces that: the state stream still *transitions* at the physical
+    #: instant, but the reported ``last_updated`` is that instant minus the lag.
+    #: Used to prove transition attribution does not depend on the two clocks
+    #: agreeing.
+    state_lag_s: dict[str, float] = field(default_factory=dict)
 
     @property
     def horizon_s(self) -> float:
@@ -76,6 +85,7 @@ class SimulatorConfig:
             "channel_quality": {k: v.value for k, v in self.channel_quality.items()},
             "outage_windows": {k: list(v) for k, v in self.outage_windows.items()},
             "include_unknown_loads": self.include_unknown_loads,
+            "state_lag_s": dict(self.state_lag_s),
             "simulator_version": "1.0.0",
             "topology_notes": [],
         }
@@ -320,10 +330,17 @@ class HouseholdScenario:
         states: dict[str, dict[str, Any]] = {}
         for dev in self.devices:
             prof = self.profiles[dev.device_id]
-            state = prof.effective_state(t)
+            # A device-state path with a reported lag is a *delayed view* of the
+            # same physical state machine: at record time ``t`` HA still shows
+            # what was true at ``t - lag``.  Only the state stream is delayed;
+            # the CT samples are not, which is exactly the mismatch this knob
+            # exists to reproduce.
+            lag = float(self.config.state_lag_s.get(dev.device_id, 0.0))
+            observed_at = max(0.0, t - lag)
+            state = prof.effective_state(observed_at)
             if state != self._last_device_state.get(dev.device_id):
                 self._last_device_state[dev.device_id] = state
-                self._last_changed[dev.device_id] = t
+                self._last_changed[dev.device_id] = observed_at
             states[dev.ha_entity_id] = {
                 "entity_id": dev.ha_entity_id,
                 "state": state,
@@ -331,10 +348,10 @@ class HouseholdScenario:
                     "friendly_name": dev.name,
                     "device_class": "power" if dev.sim_type != SimDeviceType.UNKNOWN else None,
                     "unit_of_measurement": "W",
-                    **prof.extra_attributes(t),
+                    **prof.extra_attributes(observed_at),
                 },
                 "last_changed": _iso(self.config.start_time, self._last_changed.get(dev.device_id, 0.0)),
-                "last_updated": _iso(self.config.start_time, t),
+                "last_updated": _iso(self.config.start_time, observed_at),
                 "received_at": _iso(self.config.start_time, t + 0.05),
                 "device_id": dev.device_id,
                 "attributable": dev.metadata.get("attributable", True),

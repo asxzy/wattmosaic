@@ -104,7 +104,7 @@ which survives App updates and is included in HA backups.
 Start the App, then open its **Log** tab. You should see:
 
 ```text
-engine_starting  contract_version=1.2.0
+engine_starting  contract_version=1.3.0
 database_ready   schema_version=<latest>
 ha_connected
 api_listening    host=0.0.0.0 port=8787

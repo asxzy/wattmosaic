@@ -58,8 +58,15 @@ class ErrorStats:
     mean_bias_w: float = 0.0
     max_abs_w: float = 0.0
     relative_error: float = 0.0          # MAPE-like over samples with truth > threshold
-    energy_error_kwh: float = 0.0        # integrated over the evaluation window
+    energy_error_kwh: float = 0.0        # mean(pred - truth) * duration: a coarse estimate
     energy_error_ratio: float = 0.0
+    #: Signed error of the **integrated** prediction against the simulator's own
+    #: ``ground_truth.device_energy_kwh`` curve.  ``energy_error_kwh`` above is
+    #: ``mean(bias) * duration``, which assumes the error is constant in time; on
+    #: a spiky load (a water heater cycling on/off) that is not true and the two
+    #: numbers differ.  Both are kept because they answer different questions.
+    energy_error_kwh_integral: float = 0.0
+    energy_error_ratio_integral: float = 0.0
     sample_count: int = 0
 
     def as_dict(self) -> dict[str, Any]:
@@ -72,7 +79,33 @@ class ErrorStats:
             "relative_error": round(self.relative_error, 4),
             "energy_error_kwh": round(self.energy_error_kwh, 6),
             "energy_error_ratio": round(self.energy_error_ratio, 5),
+            "energy_error_kwh_integral": round(self.energy_error_kwh_integral, 9),
+            "energy_error_ratio_integral": round(self.energy_error_ratio_integral, 6),
         }
+
+
+def trapezoid_energy_kwh(samples: Sequence[tuple[float, float]]) -> float:
+    """Integrate a ``(seconds, watts)`` series to kWh by the trapezoid rule.
+
+    Samples are sorted by time and non-finite values are skipped.  Fewer than
+    two usable samples integrates to ``0.0``: there is no interval to measure.
+
+    The trapezoid rule is what the simulator itself uses to build
+    ``ground_truth.device_energy_kwh``, so an oracle predictor integrates to
+    exactly the simulator's curve.  ``mean(watts) * duration`` does **not**: it
+    is only correct when the prediction error is constant over the window.
+    """
+    usable = sorted(
+        (float(t), float(w))
+        for t, w in samples
+        if math.isfinite(float(t)) and math.isfinite(float(w))
+    )
+    if len(usable) < 2:
+        return 0.0
+    acc = 0.0
+    for (t0, p0), (t1, p1) in zip(usable, usable[1:], strict=False):
+        acc += (p0 + p1) * 0.5 * (t1 - t0)
+    return acc / 3_600_000.0
 
 
 def error_stats(
@@ -80,11 +113,20 @@ def error_stats(
     *,
     duration_s: float = 0.0,
     relative_floor_w: float = 25.0,
+    timed: Sequence[tuple[float, float, float]] | None = None,
+    truth_energy_kwh: float | None = None,
 ) -> ErrorStats:
     """Error metrics from ``(truth, predicted)`` pairs.
 
     ``relative_error`` ignores near-zero truth samples (below ``relative_floor_w``)
     because relative error is meaningless when dividing by standby noise.
+
+    ``timed`` optionally supplies ``(seconds, truth_w, predicted_w)`` triples so
+    the *integrated* energy error can be computed properly.  ``duration_s``
+    alone can only produce the coarse ``mean(bias) * duration`` estimate; see
+    :attr:`ErrorStats.energy_error_kwh_integral`.  ``truth_energy_kwh`` lets the
+    caller pass the simulator's own integrated truth curve; when omitted the
+    integrated truth is recomputed from ``timed``.
     """
     n = len(pairs)
     if n == 0:
@@ -96,9 +138,20 @@ def error_stats(
     energy_err = 0.0
     truth_energy = 0.0
     if duration_s > 0:
-        # kWh from mean W over the window.
+        # kWh from mean W over the window.  Retained for backward compatibility:
+        # it is exact only when the error is constant across the window.
         energy_err = (sum(signed) / n) * duration_s / 3_600_000.0
         truth_energy = (sum(t for t, _ in pairs) / n) * duration_s / 3_600_000.0
+    integral_err = 0.0
+    integral_truth = 0.0
+    if timed:
+        integral_truth = (
+            float(truth_energy_kwh)
+            if truth_energy_kwh is not None
+            else trapezoid_energy_kwh([(t, tr) for t, tr, _ in timed])
+        )
+        integrated_pred = trapezoid_energy_kwh([(t, p) for t, _, p in timed])
+        integral_err = integrated_pred - integral_truth
     return ErrorStats(
         n=n,
         mae_w=sum(abs_err) / n,
@@ -108,6 +161,10 @@ def error_stats(
         relative_error=(sum(rel) / len(rel)) if rel else 0.0,
         energy_error_kwh=energy_err,
         energy_error_ratio=(abs(energy_err) / truth_energy) if truth_energy else 0.0,
+        energy_error_kwh_integral=integral_err,
+        energy_error_ratio_integral=(
+            abs(integral_err) / integral_truth if integral_truth else 0.0
+        ),
         sample_count=n,
     )
 
@@ -311,10 +368,16 @@ class _Acc:
     truth: list[float] = field(default_factory=list)
     pred: list[float] = field(default_factory=list)
     det: DetectionStats = field(default_factory=DetectionStats)
+    #: ``(seconds, truth_w, predicted_w)`` for the same samples, used by the
+    #: integral energy metric.  Kept separately so the per-sample lists above
+    #: stay in the order the records arrived.
+    timed: list[tuple[float, float, float]] = field(default_factory=list)
 
-    def add(self, truth: float, pred: float, threshold: float) -> None:
+    def add(self, truth: float, pred: float, threshold: float, *, at_s: float | None = None) -> None:
         self.truth.append(truth)
         self.pred.append(pred)
+        if at_s is not None and math.isfinite(at_s):
+            self.timed.append((at_s, truth, pred))
         truth_on = truth >= threshold
         pred_on = pred >= threshold
         if truth_on and pred_on:
@@ -390,6 +453,10 @@ def evaluate(
     prev_ts: datetime | None = None
     device_types: dict[str, str] = {}
     scenario_meta: dict[str, Any] = {}
+    #: Per-device simulated energy curve, from the *last* record.  The simulator
+    #: integrates its own truth, so this is the reference the integrated
+    #: prediction is compared against.
+    truth_energy_curve: dict[str, float] = {}
 
     for rec in records:
         rec_n += 1
@@ -398,10 +465,13 @@ def evaluate(
         truth_devices = gt["devices"]
         main_truth = float(gt.get("main_total_w", 0.0))
         unmetered_truth = float(gt.get("unmetered_w", 0.0))
+        truth_energy_curve = gt.get("device_energy_kwh") or truth_energy_curve
         ts = rec.get("timestamp")
+        at_s: float | None = None
         if isinstance(ts, str):
             try:
                 cur = datetime.fromisoformat(ts)
+                at_s = cur.timestamp()
                 if prev_ts is not None:
                     intervals.append((cur - prev_ts).total_seconds())
                 prev_ts = cur
@@ -434,12 +504,12 @@ def evaluate(
             pred_p = float(norm["power_w"]) if norm else 0.0
             if norm is not None and norm["confidence"] is not None and pred_p < 0:
                 pred_p = 0.0
-            acc_device[dev_id].add(truth_p, pred_p, on_threshold_w)
+            acc_device[dev_id].add(truth_p, pred_p, on_threshold_w, at_s=at_s)
             source = norm["source"] if norm else "unknown"
-            acc_source[source].add(truth_p, pred_p, on_threshold_w)
-            acc_type[dev_type].add(truth_p, pred_p, on_threshold_w)
+            acc_source[source].add(truth_p, pred_p, on_threshold_w, at_s=at_s)
+            acc_type[dev_type].add(truth_p, pred_p, on_threshold_w, at_s=at_s)
             conc = str(int(gt.get("concurrency", 0)))
-            acc_conc[conc].add(truth_p, pred_p, on_threshold_w)
+            acc_conc[conc].add(truth_p, pred_p, on_threshold_w, at_s=at_s)
 
         # -- data-quality stratum (per device, own supporting channels) --- #
         for dev_id, tinfo in truth_devices.items():
@@ -453,7 +523,7 @@ def evaluate(
             qkey = _worst_quality(own) if own else default_q
             norm = pred_norm.get(dev_id)
             pred_p = float(norm["power_w"]) if norm else 0.0
-            acc_quality[qkey].add(float(tinfo.get("power_w", 0.0)), pred_p, on_threshold_w)
+            acc_quality[qkey].add(float(tinfo.get("power_w", 0.0)), pred_p, on_threshold_w, at_s=at_s)
 
         # -- coverage / attribution -------------------------------------- #
         attributed = sum(
@@ -630,6 +700,8 @@ def evaluate(
             list(zip(acc.truth, acc.pred, strict=True)),
             duration_s=(window_s / max(1, len(acc.truth))) * len(acc.truth),
             relative_floor_w=relative_floor_w,
+            timed=acc.timed,
+            truth_energy_kwh=truth_energy_curve.get(dev_id),
         )
         report.per_device_detection[dev_id] = acc.det
     for key, acc in acc_source.items():
@@ -637,19 +709,26 @@ def evaluate(
             list(zip(acc.truth, acc.pred, strict=True)),
             duration_s=(window_s / max(1, len(acc.truth))) * len(acc.truth),
             relative_floor_w=relative_floor_w,
+            timed=acc.timed,
         )
         report.per_source_detection[key] = acc.det
     for key, acc in acc_type.items():
         report.per_device_type[key] = error_stats(
-            list(zip(acc.truth, acc.pred, strict=True)), relative_floor_w=relative_floor_w
+            list(zip(acc.truth, acc.pred, strict=True)),
+            relative_floor_w=relative_floor_w,
+            timed=acc.timed,
         )
     for key, acc in acc_conc.items():
         report.per_concurrency[key] = error_stats(
-            list(zip(acc.truth, acc.pred, strict=True)), relative_floor_w=relative_floor_w
+            list(zip(acc.truth, acc.pred, strict=True)),
+            relative_floor_w=relative_floor_w,
+            timed=acc.timed,
         )
     for key, acc in acc_quality.items():
         report.per_quality[key] = error_stats(
-            list(zip(acc.truth, acc.pred, strict=True)), relative_floor_w=relative_floor_w
+            list(zip(acc.truth, acc.pred, strict=True)),
+            relative_floor_w=relative_floor_w,
+            timed=acc.timed,
         )
 
     n = max(1, rec_n)
@@ -714,7 +793,13 @@ def _measurement_value(latest: Mapping[str, Any], ct_id: str) -> float:
         return 0.0
 
 
-def panel_channel_map(topology: Any) -> dict[str, list[str]]:
+def panel_channel_map(
+    topology: Any,
+    series: Mapping[str, Sequence[float | None]] | None = None,
+    *,
+    containment_min: float = 0.99,
+    reverse_max: float = 0.50,
+) -> dict[str, list[str]]:
     """Split a topology's panel-feed CTs into root and sub-panel feeds.
 
     ``{"root": [...], "sub": [...]}`` for :func:`evaluate`'s ``panel_channels``
@@ -723,23 +808,129 @@ def panel_channel_map(topology: Any) -> dict[str, list[str]]:
     root measurement.  Summing a root channel with a sub channel therefore
     double counts the sub-panel.
 
-    The split is derived structurally, not from names: a root channel is a
-    ``main`` CT with no ancestor; a sub feed is any non-root channel that has
-    children of its own (an intermediate node in the CT tree).  This works for
-    both the simulator's ``HouseholdTopology`` and a contract ``Topology``.
+    Structure comes first, from declared parents:
+
+    * a ``main`` CT with no parent is a root;
+    * a ``main`` CT under another feed is a sub feed (the commonest real shape);
+    * a branch with children that has a main ancestor is a sub feed;
+    * an aliased channel is excluded -- it measures a wire a canonical channel
+      already measures, so it is neither a root nor a distinct sub feed.
+
+    ``series`` supplies the fallback for a **parentless** topology: when no
+    declared parent places a feed, the split is derived from measurements.  A
+    main that is contained by another main at ``containment_min`` of instants
+    while the reverse holds at most ``reverse_max`` of the time is fed by it --
+    one direction only, which is the same evidence
+    ``wattmosaic_engine.electrical.nesting`` uses.  Without this fallback the
+    guard is vacuous on exactly the topology that needs it most: an install whose
+    panel tree has not been declared yet.
+
+    This works for both the simulator's ``HouseholdTopology`` and a contract
+    ``Topology``.
     """
     channels = list(getattr(topology, "channels", []))
     parent_of = {ch.ct_id: getattr(ch, "parent_ct_id", None) for ch in channels}
+    alias_of = {ch.ct_id: getattr(ch, "alias_of_ct_id", None) for ch in channels}
     has_child = {p for p in parent_of.values() if p}
+    ctype_of = {
+        ch.ct_id: getattr(getattr(ch, "ct_type", None), "value", getattr(ch, "ct_type", None))
+        for ch in channels
+    }
+    main_ids = {cid for cid, ctype in ctype_of.items() if ctype == "main"}
+
+    def has_main_ancestor(ct_id: str) -> bool:
+        seen: set[str] = set()
+        current = parent_of.get(ct_id)
+        while current is not None and current not in seen:
+            if current in main_ids:
+                return True
+            seen.add(current)
+            current = parent_of.get(current)
+        return False
+
     root: list[str] = []
     sub: list[str] = []
     for ch in channels:
-        ctype = getattr(getattr(ch, "ct_type", None), "value", getattr(ch, "ct_type", None))
-        if ctype == "main" and parent_of[ch.ct_id] is None:
-            root.append(ch.ct_id)
-        elif ch.ct_id in has_child and ctype != "main":
+        if alias_of.get(ch.ct_id):
+            continue
+        ctype = ctype_of[ch.ct_id]
+        if ctype == "main":
+            if parent_of[ch.ct_id] is None:
+                root.append(ch.ct_id)
+            else:
+                # A main feed under another feed: already counted by its parent.
+                sub.append(ch.ct_id)
+        elif ch.ct_id in has_child and has_main_ancestor(ch.ct_id):
             sub.append(ch.ct_id)
+
+    if not sub and series:
+        root, sub = _split_mains_by_containment(
+            root,
+            series,
+            containment_min=containment_min,
+            reverse_max=reverse_max,
+        )
     return {"root": root, "sub": sub}
+
+
+def _containment(
+    child: Sequence[float | None], parent: Sequence[float | None], tol: float = 30.0
+) -> float | None:
+    """Fraction of instants where ``child <= parent`` (plus tolerance).
+
+    A circuit cannot draw more power than the feed that supplies it, so this is
+    a *necessary* condition for being fed by that parent.  One-directional
+    containment is what separates a panel feed from its parent; mutual
+    containment means two channels watch the same wire.
+    """
+    pairs = [
+        (float(c), float(p))
+        for c, p in zip(child, parent, strict=False)
+        if c is not None and p is not None
+    ]
+    if not pairs:
+        return None
+    inside = sum(1 for c, p in pairs if c <= p + max(0.02 * abs(p), tol))
+    return inside / len(pairs)
+
+
+def _split_mains_by_containment(
+    candidates: Sequence[str],
+    series: Mapping[str, Sequence[float | None]],
+    *,
+    containment_min: float,
+    reverse_max: float,
+) -> tuple[list[str], list[str]]:
+    """Classify mains as root/sub from one-directional containment.
+
+    ``a`` is a sub feed of ``b`` when ``a`` is inside ``b`` almost always and
+    ``b`` is inside ``a`` rarely.  A main fed by *any* other main is removed from
+    the roots; the outermost feeds stay.  When containment is mutual the pair is
+    two CTs on one conductor (an alias), which the caller handles separately, so
+    neither is demoted here.
+    """
+    present = [cid for cid in candidates if series.get(cid)]
+    fed_by: dict[str, str] = {}
+    for child in present:
+        best: tuple[float, str] | None = None
+        for parent in present:
+            if parent == child:
+                continue
+            forward = _containment(series[child], series[parent])
+            backward = _containment(series[parent], series[child])
+            if forward is None or backward is None:
+                continue
+            if (
+                forward >= containment_min
+                and backward <= reverse_max
+                and (best is None or forward > best[0])
+            ):
+                best = (forward, parent)
+        if best is not None:
+            fed_by[child] = best[1]
+    root = [cid for cid in candidates if cid not in fed_by]
+    sub = [cid for cid in candidates if cid in fed_by]
+    return root, sub
 
 
 def _worst_quality(qualities: Sequence[str]) -> str:

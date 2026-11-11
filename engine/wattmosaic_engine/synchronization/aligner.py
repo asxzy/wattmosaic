@@ -269,6 +269,14 @@ class AlignedWindow:
     #: is invisible.  That is why these live on the window rather than being
     #: read out of band.
     state_transitions: tuple[object, ...] = ()
+    #: Free-form per-cycle context from the caller.  The disaggregation engine
+    #: reads ``device_levels`` (a dimmer's measured output fraction) and
+    #: ``channel_noise_floor_w`` (the quality layer's per-channel MAD) back out
+    #: of here.  It lives on the window rather than being passed beside it so a
+    #: window stays a complete description of one observation instant, and so
+    #: ``dataclasses.replace`` -- the only way to attach it, since the window is
+    #: frozen -- can carry it without a second parameter on ``infer``.
+    metadata: Mapping[str, object] = field(default_factory=dict)
 
     # -- convenience accessors ------------------------------------------- #
     def __getitem__(self, channel: str) -> AlignedChannel:

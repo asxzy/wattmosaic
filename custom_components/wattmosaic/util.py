@@ -204,6 +204,33 @@ def published_energy(
     return raw if raw >= 0.0 else 0.0
 
 
+def energy_entity_available(
+    *,
+    engine_available: bool,
+    publishable: bool,
+    last_value: float | None,
+) -> bool:
+    """Whether the cumulative ``energy`` entity may report a state.
+
+    A cumulative total is not a *current measurement*, but it is also not
+    always readable.  It is available exactly when the engine is reachable and
+    there is something to show:
+
+    * a publishable reading (the normal case), **or**
+    * a previously stored total (``last_value``), so a gap in engine data does
+      not blank a meter that has real history behind it.
+
+    With neither, the entity must be ``unavailable`` rather than re-reporting a
+    held number that no longer has any evidence behind it — that is what made a
+    frozen 2.041 kWh meter look live while its power sensor was ``unavailable``.
+    The held number itself is never lost: the sensor exposes it as the
+    ``last_value`` attribute.
+    """
+    if not engine_available:
+        return False
+    return bool(publishable) or last_value is not None
+
+
 def integrate_energy(
     previous: float | None,
     power_w: float | None,
@@ -384,6 +411,11 @@ def coerce_reconciliation(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         "present": present,
         "timestamp": parse_datetime(raw.get("timestamp")),
         "topology_version": as_int(raw.get("topology_version")) or 1,
+        #: Whether the balance came from a user-confirmed topology or a
+        #: ``candidate`` hypothesis (contract 1.3.0, additive).  Coerced through
+        #: ``as_bool`` because an older engine simply omits the key -- absent
+        #: must read as "not confirmed", never as ``True``.
+        "topology_confirmed": as_bool(raw.get("topology_confirmed"), default=False),
         "main_power_w": as_float(raw.get("main_power_w")),
         "l1_power_w": _opt("l1_power_w"),
         "l2_power_w": _opt("l2_power_w"),

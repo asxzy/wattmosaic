@@ -8,7 +8,7 @@ and forwards explicit user commands (learning/model/topology) to the engine.
 - Domain: `wattmosaic`
 - Target Home Assistant: **2026.11.0**
 - IoT class: `local_polling`
-- Contract version: **1.2.0** (`engine/wattmosaic_engine/contracts.py`)
+- Contract version: **1.3.0** (`engine/wattmosaic_engine/contracts.py`)
 - No device control: the integration never calls HA services that actuate
   devices, and the engine has no code path that can.
 
@@ -497,7 +497,7 @@ requirement.
 
 ### 7.3 Contract alignment
 
-The integration consumes contract `1.2.0` and sends
+The integration consumes contract `1.3.0` and sends
 `X-WattMosaic-Contract-Version` on every request. It does **not** define a
 competing schema; response parsing is defensive and degrades to `unknown`
 instead of raising.

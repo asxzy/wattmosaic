@@ -388,12 +388,10 @@ def test_restart_recovery_reproduces_energy_total(engine_db) -> None:
         after = recovered.energy_total("test_device")
         assert after == pytest.approx(before, rel=1e-6)
         # No duplicate rows: replay upserts in place.  ``Database.energy_total``
-        # sums every bucket size and therefore double counts; compare through
-        # the aggregator, which selects one series.
-        assert after == pytest.approx(
-            reopened.energy_total("test_device") / len(recovered.bucket_sizes),
-            rel=1e-6,
-        )
+        # now selects the smallest bucket size (mirroring the repository), so it
+        # agrees with the aggregator instead of summing the same energy once per
+        # resolution.
+        assert after == pytest.approx(reopened.energy_total("test_device"), rel=1e-6)
     finally:
         reopened.close()
 

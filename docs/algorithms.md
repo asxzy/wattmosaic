@@ -47,6 +47,19 @@ one.
 | 3 | `model_estimated` | a validated model gives a value for the current state |
 | 4 | `unknown` | none of the above, or ambiguity |
 
+A `branch` CT is never Level 1, however alone the device is on the circuit
+(ADR-0026): the branch may carry unmodelled load. Level 1 requires a
+`DEDICATED_DEVICE` channel or a declared `dedicated_ct_ids` entry.
+
+Because of that gate a batch can legitimately contain **zero** direct readings --
+on a branch-only install nothing is capable of one. `InferenceBatch.diagnostics`
+therefore carries a verdict (`direct_availability`:
+`measured` / `explained_unavailable` / `no_dedicated_ct` /
+`unexplained_unavailable`, with `direct_capable_count` and
+`unexplained_direct_devices`) so "0 W because every circuit is a branch" is
+distinguishable from "the direct path produced nothing". Only
+`unexplained_unavailable` is a defect. See `docs/electrical_model.md` §7.
+
 Guarantees:
 
 * A direct measurement is never replaced by a model estimate (tested with a
@@ -97,13 +110,84 @@ detected  = |delta| ≥ threshold
 * `1.4826` makes the MAD an unbiased σ estimator for Gaussian noise.
 * `k_mad = 4` by default (a 4σ step).
 * `min_delta_w = 5 W` prevents flagging resolution jitter.
-* At least **2** pre-samples and 1 post-sample are required; a single-sample
-  "baseline" cannot distinguish a step from noise.
+* At least **4** pre-samples and 1 post-sample are required. Two samples give
+  `MAD = 0` for a perfectly flat channel, so the threshold collapses to
+  `min_delta_w` and a single resolution tick reads as an event. When the
+  cadence-derived window is too sparse to hold four samples, the baseline
+  reaches back to `4 · cadence`, still strictly before the candidate.
+* `noise_floor_w` defaults to `None` → the historical **1 W** floor. The quality
+  layer may supply a per-channel measured MAD instead (`noise_floor_w={"ct_bidet":
+  8.0}` or a per-channel value in `detect_step`), which raises the threshold to
+  `k_mad · floor`. `min_delta_w` and the channel resolution stay hard floors, so
+  a floor of `0` never lowers the threshold below them.
 * The split with the largest `|delta| / threshold` wins (latest on ties).
+
+#### Anchored detection (HA transition time)
+
+Each HA state transition carries the real instant it occurred (`occurred_at`,
+`_Transition.at`). `detect_step` and `detect_changes` accept it as `anchor`:
+
+```text
+candidate splits ∈ [anchor − anchor_before_s − anchor_grace_s,
+                    anchor + anchor_after_s + anchor_grace_s]
+score = |delta| / threshold · exp(−|τ − anchor| / cadence)
+```
+
+* The window is a hard restriction. If no candidate split falls inside it the
+  result is `None` (the channel is omitted by `detect_changes`) — there is
+  **no** fallback to the global scan and **no** `previous_snapshot` fallback,
+  because both ignore *when* the step happened and are what allowed a lamp
+  switching on to claim a CT step 47 s away.
+* Proximity is a multiplicative penalty, so the nearest sufficiently large step
+  beats a far larger distant one. A step needs `|delta| ≥ threshold` to be
+  `detected=True` regardless of proximity.
+* `anchor=None` (default) is the unanchored scan, unchanged.
+* Validation: negative or non-finite windows raise `ValueError`; mixing a naive
+  and an aware `anchor`/`at` raises `ValueError`. A consistently naive pair is
+  normalised to aware UTC, matching the rest of the engine.
 
 Detected steps appear in `diagnostics["ct_steps"]`; a two-point fallback using
 the previous inference cycle is marked `source="previous_snapshot"` and is used
-only when it exceeds the threshold.
+only when it exceeds the threshold and no anchor window applies.
+
+##### How `infer` wires the anchor
+
+The unanchored scan answers "did this channel move somewhere in the buffer",
+which is not the same question as "did it move when this device switched". On a
+real capture the two differ by up to a minute (15.7 s CT cadence, 5 s engine
+cadence). So after the unanchored scan:
+
+1. Only transitions that HA timestamped itself are eligible. `_Transition`
+   records `anchored=True` for these; a transition derived from the previous
+   cycle's snapshot carries `window.at` — the time we *looked* — and anchors
+   nothing, because that is not when the device switched.
+2. For each anchored transition, the channels that observe that device
+   (`graph.device_channels`) are rescanned with
+   `anchor=occurred_at`, `anchor_before_s = anchor_after_s = after_s`,
+   `anchor_grace_s = cadence_s`, `cadence_s = cadence_s`.
+3. A channel that produced a step in the anchored rescan takes that step.
+4. A channel whose unanchored step sits outside
+   `[anchor − after_s − cadence, anchor + after_s + cadence]` loses it, and the
+   loss is reported in `diagnostics["anchored_steps_dropped"]` plus the warning
+   `ct_step_outside_transition_anchor`. The movement belongs to some other load,
+   so citing it would credit one device with another circuit's power.
+5. A `ValueError` from a naive/aware mismatch is swallowed per device: the data
+   cannot be anchored, so the unanchored scan stands rather than aborting
+   inference. The device is listed in `diagnostics["anchor_skipped_devices"]`.
+
+A channel shared by several devices survives if *any* of its anchored devices'
+windows contains the step.
+
+##### Unexplained residual with no transition
+
+Ambiguity requires at least two claimants, so `_detect_ambiguity` returns
+nothing when fewer than two devices changed state. That is not the same as
+"solved": a residual that is large while nothing switched is an event the state
+layer never saw (an always-on load cycling, a device with no state entity, a
+manual switch). `_reconcile` records it in
+`diagnostics["unexplained_residual_without_transition"]` with the residual and
+main power, and leaves the power in `unknown_residual_w`. It is a diagnostic,
+never an ambiguity and never a fabricated claimant.
 
 ### 3.5 Supplying history in production (`StepTracker`)
 
@@ -112,12 +196,19 @@ exposes only a point-in-time snapshot: no per-channel history, no cadence, no
 previous snapshot. Without a buffer, step detection would never run outside
 tests.
 
-`StepTracker` is a bounded (default 64 samples/channel), append-only observation
-buffer. Pass it once:
+`StepTracker` is a bounded (default 64 samples/channel) observation buffer. Pass
+it once:
 
 ```python
 engine = DisaggregationEngine(tracker=StepTracker())
 ```
+
+The engine is called every ~5 s while CTs publish a new state every ~15.7 s, so
+a naive buffer is a staircase of duplicated readings. When a new value equals
+the last stored value the tracker refreshes that point's timestamp instead of
+appending, and `cadence_s()` therefore measures the median interval between
+*changes* — the CT's real update cadence — rather than the inference cycle.
+`max_samples` bounds distinct values, so the retained horizon is longer.
 
 Each `infer()` call
 
@@ -126,9 +217,10 @@ Each `infer()` call
 3. records the current readings **after** detection, so a cycle is never used
    to explain itself.
 
-The tracker never rewrites past observations and appends at most one point per
-channel per inference cycle, so a given call sequence produces identical
-results. Repeated state values are not re-recorded as new physical samples.
+The tracker never rewrites a *different* past observation and appends at most one
+point per channel per value change, so a given call sequence produces identical
+results. A repeated reading refreshes the last point's timestamp instead of
+being re-recorded as a new physical sample.
 
 ### 3.4 Device events
 

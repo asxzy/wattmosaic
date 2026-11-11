@@ -11,7 +11,7 @@ from __future__ import annotations
 DOMAIN = "wattmosaic"
 NAME = "WattMosaic"
 MANUFACTURER = "WattMosaic"
-VERSION = "0.2.1-dev.10"
+VERSION = "0.2.1-dev.11"
 
 #: Platforms forwarded by ``async_setup_entry`` (strings, so no HA import).
 PLATFORMS: list[str] = ["sensor", "binary_sensor"]
@@ -22,7 +22,13 @@ API_BASE_PATH = "/api/v1"
 
 #: Contract version mirrored from ``engine/wattmosaic_engine/contracts.py``.
 #: This is a consumer-side expectation, not a competing schema definition.
-CONTRACT_VERSION = "1.2.0"
+#:
+#: It must move with the engine: ``EngineClient._check_contract`` only tolerates
+#: a *major*-version difference by refusing the connection, so a stale minor
+#: here does not fail loudly -- it silently hides the fields a newer contract
+#: added.  ``tests/unit/test_contracts.py`` pins the engine side; this file is
+#: checked against it by ``tests/integration/test_ha_integration.py``.
+CONTRACT_VERSION = "1.3.0"
 
 HEADER_API_TOKEN = "X-API-Token"
 HEADER_CONTRACT_VERSION = "X-WattMosaic-Contract-Version"

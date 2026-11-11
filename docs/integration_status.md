@@ -153,8 +153,10 @@ components ran together. Each now has a regression test that fails if it returns
 
 Every component imports `wattmosaic_engine.contracts`. Verified by grep: no
 module defines a parallel `InferenceResult` / `Measurement` / `Topology` class.
-Contract version `1.2.0` (device taxonomy + evidence tiers); schemas regenerate byte-identically
-(`contract_schema_sync` gate PASS).
+Contract version `1.3.0`
+(`Reconciliation.topology_confirmed`, additive, plus the 1.2.0 device taxonomy +
+evidence tiers); schemas regenerate byte-identically (`contract_schema_sync` gate
+PASS).
 
 ## Known integration gaps
 
