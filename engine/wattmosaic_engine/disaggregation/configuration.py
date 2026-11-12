@@ -624,6 +624,8 @@ def _materialise_device(
     config: DeviceConfiguration,
     channels: Mapping[str, Any],
     topology: Topology | None = None,
+    *,
+    name: str | None = None,
 ) -> DeviceTopology | None:
     """Create the topology row for a device that only a declaration defines.
 
@@ -632,6 +634,13 @@ def _materialise_device(
     ``topology.devices`` -- could never see the configuration at all.  Declaring
     "this switch is on that CT row" is enough to know a device exists there, so
     the row is created here.
+
+    ``name`` is the human display name the caller already knows (for an auto
+    placement, the friendly name the state snapshot reported).  A display name
+    belongs to the topology row, not to ``DeviceConfiguration``, so it is passed
+    in here rather than stored on the declaration.  When no name is known the
+    device id is used: an id is not a fabricated name, and no title-case-from-
+    slug guess is made because a slug is not what the fixture is called.
 
     The CTs are *not* attached yet: the caller projects them through the same
     path as every other device, so provenance, retraction and the
@@ -652,7 +661,7 @@ def _materialise_device(
         return None
     return DeviceTopology(
         device_id=device_id,
-        name=device_id,
+        name=name or device_id,
         phase=_phase_for_cts(cts, channels),
         topology_status=TopologyStatus.CANDIDATE,
         metadata={
@@ -665,12 +674,20 @@ def _materialise_device(
 def project_configuration(
     topology: Topology,
     configurations: DeviceConfigurationSet | Iterable[DeviceConfiguration],
+    *,
+    display_names: Mapping[str, str] | None = None,
 ) -> Topology:
     """Return a copy of ``topology`` with configuration projected into metadata.
 
     The input topology is not mutated: callers persist the result through the
     normal topology path, so a configuration change is a new topology version and
     every consumer sees it atomically.
+
+    ``display_names`` maps ``device_id -> human name`` for devices this call
+    materialises.  A display name belongs to the topology row, so it is supplied
+    by the caller that learned it (an auto placement knows the fixture's friendly
+    name) instead of being stored on the declaration.  An existing device row
+    keeps the name it already has.
     """
     items = (
         configurations.devices
@@ -679,6 +696,7 @@ def project_configuration(
     )
     by_id = {c.device_id: c for c in items}
     channels = topology.channel_map()
+    names = display_names or {}
 
     # A configuration may describe a device that no channel owns -- a fixture
     # behind a shared circuit.  Discovery only ever emits devices from monitor
@@ -690,7 +708,9 @@ def project_configuration(
     for device_id, config in by_id.items():
         if device_id in known:
             continue
-        created = _materialise_device(device_id, config, channels, topology)
+        created = _materialise_device(
+            device_id, config, channels, topology, name=names.get(device_id)
+        )
         if created is not None:
             extra.append(created)
 
@@ -700,6 +720,10 @@ def project_configuration(
         metadata = dict(device.metadata or {})
         dedicated = list(device.dedicated_ct_ids)
         branch = list(device.branch_ct_ids)
+        # A caller that knows the display name for this row supplies it; an
+        # existing row otherwise keeps the name it already carries.  Never derive
+        # a name from the id: the id is a slug, not what the fixture is called.
+        updated_name = names.get(device.device_id) or device.name
         # Retract CTs a previous projection added for this device.  Only ids this
         # module put there are removed, so a CT the user assigned through the
         # channel wizard (``build_topology_update`` mirrors dedicated CTs itself)
@@ -787,6 +811,7 @@ def project_configuration(
                     "metadata": metadata,
                     "dedicated_ct_ids": dedicated,
                     "branch_ct_ids": branch,
+                    "name": updated_name,
                 }
             )
         )

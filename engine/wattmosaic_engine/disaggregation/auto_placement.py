@@ -64,6 +64,12 @@ class Placement:
     configuration: DeviceConfiguration
     #: Human-readable justification.  Shown, never parsed.
     evidence: tuple[str, ...] = field(default_factory=tuple)
+    #: Display name the state snapshot reported for this fixture.  A device's
+    #: display name belongs to the topology row (``DeviceTopology.name``), not to
+    #: the persisted configuration, so it travels on the placement and is handed
+    #: to materialisation.  ``None`` means no name was supplied -- the engine then
+    #: keeps the device id rather than inventing one from the slug.
+    name: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -156,6 +162,7 @@ def plan_placements(
     topology: Topology,
     configurations: DeviceConfigurationSet | Iterable[DeviceConfiguration],
     assume_owned: bool = False,
+    labels: Mapping[str, str] | None = None,
 ) -> PlacementPlan:
     """Decide which accepted candidates may become devices.
 
@@ -175,10 +182,16 @@ def plan_placements(
 
     Everything else is reported in :attr:`PlacementPlan.refused` with the reason,
     so the caller can surface it rather than silently discarding the evidence.
+
+    ``labels`` maps ``entity_id -> display name`` (the friendly name the state
+    snapshot reported).  It only ever *labels* a placement; it never decides one,
+    because a name is display data and a slug is not a name.  Without a label the
+    created device keeps its id.
     """
     channels = topology.channel_map()
     known_entities = _existing_state_entities(configurations)
     existing_devices = {device.device_id for device in topology.devices}
+    label_for = labels or {}
     accepted: list[Placement] = []
     refused: dict[str, str] = {}
 
@@ -253,6 +266,7 @@ def plan_placements(
                 device_id=device_id,
                 configuration=configuration,
                 evidence=(*candidate.evidence, f"measured {candidate.typical_w:.2f} W"),
+                name=label_for.get(entity_id) or None,
             )
         )
 

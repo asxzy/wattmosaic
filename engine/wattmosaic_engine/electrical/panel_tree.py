@@ -68,6 +68,23 @@ IMPLICIT_PANEL_NAME = "Installation"
 #: Status tone vocabulary shared by every node badge.
 _STATUS_TONE = {"candidate": "warn", "confirmed": "ok", "rejected": "bad"}
 
+#: ``Source`` values -> the frozen measurement vocabulary (contract §5.2).
+#:
+#: ``measured``/``inferred``/``prior`` are the three ways the engine can honestly
+#: *hold* a number, and ``none`` is the absence of one.  ``model_estimated`` maps
+#: to ``prior`` because the engine already grades the two identically:
+#: ``disaggregation/tiers.py`` returns ``TIER_1_MODELLED`` for both
+#: ``MODEL_ESTIMATED`` and ``CONFIGURED_PRIOR``, i.e. "a stored model or an
+#: assertion supplied this value; nothing live measured it".  ``prior`` is that
+#: tier's word in the UI vocabulary.  Any other source -- including ``unknown``
+#: -- is ``none``.
+_MEASUREMENT_BY_SOURCE = {
+    "direct_measured": "measured",
+    "inferred": "inferred",
+    "configured_prior": "prior",
+    "model_estimated": "prior",
+}
+
 
 # --------------------------------------------------------------------------- #
 # Small helpers
@@ -167,6 +184,33 @@ def _result_confidence(result: Any) -> float | None:
     if isinstance(value, (int, float)):
         return float(value)
     return None
+
+
+def _measurement_of(result: Any) -> str:
+    """The engine's measurement claim for one device result (contract §5.2).
+
+    ``none`` is returned for a missing result and for ``source == "unknown"``.
+    That is what makes a placeholder zero unrepresentable: an ``unknown`` result
+    carries ``power_w = 0.0`` for residual accounting only (see
+    ``DisaggregationEngine._unknown_result``, whose provenance says
+    ``power_w_is_placeholder``), so reporting that number as this fixture's
+    reading would be a fabricated measurement of zero.
+
+    ``sample_count`` is deliberately **not** a measurement signal here.  On the
+    stored contract it is the *model's* learning-sample count
+    (``sample_count=0 if model is None else model.sample_count`` in
+    ``disaggregation/engine.py``), and the production database has 192k
+    ``direct_measured`` rows with ``sample_count=0``; treating a zero there as
+    "unmeasured" would mark every real measurement unknown.  The source is the
+    authority on how a value was obtained, so the source alone decides.
+
+    A source the vocabulary cannot describe is ``none``: the engine must not
+    claim a measurement state it does not have a word for.
+    """
+    source = _text(_result_field(result, "source"))
+    if source is None:
+        return "none"
+    return _MEASUREMENT_BY_SOURCE.get(source, "none")
 
 
 class _DisjointSet:
@@ -703,6 +747,11 @@ class _TreeBuilder:
         device = self.devices[device_id]
         result = self.latest_results.get(device_id)
         status = _text(device.topology_status)
+        measurement = _measurement_of(result)
+        # ``none`` means the engine holds no value for this fixture.  Its stored
+        # ``power_w`` (0.0 on an ``unknown`` result) exists only for residual
+        # accounting, so it is not surfaced as a reading: a zero would be a claim.
+        power = _result_power(result) if measurement != "none" else None
         node: dict[str, Any] = {
             "id": _node_id("device", device_id),
             "kind": "device",
@@ -715,7 +764,8 @@ class _TreeBuilder:
             "phase": _text(device.phase),
             "topology_status": status,
             "source": _text(_result_field(result, "source")),
-            "latest_power_w": _result_power(result),
+            "measurement": measurement,
+            "latest_power_w": power,
             "confidence": _result_confidence(result),
             "via_ct_id": via_ct_id,
         }
@@ -916,6 +966,7 @@ class _TreeBuilder:
             "phase": node["phase"],
             "topology_status": node["topology_status"],
             "via_ct_id": node["via_ct_id"],
+            "measurement": node["measurement"],
             "latest_power_w": node["latest_power_w"],
             "confidence": node["confidence"],
             "source": node["source"],

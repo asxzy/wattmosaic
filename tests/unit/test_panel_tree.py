@@ -455,6 +455,7 @@ def test_contract_node_fields() -> None:
         "phase",
         "topology_status",
         "source",
+        "measurement",
         "latest_power_w",
         "confidence",
         "via_ct_id",
@@ -477,6 +478,119 @@ def test_latest_results_are_attached_to_devices() -> None:
     assert device["latest_power_w"] == 12.5
     assert device["confidence"] == 0.9
     assert device["source"] == "inferred"
+
+
+def _device_node(tree: dict[str, Any], device_id: str) -> dict[str, Any]:
+    return next(
+        node for node in _kinds(tree, "device") if node["device_id"] == device_id
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("direct_measured", "measured"),
+        ("inferred", "inferred"),
+        ("configured_prior", "prior"),
+        ("model_estimated", "prior"),
+    ],
+)
+def test_a_sourced_result_names_its_measurement_state(source: str, expected: str) -> None:
+    """The tree speaks the frozen vocabulary (contract §5.2) instead of a guess."""
+    tree = build_panel_tree(
+        _two_panel_topology(),
+        latest_results={
+            "Upper_Humidifier": {"power_w": 12.5, "confidence": 0.9, "source": source}
+        },
+    )
+    node = _device_node(tree, "Upper_Humidifier")
+    assert node["measurement"] == expected
+    assert node["latest_power_w"] == 12.5
+
+
+def test_an_unknown_result_is_not_a_measurement_and_has_no_zero_wattage() -> None:
+    """Defect: ``source: unknown`` + ``power_w: 0.0`` rendered as a measured 0 W.
+
+    The engine really does store ``power_w = 0.0`` on an unknown result (it is a
+    placeholder for residual accounting, per ``_unknown_result``'s provenance).
+    The tree must not present it as this fixture's reading, and the UI's source
+    fallback treats a non-null source as measured -- so the node has to say
+    ``none`` *and* stop carrying the zero.
+    """
+    tree = build_panel_tree(
+        _two_panel_topology(),
+        latest_results={
+            "Upper_Humidifier": {
+                "power_w": 0.0,
+                "confidence": 0.105,
+                "source": "unknown",
+                "sample_count": 0,
+            }
+        },
+    )
+    node = _device_node(tree, "Upper_Humidifier")
+    assert node["measurement"] == "none"
+    assert node["latest_power_w"] is None
+    # The summary row a filter/list view reads must agree with the tree node.
+    summary = next(
+        row for row in tree["flat"]["devices"] if row["device_id"] == "Upper_Humidifier"
+    )
+    assert summary["measurement"] == "none"
+    assert summary["latest_power_w"] is None
+
+
+def test_a_device_with_no_result_at_all_is_not_measured() -> None:
+    tree = build_panel_tree(_two_panel_topology())
+    node = _device_node(tree, "Upper_Humidifier")
+    assert node["measurement"] == "none"
+    assert node["latest_power_w"] is None
+
+
+def test_an_unrecognised_source_is_none_rather_than_a_measurement_claim() -> None:
+    tree = build_panel_tree(
+        _two_panel_topology(),
+        latest_results={
+            "Upper_Humidifier": {"power_w": 1.0, "confidence": 0.5, "source": "something_new"}
+        },
+    )
+    node = _device_node(tree, "Upper_Humidifier")
+    assert node["measurement"] == "none"
+    assert node["latest_power_w"] is None
+
+
+def test_a_sample_count_of_zero_does_not_hide_a_real_measurement() -> None:
+    """``sample_count`` is the model's learning count, not a measurement signal.
+
+    The production DB has ~192k ``direct_measured`` rows with ``sample_count=0``;
+    treating that as "unmeasured" would blank every real reading.
+    """
+    tree = build_panel_tree(
+        _two_panel_topology(),
+        latest_results={
+            "Upper_Humidifier": {
+                "power_w": 42.5,
+                "confidence": 0.9,
+                "source": "direct_measured",
+                "sample_count": 0,
+            }
+        },
+    )
+    node = _device_node(tree, "Upper_Humidifier")
+    assert node["measurement"] == "measured"
+    assert node["latest_power_w"] == 42.5
+
+
+def test_a_measured_zero_is_still_a_measurement() -> None:
+    """A CT that legitimately reads 0 W must keep its zero: that is a reading."""
+    tree = build_panel_tree(
+        _two_panel_topology(),
+        latest_results={
+            "Upper_Humidifier": {"power_w": 0.0, "confidence": 0.9, "source": "direct_measured"}
+        },
+    )
+    node = _device_node(tree, "Upper_Humidifier")
+    assert node["measurement"] == "measured"
+    assert node["latest_power_w"] == 0.0
 
 
 # --------------------------------------------------------------------------- #

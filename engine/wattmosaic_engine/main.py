@@ -2524,12 +2524,11 @@ class EngineCore:
         # an explicit ``apply=True`` cannot override a disabled opt-in, because
         # that switch is the user's standing decision.
         allow_apply = apply is True and bool(self.config.auto_placement)
-        plan = plan_placements(
-            report=report, topology=topology, configurations=configurations
-        )
-
         channels = topology.channel_map()
         labels = {candidate.entity_id: candidate.friendly_name for candidate in candidates}
+        plan = plan_placements(
+            report=report, topology=topology, configurations=configurations, labels=labels
+        )
 
         def _channel_label(ct_id: str) -> tuple[str, str | None]:
             channel = channels.get(ct_id)
@@ -2751,7 +2750,17 @@ class EngineCore:
             return result
 
         merged = merge_placements(configurations, plan)
-        projected = project_configuration(topology, merged)
+        # The friendly name the placement reported is a display name, so it is
+        # written to the topology row rather than to the persisted configuration.
+        projected = project_configuration(
+            topology,
+            merged,
+            display_names={
+                placement.device_id: placement.name
+                for placement in plan.accepted
+                if placement.name
+            },
+        )
         self.db.save_device_configurations(merged)
         self.db.save_topology(projected, note="auto placement from observed co-movement")
         self.topology_cache = projected
