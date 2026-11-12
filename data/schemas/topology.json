@@ -142,6 +142,30 @@
           "additionalProperties": true,
           "title": "Metadata",
           "type": "object"
+        },
+        "panel_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Panel Id"
+        },
+        "panel_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Panel Name"
         }
       },
       "required": [

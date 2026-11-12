@@ -109,6 +109,12 @@ class Facade(EngineFacade):
     async def diagnostics(self) -> dict:
         return {"status": "ok", "secrets": "redacted"}
 
+    async def panel_tree(self, *, include_nesting: bool = False) -> dict:
+        """Async on purpose: see ``test_threaded_routes_accept_an_async_facade``."""
+        from wattmosaic_engine.electrical.panel_tree import build_panel_tree
+
+        return build_panel_tree(self._topology)
+
     async def models(self, device_id: str) -> dict:
         return {"device_id": device_id, "versions": [], "active": None}
 
@@ -300,6 +306,32 @@ def test_export_contains_no_secrets(db: Database) -> None:
         assert "token" not in lowered
         assert "authorization" not in lowered
         json.loads(text)
+        return True
+
+    assert asyncio.run(_with_server(db, run))
+
+
+def test_threaded_routes_accept_an_async_facade(db: Database) -> None:
+    """``to_thread`` must not swallow a coroutine-returning facade.
+
+    The ``EngineFacade`` protocol declares every method as ``-> Any`` and the
+    HTTP layer awaits through ``maybe_await``, so a facade is allowed to be
+    ``async``.  ``/snapshot``, ``/devices`` and ``/topology/tree`` run their
+    blocking read in a worker thread; calling the facade there returns the
+    coroutine object itself, and serialising *that* is a 500 with "Object of
+    type coroutine is not JSON serializable".  The stub facade used above is
+    async, so this is the shape a test double (and any future async facade)
+    actually has.
+    """
+    async def run(session, base, headers):
+        for path in ("/snapshot", "/devices"):
+            async with session.get(f"{base}{path}", headers=headers) as resp:
+                assert resp.status == 200, f"{path} -> {resp.status}"
+                await resp.json()
+        async with session.get(f"{base}/topology/tree", headers=headers) as resp:
+            assert resp.status == 200, f"/topology/tree -> {resp.status}"
+            body = await resp.json()
+            assert "roots" in body
         return True
 
     assert asyncio.run(_with_server(db, run))

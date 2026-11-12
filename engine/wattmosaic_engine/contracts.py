@@ -349,6 +349,20 @@ class CTChannel(Model):
     reliability: float = 1.0
     topology_status: TopologyStatus = TopologyStatus.CANDIDATE
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # -- panel grouping ----------------------------------------------------- #
+    #: Stable slug of the distribution board this channel sits in, e.g.
+    #: ``"refoss_main_panel"``.  Discovery derives it from the monitor name with
+    #: the same slug used to build ``ct_id``, so it is a *declared* grouping and
+    #: never a string re-parsed at render time.  A panel's feed is the set of
+    #: ``main`` CTs sharing one ``panel_id``; ordinary circuits belong to the
+    #: panel named by their own ``panel_id``.
+    #:
+    #: Additive and optional (contract 1.5.0): a topology stored before
+    #: this field existed still validates, and the hierarchy view falls back to
+    #: one implicit panel rather than inventing a structure.
+    panel_id: str | None = None
+    #: Display name of that board, e.g. ``"Refoss - Main Panel"``.
+    panel_name: str | None = None
 
     @field_validator("measurement_multiplier")
     @classmethod

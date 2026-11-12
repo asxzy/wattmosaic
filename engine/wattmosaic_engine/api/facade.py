@@ -112,6 +112,8 @@ class EngineFacade(Protocol):
 
     def confirm_topology(self) -> Any: ...
 
+    def panel_tree(self, *, include_nesting: bool = False) -> Any: ...
+
     def nesting_candidates(self, *, hours: float = 12.0) -> Any: ...
 
     def quality(self) -> Any: ...
@@ -178,6 +180,9 @@ class NullFacade:
         return self._unavailable()
 
     def confirm_topology(self) -> Any:
+        return self._unavailable()
+
+    def panel_tree(self, *, include_nesting: bool = False) -> Any:
         return self._unavailable()
 
     def nesting_candidates(self, *, hours: float = 12.0) -> Any:
@@ -299,6 +304,13 @@ class StubFacade(NullFacade):
     def confirm_topology(self) -> dict[str, Any]:
         self._topology["status"] = "confirmed"
         return dict(self._topology)
+
+    def panel_tree(self, *, include_nesting: bool = False) -> dict[str, Any]:
+        """Build the tree from the stub topology (no engine, no history)."""
+        from ..contracts import Topology
+        from ..electrical.panel_tree import build_panel_tree
+
+        return build_panel_tree(Topology.model_validate(self._topology))
 
     def nesting_candidates(self, *, hours: float = 12.0) -> dict[str, Any]:
         return {"candidates": [], "reason": "stub facade has no stored history"}

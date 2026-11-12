@@ -328,11 +328,14 @@ async def status(request: web.Request) -> web.Response:
 
 
 async def snapshot(request: web.Request) -> web.Response:
-    return _ok(await maybe_await(_facade(request).snapshot()))
+    # Same whole-table latest-result read as ``devices`` and ``topology_tree``.
+    return _ok(await maybe_await(await asyncio.to_thread(_facade(request).snapshot)))
 
 
 async def devices(request: web.Request) -> web.Response:
-    return _ok(await maybe_await(_facade(request).devices()))
+    # Same reason as ``topology_tree``: the per-device latest-result lookup is a
+    # whole-table scan, so it must not run on the event loop.
+    return _ok(await maybe_await(await asyncio.to_thread(_facade(request).devices)))
 
 
 async def device(request: web.Request) -> web.Response:
@@ -361,6 +364,14 @@ async def topology_nesting(request: web.Request) -> web.Response:
 
     Read-only: nothing here writes a parent link.  The integration wizard turns a
     candidate into a parent only when the user confirms it.
+
+    The computation is CPU- and SQLite-bound (tens of milliseconds of Python and
+    a few hundred milliseconds of row materialisation for a 12 h window), so it
+    runs in a worker thread.  Doing it inline blocked the event loop for the whole
+    response time, which starved ``/health``, ingestion and every other request
+    for seconds.  ``EngineCore.nesting_candidates`` is a pure read, and the
+    database connection is shared and lock-protected (``check_same_thread=False``
+    plus ``Database._lock``), so a thread is safe here.
     """
     raw = request.query.get("hours")
     hours = 12.0
@@ -371,7 +382,44 @@ async def topology_nesting(request: web.Request) -> web.Response:
             raise InvalidRequest("hours must be a number") from exc
         if not math.isfinite(hours) or hours <= 0 or hours > 24 * 90:
             raise InvalidRequest("hours must be greater than 0 and at most 2160")
-    return _ok(await maybe_await(_facade(request).nesting_candidates(hours=hours)))
+    facade = _facade(request)
+    method = getattr(facade, "nesting_candidates", None)
+    if method is None:
+        raise FacadeUnavailable("nesting candidates are not supported by this backend")
+    # ``to_thread`` copies the current context, so logging/correlation behaves
+    # exactly as it did inline; only the blocking part moves off the loop.
+    payload = await asyncio.to_thread(method, hours=hours)
+    return _ok(await maybe_await(payload))
+
+
+#: Truthy spellings accepted by ``?include_nesting=``.  Anything else (including
+#: an empty value) is false: nesting is opt-in because it is the expensive path.
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+async def topology_tree(request: web.Request) -> web.Response:
+    """Panel → circuits → devices hierarchy (contract v1 §1).
+
+    Computed from declared data only; ``parent_ct_id`` is never written.  The
+    default answer is the cheap one: ``include_nesting`` is false unless the
+    caller explicitly asks, because nesting runs a multi-second sample scan and
+    can only add advisories on top of a tree that is already complete.
+    """
+    raw = request.query.get("include_nesting")
+    include_nesting = raw is not None and raw.strip().lower() in _TRUTHY
+    # Even without nesting the tree merges the latest result per device, and
+    # that query is a covering-index scan of the whole ``inference_results``
+    # table.  Measured at ~24 ms warm but ~590 ms on a cold page cache against
+    # the production 343k rows, which would stall the loop and starve /health
+    # exactly as the nesting scan used to.  Same remedy: the blocking part runs
+    # in a thread.
+    return _ok(
+        await maybe_await(
+            await asyncio.to_thread(
+                _facade(request).panel_tree, include_nesting=include_nesting
+            )
+        )
+    )
 
 
 async def quality(request: web.Request) -> web.Response:
@@ -480,6 +528,7 @@ def create_app(
     router.add_put(f"{base}/topology", topology_put)
     router.add_post(f"{base}/topology/confirm", topology_confirm)
     router.add_get(f"{base}/topology/nesting", topology_nesting)
+    router.add_get(f"{base}/topology/tree", topology_tree)
     router.add_get(f"{base}/quality", quality)
     router.add_get(f"{base}/diagnostics", diagnostics)
     router.add_get(f"{base}/models/{{device_id}}", models)

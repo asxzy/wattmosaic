@@ -35,7 +35,7 @@ import signal
 import sys
 import time
 from collections import deque
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -73,6 +73,7 @@ from .device_links import (
 )
 from .diagnostics.report import redact, run_diagnostics
 from .electrical.nesting import infer_nesting
+from .electrical.panel_tree import TREE_VERSION, build_panel_tree
 from .ingestion.correlation import level_from_attributes
 from .ingestion.discovery import discover_candidate_topology
 from .ingestion.ha_source import HASource
@@ -103,6 +104,21 @@ TOPOLOGY_BOOTSTRAP_WAIT_S = 30.0
 TOPOLOGY_RETRY_INTERVAL_S = 60.0
 SUPERVISION_BACKOFF_BASE_S = 1.0
 SUPERVISION_BACKOFF_MAX_S = 60.0
+
+#: Downsample the nesting comparison grid to the channels' declared sampling
+#: cadence instead of using the union of every distinct timestamp.
+#:
+#: **Off by default, and deliberately so.**  The union is 29–38× larger than the
+#: data it describes (76 893 instants for 2 615 samples per channel over 12 h),
+#: so resampling is a large CPU win, and the set of candidate pairs it produces is
+#: identical on the reference installation.  But ``instants``, ``joint_instants``,
+#: ``containment`` and the median evidence in the payload all describe *how many
+#: instants were compared*, and those genuinely change.  Since the contract for
+#: this change requires the payload to be byte-identical, enabling this by default
+#: would silently alter a published response.  ``_sample_grid`` documents the
+#: argument and the guard rails; turn it on only with a contract update that
+#: accepts the changed evidence counts.
+NESTING_RESAMPLE_GRID = False
 
 
 # --------------------------------------------------------------------------- #
@@ -198,6 +214,128 @@ def _as_utc(value: Any) -> datetime | None:
             return None
         return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
     return None
+
+
+def _sampling_cadence_s(channels: Iterable[Any]) -> float | None:
+    """The channels' declared sampling cadence, in seconds, or ``None``.
+
+    Uses the median of the enabled channels' ``expected_interval_s`` so one
+    mis-declared channel cannot change the grid.  Deliberately *not* a hardcoded
+    15.7 s: the cadence is a property of the installation, and the reference
+    install happens to declare 15.7 s while its cheapest channel samples every
+    10 s.
+    """
+    declared = [
+        float(ch.expected_interval_s)
+        for ch in channels
+        if getattr(ch, "enabled", False)
+        and getattr(ch, "expected_interval_s", None)
+        and float(ch.expected_interval_s) > 0
+    ]
+    if not declared:
+        return None
+    declared.sort()
+    mid = len(declared) // 2
+    return declared[mid] if len(declared) % 2 else (declared[mid - 1] + declared[mid]) / 2.0
+
+
+def _sample_grid(
+    samples: Mapping[str, Sequence[tuple[datetime, float]]],
+    *,
+    cadence_s: float | None,
+    window_hours: float,
+) -> list[datetime]:
+    """Alignment instants for the nesting comparison.
+
+    Why this is not simply the union of every timestamp
+    ------------------------------------------------
+    The union is not a sampling grid.  On the reference installation a 12 h
+    window contains **76 893** distinct timestamps for 38 channels that each
+    carry only ~2 615 samples: the union is dominated by per-channel clock jitter,
+    so it is 29–38× larger than the data it describes.  Every instant then costs
+    one comparison per pair in :func:`~wattmosaic_engine.electrical.nesting.infer_nesting`
+    and one cell in every aligned series, for no new information: forward-filling
+    a channel between two of its own samples cannot tell you anything the earlier
+    sample did not.
+
+    What it does instead
+    --------------------
+    Bucket the union into fixed ``cadence_s`` slots (anchored at the first
+    timestamp so the result is deterministic) and keep the **latest real sample**
+    in each slot.  Keeping a real timestamp rather than the bucket edge means
+    :func:`_forward_fill` still sees true sample times, so no reading is ever
+    invented or shifted earlier than it happened.
+
+    The guard rails
+    ---------------
+    * ``cadence_s is None`` (nothing declared) → the union, i.e. the old
+      behaviour.  Never guess a cadence from nothing.
+    * Never coarser than the median inter-sample gap of the *fastest* channel:
+      a cadence above the real sampling interval would throw away real readings
+      and replace a measured series with a piecewise-constant one.  The step is
+      therefore ``min(declared cadence, fastest median gap)``.
+    * Never when the window holds fewer than two cadence periods: with less than
+      that, the grid would collapse to one or two instants and containment would
+      lose all meaning, so the union is kept.
+
+    Equivalence
+    -----------
+    The **set of candidate pairs** (``kind``, ``child_ct_id``, ``parent_ct_id``)
+    is byte-identical to the union grid at hours ∈ {2, 6, 12, 24} on the reference
+    installation, and the whole payload is byte-identical when this returns the
+    union.  It is **not** byte-identical when it resamples: ``instants``,
+    ``joint_instants``, ``containment`` and the median evidence describe *how many
+    instants were compared*, and comparing 2 526 instead of 76 893 genuinely
+    changes those numbers.  That is a real, visible change to the response, which
+    is why :data:`NESTING_RESAMPLE_GRID` defaults to ``False``.
+    """
+    union = sorted({stamp for series in samples.values() for stamp, _ in series})
+    if cadence_s is None or not union:
+        return union
+
+    # Median inter-sample gap across channels: the fastest real cadence.
+    gaps: list[float] = []
+    for series in samples.values():
+        ordered = sorted(series)
+        deltas = [
+            (later[0] - earlier[0]).total_seconds()
+            for earlier, later in zip(ordered, ordered[1:], strict=False)
+        ]
+        deltas = [delta for delta in deltas if delta > 0]
+        if deltas:
+            deltas.sort()
+            mid = len(deltas) // 2
+            gaps.append(
+                deltas[mid] if len(deltas) % 2 else (deltas[mid - 1] + deltas[mid]) / 2.0
+            )
+    if gaps:
+        gaps.sort()
+        mid = len(gaps) // 2
+        fastest_gap = gaps[mid] if len(gaps) % 2 else (gaps[mid - 1] + gaps[mid]) / 2.0
+        # Never stride past the fastest real sampling: that would discard real
+        # readings rather than merely de-duplicating jittered ones.
+        cadence_s = min(cadence_s, fastest_gap)
+
+    if window_hours > 0:
+        periods = (window_hours * 3600.0) / cadence_s
+        if periods < 2.0:
+            # Too short a window to resample: keep every instant.
+            return union
+
+    anchor = union[0]
+    grid: list[datetime] = []
+    current_slot: int | None = None
+    last_stamp: datetime | None = None
+    for stamp in union:
+        slot = int((stamp - anchor).total_seconds() // cadence_s)
+        if slot != current_slot:
+            if last_stamp is not None:
+                grid.append(last_stamp)
+            current_slot = slot
+        last_stamp = stamp
+    if last_stamp is not None:
+        grid.append(last_stamp)
+    return grid
 
 
 def _forward_fill(
@@ -1478,14 +1616,62 @@ class EngineCore:
             return None
         return str(getattr(tier, "value", tier))
 
+    def _latest_results_map(self) -> dict[str, Any]:
+        """Latest known result per device: in-memory first, stored rows second.
+
+        ``latest_inference_results()`` is a whole-table GROUP BY over
+        ``inference_results``.  Asking it once per device is an N+1 query:
+        measured at ~670 ms for 28 devices against a 343 560-row table, which
+        would stall the event loop on every caller.  Fetch it once, index it,
+        and let the in-memory map win, so a result computed since the last
+        persist is not shadowed by an older row.
+
+        The database fallback matters for more than speed.  Right after a
+        restart ``latest_results`` is empty until the first inference cycle, so
+        a reader that consulted only the in-memory map would report every
+        device as unknown/0 W while ``/devices`` reported real power -- the
+        same install showing two different answers on two tabs.
+
+        Cost note: ``latest_inference_results`` is a covering-index scan whose
+        price grows with the number of retained rows (~24 ms warm and ~590 ms
+        cold at the production 343k).  It is deliberately not bounded by
+        timestamp: a device that stopped reporting a month ago still has a
+        legitimate latest row, and dropping it would be a correctness change,
+        not an optimisation.  Callers that can be slow therefore run this in a
+        thread -- see the ``devices`` and ``topology_tree`` routes.
+        """
+        try:
+            latest_rows = self.db.latest_inference_results()
+        except Exception:  # noqa: BLE001
+            # Not silent: right after a restart the in-memory map is empty, so a
+            # swallowed error here makes every device read as unknown on both
+            # ``/devices`` and ``/topology/tree`` with nothing in the log to
+            # explain it.  Degrade, but say so.
+            log.warning(
+                "latest results unavailable; serving in-memory results only",
+                exc_info=True,
+            )
+            latest_rows = []
+        merged: dict[str, Any] = {}
+        for row in latest_rows:
+            device_key = row.get("device_id")
+            if not device_key:
+                continue
+            try:
+                merged[str(device_key)] = row_to_inference_result(row)
+            except Exception:  # noqa: BLE001
+                continue
+        merged.update(self.latest_results)
+        return merged
+
     def devices(self) -> list[dict[str, Any]]:
         topology = self._active_topology()
         devices = topology.devices if topology else []
         configurations = self._effective_configurations(topology)
+        recorded_results = self._latest_results_map()
         out: list[dict[str, Any]] = []
         for dev in devices:
-            result = self.latest_results.get(dev.device_id)
-            recorded = result or self._latest_result_from_db(dev.device_id)
+            recorded = recorded_results.get(dev.device_id)
             out.append(
                 {
                     "device_id": dev.device_id,
@@ -1610,6 +1796,43 @@ class EngineCore:
         self.db.log_system_event("info", "topology", "topology confirmed via API")
         return self.topology_cache or confirmed
 
+    def panel_tree(self, *, include_nesting: bool = False) -> dict[str, Any]:
+        """Read-time panel → circuits → devices hierarchy (contract §1).
+
+        Cheap by construction: it reads the already-cached topology and one
+        indexed query for the latest result per device (the same ~25 ms query
+        ``/devices`` makes), and it never scans CT samples.  The expensive
+        nesting inference runs **only** when ``include_nesting`` is explicitly
+        requested; even then it can only merge duplicate panels or add advisory
+        suggestions, never change leaf counts.
+        """
+        topology = self._active_topology()
+        if topology is None:
+            return {
+                "version": TREE_VERSION,
+                "status": "candidate",
+                "generated_at": utcnow().isoformat().replace("+00:00", "Z"),
+                "topology_version": 0,
+                "stats": {
+                    "panels": 0,
+                    "circuits": 0,
+                    "devices": 0,
+                    "unplaced_devices": 0,
+                    "unplaced_circuits": 0,
+                    "max_depth": 0,
+                    "duplicate_feeds": 0,
+                },
+                "roots": [],
+                "flat": {"panels": [], "circuits": [], "devices": []},
+                "notes": ["no topology configured"],
+            }
+        nesting = self.nesting_candidates() if include_nesting else None
+        return build_panel_tree(
+            topology,
+            latest_results=self._latest_results_map(),
+            nesting=nesting,
+        )
+
     def nesting_candidates(self, *, hours: float = 12.0) -> dict[str, Any]:
         """Propose parent links and duplicate feeds from stored history.
 
@@ -1666,7 +1889,15 @@ class EngineCore:
         if len(samples) < 2:
             return {"candidates": [], "reason": "fewer than two channels have samples"}
 
-        grid = sorted({stamp for series in samples.values() for stamp, _ in series})
+        grid = (
+            _sample_grid(
+                samples,
+                cadence_s=_sampling_cadence_s(channels),
+                window_hours=max(0.5, float(hours)),
+            )
+            if NESTING_RESAMPLE_GRID
+            else sorted({stamp for series in samples.values() for stamp, _ in series})
+        )
         if len(grid) < 10:
             return {
                 "candidates": [],

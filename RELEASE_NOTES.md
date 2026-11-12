@@ -1,5 +1,85 @@
 # Release Notes
 
+## v0.2.1-dev.14 — 2026-11-11 (development channel)
+
+The Topology tab now draws the hierarchy the engine already knows, and it draws
+it in about a second instead of twelve. The two were the same defect seen from
+two ends: the panel was re-deriving structure from CT names, and the scan behind
+it was running on the event loop. **Device watts and energy are unchanged from
+v0.2.1-dev.13.**
+
+### The hierarchy is computed once, in the engine
+
+The panel used to infer panels, circuits and nesting by parsing entity ids and
+friendly names. That guesses, and it guessed wrong: a branch appeared under a
+board that does not feed it, devices repeated, and a second monitor on the same
+service entrance looked like a second panel. Structure is now read from declared
+facts only -- `panel_id`, `parent_ct_id`, `alias_of_ct_id`, and device
+attribution -- in a new read-time builder, served by a new endpoint:
+
+```
+GET /api/v1/topology/tree?include_nesting=false
+```
+
+It returns one tree of four node kinds (`panel`, `circuit`, `device`, `group`),
+plus `stats`, a `flat` list for filtering, and `notes` that say when it had to
+fall back. `parent_ct_id` is never written: the view is read-time only. The
+panel paints `roots` verbatim and never re-derives anything.
+
+Rules worth knowing, because they decide what you see:
+
+* A circuit's children are its devices, then nested circuits. A panel is never
+  nested under a circuit.
+* Empty groups are omitted. Every device and circuit appears **exactly once**.
+* Two CTs on the same conductors are an **alias**, not two panels. On the live
+  install `refoss_main_panel_l1/l2` duplicates `main_load_manager_l1/l2`, so the
+  two monitors merge into one board with a "2 monitors" badge.
+* Nesting suggestions remain advisory and are shown outside the tree; they never
+  become an edge.
+
+### It was slow because the expensive part ran on the event loop
+
+Nesting inference over 12 h of samples took **11.7 s** and blocked the loop while
+it ran, so `/health` stalled with it. The kernels are now vectorised and the
+container filter runs before the scan: **12 h → ~0.47 s**, 6 h → 70 ms. The
+endpoint moved to a worker thread, and the tree no longer triggers nesting at all
+unless asked.
+
+`/devices` was also paying an N+1: one `GROUP BY` over `inference_results` per
+device, ~670 ms for 28 devices against 343k rows. It is now one query, indexed
+once, **~25 ms**.
+
+### Two defects found while integrating
+
+* **Panel identity did not survive a save.** `panel_id`/`panel_name` were on
+  `CTChannel` but had no columns, so `save_topology`'s explicit column list
+  dropped them and every reload rebuilt the tree as one implicit board -- the
+  flat list again, after the first restart. Schema 8 adds both columns.
+* **The tree reported 0 W after a restart.** It read only the in-memory latest
+  results, which are empty until the first inference cycle, while `/devices`
+  read the database. Two answers for one install, and 0 W is a false claim.
+  Both now share one lookup, with the fresher in-memory value winning.
+
+### Schema 8
+
+Two nullable columns on `ct_channels`. Schema 7 (the residual split) is
+untouched; this is a separate migration precisely because a reused version number
+would be skipped on any install that already ran 7, leaving every topology write
+to fail with *no column named panel_id*. That failure is silent at startup, so
+it is pinned by a regression test that starts from a schema-7 database.
+
+> **Rollback.** Keep the same rule as dev.13: restore the pre-deploy backup.
+> In-place downgrade is not supported.
+
+### Contract 1.5.0 (additive, unchanged)
+
+`CTChannel.panel_id` and `panel_name` are optional; a topology that never
+declared them still validates and the tree falls back to one implicit board.
+Panels whose feed declares no parent are only labelled "service entry" when
+exactly one board qualifies -- when discovery infers no containment at all, every
+board would, and the tree says so in `notes` rather than claiming three service
+entries.
+
 ## v0.2.1-dev.13 — 2026-11-11 (development channel)
 
 Two defects that each hid themselves. The residual split was computed correctly
