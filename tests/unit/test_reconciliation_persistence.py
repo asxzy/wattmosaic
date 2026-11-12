@@ -332,7 +332,8 @@ def test_migration_7_adds_the_split_columns_in_place(tmp_path: Path) -> None:
     # Opening with the current code applies migration 7.
     db = Database(path)
     try:
-        assert db.schema_version == LATEST_VERSION == 7
+        assert db.schema_version == LATEST_VERSION
+        assert LATEST_VERSION >= 7  # this test only needs 7 to have run
         cols = _columns(db._conn)
         assert {
             "unmonitored_w",
@@ -370,14 +371,14 @@ def test_migrations_are_idempotent_across_reopens(tmp_path: Path) -> None:
     path = tmp_path / "twice.db"
     first = Database(path)
     try:
-        assert first.schema_version == 7
+        assert first.schema_version == LATEST_VERSION
     finally:
         first.close()
 
     second = Database(path)
     try:
         # apply_migrations is a no-op at the current version ...
-        assert apply_migrations(second._conn) == 7
+        assert apply_migrations(second._conn) == LATEST_VERSION
         # ... and re-running the version-7 body explicitly is still safe.
         for migration in MIGRATIONS:
             if migration.version == 7:
@@ -422,7 +423,7 @@ def test_migration_7_noops_when_create_table_already_has_the_columns(tmp_path: P
 
     db = Database(path)
     try:
-        assert db.schema_version == 7
+        assert db.schema_version == LATEST_VERSION
         cols = [
             row[1]
             for row in db._conn.execute("PRAGMA table_info(reconciliation_results)")
@@ -439,10 +440,20 @@ def test_migration_7_noops_when_create_table_already_has_the_columns(tmp_path: P
         db.close()
 
 
-def test_latest_schema_version_is_7() -> None:
-    """The residual split is the first schema bump since 0.1.6's schema 6."""
-    assert LATEST_VERSION == 7
-    assert [m.version for m in MIGRATIONS] == list(range(1, 8))
+def test_latest_schema_version_covers_every_migration() -> None:
+    """Migration numbers must stay 1..N with no gaps and no duplicates.
+
+    This is the guard for the defect that nearly shipped here: a branch added
+    migration 7 while the main line had already shipped its own 7.  The two
+    collided, ``apply_migrations`` skipped both, and the panel columns were
+    never added -- so every topology write failed on a healthy-looking install.
+    A duplicate number fails here instead.
+    """
+    versions = [m.version for m in MIGRATIONS]
+    assert len(versions) == len(set(versions)), f"duplicate migration version: {versions}"
+    assert versions == list(range(1, len(versions) + 1))
+    assert LATEST_VERSION == len(versions)
+    assert LATEST_VERSION >= 8  # the panel identity columns
 
 
 # --------------------------------------------------------------------------- #

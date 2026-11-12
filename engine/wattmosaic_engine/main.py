@@ -1631,10 +1631,26 @@ class EngineCore:
         a reader that consulted only the in-memory map would report every
         device as unknown/0 W while ``/devices`` reported real power -- the
         same install showing two different answers on two tabs.
+
+        Cost note: ``latest_inference_results`` is a covering-index scan whose
+        price grows with the number of retained rows (~24 ms warm and ~590 ms
+        cold at the production 343k).  It is deliberately not bounded by
+        timestamp: a device that stopped reporting a month ago still has a
+        legitimate latest row, and dropping it would be a correctness change,
+        not an optimisation.  Callers that can be slow therefore run this in a
+        thread -- see the ``devices`` and ``topology_tree`` routes.
         """
         try:
             latest_rows = self.db.latest_inference_results()
         except Exception:  # noqa: BLE001
+            # Not silent: right after a restart the in-memory map is empty, so a
+            # swallowed error here makes every device read as unknown on both
+            # ``/devices`` and ``/topology/tree`` with nothing in the log to
+            # explain it.  Degrade, but say so.
+            log.warning(
+                "latest results unavailable; serving in-memory results only",
+                exc_info=True,
+            )
             latest_rows = []
         merged: dict[str, Any] = {}
         for row in latest_rows:

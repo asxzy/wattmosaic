@@ -258,6 +258,10 @@ class _TreeBuilder:
         self.panels: dict[str, _Panel] = {}
         self._panel_ds = _DisjointSet()
         self.feed_ids: set[str] = set()
+        #: Panels that are fed from outside the installation.  At most one, and
+        #: only when the data can actually distinguish it (see
+        #: ``_compute_service_entry_ids``).
+        self._service_entry_ids: set[str] = set()
         self.unplaced_circuit_ids: list[str] = []
         self.unplaced_device_ids: list[str] = []
         self.circuit_panel: dict[str, str] = {}
@@ -534,6 +538,45 @@ class _TreeBuilder:
         for panel_id, parent in parent_of.items():
             self.panels[panel_id].parent_panel_id = parent
 
+        self._service_entry_ids = self._compute_service_entry_ids()
+
+    def _compute_service_entry_ids(self) -> set[str]:
+        """The board the house hangs off, or nothing when the data does not say.
+
+        A panel is *fed from outside the installation* when none of its feeds
+        declares a parent CT -- there is nothing upstream of it.  That test is
+        necessary but not sufficient for "service entry", because on a real
+        install every ``parent_ct_id`` may be null (discovery never infers
+        containment), and then every root passes it.  Claiming three service
+        entries is a false statement about the wiring, and it also sorts the
+        real main board *last* (roots put service entries first).
+
+        So the claim is made only when exactly one root qualifies.  When several
+        do, the data cannot distinguish them and no panel is labelled; the
+        subtitle falls back to "distribution board", which claims nothing.  This
+        is deliberately conservative: a missing label is recoverable by the user
+        reading the tree, a wrong one is not.
+        """
+        roots = [
+            panel_id
+            for panel_id, panel in self.panels.items()
+            if panel.parent_panel_id is None or panel.parent_panel_id not in self.panels
+        ]
+        unfed = [
+            panel_id
+            for panel_id in roots
+            if self.panels[panel_id].feeds
+            and all(not self.channels[feed].parent_ct_id for feed in self.panels[panel_id].feeds)
+        ]
+        if len(unfed) == 1:
+            return {unfed[0]}
+        if len(unfed) > 1:
+            self.notes.append(
+                f"{len(unfed)} panels are fed from outside the installation "
+                f"({', '.join(sorted(unfed))}); none is labelled the service entry"
+            )
+        return set()
+
     # -- circuit nesting ---------------------------------------------------- #
     def _resolve_circuits(self) -> None:
         for ct_id in sorted(self.channels):
@@ -769,9 +812,7 @@ class _TreeBuilder:
             key=lambda pid: (self.panels[pid].name.casefold(), pid),
         )
         feed_ct_ids = sorted(panel.feeds)
-        is_service_entry = bool(feed_ct_ids) and all(
-            not self.channels[feed_id].parent_ct_id for feed_id in feed_ct_ids
-        )
+        is_service_entry = self._is_service_entry(panel_id)
 
         groups: list[dict[str, Any]] = []
         group_depth = depth + 1
@@ -1045,10 +1086,7 @@ class _TreeBuilder:
         return payload
 
     def _is_service_entry(self, panel_id: str) -> bool:
-        panel = self.panels.get(panel_id)
-        if panel is None or not panel.feeds:
-            return False
-        return all(not self.channels[feed].parent_ct_id for feed in panel.feeds)
+        return panel_id in self._service_entry_ids
 
 
 # --------------------------------------------------------------------------- #

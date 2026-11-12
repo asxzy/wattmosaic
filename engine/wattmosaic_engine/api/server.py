@@ -332,7 +332,9 @@ async def snapshot(request: web.Request) -> web.Response:
 
 
 async def devices(request: web.Request) -> web.Response:
-    return _ok(await maybe_await(_facade(request).devices()))
+    # Same reason as ``topology_tree``: the per-device latest-result lookup is a
+    # whole-table scan, so it must not run on the event loop.
+    return _ok(await asyncio.to_thread(_facade(request).devices))
 
 
 async def device(request: web.Request) -> web.Response:
@@ -404,8 +406,16 @@ async def topology_tree(request: web.Request) -> web.Response:
     """
     raw = request.query.get("include_nesting")
     include_nesting = raw is not None and raw.strip().lower() in _TRUTHY
+    # Even without nesting the tree merges the latest result per device, and
+    # that query is a covering-index scan of the whole ``inference_results``
+    # table.  Measured at ~24 ms warm but ~590 ms on a cold page cache against
+    # the production 343k rows, which would stall the loop and starve /health
+    # exactly as the nesting scan used to.  Same remedy: the blocking part runs
+    # in a thread.
     return _ok(
-        await maybe_await(_facade(request).panel_tree(include_nesting=include_nesting))
+        await asyncio.to_thread(
+            _facade(request).panel_tree, include_nesting=include_nesting
+        )
     )
 
 

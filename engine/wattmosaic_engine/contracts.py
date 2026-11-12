@@ -357,7 +357,7 @@ class CTChannel(Model):
     #: ``main`` CTs sharing one ``panel_id``; ordinary circuits belong to the
     #: panel named by their own ``panel_id``.
     #:
-    #: Additive and optional (contract stays 1.3.0): a topology stored before
+    #: Additive and optional (contract 1.5.0): a topology stored before
     #: this field existed still validates, and the hierarchy view falls back to
     #: one implicit panel rather than inventing a structure.
     panel_id: str | None = None

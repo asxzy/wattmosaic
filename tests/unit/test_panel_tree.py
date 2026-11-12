@@ -929,3 +929,45 @@ def test_tree_endpoint_is_unavailable_without_an_engine() -> None:
             await server.stop()
 
     asyncio.run(check())
+
+
+@needs_fixture
+def test_ambiguous_service_entry_is_not_claimed() -> None:
+    """No containment at all must not turn every board into a "service entry".
+
+    The real capture happens to declare ``parent_ct_id`` on the sub-panel feeds,
+    so exactly one panel is fed from outside.  But discovery on many installs
+    infers no containment at all, and then *every* root has feeds with no parent
+    -- the necessary test for "fed from outside the installation" passes for all
+    of them.  Labelling each one "service entry" is a false claim about the
+    house, and because roots sort service entries first it also pushes the real
+    main board last.
+
+    When the data cannot distinguish the boards, the tree claims nothing.
+    """
+    data = json.loads(TOPO_FIXTURE.read_text())
+    for channel in data["channels"]:
+        channel["parent_ct_id"] = None
+
+    tree = build_panel_tree(Topology.model_validate(data))
+
+    panels = _kinds(tree, "panel")
+    assert len(panels) == 2
+    assert [panel["is_service_entry"] for panel in panels] == [False, False]
+    assert all(panel["subtitle"].startswith("distribution board") for panel in panels)
+    # The ambiguity is stated rather than hidden.
+    assert any("outside the installation" in note for note in tree["notes"])
+    # And no rows are lost by the change.
+    assert tree["stats"]["circuits"] == 32
+    assert tree["stats"]["devices"] == 28
+
+
+@needs_fixture
+def test_unambiguous_service_entry_is_still_named_and_first() -> None:
+    """The ordinary case must keep its label -- the fix must not over-correct."""
+    tree = _real_tree()
+    panels = _kinds(tree, "panel")
+    assert tree["roots"][0]["panel_id"] == "main_load_manager"
+    assert panels[0]["is_service_entry"] is True
+    assert panels[0]["subtitle"].startswith("service entry")
+    assert panels[1]["is_service_entry"] is False

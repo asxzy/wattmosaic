@@ -1878,7 +1878,7 @@
     if (!entries.length) {
       body.append(
         emptyState(
-          'No node matches',
+          query ? 'No node matches' : 'No nodes yet',
           query ? `Nothing in this hierarchy matches “${state.tree.filter.trim()}”.` : 'This topology has no nodes to show.'
         )
       );
