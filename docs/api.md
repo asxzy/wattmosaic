@@ -559,6 +559,21 @@ Candidates come from Home Assistant state **domains** (`light`, `switch`, `fan`,
 area, a manufacturer or a registry device. An entity the user already declared,
 or WattMosaic's own output, is not a candidate.
 
+An entity whose registry `entity_category` is `config` or `diagnostic` is also
+not a candidate (`not_a_load_entity_category`). Those are settings and telemetry
+for a device, not loads it draws: a Sonos `crossfade` switch changes how the
+speaker mixes a source, and a Frigate `detect` switch arms a camera's motion
+detector. Neither adds watts to a circuit. The distinction is a declared
+registry field, not a name heuristic, and it matters to the *fit* as well as the
+placement: on the reference install these entities were 229 of 410 candidates and
+they all toggle together when their automation fires, so they formed one
+92-member "group" that inflated the row's shuffled null and hid real lighting
+circuits. Refusing them leaves 181 candidates — still including all 75 lights and
+all 63 Lutron switches — and the largest genuine co-toggle group is 4.
+
+An entity with **no** registry row is still a candidate: the domain check runs
+regardless, because the state alone is evidence that something is switching.
+
 - **200** — the analysis result (possibly with no placements). A missing topology
   is reported in the body (`"ok": false`, `"detail": "no topology to place
   devices on"`, and the same keys with empty/zero values), never as a `404`.

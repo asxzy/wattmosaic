@@ -150,9 +150,16 @@ class _FakeSource:
         leaky: bool = False,
         states: list[dict[str, Any]] | None = None,
         registries: dict[str, Any] | None = None,
+        fail_history: bool = False,
     ) -> None:
         self.payload = payload
         self.leaky = leaky
+        self.fail_history = fail_history
+        #: Set to make ``history`` fail the way a timeout or a dropped socket does.
+        #: ``history`` returns ``{}`` for a failure by design, so the only way a
+        #: caller can tell "the recorder is empty" from "the query did not finish"
+        #: is this attribute -- mirroring ``HASource.last_history_error``.
+        self.last_history_error: str | None = None
         self.calls: list[dict[str, Any]] = []
         # Candidate population now comes from the *state snapshot* (contract §2),
         # not from the topology.  Default to the two fixtures the topology used
@@ -180,13 +187,19 @@ class _FakeSource:
         start: datetime,
         end: datetime | None = None,
         include_attributes: bool = False,
+        timeout_s: float | None = None,
     ) -> dict[str, list[dict]]:
         self.calls.append(
             {
                 "entity_ids": list(entity_ids),
                 "include_attributes": include_attributes,
+                "timeout_s": timeout_s,
             }
         )
+        if self.fail_history:
+            self.last_history_error = "TimeoutError: history query exceeded 30.0s"
+            return {}
+        self.last_history_error = None
         if self.leaky:
             # A source that ignores the request and returns everything it has.
             # ``discover_placements`` must still reason only about the entities
@@ -238,6 +251,7 @@ def _core(
     topology: Topology | None = None,
     leaky: bool = False,
     states: list[dict[str, Any]] | None = None,
+    fail_history: bool = False,
 ) -> tuple[EngineCore, Database, _FakeSource]:
     db = Database(tmp_path / "wm.db")
     config = EngineConfig(
@@ -250,6 +264,7 @@ def _core(
         payload if payload is not None else _history(_start()),
         leaky=leaky,
         states=states,
+        fail_history=fail_history,
     )
     core.hasource = source  # type: ignore[assignment]
     stored = topology if topology is not None else _topology()
@@ -492,6 +507,56 @@ def test_no_history_is_reported_not_treated_as_a_clean_result(tmp_path: Path) ->
 
     assert result["accepted"] == []
     assert result["skipped"].get("reason") == "no recorded history"
+
+
+def test_a_failed_history_query_is_not_reported_as_an_empty_recorder(
+    tmp_path: Path,
+) -> None:
+    """A timeout is a fact about the query, not about the recorder.
+
+    ``HASource.history`` returns ``{}`` for *any* failure -- by design, because a
+    caller must never read failure as "no change".  The consequence was that a
+    timeout and a genuinely empty recorder were indistinguishable, and the engine
+    reported "no recorded history" for a query that had simply not finished.  That
+    is not hypothetical: 7 days of history across 485 entities takes longer than
+    the 30 s default on the reference install, so asking for a week produced a
+    confident, wrong statement that the recorder held nothing.
+
+    The distinction is a separate reason *and* the underlying cause, so a user can
+    tell "your recorder is empty" from "this window is too big to answer in time".
+    """
+    core, _, source = _core(tmp_path, fail_history=True)
+
+    result = asyncio.run(core.discover_placements(lookback_hours=24, apply=None))
+
+    assert result["accepted"] == []
+    assert result["skipped"].get("reason") == "history query did not complete"
+    assert result["skipped"].get("reason") != "no recorded history"
+    assert "TimeoutError" in (result["skipped"].get("detail") or "")
+
+
+def test_the_history_timeout_grows_with_the_requested_window(tmp_path: Path) -> None:
+    """A week of history must be given more time than a day.
+
+    The query cost grows with both the window and the entity count, so a fixed
+    timeout cannot serve both: one tight enough to notice a dead socket on a 24 h
+    request is far too tight for 7 days (measured 7 s at 24 h against 17 s at
+    72 h on the reference install, with the 7-day whole-house request exceeding
+    30 s).  The budget is therefore a function of ``lookback_hours``, and this pins
+    that it actually reaches the source.
+    """
+    core, _, source = _core(tmp_path)
+
+    asyncio.run(core.discover_placements(lookback_hours=24, apply=None))
+    short = source.calls[-1]["timeout_s"]
+    asyncio.run(core.discover_placements(lookback_hours=168, apply=None))
+    long = source.calls[-1]["timeout_s"]
+
+    assert short is not None and long is not None
+    assert long > short, "a 7-day query must be given a larger budget than a 24 h one"
+    # The base keeps a short window from waiting as long as a week: 24 h asks for
+    # far less than the linear term for 168 h alone would suggest.
+    assert short < long / 3, "the budget must be dominated by the window, not a constant"
 
 
 def test_no_candidate_state_entities_short_circuits_with_a_reason(tmp_path: Path) -> None:

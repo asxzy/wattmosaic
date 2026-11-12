@@ -275,6 +275,7 @@ class _FakeSource:
         start: datetime,
         end: datetime | None = None,
         include_attributes: bool = False,
+        timeout_s: float | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
         self.calls.append(list(entity_ids))
         wanted = set(entity_ids)
@@ -304,6 +305,7 @@ class _WideSource:
         start: datetime,
         end: datetime | None = None,
         include_attributes: bool = False,
+        timeout_s: float | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
         payload = _history()
         payload["light.porch"] = payload["light.island"]

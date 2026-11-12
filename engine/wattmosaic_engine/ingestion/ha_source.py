@@ -183,6 +183,13 @@ class HASource:
         self.include_energy = include_energy
         self.emit_measurement_events = emit_measurement_events
         self.request_timeout_s = float(request_timeout_s)
+        #: Why the most recent :meth:`history` call returned nothing, or ``None``
+        #: when it returned a payload.  ``history`` deliberately returns an empty
+        #: mapping on failure (a caller must never read failure as "no change"),
+        #: but "the recorder is empty" and "the query timed out" are different
+        #: facts and only this attribute distinguishes them.  Read it only after an
+        #: empty result.
+        self.last_history_error: str | None = None
         self._connect_factory = connect_factory
         self._backoff_base_s = backoff_base_s
         self._backoff_max_s = backoff_max_s
@@ -380,6 +387,7 @@ class HASource:
         start: datetime,
         end: datetime | None = None,
         include_attributes: bool = False,
+        timeout_s: float | None = None,
     ) -> dict[str, Any]:
         """Recorder history for these entities, as HA returns it.
 
@@ -387,6 +395,18 @@ class HASource:
         engine was running.  Returns an empty mapping when the recorder is not
         available or the query fails: the caller treats that as "no history",
         never as "no change", so a missing recorder cannot manufacture evidence.
+
+        ``timeout_s`` overrides the connection's default request timeout.  A
+        history query is the one command whose cost grows with *both* the window
+        and the entity count, and it is the only caller that asks for days of
+        data across every candidate.  On the reference install the whole-house
+        query took 7 s at 24 h, 9 s at 48 h and 17 s at 72 h, so a 7-day request
+        (485 entities) exceeded the 30 s default and raised
+        ``asyncio.TimeoutError``.  That used to be swallowed by the ``except``
+        below, and the caller then reported "no recorded history" -- a statement
+        about the *recorder*, which was healthy, rather than about the query,
+        which had not finished.  The caller passes a longer budget because it
+        knows the window it asked for; validating the answer is still its job.
 
         ``include_attributes`` asks the recorder for attribute payloads.  Dimmer
         output lives in attributes, so learning a level→watts curve requires it;
@@ -398,6 +418,7 @@ class HASource:
         wanted = [str(entity_id) for entity_id in entity_ids if entity_id]
         if not wanted or not self.connected:
             return {}
+        self.last_history_error = None
         try:
             result = await self._request(
                 "history/history_during_period",
@@ -407,8 +428,14 @@ class HASource:
                 minimal_response=not include_attributes,
                 no_attributes=not include_attributes,
                 significant_changes_only=False,
+                _timeout_s=timeout_s,
             )
         except Exception as exc:  # noqa: BLE001 - recorder may not be enabled
+            # Recorded *and* swallowed: the empty mapping below is the caller's
+            # contract (failure is never evidence), but the reason is kept so a
+            # caller can tell a timeout from a genuinely empty recorder instead of
+            # reporting "no recorded history" for a query that never finished.
+            self.last_history_error = f"{type(exc).__name__}: {exc}"
             log.debug("history query failed: %s", exc)
             return {}
         return result if isinstance(result, dict) else {}
@@ -641,7 +668,9 @@ class HASource:
         return meta
 
     # -- request/response ------------------------------------------------- #
-    async def _request(self, msg_type: str, **kwargs: Any) -> Any:
+    async def _request(
+        self, msg_type: str, *, _timeout_s: float | None = None, **kwargs: Any
+    ) -> Any:
         if msg_type not in READ_ONLY_COMMANDS:
             # Defensive: the engine is read-only by construction.
             raise PermissionError(f"command {msg_type!r} is not permitted (read-only engine)")
@@ -653,10 +682,13 @@ class HASource:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[Any] = loop.create_future()
         self._pending[req_id] = fut
+        # ``_timeout_s`` is a transport concern, not part of the HA command; it is
+        # consumed here so it can never reach ``payload``.
         payload = {"id": req_id, "type": msg_type, **kwargs}
         await ws.send(json.dumps(payload))
         try:
-            return await asyncio.wait_for(fut, self.request_timeout_s)
+            timeout = self.request_timeout_s if _timeout_s is None else float(_timeout_s)
+            return await asyncio.wait_for(fut, timeout)
         finally:
             self._pending.pop(req_id, None)
 
