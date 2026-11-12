@@ -2629,12 +2629,13 @@ class EngineCore:
                         "r2_margin": group.r2_margin,
                         # Truthful, not a constant: ``GroupFit`` derives this from
                         # whether any member carries a coefficient the fit
-                        # identified.  On the production install 14 of 21 groups
-                        # are single-fixture and therefore *do* have a measured
-                        # wattage; reporting them all as "not individually
-                        # identifiable" would understate evidence the engine
-                        # actually holds, and would make the UI warn about
-                        # numbers that are sound.
+                        # identified.  Measured on the production install at 72 h
+                        # of history, 16 of 20 groups have a single member and 14
+                        # of those 20 carry an identified coefficient, so they
+                        # *do* have a measured wattage; reporting them all as "not
+                        # individually identifiable" would understate evidence
+                        # the engine actually holds, and would make the UI warn
+                        # about numbers that are sound.
                         "individually_identifiable": group.individually_identifiable,
                         "members": members,
                         "evidence": list(group.evidence),
