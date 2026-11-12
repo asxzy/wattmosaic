@@ -67,7 +67,6 @@ from .contracts import (
     utcnow,
 )
 from .device_links import (
-    CONFIG_LOAD_ENTITIES_KEY,
     device_for_entity,
     state_entity_for_device,
 )
@@ -495,16 +494,15 @@ def _linkable_state_entities(topology: Topology) -> set[str]:
     template, or another integration's shadow -- and treating it as a load would
     be a guess about a device that does not exist yet.  The mapping wizard (and
     the user) decide what is linkable; this only reads that decision.
+
+    Candidate *population* is now the state snapshot (see
+    :mod:`wattmosaic_engine.ingestion.candidate_entities`); this remains the
+    declaration read used by the learning/event paths and is kept as the single
+    definition both places share.
     """
-    out: set[str] = set()
-    for device in topology.devices:
-        for key in ("state_entity_ids", "load_entity_ids", CONFIG_LOAD_ENTITIES_KEY):
-            raw = (device.metadata or {}).get(key)
-            if isinstance(raw, str):
-                out.add(raw)
-            elif isinstance(raw, Iterable):
-                out.update(str(v) for v in raw if v)
-    return {e for e in out if e}
+    from .ingestion.candidate_entities import declared_state_entities
+
+    return declared_state_entities(topology)
 
 
 def _prom_label(value: str) -> str:
@@ -1479,7 +1477,28 @@ class EngineCore:
                 "effective_state": "off",
                 "summary": f"learning accounting failed: {type(exc).__name__}",
             }
-        return dict(payload) if isinstance(payload, dict) else {}
+        data = dict(payload) if isinstance(payload, dict) else {}
+        self._add_blocked_reason_detail(data)
+        return data
+
+    @staticmethod
+    def _add_blocked_reason_detail(status: dict[str, Any]) -> None:
+        """Name *why* learning is blocked, without changing what the engine does.
+
+        A user reading ``blocked`` cannot act on a reason label like
+        ``ambiguous_topology``: the cause is that the topology is still a
+        candidate, and the fix is to confirm it.  This only adds the explanation
+        -- the topology is **never** auto-confirmed here (contract §6), because
+        the wiring association is the user's assertion to make.
+        """
+        from .learning.reporting import CONFIRM_REMEDY
+
+        dominant = status.get("dominant_rejection_reason")
+        if status.get("effective_state") == "blocked" and dominant == "ambiguous_topology":
+            # ``ambiguous_topology`` is only ever stamped because the wiring
+            # association is unverified, so the detail names that directly.
+            status["blocked_reason_detail"] = "topology_not_confirmed"
+            status.setdefault("remedy", CONFIRM_REMEDY)
 
     def inference_backend_status(self) -> dict[str, Any] | None:
         """Backend self-description for ``/status`` and diagnostics.
@@ -1511,6 +1530,7 @@ class EngineCore:
         except Exception:  # noqa: BLE001
             db_stats = {"error": "unavailable"}
         quality = self.latest_quality
+        learning_status = self._learning_status_payload()
         return {
             "status": health.status,
             "contract_version": CONTRACT_VERSION,
@@ -1530,7 +1550,11 @@ class EngineCore:
             },
             "learning": {
                 "active": self.learning_active,
-                "effective_state": self._learning_status_payload().get("effective_state"),
+                "effective_state": learning_status.get("effective_state"),
+                # ``blocked_reason_detail`` names the *cause* of a silent block
+                # (contract §6); it never changes what the engine does.
+                "blocked_reason_detail": learning_status.get("blocked_reason_detail"),
+                "remedy": learning_status.get("remedy"),
             },
             "database": db_stats,
             "quality": (
@@ -2061,12 +2085,22 @@ class EngineCore:
                 hours = float(lookback)
             except (TypeError, ValueError):
                 raise InvalidRequest("lookback_hours must be a number") from None
-            if not (0.1 <= hours <= 24.0 * 30):
-                raise InvalidRequest("lookback_hours must be between 0.1 and 720")
             apply = command.parameters.get("apply")
+            include_groups = command.parameters.get("include_groups", True)
+            max_candidates = command.parameters.get("max_candidates", 200)
+            # The bounds and the type checks live in ``discover_placements`` so the
+            # route and the command cannot disagree; only the coercion that turns
+            # JSON scalars into the declared parameter types happens here, and a
+            # bad value is the caller's error, not a crash.
+            if not isinstance(include_groups, bool):
+                raise InvalidRequest("include_groups must be a boolean")
+            if isinstance(max_candidates, bool) or not isinstance(max_candidates, int):
+                raise InvalidRequest("max_candidates must be an integer")
             data = await self.discover_placements(
                 lookback_hours=hours,
                 apply=None if apply is None else bool(apply),
+                include_groups=include_groups,
+                max_candidates=max_candidates,
             )
             return ServiceResult(ok=bool(data.get("ok")), command=name, data=data)
         if name in ("start_learning", "resume_learning", "pause_learning"):
@@ -2205,38 +2239,102 @@ class EngineCore:
         )
 
     # -- facade: auto placement (ADR-0024) ---------------------------------- #
+    @staticmethod
+    def _candidate_state_entities(
+        states: Iterable[Mapping[str, Any]],
+        registries: Mapping[str, Any] | None,
+        topology: Topology,
+    ) -> tuple[list[Any], dict[str, str]]:
+        """The entities this run may reason about, from states + registries.
+
+        Candidate *population* is deliberately not derived from the topology
+        (contract §2): doing that starved auto placement to one device's
+        entities, so a shared lighting circuit could never be resolved.  The
+        topology is still consulted, but only to subtract what it already
+        declares.  Kept as a thin seam so the population rule can be exercised
+        without a recorder or a database.
+        """
+        from .ingestion.candidate_entities import candidate_state_entities
+
+        return candidate_state_entities(states, registries, topology)
+
     async def discover_placements(
         self,
         *,
         lookback_hours: float = 24.0,
         apply: bool | None = None,
+        include_groups: bool = True,
+        max_candidates: int = 200,
     ) -> dict[str, Any]:
         """Learn which fixtures sit on which CT row from recorded history.
 
         This is the only facade entry point that creates devices from an
         inference, so every guard that makes that safe is visible here:
 
-        * **opt-in** -- ``config.auto_placement`` (or ``apply=True`` for an
-          explicit request) gates the write.  Analysing without writing is always
-          allowed, because it changes nothing;
+        * **opt-in** -- ``config.auto_placement`` (or an explicit ``apply=True``)
+          gates the write.  Analysing without writing is always allowed, because
+          it changes nothing;
+        * **candidate population is structural** -- every ``light``/``switch``/
+          ``fan``/``input_boolean`` state is considered, minus entities the user
+          already declared and WattMosaic's own output.  Names, areas and
+          manufacturers are never used to decide membership (contract §2);
         * **read-only history** -- the recorder is queried, no service is called;
         * **branch rows only** -- a main row or a dedicated measurement refuses
           the placement with a reason instead of double counting the circuit;
         * **user declarations win** -- an entity a person configured is never
           rewritten;
         * **no fabrication** -- a transition that did not move measured power is
-          not placed at all.
+          not placed.  Fixtures whose individual wattage is not identifiable are
+          reported as an advisory *group*, never as a device (tier B).
 
-        Returns the plan, the refusals and whether it was applied, so a caller can
-        show the user exactly what was learned and what it declined to believe.
+        Returns the plan, the refusals, the advisory groups and whether anything
+        was applied, so a caller can show the user exactly what was learned and
+        what it declined to believe.
         """
+        # Group fitting lands in a separate workstream; guard the import so this
+        # module stays importable (and testable) before it exists.
+        try:
+            from .disaggregation.group_fit import fit_shared_rows
+        except ImportError:  # group fitting lands separately
+            fit_shared_rows = None
+
+        # Validate here as well as in the transport: the facade is a public entry
+        # point (the ``discover_placements`` service command reaches it directly),
+        # and an infinite lookback would otherwise overflow when building the
+        # window.
+        if isinstance(lookback_hours, bool) or not isinstance(lookback_hours, (int, float)):
+            raise InvalidRequest("lookback_hours must be a number")
+        lookback_hours = float(lookback_hours)
+        if not math.isfinite(lookback_hours) or lookback_hours <= 0 or lookback_hours > 2160:
+            raise InvalidRequest("lookback_hours must be greater than 0 and at most 2160")
+        if isinstance(max_candidates, bool) or not isinstance(max_candidates, int):
+            raise InvalidRequest("max_candidates must be an integer")
+        if max_candidates < 1:
+            raise InvalidRequest("max_candidates must be at least 1")
+
         topology = self._active_topology()
         if topology is None:
             return {
                 "ok": False,
                 "detail": "no topology to place devices on",
+                "applied": False,
+                "lookback_hours": lookback_hours,
+                "topology_version": None,
+                "stats": {
+                    "candidate_entities": 0,
+                    "refused_entities": 0,
+                    "branch_rows": 0,
+                    "observations": 0,
+                    "accepted": 0,
+                    "groups": 0,
+                    "withheld": 0,
+                },
                 "accepted": [],
                 "refused": {},
+                "groups": [],
+                "withheld": {},
+                "skipped": {},
+                "notes": ["no topology to place devices on"],
             }
 
         from .disaggregation.auto_placement import merge_placements, plan_placements
@@ -2248,27 +2346,92 @@ class EngineCore:
             parse_history_payload,
         )
 
+        states_payload = await maybe_await(self.hasource.state_snapshot())
+        registries = await maybe_await(self.hasource.registries())
+        candidates, candidate_refused = self._candidate_state_entities(
+            states_payload or [], registries, topology
+        )
+        found = len(candidates)
+        candidates = candidates[:max_candidates]
+        entity_ids = [candidate.entity_id for candidate in candidates]
+
         row_channels = {
             channel.ct_id: channel
             for channel in topology.channels
             if channel.enabled and channel.ct_type in (CTType.BRANCH, CTType.DEDICATED_DEVICE)
         }
-        # Only entities the topology can already see: an undeclared entity is not
-        # a candidate, because the engine has no evidence about whether it is a
-        # load at all (ADR-0012).  Auto placement narrows the set further -- to
-        # domains whose state proves runtime -- inside ``correlate``.
-        entity_ids = sorted(_linkable_state_entities(topology))
-        if not row_channels or not entity_ids:
+        # Contract §4: a group is never emitted for a main row or a
+        # dedicated-device row.  A main aggregate contains every downstream
+        # fixture, so fitting it would "identify" wattages that were never
+        # separately measured -- exactly the fabrication tier B must not do.
+        excluded_ct_ids = frozenset(
+            channel.ct_id
+            for channel in topology.channels
+            if channel.ct_type in (CTType.MAIN, CTType.DEDICATED_DEVICE)
+        )
+        notes: list[str] = []
+        stats: dict[str, Any] = {
+            "candidate_entities": len(candidates),
+            "refused_entities": len(candidate_refused),
+            "branch_rows": len(row_channels),
+            "observations": 0,
+            "accepted": 0,
+            "groups": 0,
+            "withheld": 0,
+        }
+        if found > len(candidates):
+            # Say it out loud: a truncated run is not "the engine found nothing
+            # else", and the omitted entities were never analysed.
+            notes.append(
+                f"analysed the first {len(candidates)} of {found} candidate entities "
+                f"(max_candidates={max_candidates}); increase it to consider the rest"
+            )
+
+        from .entity_evidence import MODE_ONLY_DOMAINS, domain_of
+        from .ingestion.correlation import CANDIDATE_DOMAINS
+
+        def _named_refusals() -> dict[str, str]:
+            """Candidate refusals worth naming individually.
+
+            Only domains a user could plausibly have meant as a fixture are
+            listed: a whole-house snapshot contains hundreds of sensors, and
+            naming each one would bury the interesting refusals.  The count of
+            *every* entity looked at and declined stays in
+            ``stats.refused_entities`` and is restated in ``notes``, so a refusal
+            is never rounded into silence.
+            """
+            listed = CANDIDATE_DOMAINS | MODE_ONLY_DOMAINS
+            return {
+                entity_id: reason
+                for entity_id, reason in candidate_refused.items()
+                if domain_of(entity_id) in listed
+            }
+
+        def _short_circuit(reason: str, skipped: dict[str, Any]) -> dict[str, Any]:
+            """The frozen response shape with an honest "nothing was analysed"."""
             return {
                 "ok": True,
+                "applied": False,
+                "lookback_hours": lookback_hours,
+                "topology_version": topology.version,
+                "stats": stats,
                 "accepted": [],
-                "refused": {},
-                "skipped": {
-                    "reason": "no branch CT rows or no declared state entities",
+                "refused": _named_refusals(),
+                "groups": [],
+                "withheld": {},
+                "skipped": skipped,
+                "notes": [reason, *notes],
+            }
+
+        if not row_channels or not entity_ids:
+            return _short_circuit(
+                "no branch CT rows or no candidate state entities",
+                {
+                    "reason": "no branch CT rows or no candidate state entities",
                     "channels": len(row_channels),
                     "entities": len(entity_ids),
                 },
-            }
+            )
 
         end = utcnow()
         start = end - timedelta(hours=max(lookback_hours, 0.1))
@@ -2277,14 +2440,12 @@ class EngineCore:
             wanted, start=start, end=end, include_attributes=True
         )
         if not payload:
-            return {
-                "ok": True,
-                "accepted": [],
-                "refused": {},
-                "skipped": {"reason": "no recorded history", "lookback_hours": lookback_hours},
-            }
+            return _short_circuit(
+                "no recorded history",
+                {"reason": "no recorded history", "lookback_hours": lookback_hours},
+            )
 
-        states, readings, levels = parse_history_payload(payload)
+        state_history, readings, levels = parse_history_payload(payload)
         # Readings are keyed by entity id in the payload; remap to ct_id so the
         # correlation (and the placement) speak the topology's vocabulary.
         by_entity = {
@@ -2295,7 +2456,7 @@ class EngineCore:
         }
         row_noise = estimate_row_noise(row_readings)
         observations = observations_from_history(
-            entity_states={e: rows for e, rows in states.items() if e in entity_ids},
+            entity_states={e: rows for e, rows in state_history.items() if e in entity_ids},
             row_readings=row_readings,
             # Levels are deliberately *not* re-filtered here.  A level is only
             # ever read for an entity that ``entity_states`` yielded, so the
@@ -2304,42 +2465,188 @@ class EngineCore:
             # rather than a guard that any test can distinguish.
             entity_levels=levels,
         )
+        stats["observations"] = len(observations)
         report = correlate(observations, now=end, row_noise_w=row_noise)
 
         configurations = self.db.load_device_configurations()
-        allow_apply = self.config.auto_placement if apply is None else bool(apply)
+        # Contract §3.1: a write needs **both** the request's consent and the
+        # stored opt-in.  ``apply`` defaults to false, so ``None`` is read-only;
+        # an explicit ``apply=True`` cannot override a disabled opt-in, because
+        # that switch is the user's standing decision.
+        allow_apply = apply is True and bool(self.config.auto_placement)
         plan = plan_placements(
             report=report, topology=topology, configurations=configurations
         )
-        result: dict[str, Any] = {
-            "ok": True,
-            "accepted": [
+
+        channels = topology.channel_map()
+        labels = {candidate.entity_id: candidate.friendly_name for candidate in candidates}
+
+        def _channel_label(ct_id: str) -> tuple[str, str | None]:
+            channel = channels.get(ct_id)
+            if channel is None:
+                return ct_id, None
+            return channel.name or ct_id, channel.panel_name
+
+        groups: list[dict[str, Any]] = []
+        withheld: dict[str, str] = {}
+        if include_groups and fit_shared_rows is not None:
+            # Contract §4 forbids a group on a main or dedicated-device row, and
+            # keeps those rows out of the fit entirely: a main aggregate contains
+            # every downstream fixture, so fitting it would "identify" wattages
+            # that were never separately measured.  The exclusion is applied
+            # here, to the *inputs*, so the call itself stays exactly the frozen
+            # §4 signature (no extra keyword for the other workstream to honour).
+            fitted = fit_shared_rows(
+                row_readings={
+                    channel.ct_id: [
+                        dict(row) for row in payload.get(channel.entity_id, ())
+                        if isinstance(row, Mapping)
+                    ]
+                    for channel in row_channels.values()
+                    if channel.ct_id not in excluded_ct_ids and channel.entity_id
+                },
+                entity_states={
+                    entity: [dict(row) for row in rows if isinstance(row, Mapping)]
+                    for entity, rows in payload.items()
+                    if entity in entity_ids
+                },
+                entity_levels={
+                    entity: {stamp: float(fraction) for stamp, fraction in rows}
+                    for entity, rows in levels.items()
+                    if entity in entity_ids
+                },
+                row_noise_w=row_noise,
+            )
+            for group in fitted:
+                ct_label, panel_name = _channel_label(group.ct_id)
+                members = [
+                    {
+                        "entity_id": member.entity_id,
+                        "name": labels.get(member.entity_id, member.entity_id),
+                        "estimated_w": member.estimated_w,
+                    }
+                    for member in group.members
+                ]
+                for member in group.members:
+                    withheld[member.entity_id] = (
+                        f"co_toggles_with_another_fixture_on_{group.ct_id}"
+                    )
+                groups.append(
+                    {
+                        "ct_id": group.ct_id,
+                        "ct_label": ct_label,
+                        "panel_name": panel_name,
+                        "total_w": group.total_w,
+                        "r2": group.r2,
+                        "r2_null_p95": group.r2_null_p95,
+                        "r2_margin": group.r2_margin,
+                        "individually_identifiable": False,
+                        "members": members,
+                        "evidence": list(group.evidence),
+                    }
+                )
+        elif include_groups:
+            notes.append(
+                "group fitting is not installed; fixtures that co-toggle cannot be "
+                "reported even as advisory groups"
+            )
+
+        accepted: list[dict[str, Any]] = []
+        for placement in plan.accepted:
+            configuration = placement.configuration
+            ct_id = configuration.monitored_by_ct_ids[0]
+            entity_id = configuration.state_entity_ids[0]
+            ct_label, panel_name = _channel_label(ct_id)
+            candidate = next(
+                (c for c in report.candidates if c.entity_id == entity_id), None
+            )
+            accepted.append(
                 {
                     "device_id": placement.device_id,
-                    "entity_id": placement.configuration.state_entity_ids[0],
-                    "ct_id": placement.configuration.monitored_by_ct_ids[0],
-                    "on_w": placement.configuration.expected.on_w,
+                    "entity_id": entity_id,
+                    "name": labels.get(entity_id, entity_id),
+                    "ct_id": ct_id,
+                    "ct_label": ct_label,
+                    "panel_name": panel_name,
+                    "on_w": (
+                        getattr(candidate, "typical_on_w", None)
+                        if candidate is not None
+                        else None
+                    )
+                    or configuration.expected.on_w,
+                    "off_w": getattr(candidate, "typical_off_w", None)
+                    if candidate is not None
+                    else None,
+                    "symmetry": getattr(candidate, "symmetry", None),
+                    "agreement": getattr(candidate, "agreement", None),
+                    "corroborations": getattr(candidate, "corroborations", None),
+                    "specificity_z": getattr(candidate, "specificity_z", None),
                     "dimmable": bool(
-                        placement.configuration.light is not None
-                        and placement.configuration.light.dimming_curve
+                        configuration.light is not None
+                        and configuration.light.dimming_curve
                     ),
                     "evidence": list(placement.evidence),
+                    "applied": False,
                 }
-                for placement in plan.accepted
-            ],
-            "refused": dict(plan.refused),
-            "unresolved": dict(report.unresolved),
-            "skipped": dict(report.skipped),
-            "row_noise_w": row_noise,
+            )
+
+        stats["accepted"] = len(accepted)
+        stats["groups"] = len(groups)
+        stats["withheld"] = len(withheld)
+
+        # Candidate-level refusals ("this entity can never prove runtime") and
+        # placement-level refusals ("this evidence may not become a device") are
+        # both reported.
+        refused: dict[str, Any] = dict(plan.refused)
+        for entity_id, reason in _named_refusals().items():
+            refused.setdefault(entity_id, reason)
+        accepted_ids = {item["entity_id"] for item in accepted}
+        withheld = {
+            key: value
+            for key, value in withheld.items()
+            if key not in refused and key not in accepted_ids
+        }
+        stats["withheld"] = len(withheld)
+
+        notes.extend(
+            f"{entity_id}: {reason}" for entity_id, reason in report.unresolved.items()
+        )
+        if stats["refused_entities"]:
+            notes.append(
+                f"{stats['refused_entities']} state entities are not candidates "
+                "(a mode entity, or a domain whose state does not prove runtime)"
+            )
+
+        result: dict[str, Any] = {
+            "ok": True,
             "applied": False,
+            "lookback_hours": lookback_hours,
+            "topology_version": topology.version,
+            "stats": stats,
+            "accepted": accepted,
+            "refused": refused,
+            "groups": groups,
+            "withheld": withheld,
+            "skipped": dict(report.skipped),
+            # Additive to the frozen shape: kept from the pre-§3.3 payload so a
+            # caller that already explained "why was this not placed?" keeps
+            # working.  ``notes`` repeats them in human-readable form.
+            "unresolved": dict(report.unresolved),
+            "row_noise_w": row_noise,
+            "notes": notes,
         }
         if not plan.accepted:
             return result
         if not allow_apply:
-            result["detail"] = (
-                "auto placement is disabled; enable it in the integration options "
-                "or pass apply=true to write these placements"
-            )
+            if not self.config.auto_placement:
+                result["detail"] = (
+                    "auto placement is disabled in the integration options; enable "
+                    "it and pass apply=true to write these placements"
+                )
+            else:
+                result["detail"] = (
+                    "apply is false; pass apply=true to write these placements"
+                )
             return result
 
         merged = merge_placements(configurations, plan)
@@ -2352,6 +2659,9 @@ class EngineCore:
             "configuration",
             f"auto placement created {len(plan.accepted)} device(s)",
         )
+        # ``applied`` is per accepted item and only true once the write landed.
+        for item in result["accepted"]:
+            item["applied"] = True
         result["applied"] = True
         result["topology_version"] = projected.version
         return result
