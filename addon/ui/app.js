@@ -2660,15 +2660,7 @@
         el('span', { class: 'spacer' }),
         badge('advisory', 'info'),
       ]),
-      groups.length
-        ? el('div', { class: 'notice', dataset: { tone: 'warn' }, style: 'margin-bottom:12px' }, [
-            el('div', { class: 'banner-icon', 'aria-hidden': 'true' }, 'i'),
-            el('div', {}, [
-              el('strong', {}, 'Not individually identifiable'),
-              el('p', {}, 'Grouped because these fixtures toggle together. Their combined draw is measured; the split between them is not. No device is created.'),
-            ]),
-          ])
-        : null,
+      discoverGroupsNote(groups),
       groups.length
         ? el('div', { class: 'discover-list' }, groups.map((group) => discoverGroupRow(group)))
         : el('p', { class: 'stat-hint' }, 'No co-toggling groups were found on a shared row.'),
@@ -2819,32 +2811,147 @@
     return button;
   }
 
+  /* --- Groups ---------------------------------------------------------- */
+
+  // ``individually_identifiable`` is the engine's statement that the aggregate
+  // fit separated a real coefficient for this group's member.  Only a literal
+  // ``true`` is evidence: an older engine omits the key, and a missing key must
+  // never be read as "a measurement happened".  Everything else renders as the
+  // conservative ``grouped`` claim.
+  const groupIdentifiable = (group) =>
+    Boolean(group && group.individually_identifiable === true);
+
+  // The coefficient the engine fitted for one member, or ``null`` when it gave
+  // none.  ``Number('')`` is ``0``, which would be a fabricated wattage, so the
+  // empty string is rejected before the numeric coercion.
+  const memberWatts = (member) => {
+    const value = member && member.estimated_w;
+    if (value === null || value === undefined || value === '') return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  /**
+   * The Groups section used to warn, once, that *no* group was individually
+   * identifiable.  That was true when the engine hard-coded the flag to false;
+   * it is false now, because a single-fixture group carries its own measured
+   * coefficient.  So the warning is emitted only when at least one group really
+   * is unidentifiable, and in a mixed section it counts how many and defers the
+   * per-row badge to say which.  An all-identified section gets a neutral note
+   * instead, so "never a device" is still stated without the false warning.
+   */
+  function discoverGroupsNote(groups) {
+    if (!groups.length) return null;
+    const unidentified = groups.filter((group) => !groupIdentifiable(group));
+    if (!unidentified.length) {
+      return el('p', { class: 'stat-hint' },
+        'Every group here is marked identified by the aggregate fit, so its fitted draw is a separated coefficient rather than an unexplained aggregate. A group is advisory evidence only and never becomes a device.');
+    }
+    const mixed = unidentified.length < groups.length;
+    const identifiedCount = groups.length - unidentified.length;
+    // The body describes what each badge means and what is on screen.  It never
+    // claims a split that was measured, and it never claims the warning applies
+    // to an identified row.  "Identified" is the engine's statement, not ours.
+    // The co-toggle sentence is conditional because a one-member group has no
+    // sibling to toggle with, and the engine may still decline to identify it.
+    const coToggle = unidentified.some(
+      (group) => (Array.isArray(group.members) ? group.members.length : 0) > 1
+    )
+      ? ' Where the members toggle together the combined draw is measured; the split between them is not.'
+      : '';
+    const body = mixed
+      ? `The ${unidentified.length} ${unidentified.length === 1 ? 'group' : 'groups'} badged grouped ${unidentified.length === 1 ? 'has' : 'have'} no identified per-fixture wattage, so only the group total is shown. The ${identifiedCount} ${identifiedCount === 1 ? 'group' : 'groups'} badged identified ${identifiedCount === 1 ? 'carries' : 'carry'} a coefficient the aggregate fit separated. No group becomes a device.`
+      : `${groups.length === 1 ? 'This group has' : 'None of these groups has'} no identified per-fixture wattage, so only the group total is shown.${coToggle} No device is created.`;
+    return el('div', { class: 'notice', dataset: { tone: 'warn' }, style: 'margin-bottom:12px' }, [
+      el('div', { class: 'banner-icon', 'aria-hidden': 'true' }, 'i'),
+      el('div', {}, [
+        el('strong', {}, mixed
+          ? `Not individually identifiable for ${unidentified.length} of ${groups.length} groups`
+          : 'Not individually identifiable'),
+        el('p', {}, body),
+      ]),
+    ]);
+  }
+
+  // The tooltip must never claim a per-member coefficient that the row does
+  // not show.  A singleton with a fitted ``estimated_w`` gets the strong claim;
+  // every other identified shape only repeats what the engine reported.
+  function identifiedTitle(soloW) {
+    if (soloW !== null) {
+      return 'The aggregate fit identified this one fixture on its own; the wattage is a fitted coefficient, not a split of a group total';
+    }
+    return 'The engine reports this group as individually identifiable: the aggregate fit separated its coefficient, so the group total is a fitted value';
+  }
+
+  // A group the engine did not mark identifiable must not claim its members
+  // "toggle together" when the row holds fewer than two of them -- there is
+  // nothing to toggle with.  The honest claim is the absence of a separated
+  // coefficient, so only the group total is shown.
+  const groupedTitle = (members) => {
+    if (members.length > 1) return 'The members toggle together; the split is not measured';
+    if (members.length === 1) {
+      return 'The engine did not report an identified coefficient for this fixture, so only the group total is shown';
+    }
+    return 'The engine did not identify a per-fixture coefficient for this group, so only the group total is shown';
+  };
+
   function discoverGroupRow(group) {
     const members = Array.isArray(group.members) ? group.members : [];
+    const identified = groupIdentifiable(group);
     const margin = group.r2_margin !== undefined && group.r2_margin !== null
       ? `${num(group.r2_margin, 2)} margin over null`
       : null;
     const r2 = group.r2 !== undefined && group.r2 !== null ? `R² ${num(group.r2, 3)}` : null;
     const evidence = Array.isArray(group.evidence) ? group.evidence : [];
-    return el('div', { class: 'discover-row group' }, [
+    // Only a *single-member* group may carry a per-member figure, and only when
+    // the engine actually reported one.  The frozen contract sets
+    // ``estimated_w`` to ``null`` for every member of a multi-fixture group,
+    // and this panel never divides ``total_w`` by the member count -- a split
+    // would be a fabrication, not a measurement.
+    const soloW = identified && members.length === 1 ? memberWatts(members[0]) : null;
+    const facts = [r2, margin].filter(Boolean);
+    return el('div', { class: identified ? 'discover-row group identified' : 'discover-row group' }, [
       el('div', { class: 'discover-main' }, [
         el('div', { class: 'discover-title' }, [
           el('span', { class: 'chip chip-ct' }, String(group.ct_label || group.ct_id || 'unknown CT')),
           el('span', { class: 'hier-power' }, watts(group.total_w)),
-          badge('grouped', 'warn', { title: 'The members toggle together; the split is not measured' }),
+          // A singleton shows a second wattage on its member chip, so the total
+          // is captioned here; without it two equal numbers would look like a
+          // contradiction rather than one measurement stated twice.
+          soloW !== null ? el('span', { class: 'discover-fact' }, 'group total') : null,
+          identified
+            ? badge('identified', 'ok', { title: identifiedTitle(soloW) })
+            : badge('grouped', 'warn', { title: groupedTitle(members) }),
         ]),
-        el('div', { class: 'discover-meta' }, [r2, margin].filter(Boolean)
+        el('div', { class: 'discover-meta' }, facts
           .map((fact) => el('span', { class: 'discover-fact' }, fact))),
         members.length
           ? el('div', { class: 'discover-members' },
-              members.map((member) =>
-                el('span', { class: 'chip' }, String(member.name || member.entity_id || 'member'))))
+              members.map((member) => discoverGroupMember(member, soloW !== null)))
           : null,
         evidence.length
           ? el('ul', { class: 'discover-evidence' },
               evidence.map((item) => el('li', {}, String(item))))
           : null,
       ]),
+    ]);
+  }
+
+  // The member chip is captioned "identified" only when the engine actually
+  // reported a coefficient for it.  A group flagged identifiable whose member
+  // carries no number must not have a wattage (or the word "identified")
+  // attributed to that member.
+  function discoverGroupMember(member, isSolo) {
+    const name = String((member && (member.name || member.entity_id)) || 'member');
+    const value = isSolo ? memberWatts(member) : null;
+    if (value === null) return el('span', { class: 'chip' }, name);
+    return el('span', {
+      class: 'chip discover-member-identified',
+      title: 'This is the only member; the aggregate fit identified its draw directly',
+    }, [
+      el('span', { class: 'discover-member-tag' }, 'identified'),
+      name,
+      el('span', { class: 'discover-member-watts' }, watts(value)),
     ]);
   }
 

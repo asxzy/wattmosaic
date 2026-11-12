@@ -705,6 +705,9 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
   padding: 12px 14px; background: var(--bg-elev-2);
 }
 .discover-row.group { border-color: color-mix(in srgb, var(--warn) 30%, var(--line)); }
+/* An identified group carries a real coefficient, so it does not get the
+   cautionary border its unidentifiable siblings wear. */
+.discover-row.group.identified { border-color: color-mix(in srgb, var(--ok) 28%, var(--line)); }
 .discover-row.withhold { padding: 8px 12px; background: transparent; }
 .discover-main { min-width: 0; display: flex; flex-direction: column; gap: 6px; flex: 1; }
 .discover-title {
@@ -721,6 +724,14 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 }
 .discover-members { display: flex; flex-wrap: wrap; gap: 5px; }
 .discover-members .chip { font-size: 11px; padding: 1px 7px; }
+/* The one member of a singleton group whose draw the aggregate fit identified.
+   The tag distinguishes the fitted member from an unqualified member chip. */
+.discover-member-identified { border-color: color-mix(in srgb, var(--ok) 32%, transparent); }
+.discover-member-tag {
+  font-size: 9.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--ok);
+}
+.discover-member-watts { font-variant-numeric: tabular-nums; color: var(--text); }
 .discover-actions { flex: none; display: flex; align-items: center; }
 .discover-row.withhold .discover-main { gap: 2px; }
 
