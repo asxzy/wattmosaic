@@ -48,8 +48,8 @@ def run(coro):
     return asyncio.run(coro)
 
 
-async def _with_server(facade, fn, *, token: str = TOKEN):
-    server = APIServer(facade, host="127.0.0.1", port=0, api_token=token)
+async def _with_server(facade, fn, *, token: str = TOKEN, **server_kwargs):
+    server = APIServer(facade, host="127.0.0.1", port=0, api_token=token, **server_kwargs)
     await server.start()
     port = server.port
     assert port > 0
@@ -661,3 +661,184 @@ def test_no_deprecation_warnings_from_app_keys() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         create_app(StubFacade(), api_token="x")
+
+
+# --------------------------------------------------------------------------- #
+# Per-route timeouts
+# --------------------------------------------------------------------------- #
+#
+# Placement discovery is the second of two 30 s caps that broke long requests
+# on production ``0.2.1-dev.18`` through the ingress panel::
+#
+#     lookback   result
+#     24 h       HTTP 200 in 9.8 s
+#     48 h       HTTP 502 after 30.02 s
+#     72 h       HTTP 502 after 30.02 s
+#     168 h      HTTP 502 after 30.05 s
+#
+# The gateway cap (``addon/gateway.py``) was the first and is fixed separately.
+# The second was this server's unconditional
+# ``asyncio.timeout(request_timeout_s)`` with ``request_timeout_s=30``.  The
+# fix keeps that default for every ordinary endpoint and gives
+# ``POST /api/v1/discover/placements`` the budget derived from the engine's own
+# history formula.
+
+
+def test_discovery_budget_exceeds_history_budget_for_every_allowed_lookback() -> None:
+    """The discovery budget must cover the engine's history budget plus fitting.
+
+    This is the *second* of two 30 s caps fixed for production ``0.2.1-dev.18``
+    (the gateway's ``sock_read=30`` was the first).  Through ingress, 24 h
+    answered HTTP 200 in 9.8 s while 48 h, 72 h and 168 h were killed at
+    30.02 s, 30.02 s and 30.05 s respectively -- by this middleware, even though
+    the engine itself granted 168 h a 420 s history budget.
+
+    The numbers are not chosen here: both budgets are derived from
+    ``api/timeouts.py``, which is the single source of truth that ``main.py``
+    re-exports.  The assertions pin three things: the default cap is still 30 s,
+    the discovery budget covers the largest window the API accepts (2160 h), and
+    it matches the gateway's ``ANALYSIS_TIMEOUT_S`` semantics so neither cap can
+    cut the request short.
+    """
+    from wattmosaic_engine.api import server as server_mod
+    from wattmosaic_engine.api.timeouts import (
+        DISCOVERY_FIT_OVERHEAD_S,
+        HISTORY_TIMEOUT_BASE_S,
+        HISTORY_TIMEOUT_PER_HOUR_S,
+        MAX_LOOKBACK_HOURS,
+        discovery_request_timeout_s,
+        history_timeout_s,
+    )
+    from wattmosaic_engine.main import HISTORY_TIMEOUT_BASE_S as MAIN_BASE_S
+    from wattmosaic_engine.main import HISTORY_TIMEOUT_PER_HOUR_S as MAIN_PER_HOUR_S
+
+    # ``main`` re-exports the shared constants rather than owning copies.
+    assert MAIN_BASE_S == HISTORY_TIMEOUT_BASE_S == 60.0
+    assert MAIN_PER_HOUR_S == HISTORY_TIMEOUT_PER_HOUR_S == 2.5
+    assert MAX_LOOKBACK_HOURS == 2160.0
+
+    # The 30 s default is unchanged and still exported: the fix must not become
+    # "remove all timeouts".
+    assert server_mod.DEFAULT_REQUEST_TIMEOUT_S == 30.0
+    assert "DEFAULT_REQUEST_TIMEOUT_S" in server_mod.__all__
+    assert server_mod.DEFAULT_ROUTE_TIMEOUTS == {
+        "/api/v1/discover/placements": server_mod.DISCOVERY_REQUEST_TIMEOUT_S
+    }
+
+    budget = server_mod.DISCOVERY_REQUEST_TIMEOUT_S
+    # 2160 h * 2.5 s/h = 5400 s of history + 1200 s of fitting = 6600 s, the
+    # same bound the gateway uses for its socket-read budget.
+    assert budget == 6600.0
+    assert budget == MAX_LOOKBACK_HOURS * HISTORY_TIMEOUT_PER_HOUR_S + DISCOVERY_FIT_OVERHEAD_S
+    assert budget >= 6600.0
+    assert discovery_request_timeout_s() == budget
+
+    for hours in (24, 48, 72, 168, 720, 2160):
+        engine_budget = max(HISTORY_TIMEOUT_BASE_S, HISTORY_TIMEOUT_PER_HOUR_S * hours)
+        assert engine_budget == history_timeout_s(hours), hours
+        assert budget > engine_budget, hours
+        # The history query is not the whole request: fitting follows it, so the
+        # middleware must leave room beyond the history budget alone.
+        assert budget - engine_budget >= DISCOVERY_FIT_OVERHEAD_S, hours
+
+    # The 24 h case now has >200x the time that used to be allowed, and 168 h is
+    # no longer cut at 30 s.
+    assert budget > 30.0 * 100
+
+
+async def _slow_discovery(self, **_kwargs: Any) -> Any:
+    await asyncio.sleep(0.3)
+    return {"ok": True, "accepted": [], "refused": {}, "groups": []}
+
+
+def test_default_route_still_times_out_and_maps_to_504() -> None:
+    """A slow handler on a normal route is still killed and reports 504.
+
+    The budget is scaled down by 1/10 (0.05 s default) so the test runs in
+    milliseconds, but the *mechanism* is production's: the real middleware, a
+    real socket, a real ``asyncio.timeout`` and the real 504 mapping.
+    ``/status`` has no override, so it must use the injected default.
+    """
+
+    class SlowStatus(StubFacade):
+        async def status(self) -> Any:  # type: ignore[override]
+            await asyncio.sleep(0.3)
+            return {"status": "ok", "facade": "stub", "contract_version": CONTRACT_VERSION}
+
+    async def fn(session, base):
+        async with session.get(f"{base}/status", headers=HEADERS) as resp:
+            assert resp.status == 504
+            body = await resp.json()
+            assert body["error"] == "timeout"
+            assert body["retryable"] is True
+            assert resp.headers["X-WattMosaic-Contract-Version"] == CONTRACT_VERSION
+        return True
+
+    assert run(_with_server(SlowStatus(), fn, request_timeout_s=0.05))
+
+
+def test_discovery_route_uses_its_own_larger_budget() -> None:
+    """A slow discovery survives the default cap but is still bounded by its own.
+
+    Same scaled-down pair as the test above: the injected default is 0.05 s and
+    the discovery override is 0.6 s, while the handler sleeps 0.3 s.  Under the
+    old code (one unconditional budget) this request would die at 0.05 s; it now
+    completes because the middleware consults the route table by exact path.
+
+    This is a real proof rather than a tautology: it exercises the middleware
+    end to end over a real socket, and the production magnitudes are pinned
+    separately by
+    ``test_discovery_budget_exceeds_history_budget_for_every_allowed_lookback``.
+    The scaled pair preserves the ordering that matters (handler sleep <
+    discovery budget, handler sleep > default) without sleeping for minutes.
+    """
+
+    class SlowDiscovery(StubFacade):
+        discover_placements = _slow_discovery
+
+    from wattmosaic_engine.api import server as server_mod
+
+    async def fn(session, base):
+        async with session.post(
+            f"{base}/discover/placements", json={"lookback_hours": 168}, headers=HEADERS
+        ) as resp:
+            assert resp.status == 200, await resp.text()
+            body = await resp.json()
+            assert body["ok"] is True
+        return True
+
+    assert run(
+        _with_server(
+            SlowDiscovery(),
+            fn,
+            request_timeout_s=0.05,
+            route_timeouts={server_mod.DISCOVERY_PLACEMENTS_PATH: 0.6},
+        )
+    )
+
+
+def test_route_timeout_defaults_cover_discovery_and_leave_others_alone() -> None:
+    """The app ships the discovery override; ordinary paths keep the default.
+
+    Explicit ``route_timeouts`` are a deliberate override (used by the timing
+    test above to scale the budgets down), so they win over the built-in table.
+    What this pins is the production shape: a caller that passes nothing --
+    ``main._run_engine`` passes nothing -- gets the derived discovery budget and
+    the untouched 30 s default everywhere else.
+    """
+    from wattmosaic_engine.api import server as server_mod
+
+    app = create_app(StubFacade(), api_token="")
+    timeouts = app[server_mod.TIMEOUTS_KEY]
+    assert timeouts == {
+        server_mod.DISCOVERY_PLACEMENTS_PATH: server_mod.DISCOVERY_REQUEST_TIMEOUT_S
+    }
+    assert "/api/v1/status" not in timeouts
+    assert app[server_mod.CONFIG_KEY]["request_timeout_s"] == 30.0
+
+    overridden = create_app(StubFacade(), api_token="", route_timeouts={"/api/v1/health": 1.0})
+    assert overridden[server_mod.TIMEOUTS_KEY] == {
+        server_mod.DISCOVERY_PLACEMENTS_PATH: server_mod.DISCOVERY_REQUEST_TIMEOUT_S,
+        "/api/v1/health": 1.0,
+    }
+

@@ -48,6 +48,7 @@ from .api.facade import (
     maybe_await,
 )
 from .api.server import APIServer
+from .api.timeouts import HISTORY_TIMEOUT_BASE_S, HISTORY_TIMEOUT_PER_HOUR_S
 from .config.settings import EngineConfig
 from .contracts import (
     CONTRACT_VERSION,
@@ -105,16 +106,20 @@ SUPERVISION_BACKOFF_BASE_S = 1.0
 SUPERVISION_BACKOFF_MAX_S = 60.0
 
 #: Timeout budget for the placement-discovery history query, as
-#: ``max(base, per_hour * lookback_hours)``.  The query cost grows with the
-#: window *and* the candidate count: on the reference install (485 entities) it
-#: took 7 s at 24 h and 17 s at 72 h, so the connection's 30 s default covered
-#: three days but not seven.  A timeout there used to surface as "no recorded
-#: history", which blamed the recorder for a query that had not finished.
-#: ``per_hour=2.5`` gives 7 days (168 h) a 420 s budget -- 25x the measured 17 s
-#: at 72 h -- while the base keeps a short window from ever waiting longer than a
-#: stalled connection would.
-HISTORY_TIMEOUT_BASE_S = 60.0
-HISTORY_TIMEOUT_PER_HOUR_S = 2.5
+#: ``max(base, per_hour * lookback_hours)``.  The constants are defined in
+#: ``api/timeouts.py`` and imported above, because the HTTP layer needs to
+#: derive its per-route request budget from the same numbers and importing this
+#: module from ``api/server.py`` would be circular.  Nothing in this module may
+#: stop importing them from here: ``tests/unit/test_gateway_proxy.py`` reads
+#: ``wattmosaic_engine.main.HISTORY_TIMEOUT_*``.
+#:
+#: The query cost grows with the window *and* the candidate count: on the
+#: reference install (485 entities) it took 7 s at 24 h and 17 s at 72 h, so the
+#: connection's 30 s default covered three days but not seven.  A timeout there
+#: used to surface as "no recorded history", which blamed the recorder for a
+#: query that had not finished.  ``per_hour=2.5`` gives 7 days (168 h) a 420 s
+#: budget -- 25x the measured 17 s at 72 h -- while the base keeps a short
+#: window from ever waiting longer than a stalled connection would.
 
 #: Downsample the nesting comparison grid to the channels' declared sampling
 #: cadence instead of using the union of every distinct timestamp.

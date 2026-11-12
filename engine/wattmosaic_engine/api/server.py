@@ -50,6 +50,7 @@ from .facade import (
     NullFacade,
     maybe_await,
 )
+from .timeouts import DISCOVERY_REQUEST_TIMEOUT_S
 
 log = logging.getLogger("wattmosaic.api")
 
@@ -59,9 +60,28 @@ TOKEN_HEADER = "X-API-Token"
 DEFAULT_REQUEST_TIMEOUT_S = 30.0
 DEFAULT_MAX_CONCURRENCY = 32
 
+#: Route-level timeout overrides, keyed by the exact request path.
+#:
+#: The 30 s default is deliberate: it frees a panel request from a hung engine
+#: promptly, and every endpoint except placement discovery answers in
+#: milliseconds.  Discovery is the one endpoint defined to be slow -- it runs a
+#: whole-house recorder analysis and writes nothing until the analysis is done
+#: -- so it gets a budget derived from the history window it may be asked for.
+#: Keep this table small and explicit; a pattern language here would make it
+#: impossible to say which budget an endpoint actually has.
+DISCOVERY_PLACEMENTS_PATH = f"{API_PREFIX}/discover/placements"
+
+#: Paths that are allowed to outlive ``DEFAULT_REQUEST_TIMEOUT_S``.  The
+#: discovery budget comes from ``api/timeouts.py``, which is also where the
+#: engine's history-query budget lives, so the two cannot drift apart.
+DEFAULT_ROUTE_TIMEOUTS: dict[str, float] = {
+    DISCOVERY_PLACEMENTS_PATH: DISCOVERY_REQUEST_TIMEOUT_S,
+}
+
 # Typed application keys (avoids aiohttp NotAppKeyWarning).
 FACADE_KEY: web.AppKey[Any] = web.AppKey("wm_facade", Any)
 CONFIG_KEY: web.AppKey[dict[str, Any]] = web.AppKey("wm_config", dict)
+TIMEOUTS_KEY: web.AppKey[dict[str, float]] = web.AppKey("wm_route_timeouts", dict)
 SEMAPHORE_KEY: web.AppKey[asyncio.Semaphore] = web.AppKey("wm_semaphore", asyncio.Semaphore)
 STARTED_AT_KEY: web.AppKey[float] = web.AppKey("wm_started_at", float)
 
@@ -115,6 +135,7 @@ class APIServer:
         port: int = 8787,
         request_timeout_s: float = DEFAULT_REQUEST_TIMEOUT_S,
         max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
+        route_timeouts: dict[str, float] | None = None,
     ) -> None:
         self.facade = facade or NullFacade()
         self.api_token = api_token or ""
@@ -122,6 +143,7 @@ class APIServer:
         self.port = int(port)
         self.request_timeout_s = float(request_timeout_s)
         self.max_concurrency = max(1, int(max_concurrency))
+        self.route_timeouts = dict(route_timeouts or {})
         self.started_at = time.monotonic()
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
@@ -131,6 +153,7 @@ class APIServer:
             api_token=self.api_token,
             request_timeout_s=self.request_timeout_s,
             max_concurrency=self.max_concurrency,
+            route_timeouts=self.route_timeouts,
         )
 
     @property
@@ -187,6 +210,16 @@ class APIServer:
 # --------------------------------------------------------------------------- #
 
 
+def _effective_timeout(request: web.Request, cfg: dict[str, Any]) -> float:
+    """The middleware budget for this request.
+
+    Route-level overrides win; everything else keeps the global default.  The
+    lookup is an exact path match on purpose (see ``TIMEOUTS_KEY``).
+    """
+    overrides: dict[str, float] = request.app.get(TIMEOUTS_KEY, {})
+    return overrides.get(request.path, cfg["request_timeout_s"])
+
+
 @web.middleware
 async def _contract_and_auth(request: web.Request, handler: Any) -> web.StreamResponse:
     cfg = request.app[CONFIG_KEY]
@@ -200,7 +233,7 @@ async def _contract_and_auth(request: web.Request, handler: Any) -> web.StreamRe
             return response
 
     try:
-        async with asyncio.timeout(cfg["request_timeout_s"]):
+        async with asyncio.timeout(_effective_timeout(request, cfg)):
             response = await handler(request)
     except Exception as exc:  # noqa: BLE001 - mapped below
         response = _map_exception(request, exc)
@@ -561,14 +594,23 @@ def create_app(
     api_token: str = "",
     request_timeout_s: float = DEFAULT_REQUEST_TIMEOUT_S,
     max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
+    route_timeouts: dict[str, float] | None = None,
 ) -> web.Application:
-    """Build the aiohttp app.  Import-safe and side-effect free."""
+    """Build the aiohttp app.  Import-safe and side-effect free.
+
+    ``route_timeouts`` overrides the global ``request_timeout_s`` for specific
+    request paths.  The defaults already cover placement discovery, because
+    that endpoint is defined to outlive the 30 s default; a mapping passed here
+    is merged over them, so callers can add budgets or scale them (tests scale
+    both down) without losing the discovery entry by accident.
+    """
     app = web.Application(middlewares=[_bounded, _contract_and_auth])
     app[FACADE_KEY] = facade or NullFacade()
     app[CONFIG_KEY] = {
         "api_token": api_token or "",
         "request_timeout_s": float(request_timeout_s),
     }
+    app[TIMEOUTS_KEY] = {**DEFAULT_ROUTE_TIMEOUTS, **(route_timeouts or {})}
     app[SEMAPHORE_KEY] = asyncio.Semaphore(max(1, int(max_concurrency)))
     app[STARTED_AT_KEY] = time.monotonic()
 
@@ -608,6 +650,10 @@ __all__ = [
     "CONTRACT_HEADER",
     "DEFAULT_MAX_CONCURRENCY",
     "DEFAULT_REQUEST_TIMEOUT_S",
+    "DEFAULT_ROUTE_TIMEOUTS",
+    "DISCOVERY_PLACEMENTS_PATH",
+    "DISCOVERY_REQUEST_TIMEOUT_S",
+    "TIMEOUTS_KEY",
     "TOKEN_HEADER",
     "create_app",
     "create_runner",
