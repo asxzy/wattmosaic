@@ -135,12 +135,41 @@ NULL_MIN_SHIFT_BINS = 96
 #: Entities are taken in ``entity_id`` order so the cap is deterministic rather
 #: than dependent on dictionary insertion order.
 MAX_ENTITIES = 200
-#: Eigenvalues of the (singular, because scenes are exactly collinear) Gram
-#: matrix below this fraction of the largest are dropped before the factorisation
-#: used by the fit.  In those directions no coefficient is identifiable, so the
-#: solve would be numerically meaningless -- and the null, which reuses the same
-#: factor, would report a number manufactured entirely by rounding noise.
-_EIGENVALUE_FLOOR = 1e-9
+#: Largest condition number ``sqrt(λ_max/λ_min)`` a retained eigen-direction of
+#: the centred Gram matrix may have.  A direction at the cut amplifies anything
+#: projected onto it by this factor, so the cut is what bounds the coefficient's
+#: numerical error -- bounding ``λ`` alone does not, because the amplification is
+#: ``1/√λ``.
+#:
+#: ``1e3`` is measured, not tuned for a passing test.  On the production
+#: ``lights_ct1`` window the *degenerate* directions sit at
+#: ``λ/λ_max = 2.2e-15`` and ``-1.5e-14`` -- condition numbers ``4.4e7`` and
+#: imaginary -- while every direction that corresponds to a real group is at
+#: ``λ/λ_max ≥ 2.3e-4``, i.e. a condition number of at most ``66``.  The cut
+#: therefore sits 15× above the worst genuine direction and 4×10⁴ below the
+#: nearest artefact, which is a gap no threshold inside four decades can get
+#: wrong.  Floating point supports the same number from the other side: at
+#: ``κ = 1e3`` a forward error of ``κ · ε ≈ 1e-13`` keeps 13 significant digits,
+#: while ``κ = 1e7`` leaves 9 and a coefficient amplified into the 10¹⁵ range
+#: still looks like two significant digits.
+_MAX_CONDITION = 1e3
+#: A group column is *identifiable* only when its unit vector lies in the row
+#: space of the centred design, i.e. when the fitted coefficient for it is the
+#: unique least-squares answer rather than one arbitrary point on a line of
+#: equally good ones.  Concretely: the projection of column ``j`` onto the
+#: retained eigenbasis must reconstruct the column to this relative tolerance.
+#: A column that is constant over the usable window has a *zero* centred column
+#: and no projection at all, so it is never identifiable -- the fit has not seen
+#: it switch, and ``1e-9`` says "reconstructed to numerical exactness" while a
+#: collapsed direction misses by O(1).
+_IDENTIFIABILITY_TOL = 1e-9
+#: A co-toggle component larger than this is not a circuit-sized group.  Real
+#: scene groups on the production install are 2-4 members (``lights_ct1``,
+#: ``lights_ct2``); the single component that exceeds this is 92 members, every
+#: Reolink camera flag (``*_detect``/``*_motion``/``*_recordings``/...), which one
+#: automation sets together.  Such a component is a *house-wide scene*, and the
+#: evidence string says so rather than claiming a circuit group.
+HOUSE_WIDE_SCENE_MEMBERS = 20
 
 
 @dataclass(slots=True, frozen=True)
@@ -451,6 +480,22 @@ def _co_toggle_groups(instants: Mapping[str, np.ndarray]) -> list[list[str]]:
     they should be fitted as one regressor.  Sharing an *instant* is the
     discriminator, not sharing a circuit -- two fixtures on one row that switch
     independently stay separate groups and keep separate coefficients.
+
+    The union is by *transitive closure*, and that is deliberate: "cannot be
+    separated" is an equivalence relation, not a similarity.  If A and B always
+    fire together and B and C always fire together then no coefficient on A can
+    be distinguished from one on C, so splitting the chain would hand the solver
+    three columns that are not three independent regressors.
+
+    What transitive closure *does* buy, measured on the production install: one
+    component of 92 members, every pair linked (4186 of 4186 possible pairs at
+    ``share ≥ 0.8``, every member with exactly 91 links).  It is not a chain
+    thinned into a clique by accident -- it is a genuine clique, 92 Reolink
+    camera flags (``*_detect``/``*_motion``/``*_recordings``/...) that one
+    automation sets and clears together.  A 92-member ``mean()`` is therefore the
+    honest regressor for a house-wide scene, not a circuit group.  It is kept as
+    one column (splitting it would fabricate independence) and the evidence
+    string names it for what it is -- see :data:`HOUSE_WIDE_SCENE_MEMBERS`.
     """
     ids = sorted(instants)
     shares = _co_toggle_shares(instants)
@@ -503,8 +548,8 @@ def _fit_row(
     design: np.ndarray,
     *,
     seed: int,
-) -> tuple[np.ndarray, float, float, float] | None:
-    """Fit one row; return ``(coefficients, base, r², null_p95)`` or ``None``.
+) -> tuple[np.ndarray, np.ndarray, float, float, float] | None:
+    """Fit one row; return ``(coefficients, reportable, base, r², null_p95)``.
 
     The intercept is free and unconstrained, so both the row *and* the design
     are centred before the non-negative solve.  Fitting ``nnls(X, y - ȳ)``
@@ -518,6 +563,53 @@ def _fit_row(
 
     The real coefficient comes from ``scipy.optimize.nnls``: ``w ≥ 0`` is a
     physical constraint, not a regulariser.
+
+    Why the solve is underdetermined, and how a 10¹⁵ W answer happened
+    ----------------------------------------------------------------
+    ``nnls(factor, project @ cross)`` is the same problem as ``nnls(X, y)`` only
+    when ``factor`` has full *column* rank.  ``factor`` is ``k × n`` with ``k``
+    the number of retained eigen-directions and ``n`` the number of group
+    columns, so whenever the rank cut drops a direction the system is
+    underdetermined and NNLS may place **any** value in the dropped null space:
+    the residual is unchanged by that value, so the solver's choice is not a
+    measurement.
+
+    That is what produced ``total_w = 9.999358875363018e15 W`` for
+    ``switch.fan_socket_1`` on the production ``lights_ct1`` row, and the
+    numbers pin it down exactly.  The fixture is ON for 88 bins and all 88 fell
+    inside the 744 bins where two other group columns were unknown, so the
+    all-columns availability mask deleted every one: its centred column was
+    **exactly zero** (``‖X e₁₃‖ = 0.0``, ``XᵀX e₁₃ = 0``).  Two directions were
+    dropped -- that zero column and the exact ``g02 + g04 = g03 + g11``
+    dependency -- leaving 18 directions for 20 unknowns.  The retained
+    eigenvectors are orthogonal to the dropped ones only to rounding, so
+    ``factor[:, 13]`` was not exactly zero: seven of its 18 entries were
+    rounding noise, the largest ``1.57e-15``, norm ``2.26e-15``.  Their dot with
+    the right-hand side came to ``2.96e-13``, so the least-squares coefficient
+    **along that direction** is ``(f·rhs)/(f·f) = 2.96e-13 / 4.77e-30 ≈ 5.8e16``
+    -- and NNLS, free to choose in the null space, returned ``1e16``.  The row's
+    honest maximum was 114.5 W.
+
+    The gate never saw it: that coefficient bought ``ΔR² = 0.00025`` (0.99932
+    with the blowup against 0.99907 without it), which no ``r2`` or ``margin``
+    threshold can distinguish from rounding.  Magnitude was the only signal, and
+    nothing looked at magnitude.
+
+    Three structural changes make that unreachable rather than clamped.
+
+    1. **Zero-variance columns never reach the solver.**  A group that does not
+       vary over the usable window is not a regressor; it is dropped before the
+       Gram matrix is formed, so the zero column that created the null space
+       cannot exist.  This alone fixes the production blowup: with column 13
+       removed the same window returns ``70.289 W``.
+    2. **The rank cut controls the condition number** (:data:`_MAX_CONDITION`),
+       so a near-degenerate direction is removed before its ``1/√λ`` can amplify
+       anything projected onto it.
+    3. **Only identifiable coefficients are reportable.**  A column that is a
+       combination of the others (the ``g02 + g04 = g03 + g11`` quad, whose
+       relation holds to ``2.9e-15`` against column norms of 21-34) has no unique
+       coefficient; the fit still uses it -- it carries real signal and dropping
+       it would lose R² -- but its value is not a claim and is not reported.
 
     The null deliberately does **not** use NNLS.  For each shuffle it takes the
     *unconstrained* least-squares optimum, which is the best R² any linear model
@@ -533,8 +625,14 @@ def _fit_row(
         return None
     y = watts[usable]
     x = design[usable]
-    if not np.any(np.ptp(x, axis=0) > 0.0):
+    # A column that is constant over the usable window is not a regressor.  It is
+    # removed *before* the Gram matrix so it cannot manufacture a null direction
+    # for the solver to wander in.
+    variable = np.ptp(x, axis=0) > 0.0
+    if not variable.any():
         return None
+    columns = np.flatnonzero(variable)
+    x = x[:, columns]
 
     column_means = x.mean(axis=0)
     base_mean = float(y.mean())
@@ -544,36 +642,37 @@ def _fit_row(
         return None
     centred_x = x - column_means
 
-    gram = centred_x.T @ centred_x
-    eigenvalues, vectors = np.linalg.eigh(gram)
-    keep = eigenvalues > max(float(eigenvalues.max()) * _EIGENVALUE_FLOOR, 0.0)
-    eigenvalues, vectors = eigenvalues[keep], vectors[:, keep]
-    if not eigenvalues.size:
+    # One decomposition, used for the rank cut, the solve and the
+    # identifiability test.  Splitting it three ways is how the three could
+    # disagree about which subspace is trustworthy.
+    centred_x, eigenvalues, vectors, reportable = _conditioned_basis(centred_x)
+    if centred_x is None or not vectors.size:
         return None
+
+    root = np.sqrt(eigenvalues)
     # ``factor`` is ``(Λ^½ Vᵀ)``: ``factorᵀ factor == V Λ Vᵀ == XᵀX``.  Solving
     # ``nnls(factor, Λ^-½ Vᵀ Xᵀy)`` is the same non-negative problem as
     # ``nnls(X, y)`` up to an orthogonal transform, but the matrix handed to the
-    # solver is ``n × n`` instead of ``m × n``.  On a 48 h window (11 520 bins ×
+    # solver is ``k × n`` instead of ``m × n``.  On a 48 h window (11 520 bins ×
     # 200 entities) that is 9 ms instead of 400 ms per row, which is the whole
     # difference between the 2 s budget passing and failing.
-    root = np.sqrt(eigenvalues)
     factor = (vectors * root).T
     project = (vectors / root).T
-
-    def unconstrained(cross: np.ndarray) -> np.ndarray:
-        """Best possible least-squares coefficients in the identifiable space."""
-        return vectors @ ((vectors.T @ cross) / eigenvalues[:, None])
-
     cross = centred_x.T @ centred_y
     coefficient = nnls(factor, project @ cross)[0]
+    # Pin the answer to the minimum-norm solution in the retained row space.  On
+    # a rank-deficient ``factor`` this is the *only* part of the NNLS answer the
+    # data supports.
+    coefficient = vectors @ (vectors.T @ coefficient)
+
     # wᵀ(XᵀX)w = Σ λ_i (v_iᵀw)².  The eigenbasis is needed because the truncated
     # Gram is diagonal in ``v``, not in the coefficient's own axes.
     along = vectors.T @ coefficient
     residual = float(total_ss - 2.0 * coefficient @ cross + eigenvalues @ (along * along))
     r2 = 1.0 - max(residual, 0.0) / total_ss
     # The intercept the fit actually used: the row mean minus whatever mean the
-    # chosen coefficients account for.  Reported so a reader can see the always-on
-    # load the groups were fitted on top of.
+    # coefficients account for.  Reported so a reader can see the always-on load
+    # the groups were fitted on top of.
     base = base_mean - float(column_means @ coefficient)
 
     # The null rotates the *whole* on/off matrix by a large offset: every
@@ -617,7 +716,7 @@ def _fit_row(
             draws[:, draw] = centred_y[rng.permutation(usable_bins)]
         null_cross = centred_x.T @ draws
 
-    null_coefficient = unconstrained(null_cross)
+    null_coefficient = vectors @ ((vectors.T @ null_cross) / eigenvalues[:, None])
     null_along = vectors.T @ null_coefficient
     null_residual = (
         total_ss
@@ -625,7 +724,79 @@ def _fit_row(
         + eigenvalues @ (null_along * null_along)
     )
     null_r2 = 1.0 - np.maximum(null_residual, 0.0) / total_ss
-    return coefficient, base, r2, float(np.percentile(null_r2, 95))
+
+    # Expand back to one entry per group.  Columns that could not be fitted are
+    # exactly zero; columns that were fitted but are not separable keep their
+    # value for the prediction but are marked unreportable.
+    full = np.zeros(design.shape[1])
+    full[columns] = coefficient
+    flags = np.zeros(design.shape[1], dtype=bool)
+    flags[columns] = reportable
+    return full, flags, base, r2, float(np.percentile(null_r2, 95))
+
+
+def _conditioned_basis(
+    centred_x: np.ndarray,
+) -> tuple[np.ndarray | None, np.ndarray, np.ndarray, np.ndarray]:
+    """Drop degenerate columns, then return the well-conditioned eigenbasis.
+
+    Returns ``(centred_x, eigenvalues, vectors, reportable)``: the design reduced
+    to its non-degenerate columns, the retained eigenvalues and eigenvectors of
+    its Gram matrix, and -- for each column of the *returned* ``centred_x`` --
+    whether that column has a unique coefficient.
+
+    Two things make a coefficient non-unique, and both are common in this data:
+
+    * **A column with no variance.**  Its centred column is zero, so every
+      coefficient explains the row equally well.  This is the production bug:
+      ``switch.fan_socket_1``'s entire ON period fell in bins another column had
+      made unusable.
+    * **A column that is a combination of the others.**  The production row has
+      ``g02 + g04 = g03 + g11`` holding to ``2.9e-15`` against column norms of
+      21-34.  Any split among those four fits equally well.
+
+    Both are decided by one fact: a coefficient is unique exactly when the unit
+    vector ``e_j`` lies in the row space of the centred design, i.e. when it has
+    no component on the discarded near-null directions.  Row ``j`` of
+    ``vectors`` *is* ``e_j`` written in the eigenbasis, so the test is whether
+    those rows have mass on the dropped columns.
+
+    Measured on the production ``lights_ct1`` window: the four collinear groups
+    score ``0.13``-``0.34`` and the zero column is dropped before the test;
+    every remaining column scores at most ``1.2e-23``.  The ``1e-9`` tolerance
+    therefore sits 14 orders above the largest genuine score and 8 orders below
+    the smallest artefact -- the two populations are separated by ~10²², so no
+    value in that gap could change a verdict.
+    """
+    norms = np.linalg.norm(centred_x, axis=0)
+    nonzero = norms > 0.0
+    if not nonzero.any():
+        return None, np.empty(0), np.empty((0, 0)), np.zeros(centred_x.shape[1], bool)
+    centred_x = centred_x[:, nonzero]
+
+    scaled = centred_x / norms[nonzero]
+    eigenvalues, vectors = np.linalg.eigh(scaled.T @ scaled)
+    largest = float(eigenvalues.max())
+    if largest <= 0.0:
+        return None, np.empty(0), np.empty((0, 0)), np.zeros(centred_x.shape[1], bool)
+    keep = eigenvalues > largest / (_MAX_CONDITION * _MAX_CONDITION)
+    if not keep.any():
+        return None, np.empty(0), np.empty((0, 0)), np.zeros(centred_x.shape[1], bool)
+
+    # Test identifiability on the *unit-normalised* system so a column's scale
+    # cannot make it look more or less recoverable than it is.
+    outside = (vectors[:, ~keep] ** 2).sum(axis=1) if (~keep).any() else np.zeros(len(keep))
+    separable = outside <= _IDENTIFIABILITY_TOL
+
+    # The solve itself uses the unnormalised Gram, so the coefficients come out
+    # in watts rather than in units of each column's own norm.
+    eigenvalues, vectors = np.linalg.eigh(centred_x.T @ centred_x)
+    keep = eigenvalues > float(eigenvalues.max()) / (_MAX_CONDITION * _MAX_CONDITION)
+    eigenvalues, vectors = eigenvalues[keep], vectors[:, keep]
+
+    reportable = np.zeros(centred_x.shape[1], bool)
+    reportable[separable] = True
+    return centred_x, eigenvalues, vectors, reportable
 
 
 def fit_shared_rows(
@@ -729,12 +900,33 @@ def fit_shared_rows(
         result = _fit_row(watts, design, seed=seed)
         if result is None:
             continue
-        coefficient, base, r2, null_p95 = result
+        coefficient, identifiable_column, base, r2, null_p95 = result
         margin = r2 - null_p95
         if r2 < min_r2_improvement or margin < min_r2_margin_over_null:
             continue
+        # The physical bound.  A coefficient is the watts the group *adds* while
+        # on, on a row whose observed maximum is what every load on it can draw
+        # together, so no single group can exceed that maximum: at any instant
+        # the group is either off (0 W of it) or on, and when it is on the row
+        # carries at least its draw.  min is the wrong bound because the row also
+        # carries a baseline; max is the most the circuit ever measured and
+        # therefore the most anything on it can have drawn.
+        #
+        # A violation is a *rejected fit*, not a clamped number.  Clamping would
+        # report "this group draws exactly the row maximum", a figure the data
+        # never produced and which would look like a measurement.  Reaching this
+        # branch at all means the solve did not measure the group, so the honest
+        # answer is that this row cannot support a group fit.
+        row_max_w = float(np.nanmax(watts)) if np.isfinite(watts).any() else 0.0
+        if row_max_w <= 0.0 or float(coefficient.max(initial=0.0)) > row_max_w:
+            continue
         floor_w = max(MIN_RESPONSE_W, float(row_noise_w.get(ct_id, 0.0)))
         for column, group in enumerate(groups):
+            if not identifiable_column[column]:
+                # No unique coefficient exists for this column on this row, so
+                # there is nothing to report.  Zero is what the fit returned; a
+                # non-zero value here would be the solver's pivoting artefact.
+                continue
             total_w = float(coefficient[column])
             if total_w < floor_w:
                 # Below the engine's own response floor (or below the row's
@@ -804,6 +996,16 @@ def _evidence(
     count = len(group)
     if count == 1:
         sharing = f"1 fixture on this circuit, no co-toggling partner ({group[0]})"
+    elif count >= HOUSE_WIDE_SCENE_MEMBERS:
+        # Not a circuit group.  A component this large is the transitive closure
+        # of a house-wide scene -- measured on the production install: 92 camera
+        # flags, every pair co-toggling, all set by one automation.  Calling it
+        # "N fixtures share one switch" would suggest a switch a person could
+        # point at, which no longer exists at this size.
+        sharing = (
+            f"house-wide scene: {count} fixtures switch together within "
+            f"{CO_TOGGLE_S:g} s (a scene automation, not one circuit switch)"
+        )
     else:
         sharing = f"{count} fixtures co-toggle within {CO_TOGGLE_S:g} s and share one switch"
     lines = [
@@ -832,5 +1034,6 @@ __all__ = [
     "N_NULL_PERMUTATIONS",
     "GroupFit",
     "GroupMember",
+    "HOUSE_WIDE_SCENE_MEMBERS",
     "fit_shared_rows",
 ]

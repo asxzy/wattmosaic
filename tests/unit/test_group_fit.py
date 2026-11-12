@@ -425,6 +425,268 @@ def test_a_fixture_below_the_response_floor_is_not_reported() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Degenerate designs: a coefficient that outruns the row is a refused row
+# --------------------------------------------------------------------------- #
+
+#: How many bins of an entity's history are unknown before its first event.  A
+#: fixture that was never recorded until 10:00 has no state before 10:00, and
+#: ``_design_matrix`` marks the whole group column unknown over that prefix.
+UNKNOWN_PREFIX_BINS = 600
+#: Width of the ON period of the fixture that only ever switches inside that
+#: unknown prefix -- so its centred column is exactly zero over the usable
+#: window.  This is the production shape: ``switch.fan_socket_1`` was ON for 88
+#: bins and all 88 fell inside the 744 bins that two other group columns made
+#: unknown.
+BLIND_FIXTURE_ON_BINS = 88
+#: A load the design cannot explain.  With a perfect fit the solver stops at the
+#: boundary of the problem and the defect stays hidden; a row whose switch
+#: pattern is only partly explained leaves the solver searching, which is when
+#: the zero-width direction gets used.  The production row had exactly this
+#: shape -- R² 0.99, but 114.5 W of measured range against a 160.8 W maximum.
+UNEXPLAINED_W = 100.0
+
+
+def _states_after(pattern: np.ndarray, first_bin: int) -> list[dict]:
+    """State changes only, and only from ``first_bin`` onward.
+
+    A recorder that first reports at 10:00 says nothing about 09:00, so the bins
+    before ``first_bin`` stay unknown rather than being assumed off.
+    """
+    rows: list[dict] = []
+    previous: bool | None = None
+    for index in range(first_bin, N_BINS):
+        on = bool(pattern[index])
+        if previous is not None and on == previous:
+            continue
+        rows.append(
+            {
+                "s": "on" if on else "off",
+                "lu": (T0 + timedelta(seconds=BIN_S * index)).timestamp(),
+            }
+        )
+        previous = on
+    return rows
+
+
+def _toggle_pattern(seed: int) -> np.ndarray:
+    """One fixture's on/off history, from a per-fixture seed.
+
+    Per-fixture seeds (rather than one stream) keep a fixture's pattern stable
+    when another fixture is added or removed, which is what makes this design
+    reproducible: the defect depends on the *exact* bits of the design.
+    """
+    rng = np.random.default_rng(seed)
+    pattern = np.zeros(N_BINS, dtype=bool)
+    at = int(rng.integers(0, 100))
+    while at < N_BINS - 20:
+        length = int(rng.integers(6, 50))
+        pattern[at : at + max(1, length)] = True
+        at += length + int(rng.integers(6, 80))
+    return pattern
+
+
+def _blind_fixture_design(
+    seed: int = 7,
+) -> tuple[np.ndarray, dict[str, list[dict]], dict[str, float]]:
+    """Eight observed fixtures plus one that is never seen to switch.
+
+    Returns the row watts, the recorder histories, and the constructed wattages.
+    The blind fixture's ON period sits entirely inside ``UNKNOWN_PREFIX_BINS``,
+    which every other fixture's history starts after, so its column is unknown
+    wherever it is ON and constant everywhere else: zero variance, zero
+    information, and -- under the pre-fix code -- the exact null direction the
+    solver was free to fill with any number at all.
+
+    Eight observed fixtures are used because the defect needs the retained
+    system to be *underdetermined*: one dropped direction makes ``factor``
+    ``k × n`` with ``k < n``, and NNLS may then put any value in the null space.
+    Fewer fixtures leave the system square, the leak is a rounding term of the
+    last pivot, and the solver sets it to zero.
+    """
+    patterns = {f"light.a{index}": _toggle_pattern(seed * 17 + index) for index in range(6)}
+    patterns.update(
+        {f"light.z{index}": _toggle_pattern(seed * 17 + 8 + index) for index in range(2)}
+    )
+    blind = np.zeros(N_BINS, dtype=bool)
+    blind[
+        UNKNOWN_PREFIX_BINS // 2 : UNKNOWN_PREFIX_BINS // 2 + BLIND_FIXTURE_ON_BINS
+    ] = True
+    patterns["light.b_blind"] = blind
+
+    rng = np.random.default_rng(seed + 31)
+    unexplained = _toggle_pattern(seed * 7 + 999)
+    watts = {
+        name: float(rng.uniform(5.0, 40.0))
+        for name in patterns
+        if name != "light.b_blind"
+    }
+    row = np.full(N_BINS, BASELINE_W)
+    for name, pattern in patterns.items():
+        if name == "light.b_blind":
+            continue
+        row = row + watts[name] * pattern
+    row = row + UNEXPLAINED_W * unexplained + rng.normal(0.0, NOISE_W, N_BINS)
+
+    # Every fixture except the blind one is first recorded after the prefix.
+    states = {
+        name: _states_after(
+            pattern, 0 if name == "light.b_blind" else UNKNOWN_PREFIX_BINS
+        )
+        for name, pattern in patterns.items()
+    }
+    return row, states, watts
+
+
+def test_a_blind_fixture_never_gets_a_coefficient_larger_than_the_row() -> None:
+    """A regressor ON only where it cannot be seen must not be amplified.
+
+    **This is the production defect, in miniature.**  On the real 24 h
+    ``lights_ct1`` window ``switch.fan_socket_1`` is ON for 88 bins and all 88
+    fall inside the 744 bins two other columns mark unknown, so its centred
+    column is exactly zero.  The old code then dropped a second direction (the
+    exact ``g02 + g04 = g03 + g11`` relation), handed NNLS an 18 × 20
+    underdetermined system, and got back ``9.999358875363018e15 W`` for a fixture
+    on a row whose observed maximum was ``114.507 W``.  R² barely moved
+    (0.9899 with the blowup, 0.9908 at the true optimum), so every gate passed.
+
+    This fixture reproduces it deterministically at unit-test scale, through the
+    public API and with **default** thresholds: the blind column is zero-variance
+    over the usable window, eight observed fixtures leave the retained system
+    underdetermined, and the pre-fix code returns ``6.35248288678673e15 W`` on a
+    row whose maximum is ``327.60 W`` (R² 0.3534, margin +0.334 -- both inside
+    their gates).
+
+    The bound is the row's observed maximum, not its range or its minimum.  A
+    coefficient is the watts a group *adds* while ON, and the row maximum is the
+    most every load on that circuit ever drew together; when the group is ON the
+    row is carrying at least its draw, so a coefficient above the maximum cannot
+    be a measurement of anything.  A violation must therefore be a **refused
+    row** -- the fit did not measure the group -- never a clamped number, which
+    would look like a measurement the data never produced.
+    """
+    row, states, _ = _blind_fixture_design()
+
+    fits = _fit({"ct1": _recorder_row(row)}, states)
+
+    row_max_w = float(np.nanmax(row))
+    assert fits, "the observed fixtures must still be fitted"
+    blind = [fit for fit in fits if fit.members[0].entity_id == "light.b_blind"]
+    # Either the blind fixture is absent or it is reported at a wattage the row
+    # can physically carry.  Both are honest; 6.35e15 W is not.
+    assert all(fit.total_w <= row_max_w for fit in blind), (
+        f"blind fixture reported at {[fit.total_w for fit in blind]} W "
+        f"on a {row_max_w:.2f} W row"
+    )
+    assert all(fit.total_w <= row_max_w for fit in fits), [
+        (fit.members[0].entity_id, fit.total_w) for fit in fits
+    ]
+    # The defect is one fabricated column, not an inability to fit the row: the
+    # seven fixtures that were genuinely observed keep their coefficients.
+    assert len(fits) == 7, [(fit.members[0].entity_id, fit.total_w) for fit in fits]
+
+
+def test_a_near_singular_design_is_dropped_rather_than_amplified() -> None:
+    """Two nearly-collinear columns must not be split into two huge numbers.
+
+    When ``a`` and ``b`` differ by a handful of bins their coefficients trade off
+    almost perfectly: ``a + b`` is measured and ``a - b`` is not.  Solving that
+    as if it were two separate regressors is how a 40 W fixture becomes a 4000 W
+    one and its twin becomes -3960 W.  The honest answers are the sum (in the
+    row space) and *nothing* for the difference -- so at most one of the pair may
+    be reported, and whatever is reported must stay inside the row.
+
+    Measured on the production ``lights_ct1`` row: the four collinear groups
+    score 0.13-0.34 on the discarded directions while every genuine column scores
+    at most 1.2e-23, and the surviving directions have condition number ≤ 66
+    against a cut at 1e3.  Here the two columns differ in a single bin.
+    """
+    rng = np.random.default_rng(21)
+    base = np.zeros(N_BINS, dtype=bool)
+    at = 40
+    while at < N_BINS:
+        length = int(rng.integers(8, 60))
+        base[at : at + length] = True
+        at += length + int(rng.integers(8, 90))
+    twin = base.copy()
+    twin[np.flatnonzero(base)[-1]] = False
+
+    patterns = {"light.a": base, "light.twin": twin}
+    watts = {"light.a": 30.0, "light.twin": 28.0}
+    row = _row_watts(patterns, watts)
+    states = {name: _recorder_states(pattern) for name, pattern in patterns.items()}
+
+    fits = _fit({"ct1": _recorder_row(row)}, states)
+
+    row_max_w = float(np.nanmax(row))
+    assert all(fit.total_w <= row_max_w for fit in fits), [
+        (fit.members[0].entity_id, fit.total_w) for fit in fits
+    ]
+    # The pair is one measured quantity plus one unmeasurable split, so the two
+    # members cannot both carry a number: `individually_identifiable` is
+    # `len(members) == 1`, so two singletons would be two claimed measurements
+    # of one indistinguishable direction.
+    assert not (len(fits) == 2 and all(fit.individually_identifiable for fit in fits))
+
+
+def test_the_candidate_list_decides_the_usable_window_and_so_the_answer() -> None:
+    """Truncating candidates can change a *surviving* row's numbers either way.
+
+    ``discover_placements`` cuts the candidate list to ``max_candidates`` (200 by
+    default) before anything is fitted, and that cut is **not monotone** in the
+    output.  This test makes the reason explicit rather than leaving it as lore.
+
+    The window a row is fitted on is the intersection of every candidate's
+    recorded history.  Adding one candidate that was first recorded *late* -- an
+    ordinary thing, a fixture added to HA last week -- marks the whole prefix
+    unknown, and :func:`_design_matrix` then drops every bin in it from the row's
+    usable window.  The row's numbers are therefore a function of the candidate
+    *set*, not just of the row.
+
+    Measured here: the same recorded row, the same three fixtures, zeroed to fit
+    on the whole window, returns ``59.6 / 23.8 / 13.7 W`` at R² 0.435.  Add one
+    candidate that is unrecorded before bin 2 000 and the window shrinks to bins
+    2 000-11 519, the early confound is excluded, and the same row now returns the
+    exact constructed ``60.0 / 26.0 / 11.0 W`` at R² 1.000.  On production the
+    same effect is what moved the 200-candidate run from 13 groups to 12 and the
+    407-candidate run into the 92-fixture scene group: the two runs are not two
+    samples of one distribution, they are fits of two different windows.
+
+    The assertion is deliberately two-sided.  It does not claim truncation is
+    good or bad -- it pins down that the cap *is* a measurement choice, so a
+    caller comparing two caps is comparing two experiments.
+    """
+    prefix = 2_000
+    patterns = {f"light.a{index}": _toggle_pattern(300 + index) for index in range(3)}
+    watts = {"light.a0": 60.0, "light.a1": 26.0, "light.a2": 11.0}
+    rng = np.random.default_rng(9)
+    row = np.full(N_BINS, BASELINE_W)
+    for name, pattern in patterns.items():
+        row = row + watts[name] * pattern
+    confound = np.zeros(N_BINS, dtype=bool)
+    confound[:prefix] = True
+    row = row + 95.0 * confound + rng.normal(0.0, NOISE_W, N_BINS)
+    rows = {"ct1": _recorder_row(row)}
+
+    whole_window = {name: _states_after(p, 0) for name, p in patterns.items()}
+    late_start = {name: _states_after(p, prefix) for name, p in patterns.items()}
+
+    short = _fit(rows, whole_window)
+    long = _fit(rows, late_start)
+
+    assert len(short) == 3 and len(long) == 3
+    by_name_short = {fit.members[0].entity_id: fit.total_w for fit in short}
+    by_name_long = {fit.members[0].entity_id: fit.total_w for fit in long}
+    # Candidates do not change the row; they change the window it is fitted on.
+    assert short[0].r2 != long[0].r2
+    assert by_name_short != by_name_long
+    # The narrow window excludes the confound and recovers what was constructed.
+    assert by_name_long == pytest.approx(watts, abs=1.0)
+    # Both answers are physically possible on this row -- neither is a defect.
+    row_max_w = float(np.nanmax(row))
+    assert all(fit.total_w <= row_max_w for fit in short + long)
+
+
+# --------------------------------------------------------------------------- #
 # Determinism
 # --------------------------------------------------------------------------- #
 
