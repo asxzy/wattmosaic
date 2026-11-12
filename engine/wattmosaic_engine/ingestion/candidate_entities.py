@@ -10,13 +10,41 @@ never be resolved: every light on it was "unknown to the topology" and was
 silently absent from the analysis.  The engine looked like it had found nothing
 when in fact it had looked at nothing.
 
-The honest population is the set of Home Assistant entities whose **domain and
-declared role** can prove runtime -- ``light``, ``switch``, ``fan``,
-``input_boolean`` -- minus the ones that are already accounted for (declared by
-the user, or the engine's own output).  That is a structural rule, not a
-heuristic: it never consults a friendly name, an area, a manufacturer or a
-registry device *to decide membership*.  Those fields travel with a candidate
-only so the UI can label it.
+The honest population is the set of Home Assistant entities whose **domain,
+declared role and declared entity category** can prove runtime -- ``light``,
+``switch``, ``fan``, ``input_boolean`` -- minus the ones that are already
+accounted for (declared by the user, or the engine's own output).  That is a
+structural rule, not a heuristic: it never consults a friendly name, an area, a
+manufacturer or a registry device *to decide membership*.  Those fields travel
+with a candidate only so the UI can label it.
+
+The population rule, in full
+----------------------------
+Measured on the production install, ``candidate_state_entities`` offered **410**
+entities, and **229** of them were Home Assistant ``entity_category: config``
+settings knobs rather than loads: 98 Sonos switches (``crossfade``,
+``loudness``, ``night_sound``, ``speech_enhancement``, ``subwoofer_enabled``,
+``surround_enabled``, ``tv_autoplay``, ``ungroup_on_autoplay``), 92 Frigate
+camera flags (``back_detect``, ``motion``, ``recordings``, ``snapshots``,
+``review_alerts``, ``ptz_autotracker``), 12 IKEA leak-sensor ``audible``/
+``visual`` switches, 9 Ubiquiti entities (three ``qqppffyy_*_enabled`` flags
+plus six device status ``light.*_led``), 6 Roborock ``do_not_disturb``/
+``dock_child_lock`` switches, 3 ratgdo ``door_opener_learn`` switches, 3 Zengge
+``remote_access`` switches and 5 TP-Link/Gecko hot-tub settings
+(``auto_off_enabled``, ``auto_update_enabled``, ``led``,
+``my_spa_economy_mode``, ``my_spa_standby``), and 1 local ``wattmosaic_pre_release``
+switch.  They are all ``switch.*`` or ``light.*``, so the domain rule alone
+cannot see them.
+
+Leaving them in does not merely inflate the count; it corrupts the *evidence*.
+The 92 Frigate flags are set and cleared together by one automation, so
+``disaggregation.group_fit._co_toggle_groups`` merged them into a single
+92-member component, which then became a regressor that inflated the rotation
+null and caused valid rows to be rejected downstream.  Refusing them at the
+candidate layer removes the failure mode at its source: with the filter the
+population is 181 entities, every pair of the 92-clique is gone, and the
+largest co-toggle group falls from **92 members to 4** while all 63 Lutron
+lighting loads survive.
 
 Two things this module deliberately does **not** do
 ---------------------------------------------------
@@ -44,8 +72,17 @@ from .normalize import is_own_entity
 #: client may key its explanation off them.
 REASON_MODE_ENTITY = "mode_entity"
 REASON_NOT_A_LOAD_DOMAIN = "not_a_load_domain"
+REASON_NOT_A_LOAD_ENTITY_CATEGORY = "not_a_load_entity_category"
 REASON_ALREADY_DECLARED = "already_declared_state_entity"
 REASON_WATTMOSAIC_ENTITY = "wattmosaic_entity"
+
+#: Home Assistant ``entity_category`` values that describe a *setting* or
+#: *telemetry*, never a load.  A ``config`` entity configures its device (Sonos
+#: ``crossfade``, Frigate ``detect``); a ``diagnostic`` entity reports on it.  HA
+#: declares this in the entity registry, so it is a registry field like
+#: ``domain`` -- not a name, area or manufacturer heuristic.  ``None`` (a primary
+#: control or state) is normal and must stay a candidate.
+NON_LOAD_ENTITY_CATEGORIES = frozenset({"config", "diagnostic"})
 
 #: The three topology metadata keys that declare a device's runtime signals.
 #: Kept identical to ``main._linkable_state_entities`` on purpose: rule 2 says a
@@ -169,13 +206,42 @@ def candidate_state_entities(
     Nothing is dropped silently: an entity that was looked at and declined is in
     the refusal map with the rule that declined it.
 
-    Inclusion needs all four rules (contract §2):
+    Inclusion needs all five rules (contract §2), checked in this order so the
+    most specific, most durable reason wins:
 
-    1. the domain is one whose state *is* runtime (``CANDIDATE_DOMAINS``);
-    2. the entity is not already declared by the topology;
-    3. the entity is not WattMosaic's own output;
+    1. the entity is not already declared by the topology (``already_declared_state_entity``);
+    2. the entity is not WattMosaic's own output (``wattmosaic_entity``);
+    3. Home Assistant does not declare it as a ``config``/``diagnostic`` entity
+       (``not_a_load_entity_category``);
     4. ``classify_entity`` calls its role ``load`` (ADR-0012), so a
-       ``climate``/``water_heater`` mode entity is refused as ``mode_entity``.
+       ``climate``/``water_heater`` mode entity is refused as ``mode_entity``;
+    5. the domain is one whose state *is* runtime (``CANDIDATE_DOMAINS``).
+
+    Why rule 3 exists and where it sits
+    -----------------------------------
+    ``entity_category`` is a *declared registry field*, not a heuristic: HA sets
+    it to ``"config"`` for an entity that configures its device and
+    ``"diagnostic"`` for diagnostic telemetry.  A config switch is by
+    definition not a load -- turning on Sonos ``crossfade`` draws no wall power
+    and Frigate ``detect`` is a software flag -- so no amount of co-movement can
+    make it prove runtime.  On the production install this rule is what removes
+    the 229 settings knobs described in the module docstring and collapses the
+    92-member Frigate co-toggle clique.
+
+    It sits *after* the two accounting rules because those are statements about
+    this installation (we already know the entity; it is our own output) rather
+    than about what the entity physically is, and they must keep their existing
+    meaning even for an entity HA happens to categorise.  It sits *before* the
+    role and domain rules because the category is the more fundamental claim: a
+    setting is disqualified before we ask what its state vocabulary means.  So
+    an entity that is **both** ``config`` and a mode domain is refused as
+    ``not_a_load_entity_category`` -- one reason covers the whole class of 229
+    config entities regardless of domain, which is easier for a client to
+    explain than a reason that changes with the entity's domain.
+
+    A missing ``entity_category`` is **not** disqualifying: many primary
+    controls report ``None``, and a registry row may be absent altogether (rule
+    2's guarantee).  Only an explicit ``"config"`` or ``"diagnostic"`` refuses.
     """
     states_by_id = _state_rows(states)
     entities = _registry_rows(registries, "entities")
@@ -196,6 +262,16 @@ def candidate_state_entities(
             continue
         if is_own_entity(entity_id, str(platform) if platform is not None else None):
             refused[entity_id] = REASON_WATTMOSAIC_ENTITY
+            continue
+
+        # A declared category is a statement about what the entity *is*, so it
+        # outranks the role/domain vocabulary checks below: a Sonos ``crossfade``
+        # switch is a setting first and a ``switch`` second.  Only an explicit
+        # ``config``/``diagnostic`` refuses -- ``None`` is the normal primary
+        # control and must stay a candidate.
+        entity_category = entity_entry.get("entity_category")
+        if isinstance(entity_category, str) and entity_category in NON_LOAD_ENTITY_CATEGORIES:
+            refused[entity_id] = REASON_NOT_A_LOAD_ENTITY_CATEGORY
             continue
 
         # The domain-independent role check comes first so a ``climate`` entity
@@ -242,9 +318,11 @@ def candidate_state_entities(
 __all__ = [
     "CandidateEntity",
     "DECLARED_STATE_ENTITY_KEYS",
+    "NON_LOAD_ENTITY_CATEGORIES",
     "REASON_ALREADY_DECLARED",
     "REASON_MODE_ENTITY",
     "REASON_NOT_A_LOAD_DOMAIN",
+    "REASON_NOT_A_LOAD_ENTITY_CATEGORY",
     "REASON_WATTMOSAIC_ENTITY",
     "candidate_state_entities",
     "declared_state_entities",

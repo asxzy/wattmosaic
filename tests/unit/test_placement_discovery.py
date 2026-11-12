@@ -46,6 +46,7 @@ from wattmosaic_engine.contracts import (
 from wattmosaic_engine.ingestion.candidate_entities import (
     REASON_ALREADY_DECLARED,
     REASON_MODE_ENTITY,
+    REASON_NOT_A_LOAD_ENTITY_CATEGORY,
     REASON_WATTMOSAIC_ENTITY,
     CandidateEntity,
     candidate_state_entities,
@@ -209,6 +210,233 @@ def test_candidate_entity_is_a_frozen_value_object() -> None:
     )
     with pytest.raises(FrozenInstanceError):
         candidate.entity_id = "light.b"  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------- #
+# entity_category is a declared role, not a name heuristic
+# --------------------------------------------------------------------------- #
+
+
+def test_a_config_switch_is_refused_because_a_setting_draws_no_power() -> None:
+    """229 of the 410 production candidates were ``entity_category: config``.
+
+    98 of them were Sonos room switches (``crossfade``, ``loudness``,
+    ``night_sound``, ...).  Turning on crossfade draws no wall power, so the
+    entity can never prove runtime no matter how it co-moves; HA declaring the
+    category is the whole evidence needed to refuse it.
+    """
+    states = [
+        _state("switch.kitchen_kitchen_crossfade", friendly_name="Kitchen Crossfade"),
+        _state("light.kitchen_island", friendly_name="Island Lights"),
+    ]
+    registries = {
+        "entities": [
+            {
+                "entity_id": "switch.kitchen_kitchen_crossfade",
+                "platform": "sonos",
+                "entity_category": "config",
+            },
+            {"entity_id": "light.kitchen_island", "platform": "lutron_caseta"},
+        ],
+        "devices": [],
+    }
+
+    candidates, refused = candidate_state_entities(states, registries)
+
+    assert [c.entity_id for c in candidates] == ["light.kitchen_island"]
+    assert (
+        refused["switch.kitchen_kitchen_crossfade"]
+        == REASON_NOT_A_LOAD_ENTITY_CATEGORY
+    )
+
+
+def test_a_diagnostic_entity_is_refused_for_the_same_structural_reason() -> None:
+    """``diagnostic`` is telemetry about a device, never the device's load."""
+    states = [_state("switch.bridge_uptime_reset", friendly_name="Bridge Reset")]
+    registries = {
+        "entities": [
+            {
+                "entity_id": "switch.bridge_uptime_reset",
+                "platform": "unifi",
+                "entity_category": "diagnostic",
+            }
+        ],
+        "devices": [],
+    }
+
+    candidates, refused = candidate_state_entities(states, registries)
+
+    assert candidates == []
+    assert refused["switch.bridge_uptime_reset"] == REASON_NOT_A_LOAD_ENTITY_CATEGORY
+
+
+def test_a_primary_control_with_no_entity_category_is_still_a_candidate() -> None:
+    """``entity_category: None`` is HA's normal primary control -- a real load.
+
+    The filter must not eat the 75 lights and 63 Lutron loads that survived on
+    the production install; only an *explicit* config/diagnostic refuses.
+    """
+    states = [_state("light.kitchen_island", friendly_name="Island Lights")]
+    registries = {
+        "entities": [
+            {
+                "entity_id": "light.kitchen_island",
+                "platform": "lutron_caseta",
+                "entity_category": None,
+            }
+        ],
+        "devices": [],
+    }
+
+    candidates, refused = candidate_state_entities(states, registries)
+
+    assert [c.entity_id for c in candidates] == ["light.kitchen_island"]
+    assert refused == {}
+
+
+def test_the_category_rule_is_domain_independent_so_a_status_led_is_refused() -> None:
+    """Six Ubiquiti ``light.*_led`` device status LEDs are config entities.
+
+    They pass the domain check because they are ``light.*``; the category is
+    what identifies them as settings.  This pins the rule as category-first.
+    """
+    states = [_state("light.qqppffyy_status_led", friendly_name="Status LED")]
+    registries = {
+        "entities": [
+            {
+                "entity_id": "light.qqppffyy_status_led",
+                "platform": "unifi",
+                "entity_category": "config",
+            }
+        ],
+        "devices": [],
+    }
+
+    candidates, refused = candidate_state_entities(states, registries)
+
+    assert candidates == []
+    assert refused["light.qqppffyy_status_led"] == REASON_NOT_A_LOAD_ENTITY_CATEGORY
+
+
+def test_an_entity_without_a_registry_row_has_no_category_to_refuse_it() -> None:
+    """Rule 2's guarantee survives the new rule: absence is not disqualifying.
+
+    A missing registry row means there is no ``entity_category`` to read, and
+    the domain alone is still the evidence.
+    """
+    states = [_state("light.no_registry_row", friendly_name="Porch Light")]
+
+    candidates, refused = candidate_state_entities(states, {"entities": [], "devices": []})
+
+    assert [c.entity_id for c in candidates] == ["light.no_registry_row"]
+    assert refused == {}
+
+
+def test_a_config_and_mode_entity_gets_the_domain_independent_reason() -> None:
+    """When both rules would refuse, the category wins.
+
+    The category covers the whole class of 229 production settings knobs with
+    one reason, instead of a reason that changes with the entity's domain.  The
+    accounting rules still outrank it, because they describe *this*
+    installation rather than what the entity is.
+    """
+    states = [_state("select.kitchen_scene", friendly_name="Scene")]
+    registries = {
+        "entities": [
+            {
+                "entity_id": "select.kitchen_scene",
+                "platform": "demo",
+                "entity_category": "config",
+            }
+        ],
+        "devices": [],
+    }
+    # ``select`` is a mode-only domain, so without the category rule this would
+    # have been refused as ``mode_entity``.
+    candidates, refused = candidate_state_entities(states, registries)
+
+    assert candidates == []
+    assert refused["select.kitchen_scene"] == REASON_NOT_A_LOAD_ENTITY_CATEGORY
+
+
+def _toggle_rows(start: float, cycles: int) -> list[dict[str, Any]]:
+    """``off``/``on`` recorder rows, one pair every 10 minutes."""
+    rows: list[dict[str, Any]] = [{"s": "off", "lu": start}]
+    moment = start
+    for _ in range(cycles):
+        moment += 600
+        rows.append({"s": "on", "lu": moment})
+        moment += 300
+        rows.append({"s": "off", "lu": moment})
+    return rows
+
+
+def test_config_flags_that_co_toggle_cannot_become_a_giant_regressor() -> None:
+    """The measured regression: a 92-member Frigate clique inflated the null.
+
+    92 camera config flags (``*_detect``/``*_motion``/``*_recordings``/...) are
+    set and cleared by one automation, so ``_co_toggle_groups`` merged them into
+    a single 92-member component.  That component became a regressor that
+    inflated the rotation null and rejected valid rows.  Filtering at the
+    candidate layer removes the clique at its source: on production the largest
+    co-toggle group falls from 92 members to 4.
+
+    This test builds the same shape synthetically -- eight config switches that
+    fire at identical instants -- and shows that the *same* registry without an
+    ``entity_category`` field yields the clique, so the assertion would fail
+    before the fix.
+    """
+    from wattmosaic_engine.disaggregation.group_fit import (
+        _co_toggle_groups,
+        _instants,
+        _state_series,
+    )
+
+    flags = [f"switch.camera_{index:02d}_detect" for index in range(8)]
+    lights = ["light.island", "light.porch"]
+    start = (datetime.now(UTC) - timedelta(hours=2)).timestamp()
+
+    history: dict[str, list[dict[str, Any]]] = {
+        flag: _toggle_rows(start, 6) for flag in flags
+    }
+    # Real loads switch on their own, so they never join the clique.
+    history["light.island"] = _toggle_rows(start + 17, 2)
+    history["light.porch"] = _toggle_rows(start + 43, 2)
+    states = [_state(entity_id) for entity_id in [*flags, *lights]]
+
+    def registry(*, categorised: bool) -> dict[str, Any]:
+        return {
+            "entities": [
+                {
+                    "entity_id": flag,
+                    "platform": "frigate",
+                    **({"entity_category": "config"} if categorised else {}),
+                }
+                for flag in flags
+            ]
+            + [{"entity_id": light, "platform": "lutron_caseta"} for light in lights],
+            "devices": [],
+        }
+
+    def largest_group(candidates: list[CandidateEntity]) -> int:
+        instants = {
+            candidate.entity_id: _instants(_state_series(history[candidate.entity_id]))
+            for candidate in candidates
+        }
+        return max((len(group) for group in _co_toggle_groups(instants)), default=0)
+
+    unfiltered, _ = candidate_state_entities(states, registry(categorised=False))
+    filtered, refused = candidate_state_entities(states, registry(categorised=True))
+
+    assert len(unfiltered) == 10, "before the fix every domain-valid entity is offered"
+    assert largest_group(unfiltered) == 8, (
+        "the eight co-toggling config flags form one component -- the defect"
+    )
+
+    assert [c.entity_id for c in filtered] == sorted(lights)
+    assert largest_group(filtered) == 1, "no config flag may remain to be grouped"
+    for flag in flags:
+        assert refused[flag] == REASON_NOT_A_LOAD_ENTITY_CATEGORY
 
 
 # --------------------------------------------------------------------------- #
