@@ -2,12 +2,6 @@
 
 ## v0.2.1-dev.16 — 2026-11-12 (development channel)
 
-Automatic development build.
-
-### Changes
-
-## v0.2.1-dev.15 — 2026-11-12 (development channel)
-
 The Topology tab can now find fixtures that share a circuit. Before this release
 the engine could only attribute a device that had a CT of its own: 28 of them were
 found, and the dozens of lights behind the three lighting circuits were invisible.
