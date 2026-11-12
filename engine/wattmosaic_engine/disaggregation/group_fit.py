@@ -572,13 +572,147 @@ def _design_matrix(
     return np.column_stack(columns) if columns else np.empty((0, 0))
 
 
+@dataclass(slots=True, frozen=True)
+class _RowSystem:
+    """The part of a row's normal equations that its *usable mask* alone decides.
+
+    Every row is fitted against the **same** ``design`` matrix; the only thing
+    that differs between rows is which bins survive ``~isnan(watts) &
+    ~isnan(design).any(axis=1)``.  Everything downstream of that mask -- the
+    zero-variance column filter, the column means, the eigenbasis of the centred
+    Gram and the identifiability verdict -- is therefore a pure function of the
+    mask.  Rebuilding it per row measured 0.62 s of a 1.46 s 32-row fit on the
+    48 h performance fixture, i.e. 42 % of the whole call, all of it identical
+    arithmetic.
+
+    It is *not* valid to hoist this out of the row loop unconditionally: a row
+    with a data gap has a different mask, so a different subset of bins, so a
+    genuinely different basis.  The cache is keyed on the mask bytes, which makes
+    the identity exact rather than assumed -- see :func:`_row_system`.
+
+    Only the small factors are held (``k × k`` at most); the ``m × n`` centred
+    design is re-derived per row because caching *that* would be tens of
+    megabytes per distinct mask.
+    """
+
+    #: Indices of the retained (variable and non-zero) design columns.
+    columns: np.ndarray
+    #: Mean of each retained column over the usable bins, for the intercept.
+    column_means: np.ndarray
+    #: Eigenvalues of ``centredᵀ centred``, already rank-cut.
+    eigenvalues: np.ndarray
+    #: Eigenvectors of ``centredᵀ centred``, already rank-cut.
+    vectors: np.ndarray
+    #: Per retained column: does it have a unique coefficient?
+    reportable: np.ndarray
+
+
+#: Distinct masks whose basis is kept.  A 48 h install has one mask per *gap
+#: pattern*, not one per row, so a handful covers a real recorder; the cap is
+#: what stops a pathological install with 200 unique gap patterns from holding
+#: 200 × 320 kB of eigenvectors.
+_ROW_SYSTEM_CACHE_ENTRIES = 8
+
+
+def _row_system(
+    design: np.ndarray,
+    usable: np.ndarray,
+    cache: dict[bytes, _RowSystem | None] | None,
+) -> _RowSystem | None:
+    """``_RowSystem`` for ``design[usable]``, memoised on the mask.
+
+    The key is the raw bytes of ``usable``.  Two rows with the same mask select
+    the same rows of the same design, so the arithmetic below is repeated on
+    bit-identical inputs and returns bit-identical outputs; two rows with
+    different masks (a CT with a gap, a CT without one) get different keys and
+    are computed independently.  Nothing about the mask is assumed shared -- it
+    is *observed* to be shared, per row, and a miss is always correct.
+
+    ``None`` is a legitimate cached value: the design has no variable column over
+    these bins, so the row cannot be fitted.  Caching the miss keeps a
+    pathological install from re-running the eigendecomposition on every row to
+    learn the same thing.  That is why the hit test is ``key in cache`` rather
+    than ``cache.get(key) is not None`` -- the latter would silently re-run the
+    cached miss every time.
+    """
+    key = usable.tobytes()
+    if cache is not None and key in cache:
+        # Move to the end so eviction is least-recently-used, not
+        # least-recently-inserted: rows are visited in id order, which has no
+        # relation to which masks recur.
+        cache[key] = cache.pop(key)
+        return cache[key]
+    system = _build_row_system(design[usable])
+    if cache is not None:
+        if len(cache) >= _ROW_SYSTEM_CACHE_ENTRIES:
+            cache.pop(next(iter(cache)))
+        cache[key] = system
+    return system
+
+
+def _build_row_system(x: np.ndarray) -> _RowSystem | None:
+    """Uncached :func:`_row_system` for one mask's sub-design ``x``.
+
+    The column filtering is done here rather than inside
+    :func:`_conditioned_basis` so the *indices* of the retained columns travel
+    with the basis -- that is what lets the cached path rebuild ``centred_x``
+    without eigendecomposing again.  The two filters are the same two
+    ``_conditioned_basis`` applies (zero range, then zero norm), in the same
+    order, so the matrix handed to the eigendecomposition is bit-identical to
+    the uncached one.
+
+    The centring is computed once and both filters read it, rather than
+    centring twice (once for the norm test, once for the solve): each pass is a
+    full ``m × n`` copy and on a 48 h design that is 18 MB apiece.
+    """
+    variable = np.flatnonzero(np.ptp(x, axis=0) > 0.0)
+    if not variable.size:
+        return None
+    # ``np.flatnonzero`` is sorted, so when every column survives the index
+    # array is ``0..n-1`` and ``x[:, variable]`` is ``x``.  Taking the slice only
+    # when it is needed keeps the common all-columns-variable case copy-free.
+    x = x[:, variable] if variable.size != x.shape[1] else x
+    column_means = x.mean(axis=0)
+    centred_x = x - column_means
+    nonzero = np.linalg.norm(centred_x, axis=0) > 0.0
+    if not nonzero.any():
+        return None
+    if not nonzero.all():
+        variable = variable[nonzero]
+        column_means = column_means[nonzero]
+        centred_x = centred_x[:, nonzero]
+
+    _, eigenvalues, vectors, reportable = _conditioned_basis(centred_x)
+    if not vectors.size:
+        return None
+    return _RowSystem(
+        columns=variable,
+        column_means=column_means,
+        eigenvalues=eigenvalues,
+        vectors=vectors,
+        reportable=reportable,
+    )
+
+
 def _fit_row(
     watts: np.ndarray,
     design: np.ndarray,
     *,
     seed: int,
+    min_r2: float = -math.inf,
+    system_cache: dict[bytes, _RowSystem | None] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, float, float, float] | None:
     """Fit one row; return ``(coefficients, reportable, base, r², null_p95)``.
+
+    ``min_r2`` is the caller's constant-baseline gate.  A row below it cannot be
+    emitted whatever its null says, so the 50-draw NNLS null is not computed and
+    the row is returned as ``None`` -- the same verdict the caller would reach,
+    without the work.  On the 32-row production fixture every row measures
+    R² 0.006-0.010, so *every* null drawn there used to be discarded.
+
+    ``system_cache`` memoises :func:`_row_system` across the rows of one install,
+    keyed on each row's usable mask; see :class:`_RowSystem` for why that is
+    exact rather than an assumption that the mask is shared.
 
     The intercept is free and unconstrained, so both the row *and* the design
     are centred before the non-negative solve.  Fitting ``nnls(X, y - ȳ)``
@@ -687,30 +821,23 @@ def _fit_row(
     if int(usable.sum()) < 2:
         return None
     y = watts[usable]
-    x = design[usable]
-    # A column that is constant over the usable window is not a regressor.  It is
-    # removed *before* the Gram matrix so it cannot manufacture a null direction
-    # for the solver to wander in.
-    variable = np.ptp(x, axis=0) > 0.0
-    if not variable.any():
-        return None
-    columns = np.flatnonzero(variable)
-    x = x[:, columns]
-
-    column_means = x.mean(axis=0)
     base_mean = float(y.mean())
     centred_y = y - base_mean
     total_ss = float(centred_y @ centred_y)
     if total_ss <= 0.0:
         return None
-    centred_x = x - column_means
 
-    # One decomposition, used for the rank cut, the solve and the
-    # identifiability test.  Splitting it three ways is how the three could
-    # disagree about which subspace is trustworthy.
-    centred_x, eigenvalues, vectors, reportable = _conditioned_basis(centred_x)
-    if centred_x is None or not vectors.size:
+    system = _row_system(design, usable, system_cache)
+    if system is None:
         return None
+    x = design[usable]
+    columns = system.columns
+    x = x if columns.size == x.shape[1] else x[:, columns]
+    column_means = system.column_means
+    centred_x = x - column_means
+    eigenvalues = system.eigenvalues
+    vectors = system.vectors
+    reportable = system.reportable
 
     root = np.sqrt(eigenvalues)
     # ``factor`` is ``(Λ^½ Vᵀ)``: ``factorᵀ factor == V Λ Vᵀ == XᵀX``.  Solving
@@ -737,6 +864,14 @@ def _fit_row(
     # coefficients account for.  Reported so a reader can see the always-on load
     # the groups were fitted on top of.
     base = base_mean - float(column_means @ coefficient)
+
+    # A row that cannot clear the caller's constant-baseline gate is refused
+    # whatever the null says, so the null would be computed and thrown away.
+    # Returning ``None`` here is the same verdict ``fit_shared_rows`` reached
+    # before -- it tested ``r2 < min_r2_improvement`` immediately after this
+    # call -- but skips 50 NNLS draws.
+    if r2 < min_r2:
+        return None
 
     # The null rotates the *whole* on/off matrix by a large offset: every
     # fixture keeps its own duty cycle, its ON-duration distribution and the
@@ -844,6 +979,29 @@ def _conditioned_basis(
     therefore sits 14 orders above the largest genuine score and 8 orders below
     the smallest artefact -- the two populations are separated by ~10²², so no
     value in that gap could change a verdict.
+
+    Why there are two ``eigh`` calls, and why one cannot do both jobs
+    -----------------------------------------------------------------
+    The normalised Gram ``S = (X/n)ᵀ(X/n)`` is ``D⁻¹ (XᵀX) D⁻¹`` with
+    ``D = diag(n)``.  That is a **congruence** of ``G = XᵀX``, not a similarity:
+    by Sylvester's law it preserves inertia, but it does **not** preserve
+    eigenvectors unless ``D`` is a multiple of the identity.  So ``S``'s basis
+    cannot be reused for the solve, and its eigenvalues do not differ from
+    ``G``'s by one common factor:
+
+    * two independent columns with norms 1 and 2 give ``S = I`` (eigenvalues
+      ``1, 1``) and ``G = diag(1, 4)`` (eigenvalues ``1, 4``) -- no single
+      rescaling maps one spectrum onto the other;
+    * on the 3-fixture unit fixture the largest eigenvector mismatch between the
+      two bases is ``|⟨v_S, v_G⟩| = 0.905`` (so the bases are *not* the same)
+      and the eigenvalue-ratio spread is ``4.4e-6``; on the perf fixture the
+      ratio spread is ``2.4e-7`` and reusing the scaled basis moves a
+      coefficient by ``4.3e-5`` W.
+
+    The second decomposition therefore stays.  Each of the two costs 4.3 ms per
+    row on the 48 h design; the win that mattered was not eigendecomposing at
+    all for the 31 rows that share the first row's mask, not halving the one
+    eigendecomposition that remains.
     """
     norms = np.linalg.norm(centred_x, axis=0)
     nonzero = norms > 0.0
@@ -970,16 +1128,29 @@ def fit_shared_rows(
 
     levels_present = any(bool(levels) for levels in entity_levels.values())
     fits: list[GroupFit] = []
+    # One basis per distinct usable mask, shared across every row of the install.
+    # A row with a data gap gets its own entry; see :class:`_RowSystem`.
+    system_cache: dict[bytes, _RowSystem | None] = {}
     for ct_id in sorted(row_readings):
         if ct_id in excluded_ct_ids:
             continue
         watts = _resample_row(parsed_rows[ct_id], t0, n_bins)
-        result = _fit_row(watts, design, seed=seed)
+        # The R² gate is applied *before* the null: a row below it is refused
+        # whatever the null says, and a null is 50 NNLS draws.  ``_fit_row``
+        # returns ``None`` for such a row, so the reported fields below are only
+        # built for rows that could still be emitted.
+        result = _fit_row(
+            watts,
+            design,
+            seed=seed,
+            min_r2=min_r2_improvement,
+            system_cache=system_cache,
+        )
         if result is None:
             continue
         coefficient, identifiable_column, base, r2, null_p95 = result
         margin = r2 - null_p95
-        if r2 < min_r2_improvement or margin < min_r2_margin_over_null:
+        if margin < min_r2_margin_over_null:
             continue
         # The physical bound.  A coefficient is the watts the group *adds* while
         # on, on a row whose observed maximum is what every load on it can draw

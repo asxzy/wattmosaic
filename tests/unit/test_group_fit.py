@@ -32,6 +32,7 @@ the margin crosses the gate, while the NNLS null moves it only 0.2932 → 0.2490
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
@@ -1057,6 +1058,263 @@ def test_the_frozen_signature_is_unchanged() -> None:
     assert all(
         parameter.kind is inspect.Parameter.KEYWORD_ONLY
         for parameter in parameters.values()
+    )
+
+
+# --------------------------------------------------------------------------- #
+# The shared design: one basis per mask, and the R² gate before the null
+# --------------------------------------------------------------------------- #
+
+#: Bins the second CT is missing at the start of the window.  A CT that started
+#: reporting two and a half hours into the window has no value there, so
+#: :func:`_resample_row` leaves those bins ``NaN`` -- it must not invent a
+#: reading for a period nothing measured.
+LATE_CT_PREFIX_BINS = 600
+
+
+def _two_rows_one_with_a_gap() -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
+    """One CT that reports throughout, one that starts 600 bins late.
+
+    Both rows are driven by the *same* two fixtures, so they share one design and
+    one set of group columns.  The late CT's first 600 bins are unknown, so its
+    usable mask is a strict subset of the complete row's: exactly the case a
+    "the mask is shared, hoist the basis" shortcut would get wrong.  The two rows
+    also carry different wattages, so a cache that keyed on anything weaker than
+    the mask could not be caught by the coefficients looking plausible.
+    """
+    watts = {"light.a": 60.0, "light.b": 25.0}
+    patterns = _switch_patterns(list(watts), shared=False)
+    full = _recorder_row(_row_watts(patterns, watts))
+    other = _recorder_row(_row_watts(patterns, {"light.a": 90.0, "light.b": 40.0}, seed=17))
+    late = [
+        row for row in other if _row_bin(row) >= LATE_CT_PREFIX_BINS
+    ]
+    states = {name: _recorder_states(pattern) for name, pattern in patterns.items()}
+    return {"ct_full": full, "ct_late": late}, states
+
+
+def _row_bin(row: dict) -> int:
+    """Which bin of the common grid one recorder sample falls in."""
+    return int(round((float(row["lu"]) - T0.timestamp()) / BIN_S))
+
+
+def test_a_row_with_a_gap_gets_its_own_basis_and_matches_the_uncached_fit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The mask-sharing correctness test.**  Caching must not leak across masks.
+
+    ``fit_shared_rows`` builds one design and fits every CT row against it.  The
+    basis of the normal equations is a function of the row's *usable mask*, which
+    includes where that row's watts are ``NaN`` -- so hoisting the basis out of
+    the row loop is only sound if the mask is checked.  Here ``ct_full`` reports
+    for the whole window and ``ct_late`` has no samples for its first 600 bins,
+    so the two masks differ and the two bases must differ.
+
+    The reference is the same public function with the memo forced to miss on
+    every row (``_row_system`` replaced by the uncached builder), so this compares
+    two *emitted* answers, not an internal helper.  Every field of every emitted
+    :class:`GroupFit` is compared exactly -- ``total_w``, ``r2``,
+    ``r2_null_p95``, ``r2_margin``, the members and the evidence -- including the
+    ``r2_null_p95`` the null path produces, because that is the field a mis-keyed
+    cache would corrupt while leaving R² plausible.
+
+    A one-off manual check of the same comparison over the 32-row performance
+    design (complete, gapped, and gapped-design variants) measured ``max|Δ| =
+    0.0`` for ``total_w``, ``r2``, ``r2_null_p95`` and ``base`` -- the cached and
+    uncached paths are bit-identical, not merely close.
+    """
+    from wattmosaic_engine.disaggregation import group_fit as module
+
+    rows, states = _two_rows_one_with_a_gap()
+
+    def run():
+        return fit_shared_rows(
+            row_readings=rows,
+            entity_states=states,
+            entity_levels={},
+            row_noise_w={"ct_full": NOISE_W, "ct_late": NOISE_W},
+        )
+
+    cached = run()
+    # Same call, cache bypassed: every row rebuilds its own basis from its own
+    # mask.  This is the definition the cached path must reproduce.
+    monkeypatch.setattr(
+        module,
+        "_row_system",
+        lambda design, usable, cache: module._build_row_system(design[usable]),
+    )
+    uncached = run()
+    monkeypatch.undo()
+
+    # The fixture must emit both rows, or it proves nothing about sharing.
+    assert {fit.ct_id for fit in cached} == {"ct_full", "ct_late"}, [
+        (fit.ct_id, fit.members) for fit in cached
+    ]
+
+    assert len(cached) == len(uncached)
+    for got, reference in zip(cached, uncached, strict=True):
+        assert got.ct_id == reference.ct_id
+        assert got.total_w == reference.total_w
+        assert got.r2 == reference.r2
+        assert got.r2_null_p95 == reference.r2_null_p95
+        assert got.r2_margin == reference.r2_margin
+        assert got.members == reference.members
+        assert got.evidence == reference.evidence
+
+    # And the masks really do differ: the late CT has no value in its prefix, so
+    # its usable window is shorter than the complete row's.
+    from wattmosaic_engine.disaggregation.group_fit import _epoch_pairs, _resample_row
+
+    late_watts = _resample_row(
+        _epoch_pairs(rows["ct_late"]), T0.timestamp(), N_BINS
+    )
+    full_watts = _resample_row(
+        _epoch_pairs(rows["ct_full"]), T0.timestamp(), N_BINS
+    )
+    assert int(np.isnan(late_watts).sum()) == LATE_CT_PREFIX_BINS
+    assert not np.isnan(full_watts).any()
+    assert np.isnan(late_watts)[:LATE_CT_PREFIX_BINS].all()
+
+
+def test_the_r2_gate_runs_before_the_null_and_the_null_is_still_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row refused on R² alone must not pay for a null; an emitted one must have it.
+
+    ``_fit_row`` returns ``None`` as soon as ``r2 < min_r2``, which is exactly the
+    verdict ``fit_shared_rows`` used to reach one line later -- but it skips 50
+    NNLS draws.  The contract is that this changes *nothing observable*: every
+    emitted group still carries its ``r2_null_p95``.
+
+    The budget half is asserted by counting calls to ``_nnls_batch`` (the null
+    solver), because the waste being removed is *work*, not output: a row that
+    cannot be emitted produces no fields either way, so only an instrumented
+    count can see the difference.  The 32-row performance fixture is the case
+    that motivated the change -- every row there measures R² ≈ 0.006-0.010, so
+    all 32 nulls used to be computed and all 32 discarded.
+
+    The reporting half is asserted through the public API: the good row's
+    ``r2_null_p95`` is a real number below its R², and it does not move when the
+    gate is set high enough to suppress a different row.
+    """
+    from wattmosaic_engine.disaggregation import group_fit as module
+
+    watts = {"light.a": 60.0, "light.b": 25.0}
+    rows, states = _history(watts)
+    rows["ct_flat"] = _recorder_row(
+        np.full(N_BINS, BASELINE_W) + np.random.default_rng(3).normal(0.0, NOISE_W, N_BINS)
+    )
+    kwargs = dict(row_noise_w={"ct1": NOISE_W, "ct_flat": NOISE_W})
+
+    # The design the two rows are fitted against, so the rows can be driven
+    # through ``_fit_row`` one at a time with an exact call count.
+    from wattmosaic_engine.disaggregation.group_fit import _epoch_pairs, _resample_row
+
+    series, design = _design_for_test(states, rows)
+    bounds = module._axis_bounds(
+        [module._state_series(item) for item in states.values()]
+        + [_epoch_pairs(item) for item in rows.values()]
+    )
+    assert bounds is not None
+    t0, t1 = bounds
+    n_bins = int(np.floor((t1 - t0) / module.BIN_S)) + 1
+    flat_watts = _resample_row(_epoch_pairs(rows["ct_flat"]), t0, n_bins)
+
+    calls = {"n": 0}
+    real = module._nnls_batch
+
+    def counting(*args, **kwargs_):
+        calls["n"] += 1
+        return real(*args, **kwargs_)
+
+    monkeypatch.setattr(module, "_nnls_batch", counting)
+
+    # The flat row is below any sensible R² gate.  With the gate in force it is
+    # refused *before* the null, so the null solver is never entered.
+    assert module._fit_row(flat_watts, design, seed=0, min_r2=0.30) is None
+    assert calls["n"] == 0, "the null was computed for a row refused on R² alone"
+
+    # With the gate removed the same row does reach the null path, which proves
+    # the count above was the gate and not an unrelated early exit.
+    assert module._fit_row(flat_watts, design, seed=0, min_r2=-math.inf) is not None
+    assert calls["n"] == 1
+
+    monkeypatch.undo()
+
+    # Reporting: the good row still carries a real null through the public API.
+    refused = _fit(rows, states, **kwargs)
+    assert {fit.ct_id for fit in refused} == {"ct1"}
+    assert all(0.0 <= fit.r2_null_p95 < fit.r2 for fit in refused)
+    assert all(fit.r2 >= 0.30 for fit in refused)
+    # A gate above any achievable R² suppresses every row, which pins that the
+    # early exit is a *refusal* and not a silent drop of the numbers.
+    suppressed = _fit(rows, states, min_r2_improvement=1.0, **kwargs)
+    assert suppressed == ()
+    passed = {(fit.ct_id, fit.members[0].entity_id): fit for fit in refused}
+    for fit in _fit(rows, states, min_r2_improvement=0.0, **kwargs):
+        key = (fit.ct_id, fit.members[0].entity_id)
+        if key in passed:
+            assert fit == passed[key]
+
+
+def test_the_two_eigh_basis_is_the_solve_basis_and_one_eigh_cannot_replace_it() -> None:
+    """Pin the reason ``_conditioned_basis`` keeps its second eigendecomposition.
+
+    A tempting simplification is to reuse the eigenvalues and eigenvectors of the
+    *unit-normalised* Gram ``S = (X/n)ᵀ(X/n)`` for the solve as well, on the
+    theory that the unnormalised Gram ``G = XᵀX`` has the same eigenvectors with
+    eigenvalues scaled by ``n²``.  It does not.  ``D⁻¹ G D⁻¹`` is a *congruence*
+    of ``G``, not a similarity, so it preserves inertia but not eigenvectors:
+    with ``D`` not a multiple of the identity the two bases differ.
+
+    The test is therefore two-sided.  It checks that ``_conditioned_basis``
+    returns exactly the ``G`` basis (what the solve needs), and it checks that
+    the single-``eigh`` substitute would differ measurably on this fixture, so
+    the redundancy cannot be "optimised away" again without a failure.
+    """
+    from wattmosaic_engine.disaggregation import group_fit as module
+
+    watts = {"light.a": 60.0, "light.b": 25.0, "light.c": 18.0}
+    rows, states = _history(watts)
+    _, design = _design_for_test(states, rows)
+    usable = ~np.isnan(design).any(axis=1)
+    x = design[usable]
+    x = x[:, np.ptp(x, axis=0) > 0]
+    centred_x = x - x.mean(axis=0)
+
+    # The reference exactly as _conditioned_basis computes it: two eighs, the
+    # identifiability test on the normalised Gram, the solve on the raw Gram.
+    norms = np.linalg.norm(centred_x, axis=0)
+    scaled = centred_x / norms
+    n_eigenvalues, n_vectors = np.linalg.eigh(scaled.T @ scaled)
+    largest = float(n_eigenvalues.max())
+    keep = n_eigenvalues > largest / (1e3 * 1e3)
+    outside = (n_vectors[:, ~keep] ** 2).sum(axis=1)
+    expected_reportable = outside <= 1e-9
+
+    g_eigenvalues, g_vectors = np.linalg.eigh(centred_x.T @ centred_x)
+    g_keep = g_eigenvalues > float(g_eigenvalues.max()) / (1e3 * 1e3)
+    g_eigenvalues, g_vectors = g_eigenvalues[g_keep], g_vectors[:, g_keep]
+
+    returned_x, eigenvalues, vectors, reportable = module._conditioned_basis(centred_x)
+
+    # 1. Bit-identical to the reference two-eigh computation.
+    assert np.array_equal(returned_x, centred_x)
+    assert np.array_equal(eigenvalues, g_eigenvalues)
+    assert np.array_equal(vectors, g_vectors)
+    assert np.array_equal(reportable, expected_reportable)
+
+    # 2. The single-eigh substitute is *not* the same basis, so the refactor the
+    #    docstring above rejects would change the solve.  Both halves matter: the
+    #    eigenvectors differ, and no single scalar rescales one spectrum into the
+    #    other.  Measured here: min |<v_S, v_G>| = 0.905 and ratio spread 4.4e-6.
+    assert not np.allclose(
+        np.abs(n_vectors[:, keep]), np.abs(g_vectors), atol=1e-2
+    ), "the normalised and raw Gram share a basis on this fixture, so it cannot "
+    ratio = n_eigenvalues[keep] / g_eigenvalues
+    assert np.ptp(ratio) > 1e-9, (
+        "eigenvalues scaled by one common factor, contradicting the congruence "
+        f"argument (ratio spread {np.ptp(ratio):.3e})"
     )
 
 
