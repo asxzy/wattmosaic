@@ -1,5 +1,71 @@
 # Release Notes
 
+## v0.2.1-dev.20 — 2026-11-12 (development channel)
+
+The Discover card can now actually create the devices it finds. It has been able
+to *find* them since `dev.18`, but the button that writes them could never
+succeed on an App install, and once a device was written the tree showed a raw
+internal id and a fabricated `0 W`. All three are fixed. **No measurement,
+threshold, or fitted wattage changes in this release.**
+
+### The Apply button was not wired to anything
+
+The card's **Apply** posts `apply: true`. The engine requires two independent
+consents before it writes:
+
+```python
+allow_apply = apply is True and bool(self.config.auto_placement)
+```
+
+The second consent came from `WM_AUTO_PLACEMENT`, which the App never set — the
+option did not exist in `addon/config.yaml` or the entrypoint's option table. So
+on every App install the flag was permanently false, and Apply returned
+
+```
+applied: false
+detail: "auto placement is disabled in the integration options; enable it and
+         pass apply=true to write these placements"
+```
+
+— an instruction to enable something that could not be reached. Measured on
+production `0.2.1-dev.19` through ingress. The integration's own "Automatically
+create devices" checkbox was inert for the same reason: it only supplies the
+first consent.
+
+`auto_placement` is now an App option, mapped to `WM_AUTO_PLACEMENT`, **off by
+default**. Off is the point: this writes device configurations, and a write must
+be something the user asked for. Both switches still have to be on, so the
+two-consent design is unchanged — it is now reachable rather than theoretical.
+Verified end-to-end against a copy of the production database with the option
+enabled: `applied: true`, two fixtures written, both appearing under their
+circuits in the tree.
+
+### A device was named after its own id, and shown as 0 W
+
+Two display defects appeared the moment auto placement had written something:
+
+```
+[circuit] Refoss - Main Panel Lights CT1 power
+  [device] dev_auto_master_ensuite_bathroom_master_ensuite_bathroom_vanity_lights
+```
+
+The placement had reported the friendly name — *Master Ensuite Bathroom Vanity
+Lights* — but materialisation wrote `name=device_id`, so the tree had only the
+slug. The plan now carries the name it was given and stores it on the device row;
+applying a second time repairs rows an older build already stored with the id.
+When no friendly name exists the engine keeps the id and does not invent one — a
+title-cased slug is not a name.
+
+The same node reported `latest_power_w: 0.0, source: "unknown",
+sample_count: 0`. The panel's own first design rule is that an unknown device says
+*unknown*, not `0 W`; `unknown` is a non-null source, so the node passed the
+"measured" test and rendered a fabricated zero. Device nodes now state their
+`measurement` (`measured` / `inferred` / `prior` / `none`) and an unmeasured node
+carries `latest_power_w: null`. A genuine measured zero is preserved and still
+renders as `0 W` — the fix removes the claim, not the reading. The field is
+additive and the contract stays at `1.5.0`; `export_schemas.py --check` confirms
+the schemas are unchanged.
+
 ## v0.2.1-dev.19 — 2026-11-12 (development channel)
 
 Discovering devices over more than a day of history now works. It did not fail
