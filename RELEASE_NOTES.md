@@ -1,14 +1,6 @@
 # Release Notes
 
-## v0.2.1-dev.17 — 2026-11-12 (development channel)
-
-Automatic development build.
-
-### Changes
-
-- docs: publish the dev.16 notes under the version that actually ships
-
-## v0.2.1-dev.16 — 2026-11-12 (development channel)
+## v0.2.1-dev.18 — 2026-11-12 (development channel)
 
 The Topology tab can now find fixtures that share a circuit. Before this release
 the engine could only attribute a device that had a CT of its own: 28 of them were
@@ -134,7 +126,12 @@ turned an accepted lighting row into a refusal. More evidence producing less out
 is indefensible. The null now runs through the same NNLS pipeline as the fit
 (same rank cut, same min-norm projection, same residual formula), so it drifts
 +0.0120 instead. The gate threshold is unchanged at 0.15 — the estimator was the
-bug. Fifty draws cost ~19 ms per row, keeping a 32-row install inside two seconds.
+bug. The estimator-consistent null is more expensive, so the per-row work was
+reduced to keep the two-second budget: the design's eigenbasis is a pure function
+of a row's usable mask, and is now computed once per distinct mask instead of once
+per row, and a row that cannot clear the R² gate no longer pays for a null it will
+never report. Together those took a 32-row, 200-entity install from 3.0 s to
+1.4 s, with every coefficient and R² bit-identical to the uncached path.
 
 **A week of history did not fit in a frame.** Placement discovery asks for
 `include_attributes`, which makes the response 4.5× larger: 39.7 MB at 24 h, 79.6 MB
