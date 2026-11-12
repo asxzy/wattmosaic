@@ -48,6 +48,7 @@ database_path|WM_DATABASE_PATH|/data/wattmosaic.db
 retention_days_raw|WM_RETENTION_DAYS_RAW|30
 retention_days_aggregates|WM_RETENTION_DAYS_AGGREGATES|730
 queue_max_size|WM_QUEUE_MAX_SIZE|5000
+auto_placement|WM_AUTO_PLACEMENT|false
 "
 
 OPTIONS_FILE="${WM_OPTIONS_FILE:-/data/options.json}"

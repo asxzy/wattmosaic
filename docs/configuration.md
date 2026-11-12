@@ -52,6 +52,7 @@ touches `device_model_versions` or `learning_samples`, so model history survives
 | `WM_STALE_AFTER_S` | `120` | A reading older than this is `stale`: excluded from learning, confidence reduced, entity marked unavailable. |
 | `WM_INFERENCE_INTERVAL_S` | `5` | Inference loop period. Must be shorter than your fastest meaningful load cycle. |
 | `WM_QUEUE_MAX_SIZE` | `5000` | Bounded ingestion queue. On overflow the oldest items are dropped and a metric incremented; memory never grows unbounded. |
+| `WM_AUTO_PLACEMENT` | `false` | Exposed as the App option `auto_placement`. Allows `POST /api/v1/discover/placements` to **write device configurations** when the request also sends `apply: true`. Off by default because a write must be something the user asked for (ADR-0024 item 8). With it off, the endpoint still analyses and reports what it would place, and writes nothing. |
 | `WM_TOPOLOGY_BOOTSTRAP` | `true` | Discover a candidate topology from Home Assistant at startup when the database has none. Disabling it leaves a fresh install with nothing to infer; `/health` then reports `degraded` with `details.topology.configured = false`. |
 | `WM_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
 | `WM_LOG_JSON` | `true` | Structured JSON logs for the App; set `false` for human-readable local logs. |
@@ -118,6 +119,7 @@ discovery card.
 | Paired CT | from topology | Second leg of a double-pole load. |
 | Device → CT mapping | candidates | Must be explicitly confirmed; unconfirmed mappings stay `candidate`. |
 | Create energy entity (per device) | `true` | Adds a `total_increasing` kWh sensor for that load. Stored in the config entry, never sent to the engine. When the device's state entity belongs to a real Home Assistant device, the energy sensor is attached there — after registration, so the move never changes its entity ID (ADR-0021). |
+| Automatically create devices | `false` | Stored as `auto_placement` in the config entry and sent as `apply` on every placement request. It is **not** sufficient on its own: the engine also requires its own `auto_placement` option (App option / `WM_AUTO_PLACEMENT`). Both must agree before a device configuration is written, and both default to off. |
 
 ## Per-device configuration
 

@@ -17,6 +17,7 @@
 #   retention_days_raw     -> WM_RETENTION_DAYS_RAW
 #   retention_days_aggregates -> WM_RETENTION_DAYS_AGGREGATES
 #   queue_max_size         -> WM_QUEUE_MAX_SIZE
+#   auto_placement         -> WM_AUTO_PLACEMENT
 
 name: "WattMosaic Engine"
 version: "0.2.1-dev.19"
@@ -117,6 +118,12 @@ options:
   retention_days_raw: 30
   retention_days_aggregates: 730
   queue_max_size: 5000
+  # Creates devices for fixtures whose circuit membership was learned from
+  # observed co-movement (ADR-0024). This writes device configurations, so it is
+  # off by default and only a deliberate opt-in enables it. The Discover card's
+  # Apply button additionally requires apply=true in the request: two
+  # independent consents before anything is written.
+  auto_placement: false
 
 schema:
   ha_url: url
@@ -133,3 +140,4 @@ schema:
   retention_days_raw: "int(1,3650)"
   retention_days_aggregates: "int(30,36500)"
   queue_max_size: "int(100,1000000)"
+  auto_placement: bool
