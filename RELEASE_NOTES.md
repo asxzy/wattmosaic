@@ -1,5 +1,13 @@
 # Release Notes
 
+## v0.2.1-dev.17 — 2026-11-12 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- docs: publish the dev.16 notes under the version that actually ships
+
 ## v0.2.1-dev.16 — 2026-11-12 (development channel)
 
 The Topology tab can now find fixtures that share a circuit. Before this release
