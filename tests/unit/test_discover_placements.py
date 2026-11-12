@@ -41,8 +41,14 @@ from wattmosaic_engine.contracts import (
     ServiceCommand,
     Topology,
     TopologyStatus,
+    utcnow,
 )
 from wattmosaic_engine.disaggregation.auto_placement import auto_device_id
+from wattmosaic_engine.ingestion.ha_source import (
+    HISTORY_BOUNDARY_NUDGE,
+    history_window_slices,
+    merge_history_slices,
+)
 from wattmosaic_engine.main import EngineCore
 from wattmosaic_engine.storage.database import Database
 
@@ -139,7 +145,14 @@ def _history(
 
 
 class _FakeSource:
-    """Stands in for the HA WebSocket source; serves states, registries, history."""
+    """Stands in for the HA WebSocket source; serves states, registries, history.
+
+    ``history`` mirrors ``HASource.history`` including its time slicing (it uses
+    the production ``history_window_slices`` / ``merge_history_slices`` helpers),
+    so a discovery test sees the same number of recorder queries and the same
+    seam behaviour as production.  A fake that returned the whole window in one
+    payload would hide the very defect this mirrors.
+    """
 
     connected = True
 
@@ -151,16 +164,22 @@ class _FakeSource:
         states: list[dict[str, Any]] | None = None,
         registries: dict[str, Any] | None = None,
         fail_history: bool = False,
+        fail_slice_at: int | None = None,
     ) -> None:
         self.payload = payload
         self.leaky = leaky
         self.fail_history = fail_history
+        #: 1-based index of the slice that fails (e.g. 2 = the middle of three).
+        self.fail_slice_at = fail_slice_at
         #: Set to make ``history`` fail the way a timeout or a dropped socket does.
         #: ``history`` returns ``{}`` for a failure by design, so the only way a
         #: caller can tell "the recorder is empty" from "the query did not finish"
         #: is this attribute -- mirroring ``HASource.last_history_error``.
         self.last_history_error: str | None = None
+        #: One entry per ``history()`` call, as discovery makes it.
         self.calls: list[dict[str, Any]] = []
+        #: One entry per recorder query actually issued (i.e. per time slice).
+        self.slice_calls: list[dict[str, Any]] = []
         # Candidate population now comes from the *state snapshot* (contract §2),
         # not from the topology.  Default to the two fixtures the topology used
         # to declare so the historical assertions still describe the same run.
@@ -189,24 +208,75 @@ class _FakeSource:
         include_attributes: bool = False,
         timeout_s: float | None = None,
     ) -> dict[str, list[dict]]:
+        end = end or utcnow()
+        slices = history_window_slices(start, end)
         self.calls.append(
             {
                 "entity_ids": list(entity_ids),
                 "include_attributes": include_attributes,
                 "timeout_s": timeout_s,
+                "window_slices": len(slices),
             }
         )
         if self.fail_history:
             self.last_history_error = "TimeoutError: history query exceeded 30.0s"
             return {}
         self.last_history_error = None
-        if self.leaky:
-            # A source that ignores the request and returns everything it has.
-            # ``discover_placements`` must still reason only about the entities
-            # the state snapshot offered as candidates.
-            return dict(self.payload)
-        wanted = set(entity_ids)
-        return {key: rows for key, rows in self.payload.items() if key in wanted}
+        parts: list[dict[str, list[dict]]] = []
+        for index, (slice_start, slice_end) in enumerate(slices, start=1):
+            # Half-open slice bounds, exactly like HASource: the recorder's own
+            # SQL is strict on both sides, hence the one-microsecond nudge.
+            query_start = (
+                slice_start if index == 1 else slice_start - HISTORY_BOUNDARY_NUDGE
+            )
+            self.slice_calls.append(
+                {
+                    "start": query_start,
+                    "end": slice_end,
+                    "include_attributes": include_attributes,
+                }
+            )
+            if self.fail_slice_at == index:
+                self.last_history_error = (
+                    f"slice {index} of {len(slices)} "
+                    f"[{slice_start.isoformat()}, {slice_end.isoformat()}) "
+                    "failed: TimeoutError: recorder query exceeded its slice budget"
+                )
+                return {}
+            if self.leaky:
+                # A source that ignores the request and returns everything it has.
+                # ``discover_placements`` must still reason only about the entities
+                # the state snapshot offered as candidates.
+                parts.append(dict(self.payload))
+                continue
+            wanted = set(entity_ids)
+            part: dict[str, list[dict]] = {}
+            for key, rows in self.payload.items():
+                if key not in wanted:
+                    continue
+                kept = [
+                    row
+                    for row in rows
+                    if query_start.timestamp() < float(row["lu"]) < slice_end.timestamp()
+                ]
+                if index == 1:
+                    # Only the first slice asks for the start-time state; later
+                    # slices would replay a stale value behind the previous
+                    # slice's rows and invent a transition at the seam.
+                    prior = [
+                        row for row in rows if float(row["lu"]) <= query_start.timestamp()
+                    ]
+                    if prior and kept:
+                        kept = [
+                            {"s": prior[-1]["s"], "lu": query_start.timestamp()},
+                            *kept,
+                        ]
+                if kept:
+                    part[key] = kept
+            parts.append(part)
+        if len(parts) == 1:
+            return parts[0]
+        return merge_history_slices(parts)  # type: ignore[return-value]
 
 
 # --------------------------------------------------------------------------- #
@@ -252,6 +322,7 @@ def _core(
     leaky: bool = False,
     states: list[dict[str, Any]] | None = None,
     fail_history: bool = False,
+    fail_slice_at: int | None = None,
 ) -> tuple[EngineCore, Database, _FakeSource]:
     db = Database(tmp_path / "wm.db")
     config = EngineConfig(
@@ -265,6 +336,7 @@ def _core(
         leaky=leaky,
         states=states,
         fail_history=fail_history,
+        fail_slice_at=fail_slice_at,
     )
     core.hasource = source  # type: ignore[assignment]
     stored = topology if topology is not None else _topology()
@@ -557,6 +629,96 @@ def test_the_history_timeout_grows_with_the_requested_window(tmp_path: Path) -> 
     # The base keeps a short window from waiting as long as a week: 24 h asks for
     # far less than the linear term for 168 h alone would suggest.
     assert short < long / 3, "the budget must be dominated by the window, not a constant"
+
+
+def test_a_failed_slice_of_a_long_window_is_never_reported_as_a_smaller_answer(
+    tmp_path: Path,
+) -> None:
+    """Slice 2 of 6 failing must not silently truncate a week to a day.
+
+    ``HASource.history`` returns ``{}`` when *any* slice fails, precisely so this
+    layer cannot reason about a period it believes is complete.  The failure has
+    to reach the user as "history query did not complete" with the failing slice
+    named -- never as a successful, shorter history.  That is the whole point of
+    the previous fix: a wrong "no recorded history" is worse than an honest error.
+    """
+    core, _, source = _core(tmp_path, fail_slice_at=2)
+
+    result = asyncio.run(core.discover_placements(lookback_hours=72, apply=None))
+
+    assert result["accepted"] == []
+    assert result["skipped"].get("reason") == "history query did not complete"
+    detail = result["skipped"].get("detail") or ""
+    assert "slice 2 of 6" in detail, "the failed slice must be named, not just the error"
+    assert "TimeoutError" in detail
+    # The call stops at the failed slice; the first slice's rows are discarded.
+    assert len(source.slice_calls) == 2
+    assert result["stats"]["observations"] == 0
+
+
+def test_a_short_window_is_not_sliced_and_a_week_is(tmp_path: Path) -> None:
+    """The threshold is a cost decision as well as a safety one.
+
+    24 h measured 39.7 MB -- one safe frame, ~4 s.  Splitting it would double the
+    round trips for nothing.  168 h measured 282.5 MB and dropped the connection,
+    so it must be cut into bounded slices.
+    """
+    core, _, source = _core(tmp_path)
+
+    asyncio.run(core.discover_placements(lookback_hours=24, apply=None))
+    assert len(source.slice_calls) == 1, "a 24 h window must stay one request"
+    assert source.calls[-1]["window_slices"] == 1
+
+    source.slice_calls.clear()
+    asyncio.run(core.discover_placements(lookback_hours=168, apply=None))
+    assert len(source.slice_calls) > 1, "a 7-day window must be sliced"
+    assert source.calls[-1]["window_slices"] >= 14
+
+
+def test_a_ct_row_that_reported_unavailable_never_reaches_the_group_fit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real recorder row says ``unavailable`` when a bridge restarts.
+
+    On the reference install a Refoss CT published ``unavailable`` inside the
+    7-day window.  ``parse_history_payload`` drops it (a non-numeric state is not
+    a wattage), which is why correlation was unaffected, but the group fit's row
+    parser raises ``ValueError`` on it.  That only became reachable once 168 h
+    started returning at all -- the old code dropped the connection first -- so
+    discovery must not hand a wattage fit a row that has no wattage.
+
+    Asserted on the *input* the fit receives, not on a crash: a small fixture can
+    fail to reach the resampling step for unrelated reasons, and a test that only
+    passes because the fit bailed out early would prove nothing.
+    """
+    from wattmosaic_engine.disaggregation import group_fit
+
+    seen: list[list[dict]] = []
+    real_fit = group_fit.fit_shared_rows
+
+    def spy(**kwargs: Any):
+        seen.extend(kwargs["row_readings"].values())
+        return real_fit(**kwargs)
+
+    monkeypatch.setattr(group_fit, "fit_shared_rows", spy)
+
+    payload = _history(_start())
+    ct = payload["sensor.ct1_power"]
+    middle = len(ct) // 2
+    # A genuine outage row, not a fabricated value: the bridge said nothing.
+    ct.insert(middle, {"s": "unavailable", "lu": ct[middle]["lu"] - 15})
+    core, _, _ = _core(tmp_path, payload=payload)
+
+    result = asyncio.run(core.discover_placements(lookback_hours=24, apply=False))
+
+    assert seen, "the group fit was never called"
+    assert all(
+        str(row.get("s")).strip().lower() not in ("unavailable", "unknown")
+        for rows in seen
+        for row in rows
+    ), "a non-numeric CT row reached the wattage fit"
+    assert result.get("error") is None
+    assert result["skipped"].get("reason") is None
 
 
 def test_no_candidate_state_entities_short_circuits_with_a_reason(tmp_path: Path) -> None:

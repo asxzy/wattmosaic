@@ -28,8 +28,8 @@ import math
 import random
 import ssl
 import uuid
-from collections.abc import Callable, Iterable
-from datetime import UTC, datetime
+from collections.abc import Callable, Iterable, Mapping
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any, Protocol
 
@@ -65,6 +65,84 @@ BACKOFF_MAX_S = 60.0
 BACKOFF_JITTER = 0.20
 DEFAULT_STALE_AFTER_S = 120.0
 MAX_FRAME_BYTES = 64 * 1024 * 1024
+
+#: Longest window asked of the recorder in one ``history_during_period`` call
+#: when attributes are requested.
+#:
+#: The cap is *bytes per frame*, and the recorder answers one request with one
+#: frame, so the only way to stay under :data:`MAX_FRAME_BYTES` is to bound the
+#: bytes a single request can produce.  Measured on the reference install (485
+#: candidate entities plus the CT rows, ``include_attributes=True``) the payload
+#: of a whole-candidate-set query was:
+#:
+#: ===========  =================
+#: window       response
+#: ===========  =================
+#: 24 h          39.7 MB
+#: 36 h          59.8 MB
+#: 48 h          79.6 MB  -> dropped
+#: 72 h         119.2 MB  -> dropped
+#: 168 h        282.5 MB  -> dropped
+#: ===========  =================
+#:
+#: So size grows linearly with the window at roughly 1.7 MB/h, and 48 h alone was
+#: 1.24x over the 64 MiB cap.  Entity count is *not* a usable knob: the same 485
+#: entities split into batches of 64 still produced a 266.8 MB frame, because a
+#: handful of dense power rows dominate, and batches of 128/256 silently returned
+#: 0 entities.  12 h was therefore chosen as the slice: on the same data a
+#: 12 h slice peaked at **20.1 MB**, i.e. 3.2x headroom under the 64 MiB cap,
+#: against 1.5x for the 24 h slice that already reached 41.5 MB.  A 16 h slice
+#: would leave only ~2.4x; 12 h keeps a busy week (fixtures cycling far more
+#: than the day measured here) well inside the limit while still collapsing a
+#: 24 h request into two calls.
+#:
+#: This must never be confused with a target *size*: it is a time bound whose
+#: measured consequence happens to stay small.  Raising :data:`MAX_FRAME_BYTES`
+#: instead was rejected -- the cap is a real protection against a recorder that
+#: streams thousands of rows, and a bigger cap only moves the cliff.
+HISTORY_SLICE_HOURS = 12.0
+
+#: Windows up to this long stay a single request.
+#:
+#: A short window is already far from the cap (24 h measured 39.7 MB, still one
+#: frame) and the unsliced route costs ~4 s; splitting it would double the round
+#: trips for no safety gain.  24 h is the largest window measured to fit *and*
+#: the default lookback, so it is the natural threshold: at 24 h a single
+#: request is provably safe today, and anything longer is sliced.
+#:
+#: Consequence worth stating: the largest frame the engine can ever ask for is
+#: then the 24 h single request at 39.7 MB (1.6x headroom), because every longer
+#: window is cut into 12 h slices whose measured peak is 20.1 MB.  That 1.6x is
+#: the *pre-existing* default route, measured working on production; the slicing
+#: exists so that no window can grow past it.  Lowering the threshold would buy
+#: more headroom on the common case at the cost of a second round trip, which is
+#: not worth it while the 24 h answer demonstrably fits.
+HISTORY_SLICE_THRESHOLD_HOURS = 24.0
+
+#: How far a slice's *left* edge is nudged earlier than its logical start.
+#:
+#: The recorder's SQL is ``last_updated_ts > start`` and ``last_updated_ts < end``
+#: (see ``_significant_states_stmt`` in HA's ``recorder/history``), so a row
+#: stamped exactly on a slice boundary belongs to neither neighbour: strict
+#: ``< end`` excludes it from the slice before, strict ``> start`` from the slice
+#: after.  A dropped transition at a seam is the same class of defect as a
+#: duplicated one -- the correlation code counts transitions -- so each interior
+#: slice asks from one microsecond before its logical start.  That makes the
+#: logical ranges genuinely half-open ``[start, end)`` at the recorder's own
+#: timestamp resolution (microseconds), with the instant owned by the later
+#: slice.  One microsecond is smaller than any timestamp HA can store, so this
+#: cannot pull in a row the previous slice already owns.
+HISTORY_BOUNDARY_NUDGE = timedelta(microseconds=1)
+
+#: Smallest per-slice timeout when a query is split.
+#:
+#: A sliced request is *smaller* than an unsliced one, so the caller's total
+#: budget divided by the slice count is the natural share.  The floor exists so
+#: a short window split into two slices does not get half of a budget that was
+#: already only sized for one request.  A measured 12 h slice took 2.2 s, so 15 s
+#: is nearly seven times the observed cost while keeping a 7-day query (14
+#: slices, 420 s budget) at 30 s per slice.
+HISTORY_SLICE_MIN_TIMEOUT_S = 15.0
 
 READ_ONLY_COMMANDS = frozenset(
     {
@@ -148,6 +226,112 @@ def _as_aware(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def history_window_slices(
+    start: datetime,
+    end: datetime,
+    *,
+    slice_hours: float = HISTORY_SLICE_HOURS,
+    threshold_hours: float = HISTORY_SLICE_THRESHOLD_HOURS,
+) -> list[tuple[datetime, datetime]]:
+    """Split ``[start, end)`` into recorder-safe windows.
+
+    Returns ``[(start, end)]`` unchanged when the window is at most
+    ``threshold_hours``: a single request is cheaper (the reference install's
+    unsliced route costs ~4 s) and, up to 24 h, measured *safe* (39.7 MB against
+    a 64 MiB frame cap).  Splitting a window that fits would double the round
+    trips for no protection.
+
+    Longer windows are cut into consecutive ``slice_hours`` pieces.  The pieces
+    are returned as half-open ``[start, end)`` ranges; the caller turns that into
+    the recorder's strict-SQL bounds.  There is no overlap and no gap, so the
+    union is exactly the requested window.
+    """
+    if end <= start:
+        # Reversed or empty: pass it through.  Home Assistant answers an empty
+        # range with an empty result, and inventing slices for it would only
+        # multiply a request that cannot return anything.
+        return [(start, end)]
+    if end - start <= timedelta(hours=threshold_hours):
+        return [(start, end)]
+    width = timedelta(hours=slice_hours)
+    slices: list[tuple[datetime, datetime]] = []
+    cursor = start
+    while cursor < end:
+        stop = min(cursor + width, end)
+        slices.append((cursor, stop))
+        cursor = stop
+    return slices
+
+
+def _history_row_stamp(row: Mapping[str, Any]) -> float | None:
+    """Epoch seconds of a compressed recorder row, or ``None`` if unparseable."""
+    raw = row.get("lu", row.get("last_updated"))
+    if isinstance(raw, bool) or raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    parsed = parse_state_timestamp(raw)
+    return parsed.timestamp() if parsed is not None else None
+
+
+def merge_history_slices(parts: Iterable[Mapping[str, Any]]) -> dict[str, list[Any]]:
+    """Concatenate per-slice recorder payloads into one payload.
+
+    ``parts`` must be in chronological order.  Each entity's rows are appended in
+    that order and each recorder answer is already sorted, so the merged list is
+    ascending in time just like a single unsliced answer.
+
+    **Seam-exact.**  A recorder row can appear in two adjacent slices: the
+    recorder answers ``last_updated_ts > start`` and ``< end``, and a row at an
+    instant returned by one slice can be returned again at the start of the next
+    one (the recorder can synthesise a "state at the start of the window" row from
+    the last state before it).  Emitting such a row twice would turn one
+    transition into two -- a phantom on/off event -- and the correlation and
+    group-fit code counts transitions, so a duplicated seam row would corrupt the
+    evidence that placement is decided on.
+
+    A row from a later slice is therefore admitted only when it is **strictly
+    newer** than the youngest row already merged for that entity.  With the
+    half-open bounds the recorder's own SQL produces, that filter should never
+    drop a real row (a real row exactly on the seam belongs to the later slice
+    only); it is defence in depth against a recorder that returns an overlapping
+    row anyway.  Rows *inside* one slice are never filtered, so two distinct
+    observations at the same instant are both kept.
+    """
+    merged: dict[str, list[Any]] = {}
+    #: Youngest row admitted so far per entity (``None`` when unparseable).
+    #: Only a slice boundary consults it, so a same-instant pair that genuinely
+    #: lives inside one answer is preserved.
+    youngest: dict[str, float | None] = {}
+
+    for index, payload in enumerate(parts):
+        for entity_id, rows in (payload or {}).items():
+            if not isinstance(entity_id, str):
+                continue
+            bucket = merged.setdefault(entity_id, [])
+            # Fixed for the whole slice: everything at or before the last row of
+            # the previous slice is that slice's answer (including the start-time
+            # state the recorder synthesises for this window), not new history.
+            # Rows *inside* this slice are all admitted, so two real observations
+            # at the same instant are not collapsed into one.
+            boundary = youngest.get(entity_id) if index else None
+            latest: float | None = None
+            for row in rows if isinstance(rows, (list, tuple)) else ():
+                if not isinstance(row, Mapping):
+                    continue
+                stamp = _history_row_stamp(row)
+                if boundary is not None and stamp is not None and stamp <= boundary:
+                    continue
+                bucket.append(row)
+                if stamp is not None:
+                    latest = stamp
+            if latest is not None:
+                youngest[entity_id] = latest
+            elif index:
+                youngest.setdefault(entity_id, None)
+    return merged
 
 
 class HASource:
@@ -414,31 +598,105 @@ class HASource:
         small.  Note that many integrations store only ``device_id`` and
         ``friendly_name`` per row regardless, so an empty attribute payload is a
         normal answer and never an error.
+
+        **Long windows are sliced.**  The recorder answers one request with one
+        websocket frame, and :meth:`_connect` caps a frame at
+        :data:`MAX_FRAME_BYTES` (64 MiB).  Above that the websockets library drops
+        the connection, which is why every window longer than ~40 h used to fail
+        with ``ConnectionError: websocket closed by peer``.  Measured on the
+        reference install with ``include_attributes=True``: 24 h = 39.7 MB (one
+        frame, safe), 48 h = 79.6 MB and 168 h = 282.5 MB (both over the cap and
+        dropped).  Windows longer than :data:`HISTORY_SLICE_THRESHOLD_HOURS`
+        (24 h, the largest measured to fit) are therefore split into slices of at
+        most :data:`HISTORY_SLICE_HOURS` (12 h, whose measured peak frame was
+        20.1 MB -- 3.2x headroom under the cap) and merged back into one mapping.
+
+        The slices are half-open ``[start, end)`` at the recorder's microsecond
+        resolution, and merging is seam-exact: a row the recorder returns at a
+        slice boundary is kept exactly once.  A duplicated transition is a
+        phantom on/off event, and the correlation/group code counts transitions,
+        so merging must not invent one at every seam.
+
+        A failure in *any* slice fails the whole call (empty mapping plus
+        :attr:`last_history_error` naming the slice): returning the slices that
+        did succeed would silently truncate the window while looking complete.
         """
         wanted = [str(entity_id) for entity_id in entity_ids if entity_id]
         if not wanted or not self.connected:
             return {}
         self.last_history_error = None
-        try:
-            result = await self._request(
-                "history/history_during_period",
-                start_time=start.isoformat(),
-                end_time=(end or utcnow()).isoformat(),
-                entity_ids=wanted,
-                minimal_response=not include_attributes,
-                no_attributes=not include_attributes,
-                significant_changes_only=False,
-                _timeout_s=timeout_s,
+        end_time = _as_aware(end) or utcnow()
+        start_time = _as_aware(start) or end_time
+        slices = history_window_slices(start_time, end_time)
+        base_timeout = self.request_timeout_s if timeout_s is None else float(timeout_s)
+        # A slice is smaller than the whole query, so the caller's budget divided
+        # across the slices is the natural share.  The floor keeps a short window
+        # split into a handful of slices from getting less time than the single
+        # request it replaced would have had.
+        slice_timeout = base_timeout
+        if len(slices) > 1:
+            slice_timeout = max(HISTORY_SLICE_MIN_TIMEOUT_S, base_timeout / len(slices))
+
+        parts: list[Any] = []
+        for index, (slice_start, slice_end) in enumerate(slices, start=1):
+            # The recorder's SQL is strict on both sides (``last_updated_ts >
+            # start`` and ``< end``), so nudging the left edge back by a
+            # microsecond is what makes the logical ranges meet with no gap and
+            # no overlap -- see :data:`HISTORY_BOUNDARY_NUDGE`.  Exact-boundary
+            # rows therefore belong to the later slice only.
+            #
+            # ``include_start_time_state`` is asked for on the *first* slice only.
+            # It makes the recorder synthesise a row stamped at the query start
+            # carrying the last state before it, which is how the unsliced call
+            # knows what was on when the window opened.  For a later slice that
+            # row would be stale: its value predates the previous slice's rows, so
+            # a fixture that toggled exactly on the boundary would be replayed as
+            # on -> off -> on and invent two transitions.  The previous slice
+            # already supplies that context, so later slices ask for changes only.
+            query_start = (
+                slice_start if index == 1 else slice_start - HISTORY_BOUNDARY_NUDGE
             )
-        except Exception as exc:  # noqa: BLE001 - recorder may not be enabled
-            # Recorded *and* swallowed: the empty mapping below is the caller's
-            # contract (failure is never evidence), but the reason is kept so a
-            # caller can tell a timeout from a genuinely empty recorder instead of
-            # reporting "no recorded history" for a query that never finished.
-            self.last_history_error = f"{type(exc).__name__}: {exc}"
-            log.debug("history query failed: %s", exc)
-            return {}
-        return result if isinstance(result, dict) else {}
+            try:
+                result = await self._request(
+                    "history/history_during_period",
+                    start_time=query_start.isoformat(),
+                    end_time=slice_end.isoformat(),
+                    entity_ids=wanted,
+                    include_start_time_state=index == 1,
+                    minimal_response=not include_attributes,
+                    no_attributes=not include_attributes,
+                    significant_changes_only=False,
+                    _timeout_s=slice_timeout,
+                )
+            except Exception as exc:  # noqa: BLE001 - recorder may not be enabled
+                # Recorded *and* swallowed: the empty mapping below is the
+                # caller's contract (failure is never evidence), but the reason is
+                # kept so a caller can tell a timeout from a genuinely empty
+                # recorder instead of reporting "no recorded history" for a query
+                # that never finished.  Naming the slice is deliberate: "slice 3
+                # of 7 failed" is a fact a user can act on, while a bare timeout
+                # says nothing about how much of the window was answered.  An
+                # unsliced window says "the whole window" instead of "slice 1 of
+                # 1", because that is the request the user's window actually made.
+                where = (
+                    "the whole window"
+                    if len(slices) == 1
+                    else f"slice {index} of {len(slices)}"
+                )
+                self.last_history_error = (
+                    f"{where} [{slice_start.isoformat()}, {slice_end.isoformat()}) "
+                    f"failed: {type(exc).__name__}: {exc}"
+                )
+                log.debug("history query failed: %s", self.last_history_error)
+                # Partial slices are *not* a partial answer: drop everything so
+                # the caller cannot reason about a truncated window as if it were
+                # the whole one.
+                return {}
+            parts.append(result if isinstance(result, dict) else {})
+
+        if len(parts) == 1:
+            return parts[0]
+        return merge_history_slices(parts)
 
     async def registries(self) -> dict[str, Any]:
         """Return entity/device/area/floor registries (cached)."""

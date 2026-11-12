@@ -2454,6 +2454,14 @@ class EngineCore:
         # from the window it was asked for (a 7-day whole-house request takes 17 s
         # on the reference install against a 30 s default) and refuse rather than
         # report "no recorded history" when the answer is incomplete.
+        #
+        # That budget is the budget for the *whole* window: ``history()`` splits
+        # a window longer than its slice threshold into bounded slices and divides
+        # this total across them.  It has to, because one whole-window frame with
+        # attributes is 79.6 MB at 48 h and 282.5 MB at 168 h against a 64 MiB
+        # websocket frame cap -- the connection was dropped, not answered.  The
+        # slicing is a property of the source (it knows the cap); discovery only
+        # says how much time the window is worth.
         history_timeout_s = max(HISTORY_TIMEOUT_BASE_S, HISTORY_TIMEOUT_PER_HOUR_S * lookback_hours)
         payload = await self.hasource.history(
             wanted,
@@ -2469,6 +2477,11 @@ class EngineCore:
                     {
                         "reason": "history query did not complete",
                         "lookback_hours": lookback_hours,
+                        # Names the failed slice and the transport error, e.g.
+                        # "slice 3 of 14 [..) failed: TimeoutError: ...".  A
+                        # partial answer is never returned as if it were the whole
+                        # window, so the only honest report is which part of the
+                        # window could not be read.
                         "detail": str(self.hasource.last_history_error),
                     },
                 )
@@ -2536,11 +2549,24 @@ class EngineCore:
             # that were never separately measured.  The exclusion is applied
             # here, to the *inputs*, so the call itself stays exactly the frozen
             # §4 signature (no extra keyword for the other workstream to honour).
+            #
+            # CT rows are filtered to *numeric* states first.  A recorder really
+            # does return ``unavailable`` for a CT row (a Refoss bridge restart
+            # during the 7-day window on the reference install does exactly
+            # that), and a non-numeric state is not a measurement -- the same
+            # rule ``parse_history_payload`` already applies when building
+            # ``readings`` above, which is why correlation never saw this.  The
+            # fit's numeric parser raises ``ValueError`` on such a row instead of
+            # skipping it, and that only became reachable once 168 h started
+            # returning at all: the old code dropped the connection first.  The
+            # real fix belongs in ``group_fit``'s row parser; filtering here keeps
+            # discovery from handing a wattage fit a row that has no wattage.
             fitted = fit_shared_rows(
                 row_readings={
                     channel.ct_id: [
-                        dict(row) for row in payload.get(channel.entity_id, ())
-                        if isinstance(row, Mapping)
+                        dict(row)
+                        for row in payload.get(channel.entity_id, ())
+                        if isinstance(row, Mapping) and _is_numeric_state(row)
                     ]
                     for channel in row_channels.values()
                     if channel.ct_id not in excluded_ct_ids and channel.entity_id
@@ -2835,6 +2861,26 @@ def _safe_history_row(row: dict[str, Any]) -> dict[str, Any]:
         "quality_status": row.get("quality_status"),
         "operating_stage": row.get("operating_stage"),
     }
+
+
+def _is_numeric_state(row: Mapping[str, Any]) -> bool:
+    """True when a recorder row's state is a number, i.e. an actual measurement.
+
+    A CT row legitimately reports ``unavailable`` while its bridge restarts
+    (observed on the reference install inside a 7-day window).  That row carries
+    no watts, and the group fit's row parser raises on it rather than skipping
+    it.  ``parse_history_payload`` already drops such rows when building
+    ``readings``, so this keeps the fit's input consistent with the evidence the
+    correlation used instead of inventing a second interpretation.
+    """
+    raw = row.get("s", row.get("state"))
+    if raw is None or isinstance(raw, bool):
+        return False
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(value)
 
 
 # --------------------------------------------------------------------------- #
