@@ -468,6 +468,113 @@ def test_max_candidates_truncates_and_says_so(tmp_path: Path) -> None:
     assert any("max_candidates=1" in note for note in result["notes"])
 
 
+def test_placed_fixture_is_not_reported_again_as_a_group_member(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fixture has exactly one wattage story, and it is the measured one.
+
+    Real production data produced a group containing the same fixture tier A had
+    just placed, so the payload carried both a measured ``on_w`` (Placed) and a
+    fitted ``total_w`` (Group) for one lamp.  Two numbers for one device is the
+    contradiction the two tiers exist to avoid, and the aggregate fit is the
+    weaker claim, so it must yield.
+    """
+
+    def fake_fit(**_: Any) -> tuple[Any, ...]:
+        return (
+            _StubGroupFit(
+                ct_id="ct1",
+                members=(
+                    _StubGroupMember("light.island", 70.6),
+                    _StubGroupMember("light.porch", None),
+                ),
+            ),
+        )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "wattmosaic_engine.disaggregation.group_fit",
+        types.SimpleNamespace(fit_shared_rows=fake_fit),
+    )
+    core, _, _, _ = _core(tmp_path)
+
+    result = asyncio.run(core.discover_placements(lookback_hours=24, apply=False))
+
+    assert [item["entity_id"] for item in result["accepted"]] == ["light.island"]
+    members = [m["entity_id"] for group in result["groups"] for m in group["members"]]
+    assert "light.island" not in members, "the placed fixture must not be grouped too"
+    assert members == ["light.porch"]
+    assert result["withheld"]["light.porch"] == "co_toggles_with_another_fixture_on_ct1"
+
+
+def test_a_single_fixture_group_reports_its_wattage_as_identifiable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The flag must describe the evidence, not be a constant.
+
+    Half of the groups on the production install contain one fixture, whose
+    coefficient the aggregate fit genuinely identified.  Hard-coding ``False``
+    made the payload deny a measured wattage the engine actually held and told the
+    UI to caveat a number that was sound.
+    """
+
+    def fake_fit(**_: Any) -> tuple[Any, ...]:
+        return (
+            _StubGroupFit(ct_id="ct1", members=(_StubGroupMember("light.porch", 42.0),)),
+        )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "wattmosaic_engine.disaggregation.group_fit",
+        types.SimpleNamespace(fit_shared_rows=fake_fit),
+    )
+    core, _, _, _ = _core(tmp_path)
+
+    result = asyncio.run(core.discover_placements(lookback_hours=24, apply=False))
+
+    group = result["groups"][0]
+    assert group["individually_identifiable"] is True
+    assert group["members"][0]["estimated_w"] == 42.0
+    # Identified by the aggregate fit is *not* the same claim as measured by a
+    # transition pair, so the honest reason still refuses to make it a device.
+    assert result["withheld"]["light.porch"] == "identified_by_aggregate_fit_on_ct1"
+
+
+def test_a_two_fixture_group_still_reports_co_toggling_after_one_is_placed_solo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The withholding reason is about the original group, not the survivors.
+
+    Once the placed member is filtered out of the member list, a two-fixture
+    group is a one-element list.  Deriving the reason from that filtered size
+    would claim the survivor "co-toggles with another fixture" when the only
+    other fixture was the one that got its own measured device.
+    """
+
+    def fake_fit(**_: Any) -> tuple[Any, ...]:
+        return (
+            _StubGroupFit(
+                ct_id="ct1",
+                members=(
+                    _StubGroupMember("light.island", 70.6),
+                    _StubGroupMember("light.porch", None),
+                ),
+            ),
+        )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "wattmosaic_engine.disaggregation.group_fit",
+        types.SimpleNamespace(fit_shared_rows=fake_fit),
+    )
+    core, _, _, _ = _core(tmp_path)
+
+    result = asyncio.run(core.discover_placements(lookback_hours=24, apply=False))
+
+    assert len(result["groups"][0]["members"]) == 1
+    assert result["withheld"]["light.porch"] == "co_toggles_with_another_fixture_on_ct1"
+
+
 def _install_group_fit(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make the guarded group-fit import resolve to a deterministic stub."""
     monkeypatch.setitem(
@@ -492,6 +599,16 @@ class _StubGroupFit:
     r2_null_p95: float = 0.14
     r2_margin: float = 0.65
     evidence: tuple[str, ...] = ("stub evidence",)
+
+    @property
+    def individually_identifiable(self) -> bool:
+        """Mirror the real ``GroupFit``: derived from measured coefficients.
+
+        The engine reads this property rather than assuming a constant, so the
+        stub must derive it the same way or the two would disagree about whether
+        a single-fixture group carries a trustworthy wattage.
+        """
+        return any(member.estimated_w is not None for member in self.members)
 
 
 def test_apply_false_writes_nothing(tmp_path: Path) -> None:

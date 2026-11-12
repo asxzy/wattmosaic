@@ -2489,6 +2489,14 @@ class EngineCore:
 
         groups: list[dict[str, Any]] = []
         withheld: dict[str, str] = {}
+        # Entities tier A is about to place.  Computed before the group fit so the
+        # advisory pass can exclude them: the same fixture must not appear with
+        # both a measured wattage (Placed) and a fitted one (Group).
+        placed_entity_ids = {
+            placement.configuration.state_entity_ids[0]
+            for placement in plan.accepted
+            if placement.configuration.state_entity_ids
+        }
         if include_groups and fit_shared_rows is not None:
             # Contract §4 forbids a group on a main or dedicated-device row, and
             # keeps those rows out of the fit entirely: a main aggregate contains
@@ -2519,6 +2527,11 @@ class EngineCore:
             )
             for group in fitted:
                 ct_label, panel_name = _channel_label(group.ct_id)
+                # A fixture that tier A placed already owns a device with a
+                # measured wattage.  Leaving it in a group as well would report
+                # the same watts twice (once measured, once fitted) and would
+                # make the advisory card contradict the Placed card.  The
+                # aggregate fit is the weaker claim, so it yields.
                 members = [
                     {
                         "entity_id": member.entity_id,
@@ -2526,10 +2539,26 @@ class EngineCore:
                         "estimated_w": member.estimated_w,
                     }
                     for member in group.members
+                    if member.entity_id not in placed_entity_ids
                 ]
-                for member in group.members:
+                if not members:
+                    continue
+                kept = [m for m in group.members if m.entity_id not in placed_entity_ids]
+                for member in kept:
+                    # A single-fixture group is *identified* by the aggregate
+                    # fit, so "it co-toggles with another fixture" would be
+                    # false.  The honest reason is that the aggregate fit found
+                    # it while transition-pair correlation did not: that is a
+                    # weaker claim, so it still does not become a device.
+                    #
+                    # The test is the *original* group size, not the surviving
+                    # members: a two-fixture group whose other member was placed
+                    # solo still co-toggles, and saying otherwise would invent a
+                    # reason the evidence does not support.
                     withheld[member.entity_id] = (
-                        f"co_toggles_with_another_fixture_on_{group.ct_id}"
+                        f"identified_by_aggregate_fit_on_{group.ct_id}"
+                        if len(group.members) == 1
+                        else f"co_toggles_with_another_fixture_on_{group.ct_id}"
                     )
                 groups.append(
                     {
@@ -2540,7 +2569,15 @@ class EngineCore:
                         "r2": group.r2,
                         "r2_null_p95": group.r2_null_p95,
                         "r2_margin": group.r2_margin,
-                        "individually_identifiable": False,
+                        # Truthful, not a constant: ``GroupFit`` derives this from
+                        # whether any member carries a coefficient the fit
+                        # identified.  On the production install 14 of 21 groups
+                        # are single-fixture and therefore *do* have a measured
+                        # wattage; reporting them all as "not individually
+                        # identifiable" would understate evidence the engine
+                        # actually holds, and would make the UI warn about
+                        # numbers that are sound.
+                        "individually_identifiable": group.individually_identifiable,
                         "members": members,
                         "evidence": list(group.evidence),
                     }
