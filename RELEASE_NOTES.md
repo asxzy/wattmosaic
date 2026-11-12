@@ -1,5 +1,72 @@
 # Release Notes
 
+## v0.2.1-dev.19 — 2026-11-12 (development channel)
+
+Discovering devices over more than a day of history now works. It did not fail
+because the analysis was wrong — it was being cut off at 30 seconds by two
+separate timeouts before it could finish. Both are fixed. **No measurement,
+threshold, or fitted wattage changes in this release.**
+
+### Two 30-second caps, measured
+
+The panel reaches the engine through the Home Assistant ingress gateway, so every
+request passes two independent budgets. Both were 30 s, and placement discovery is
+one of the few calls that legitimately runs for minutes: it reads a whole-house
+recorder window and writes nothing until the analysis is done.
+
+Measured end-to-end on the production install through the panel, before the fix:
+
+| lookback | before |
+| --- | --- |
+| 24 h | 200 in 9.8 s |
+| 48 h | 502 at 30.02 s |
+| 72 h | 502 at 30.02 s |
+| 168 h | 502 at 30.05 s |
+
+Re-measured with both fixes in place, engine and gateway chained against a copy of
+the production database:
+
+| lookback | after | placed | groups |
+| --- | --- | --- | --- |
+| 48 h | **200 in 10.6 s** | 2 | 11 |
+| 72 h | **200 in 14.1 s** | 2 | 19 |
+| 168 h | **200 in 43.9 s** | 2 | 31 |
+
+The 168 h request is the proof: it ran for 43.9 s, which the old chain could not
+have answered at all. Every reported group fit is bounded by its row's observed
+maximum (largest 283.5 W), and `skipped.reason` is `null` at every window — no
+window was silently shortened.
+
+The first cap was the gateway's `ClientTimeout(sock_read=30)`. A socket-read
+timeout only counts silence, and the engine is silent by design while it works,
+so a healthy engine was killed and reported as **"engine is not reachable"** — a
+lie about the engine and a misleading one about what to do. The gateway now
+derives its analysis budget from the engine's own history formula plus a fitting
+allowance (6600 s, which covers the largest window the API accepts, 2160 h), and
+distinguishes the two failures: a timeout is now `504 upstream_timeout`, while
+"not reachable" is reserved for a connection that actually failed. `/healthz`
+keeps a 4 s budget, because it backs the Supervisor watchdog and must not inherit
+a seven-minute allowance; a dead engine still gets restarted promptly.
+
+The second cap was the engine's own `DEFAULT_REQUEST_TIMEOUT_S = 30.0`, applied
+unconditionally by the auth middleware. The engine had already granted a 168 h
+query a 420 s history budget and then killed the request at 30 s before it could
+use it. Discovery now has a route-level budget derived from the same constants
+(6600 s); every other endpoint keeps the 30 s default, so a hung engine still
+frees the panel in under a minute. The two history constants moved to
+`engine/wattmosaic_engine/api/timeouts.py` because the API cannot import
+`main.py` (which imports the API) — one source of truth, still re-exported from
+`main` so nothing else moves.
+
+### Why this is not "just raise the timeout"
+
+A proxy with no bound turns a hung engine into a hung panel forever. These are
+still real bounds, sized from measured cost: 6600 s is 15.7× the 420 s the engine
+grants a 168 h query and 220× the 30 s that failed, and the connect timeout
+stays at 5 s so a genuinely dead container is detected immediately. What changed
+is whose budget governs: the endpoint that is defined to be slow, not the default
+meant for endpoints that answer in milliseconds.
+
 ## v0.2.1-dev.18 — 2026-11-12 (development channel)
 
 The Topology tab can now find fixtures that share a circuit. Before this release
