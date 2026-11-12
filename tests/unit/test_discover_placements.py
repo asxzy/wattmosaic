@@ -139,16 +139,39 @@ def _history(
 
 
 class _FakeSource:
-    """Stands in for the HA WebSocket source; serves history only."""
+    """Stands in for the HA WebSocket source; serves states, registries, history."""
 
     connected = True
 
     def __init__(
-        self, payload: dict[str, list[dict]], *, leaky: bool = False
+        self,
+        payload: dict[str, list[dict]],
+        *,
+        leaky: bool = False,
+        states: list[dict[str, Any]] | None = None,
+        registries: dict[str, Any] | None = None,
     ) -> None:
         self.payload = payload
         self.leaky = leaky
         self.calls: list[dict[str, Any]] = []
+        # Candidate population now comes from the *state snapshot* (contract §2),
+        # not from the topology.  Default to the two fixtures the topology used
+        # to declare so the historical assertions still describe the same run.
+        self._states = (
+            states
+            if states is not None
+            else [
+                {"entity_id": "light.first", "state": "off", "attributes": {}},
+                {"entity_id": "light.second", "state": "off", "attributes": {}},
+            ]
+        )
+        self._registries = registries or {"entities": [], "devices": []}
+
+    async def state_snapshot(self) -> list[dict[str, Any]]:
+        return list(self._states)
+
+    async def registries(self) -> dict[str, Any]:
+        return dict(self._registries)
 
     async def history(
         self,
@@ -167,7 +190,7 @@ class _FakeSource:
         if self.leaky:
             # A source that ignores the request and returns everything it has.
             # ``discover_placements`` must still reason only about the entities
-            # the topology declared.
+            # the state snapshot offered as candidates.
             return dict(self.payload)
         wanted = set(entity_ids)
         return {key: rows for key, rows in self.payload.items() if key in wanted}
@@ -179,6 +202,13 @@ class _FakeSource:
 
 
 def _topology() -> Topology:
+    """A confirmed topology with a main feed and one branch lighting circuit.
+
+    The devices deliberately declare **no** state entities: contract §2 makes a
+    declared entity ineligible for auto placement, and these tests are about the
+    fixtures the *state snapshot* offers as candidates, not about re-placing an
+    entity a person already linked.
+    """
     return Topology(
         status=TopologyStatus.CONFIRMED,
         version=1,
@@ -196,20 +226,7 @@ def _topology() -> Topology:
                 phase=Phase.L1,
             ),
         ],
-        devices=[
-            DeviceTopology(
-                device_id="dev_first",
-                name="first",
-                phase=Phase.L1,
-                metadata={"state_entity_ids": ["light.first"]},
-            ),
-            DeviceTopology(
-                device_id="dev_second",
-                name="second",
-                phase=Phase.L1,
-                metadata={"state_entity_ids": ["light.second"]},
-            ),
-        ],
+        devices=[],  # type: ignore[arg-type]
     )
 
 
@@ -220,6 +237,7 @@ def _core(
     auto_placement: bool = False,
     topology: Topology | None = None,
     leaky: bool = False,
+    states: list[dict[str, Any]] | None = None,
 ) -> tuple[EngineCore, Database, _FakeSource]:
     db = Database(tmp_path / "wm.db")
     config = EngineConfig(
@@ -229,7 +247,9 @@ def _core(
     )
     core = EngineCore(config, db)
     source = _FakeSource(
-        payload if payload is not None else _history(_start()), leaky=leaky
+        payload if payload is not None else _history(_start()),
+        leaky=leaky,
+        states=states,
     )
     core.hasource = source  # type: ignore[assignment]
     stored = topology if topology is not None else _topology()
@@ -265,17 +285,26 @@ def test_analysis_alone_writes_nothing(tmp_path: Path) -> None:
         "light.first",
         "light.second",
     }
-    assert "topology_version" not in result
+    # The frozen §3.3 shape always reports the version it analysed against; what
+    # must *not* change is that nothing was written.
+    assert result["topology_version"] == 1
+    assert all(item["applied"] is False for item in result["accepted"])
 
 
-def test_apply_none_follows_the_stored_option(tmp_path: Path) -> None:
-    """``apply=None`` means "do what the user configured", not "do nothing"."""
+def test_apply_none_is_read_only_even_when_the_opt_in_is_on(tmp_path: Path) -> None:
+    """``apply`` defaults to false: only an explicit ``True`` may write.
+
+    The stored opt-in is a *permission*, not an instruction (contract §3.1).  A
+    caller that omits ``apply`` asked for an analysis, and an analysis writes
+    nothing -- otherwise a status poll would silently create devices.
+    """
     core, db, _ = _core(tmp_path, auto_placement=True)
 
     result = asyncio.run(core.discover_placements(lookback_hours=24, apply=None))
 
-    assert result["applied"] is True
-    assert db.load_device_configurations().devices
+    assert result["applied"] is False
+    assert db.load_device_configurations().devices == []
+    assert "apply" in result["detail"].lower()
 
 
 def test_a_disabled_opt_in_is_reported_rather_than_silent(tmp_path: Path) -> None:
@@ -291,8 +320,8 @@ def test_a_disabled_opt_in_is_reported_rather_than_silent(tmp_path: Path) -> Non
 
 
 def test_an_explicit_apply_writes_the_devices(tmp_path: Path) -> None:
-    """The user's consent on the call itself is enough, without a config change."""
-    core, db, _ = _core(tmp_path, auto_placement=False)
+    """Writing needs the request's consent *and* the stored opt-in (contract §3.1)."""
+    core, db, _ = _core(tmp_path, auto_placement=True)
 
     result = asyncio.run(core.discover_placements(lookback_hours=24, apply=True))
 
@@ -465,16 +494,20 @@ def test_no_history_is_reported_not_treated_as_a_clean_result(tmp_path: Path) ->
     assert result["skipped"].get("reason") == "no recorded history"
 
 
-def test_no_declared_state_entities_short_circuits_with_a_reason(tmp_path: Path) -> None:
-    topology = _topology().model_copy(update={"devices": []})
-    core, _, _ = _core(tmp_path, topology=topology)
+def test_no_candidate_state_entities_short_circuits_with_a_reason(tmp_path: Path) -> None:
+    """An empty snapshot is "nothing to analyse", and must say so.
+
+    Candidate population comes from the state snapshot (contract §2), not from
+    the topology, so the absence of *devices* is no longer the trigger: the
+    trigger is that Home Assistant offered no entity whose domain could be a
+    fixture.
+    """
+    core, _, _ = _core(tmp_path, states=[])
 
     result = asyncio.run(core.discover_placements(lookback_hours=24, apply=None))
 
     assert result["accepted"] == []
-    assert result["skipped"][
-        "reason"
-    ] == "no branch CT rows or no declared state entities"
+    assert result["skipped"]["reason"] == "no branch CT rows or no candidate state entities"
 
 
 # --------------------------------------------------------------------------- #
@@ -609,40 +642,27 @@ def test_a_main_row_is_never_correlated_even_when_it_tracks_a_switch(
     assert "light.first" in result["unresolved"]
 
 
-def test_an_undeclared_entity_is_never_placed(tmp_path: Path) -> None:
-    """The engine has no evidence an undeclared entity is a load at all.
+def test_an_entity_outside_the_state_snapshot_is_never_placed(tmp_path: Path) -> None:
+    """Evidence about an entity Home Assistant did not report is never collected.
 
-    ``light.rogue`` toggles in step with the moving row, so a correlation would
-    happily accept it.  It is not in the topology, which means WattMosaic was
-    never told it exists -- creating a device for it would be reading the
-    registry as evidence, and the whole point of the engine-side split is that
-    it does not.  The only declared entity never moves, so with the filter in
-    place there is nothing to place at all.
+    ``light.rogue`` toggles in step with the moving row in the *recorder* payload,
+    so a correlation would happily accept it.  It is absent from the state
+    snapshot, which is the population contract §2 defines -- so it was never a
+    candidate, and asking the recorder about it would be collecting evidence for
+    a device nobody offered.
     """
     payload = _history(_start())
     payload["light.rogue"] = [dict(row) for row in payload["light.first"]]
     payload["light.second"] = [
         {"s": "off", "lu": row["lu"]} for row in payload["sensor.ct1_power"]
     ]
-    topology = _topology().model_copy(
-        update={
-            "devices": [
-                DeviceTopology(
-                    device_id="dev_second",
-                    name="second",
-                    phase=Phase.L1,
-                    metadata={"state_entity_ids": ["light.second"]},
-                )
-            ]
-        }
-    )
-    core, _, source = _core(tmp_path, topology=topology, payload=payload)
+    core, _, source = _core(tmp_path, payload=payload)
 
     result = asyncio.run(core.discover_placements(lookback_hours=24, apply=False))
 
-    assert result["accepted"] == []
+    assert [item["entity_id"] for item in result["accepted"]] == ["light.first"]
     # It was not even requested: asking for it would be collecting evidence
-    # about an entity the topology never declared.
+    # about an entity the state snapshot never offered.
     requested = {entity for call in source.calls for entity in call["entity_ids"]}
     assert "light.rogue" not in requested
 
