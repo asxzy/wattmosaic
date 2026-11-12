@@ -547,8 +547,18 @@ class Database:
         return len(payload)
 
     def latest_inference_results(self) -> list[dict[str, Any]]:
-        with self._lock:
-            rows = self._conn.execute(
+        """The newest result per device.
+
+        Reads on ``_reader()`` rather than the shared connection: this is a
+        covering-index scan of the whole table (~24 ms warm, ~590 ms cold on the
+        production 343k rows) and on the shared connection it holds
+        ``self._lock`` for its duration, so a concurrent ``ping()`` -- the
+        ``/health`` probe -- queues behind it.  That is the same defect the CT
+        sample scan had; WAL mode lets a second read-only connection run beside
+        the writer, which is what ``_reader`` opens.
+        """
+        with self._reader() as conn:
+            rows = conn.execute(
                 """SELECT * FROM inference_results WHERE id IN
                 (SELECT MAX(id) FROM inference_results GROUP BY device_id) ORDER BY device_id"""
             ).fetchall()

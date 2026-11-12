@@ -452,7 +452,7 @@ def test_latest_schema_version_covers_every_migration() -> None:
     versions = [m.version for m in MIGRATIONS]
     assert len(versions) == len(set(versions)), f"duplicate migration version: {versions}"
     assert versions == list(range(1, len(versions) + 1))
-    assert LATEST_VERSION == len(versions)
+    assert len(versions) == LATEST_VERSION
     assert LATEST_VERSION >= 8  # the panel identity columns
 
 

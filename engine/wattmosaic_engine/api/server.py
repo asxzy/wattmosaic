@@ -328,13 +328,14 @@ async def status(request: web.Request) -> web.Response:
 
 
 async def snapshot(request: web.Request) -> web.Response:
-    return _ok(await maybe_await(_facade(request).snapshot()))
+    # Same whole-table latest-result read as ``devices`` and ``topology_tree``.
+    return _ok(await maybe_await(await asyncio.to_thread(_facade(request).snapshot)))
 
 
 async def devices(request: web.Request) -> web.Response:
     # Same reason as ``topology_tree``: the per-device latest-result lookup is a
     # whole-table scan, so it must not run on the event loop.
-    return _ok(await asyncio.to_thread(_facade(request).devices))
+    return _ok(await maybe_await(await asyncio.to_thread(_facade(request).devices)))
 
 
 async def device(request: web.Request) -> web.Response:
@@ -413,8 +414,10 @@ async def topology_tree(request: web.Request) -> web.Response:
     # exactly as the nesting scan used to.  Same remedy: the blocking part runs
     # in a thread.
     return _ok(
-        await asyncio.to_thread(
-            _facade(request).panel_tree, include_nesting=include_nesting
+        await maybe_await(
+            await asyncio.to_thread(
+                _facade(request).panel_tree, include_nesting=include_nesting
+            )
         )
     )
 
