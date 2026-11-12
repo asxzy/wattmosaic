@@ -15,6 +15,7 @@ with a reason.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -1123,3 +1124,346 @@ def test_an_observation_with_no_measured_row_at_all_is_dropped() -> None:
     )
 
     assert observations == []
+
+
+# --------------------------------------------------------------------------- #
+# Refusal case 7: both directions must agree (measured symmetry gate)
+# --------------------------------------------------------------------------- #
+#
+# The gates below were measured from production recorder history.  The symmetry
+# population comes from replaying 11 days (409 candidate entities, 32 branch
+# rows, 19 191 transitions) through the shipped estimator with each gate
+# disabled: the 9 candidates that pass every other gate score 0.875-0.998, the 6
+# that co-fire with something else score 0.174-0.670.  The fixtures below are
+# reconstructed from those measured values, so a passing test means the engine
+# reproduces the separation production showed -- not that it matches a threshold
+# written to satisfy it.
+#
+# NOTE: the feasibility study's *plateau* estimator (median of a 20-120 s window
+# either side of the edge) reports higher symmetry for the same pairs -- office
+# 0.845, vanity 0.989.  The shipped estimator uses the immediate step, so on real
+# data it measures office at 0.381 and withholds it.  Both numbers are recorded
+# here because conflating them is how a threshold ends up citing provenance its
+# own code cannot reproduce.
+
+
+#: Measured by the shipped estimator on 11 days: vanity 75.6 W ON, 72.1 W OFF,
+#: symmetry 0.954, z 559.  (The study's plateau estimator reported 0.989 / 405.)
+VANITY_ON_W = 75.6
+VANITY_OFF_W = 72.1
+#: The study's plateau measurement for office: 69.8 W ON, 82.7 W OFF, symmetry
+#: 0.845.  Kept as the *weakest trusted* study value so the gate is proven not to
+#: be tuned above it; the shipped immediate-step estimator measures 0.381 on the
+#: same data (see `test_office_is_withheld_by_the_immediate_step_estimator`).
+OFFICE_ON_W = 69.8
+OFFICE_OFF_W = 82.7
+#: Measured by the shipped estimator on 11 days: the weakest survivor is the
+#: upstairs pot light at symmetry 0.875 / z 70.2, the strongest refusal is the
+#: office at 0.670.  Those two numbers bracket the gate.
+WEAKEST_ACCEPTED_SYMMETRY = 0.875
+STRONGEST_REFUSED_SYMMETRY = 0.670
+#: Weakest specificity among the 9 survivors on 11 days (upstairs pot, z 70.2).
+WEAKEST_ACCEPTED_Z = 70.2
+#: Quiet jitter of the lighting rows, measured as 0.043 / 0.073 / 0.099 W (1σ).
+LIGHTS_NOISE_W = 0.05
+
+
+def _measured_cycles(
+    entity_id: str,
+    *,
+    on_w: float,
+    off_w: float,
+    cycles: int,
+    minute_step: float = 10.0,
+    other_rows: Mapping[str, float] | None = None,
+) -> list[EntityObservation]:
+    """`cycles` real toggles at the measured ON and OFF step sizes.
+
+    ``other_rows`` adds bystander circuits that move by that many watts *every*
+    transition -- the scene confound the specificity gate is looking for.  They
+    are given their own baseline so the steps do not have to be signed.
+    """
+    observations: list[EntityObservation] = []
+    for index in range(cycles):
+        at = T0 + timedelta(minutes=minute_step * index)
+        before = {"ct1": BASELINE_W}
+        after = {"ct1": BASELINE_W + on_w}
+        before_off = {"ct1": BASELINE_W + off_w}
+        after_off = {"ct1": BASELINE_W}
+        if other_rows:
+            before.update({ct: 100.0 for ct in other_rows})
+            after.update({ct: 100.0 + watts for ct, watts in other_rows.items()})
+            before_off.update({ct: 100.0 + watts for ct, watts in other_rows.items()})
+            after_off.update({ct: 100.0 for ct in other_rows})
+        observations += [
+            EntityObservation(entity_id, at, True, before, after),
+            EntityObservation(
+                entity_id, at + timedelta(minutes=1), False, before_off, after_off
+            ),
+        ]
+    return observations
+
+
+def _lights_noise(**extra: float) -> dict[str, float]:
+    noise = {"ct1": LIGHTS_NOISE_W}
+    noise.update(extra)
+    return noise
+
+
+def test_the_measured_vanity_pair_is_accepted_with_its_measured_symmetry() -> None:
+    """Reconstructed real data: 75.6 W on, 72.1 W off, the strongest placement.
+
+    These are the steps the *shipped estimator* measured on 11 days of production
+    history (symmetry 0.954, z 559).  If the new gates rejected it they would be
+    rejecting the one placement a human would confirm without hesitation.
+    """
+    observations = _measured_cycles(
+        "light.master_ensuite_bathroom_vanity_lights",
+        on_w=VANITY_ON_W,
+        off_w=VANITY_OFF_W,
+        cycles=11,
+    )
+
+    report = _correlate(observations, row_noise_w=_lights_noise())
+
+    assert len(report.candidates) == 1
+    candidate = report.candidates[0]
+    assert candidate.ct_id == "ct1"
+    assert candidate.typical_on_w == pytest.approx(VANITY_ON_W)
+    assert candidate.typical_off_w == pytest.approx(VANITY_OFF_W)
+    assert candidate.symmetry == pytest.approx(VANITY_OFF_W / VANITY_ON_W)
+    assert candidate.symmetry >= WEAKEST_ACCEPTED_SYMMETRY
+    # Nothing else moved, so the target is the only row with a step.
+    assert candidate.specificity_z > 20.0
+    assert any("symmetry" in line for line in candidate.evidence)
+    assert any("more than any other circuit" in line for line in candidate.evidence)
+
+
+def test_the_office_pair_must_not_be_withheld_by_a_gate_tuned_above_the_study() -> None:
+    """69.8 W on / 82.7 W off: the study's weakest trusted symmetry, 0.845.
+
+    The feasibility study placed this fixture with 6 of 6 corroborations at
+    z 608 using a plateau estimator.  A gate set above 0.845 would withhold it,
+    so the threshold is proven to sit below the study's weakest survivor even
+    though the shipped estimator measures the same pair lower (see the next
+    test).  Both facts belong here: the gate must not be justified by a number
+    the code cannot reproduce, and it must not be tighter than the study.
+    """
+    observations = _measured_cycles(
+        "light.office_office_main_lights",
+        on_w=OFFICE_ON_W,
+        off_w=OFFICE_OFF_W,
+        cycles=6,
+    )
+
+    report = _correlate(observations, row_noise_w=_lights_noise())
+
+    assert len(report.candidates) == 1
+    candidate = report.candidates[0]
+    assert candidate.symmetry == pytest.approx(OFFICE_ON_W / OFFICE_OFF_W, abs=1e-3)
+    assert candidate.symmetry < 0.86, "the gate must not be tuned above the weakest trusted pair"
+
+
+def test_office_is_withheld_when_measured_by_the_immediate_step_estimator() -> None:
+    """The shipped estimator measures office at 0.381, not the study's 0.845.
+
+    On the raw 48 h recorder series the office fixture rises by 73-114 W but
+    falls by 5-82 W, so its immediate steps disagree by more than half.  The
+    plateau estimator averages that away; this module does not, and withholds.
+    That is a deliberate, documented asymmetry: the gate is conservative, and a
+    fixture whose OFF edge is contaminated should be reported as unidentifiable
+    rather than given a wattage built from a mixture.
+    """
+    observations = _measured_cycles(
+        "light.office_office_main_lights",
+        on_w=72.97,
+        off_w=27.78,
+        cycles=6,
+    )
+
+    report = _correlate(observations, row_noise_w=_lights_noise())
+
+    assert report.candidates == ()
+    assert report.unresolved["light.office_office_main_lights"] == "asymmetric_response"
+
+
+def test_an_asymmetric_on_and_off_step_is_refused() -> None:
+    """A 74 W rise but a 22 W fall measured two different events.
+
+    Real refusals on the 11-day replay take exactly this shape: stairs 0.174,
+    living room 0.324, HRV sockets 0.517/0.523, shower 0.588, office 0.670.  The
+    step is large and specific, so every gate but symmetry accepts it -- which is
+    why the gate has to exist.
+    """
+    observations = _measured_cycles(
+        "light.master_bedroom_main_lights",
+        on_w=74.0,
+        off_w=22.0,
+        cycles=6,
+    )
+
+    report = _correlate(observations, row_noise_w=_lights_noise())
+
+    assert report.candidates == ()
+    assert report.unresolved["light.master_bedroom_main_lights"] == "asymmetric_response"
+
+
+def test_the_symmetry_gate_sits_between_the_measured_populations() -> None:
+    """0.70 must reject the 0.670 the estimator measures on a scene and accept 0.875.
+
+    Both bounds come from the 11-day replay: 0.875 is the weakest *survivor*'s
+    symmetry, 0.670 the strongest *refusal*'s.  Asserted from both sides so
+    neither "the gate rejects everything" nor "the gate accepts everything" can
+    pass the two tests above by accident.
+    """
+    from wattmosaic_engine.ingestion.correlation import MIN_ON_OFF_SYMMETRY
+
+    assert STRONGEST_REFUSED_SYMMETRY < MIN_ON_OFF_SYMMETRY < WEAKEST_ACCEPTED_SYMMETRY
+    assert pytest.approx(0.70) == MIN_ON_OFF_SYMMETRY
+
+
+# --------------------------------------------------------------------------- #
+# Refusal case 8: the winning row must be the one that moved (specificity z)
+# --------------------------------------------------------------------------- #
+
+
+def test_a_response_that_barely_stands_out_is_not_specific() -> None:
+    """A 9 W step against circuits wandering at 0.8 W is not evidence.
+
+    This is the case the third guard exists for and the others cannot see.  The
+    bystanders move by 0.8 W, which is *below* the row's own response floor
+    (``MIN_RESPONSE_W``), so they never claim a transition and the ambiguity
+    guard stays silent -- yet at z ≈ 11 the target is nowhere near the 20 that
+    separates production's survivors (z 70-987) from a scene (z ≈ 1).  The same
+    fixture with bystanders at 0.1 W scores z ≈ 85 and is accepted by the test
+    above.
+
+    A scene where the other rows move by 8 W is refused earlier, by
+    ``ambiguous_rows``: several rows then respond equally, so no guard past that
+    point is ever reached.
+    """
+    bystanders = {f"ct{index}": 0.8 for index in range(2, 6)}
+    observations = _measured_cycles(
+        "light.near_threshold",
+        on_w=9.0,
+        off_w=9.0,
+        cycles=6,
+        other_rows=bystanders,
+    )
+
+    report = _correlate(
+        observations,
+        row_noise_w={ct: LIGHTS_NOISE_W for ct in ["ct1", *bystanders]},
+    )
+
+    assert report.candidates == ()
+    assert report.unresolved["light.near_threshold"] == "not_specific"
+
+
+def test_a_specific_response_survives_a_noisy_house() -> None:
+    """Specificity is a ratio, not an absolute step: a small row can still win.
+
+    The target moves 9 W while every other circuit wanders by sub-watt amounts.
+    That is the 8.2 W garage fixture the study measured at z 84 -- below the
+    bystanders' *noise*, but two orders of magnitude above their typical step.
+    """
+    bystanders = {f"ct{index}": 0.2 for index in range(2, 6)}
+    observations = _measured_cycles(
+        "light.triple_garage_main_garage_door_opener_light",
+        on_w=8.2,
+        off_w=8.8,
+        cycles=6,
+        other_rows=bystanders,
+    )
+
+    report = _correlate(
+        observations,
+        row_noise_w={ct: LIGHTS_NOISE_W for ct in ["ct1", *bystanders]},
+    )
+
+    assert len(report.candidates) == 1
+    candidate = report.candidates[0]
+    assert candidate.ct_id == "ct1"
+    assert candidate.specificity_z > 20.0
+    assert candidate.specificity_z == pytest.approx(8.5 / 0.2, rel=0.2)
+
+
+def test_the_specificity_gate_sits_between_the_measured_populations() -> None:
+    """20 must be far above the ≈1 a scene scores and below the 70.2 weakest survivor."""
+    from wattmosaic_engine.ingestion.correlation import MIN_SPECIFICITY_Z
+
+    assert 1.0 < MIN_SPECIFICITY_Z < WEAKEST_ACCEPTED_Z
+    assert pytest.approx(20.0) == MIN_SPECIFICITY_Z
+
+
+def test_a_single_row_house_has_infinite_specificity_rather_than_a_crash() -> None:
+    """With no other circuit there is nothing to be confused with.
+
+    Dividing by zero here would either raise ``ZeroDivisionError`` or report
+    ``inf``; neither is a measurement.  The row's own noise is the denominator,
+    which is the honest meaning of "how far above the floor did this move".
+    """
+    observations = _measured_cycles("light.solo", on_w=40.0, off_w=40.0, cycles=4)
+
+    report = _correlate(observations, row_noise_w={"ct1": 0.1})
+
+    assert len(report.candidates) == 1
+    assert report.candidates[0].specificity_z == pytest.approx(40.0 / 0.1)
+
+
+def test_a_clean_fixture_still_passes_with_the_new_defaults() -> None:
+    """Backwards compatibility: the shipped happy path is unchanged by the new gates.
+
+    Both thresholds are new, so the case the engine already got right is the one
+    most at risk of being broken by them.
+    """
+    observations = []
+    for index in range(3):
+        observations += _cycle("light.bar", watts=BAR_POTS_W, minute=10 * index)
+
+    report = _correlate(observations)
+
+    assert len(report.candidates) == 1
+    candidate = report.candidates[0]
+    assert candidate.ct_id == "ct1"
+    assert candidate.symmetry == pytest.approx(1.0)
+    assert candidate.specificity_z >= 20.0
+
+
+def test_both_new_gates_can_be_disabled_by_the_caller() -> None:
+    """Passing 0.0 disables a gate.
+
+    Not a production setting -- reporting a candidate whose physics failed is
+    wrong -- but it is the only way to tell "withheld for symmetry" apart from
+    "withheld for specificity" when diagnosing a real installation, so the
+    relaxation has to actually work.
+    """
+    asymmetric = _measured_cycles("light.lopsided", on_w=24.0, off_w=50.6, cycles=4)
+
+    assert _correlate(asymmetric).candidates == ()
+    relaxed = _correlate(
+        asymmetric, min_on_off_symmetry=0.0, min_specificity_z=0.0
+    )
+    assert len(relaxed.candidates) == 1
+    assert relaxed.candidates[0].symmetry < 0.5
+
+
+def test_a_candidate_built_by_hand_keeps_the_new_fields_defaulted() -> None:
+    """Existing constructors and tests must keep working.
+
+    ``symmetry`` and ``specificity_z`` default to 0.0, which reads as "not
+    measured" -- a hand-built candidate never claims a measurement it did not
+    make.
+    """
+    candidate = CtCandidate(
+        entity_id="light.ghost",
+        ct_id="ct1",
+        corroborations=3,
+        agreement=1.0,
+        typical_on_w=10.0,
+        typical_off_w=10.0,
+    )
+
+    assert candidate.symmetry == 0.0
+    assert candidate.specificity_z == 0.0
+    assert candidate.typical_w == pytest.approx(10.0)
