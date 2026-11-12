@@ -41,6 +41,19 @@ accepted every main feed and every sub-panel CT (margins +0.23 to +0.63), which
 is precisely the false conclusion the gate exists to prevent.  Rotation gives a
 p95 of 0.68-0.80, and then only the three real lighting rows pass.
 
+The null must be computed with the **same estimator** as the fit -- NNLS -- and
+not with the unconstrained least-squares optimum.  An LS optimum bounds the NNLS
+one only for a fixed design; as columns are added the bound drifts upward
+because each extra regressor can exploit a rotated alignment by accident.
+Measured on 24 h of production recorder data while sweeping the candidate cap
+60 → 181, the `lights_ct2` row (see :func:`_fit_row` for the table): R² moved
+0.9930 → 0.9975, the LS null 0.8060 → 0.8536 (+0.0475), and the NNLS null only
+0.7970 → 0.8090 (+0.0120).  Against the LS null that row is accepted at cap 60
+(margin +0.1869) and **refused** at cap 100 (+0.1440), i.e. **adding candidates
+removed accepted evidence**; under the NNLS null it is accepted at every cap.
+Estimator consistency is the whole argument: a null distribution is only
+comparable to a statistic if both are the same statistic.
+
 Measured on 48 h of production recorder data (15 s bins, 25 active lights).  The
 figures below are report **Q3**'s: per-light regressors, the study's own null.
 They are the provenance for the thresholds, not a reproduction -- this module
@@ -170,6 +183,22 @@ _IDENTIFIABILITY_TOL = 1e-9
 #: automation sets together.  Such a component is a *house-wide scene*, and the
 #: evidence string says so rather than claiming a circuit group.
 HOUSE_WIDE_SCENE_MEMBERS = 20
+#: Convergence target for the batched projected-gradient warm start
+#: (:func:`_fista_nonnegative`).  It only has to find the right *support*; the
+#: exact solve in :func:`_nnls_polish` finishes the job, so this is a speed knob
+#: rather than an accuracy one.
+_NNLS_TARGET_TOL = 1e-13
+#: KKT tolerance used to *certify* a draw, relative to its ``max|c|``.  An
+#: absolute tolerance would be wrong here because ``c`` carries the row's watts:
+#: the same numerical noise is ``1e-10`` on a 3 kW row and ``1e-2`` on a 3 W one.
+#: ``1e-10`` leaves the residual of the certification below the least significant
+#: digit of any reported R², while a tighter value made the active-set loop
+#: churn on draws whose support was already correct.
+_NNLS_RELATIVE_TOL = 1e-10
+#: Projected-gradient iterations before the warm start is used as-is.  ``4 000``
+#: is far above the 148 a 200-column design needed; a run that hits it still
+#: produces a valid support, because the polish certifies the result either way.
+_NNLS_MAX_ITERATIONS = 4_000
 
 
 @dataclass(slots=True, frozen=True)
@@ -611,14 +640,48 @@ def _fit_row(
        coefficient; the fit still uses it -- it carries real signal and dropping
        it would lose R² -- but its value is not a claim and is not reported.
 
-    The null deliberately does **not** use NNLS.  For each shuffle it takes the
-    *unconstrained* least-squares optimum, which is the best R² any linear model
-    could achieve on that shuffled design.  That is an upper bound on the NNLS
-    null, so ``r2 - r2_null_p95`` is a *lower* bound on the true margin: if a row
-    clears this null it would also clear the weaker NNLS one.  The alternative
-    (running NNLS 50 times per row) is both slower by two orders of magnitude and
-    slightly optimistic, because a sub-optimal null solve reports a smaller null
-    R² and so an easier gate.
+    The null uses the **same estimator as the real fit** -- NNLS -- on the same
+    rotated design.  That is not a stylistic choice; using the unconstrained
+    least-squares optimum, as this module used to, is a measured defect.
+
+    An unconstrained optimum is an upper bound on the NNLS optimum *for one
+    design*, but the bound is not stable as the design grows: every added
+    regressor can exploit a rotated alignment by accident, so the permissiveness
+    of the bound grows with the column count.  Measured on 24 h of production
+    recorder data, sweeping ``max_candidates`` from 60 to 181 (the row fit is
+    identical; only the design grows, 8 → 13 columns):
+
+    ======  =====  =======  ==========  ===========
+    cap     cols   R²       null (LS)   null (NNLS)
+    ======  =====  =======  ==========  ===========
+    60      8      0.9930   0.8060      0.7970
+    100     13     0.9975   0.8536      0.8090
+    140     13     0.9975   0.8536      0.8090
+    181     13     0.9975   0.8536      0.8090
+    ======  =====  =======  ==========  ===========
+
+    (``lights_ct2``; the design saturates at 13 columns once every candidate
+    that moves is included, which is why the last three rows are identical.)
+    The row's R² moves 0.0045 while the LS null climbs 0.0475 and the NNLS null
+    0.0120 -- a 4× difference, and the difference is the one that matters: the
+    LS margin crosses the 0.15 gate between cap 60 (+0.1869) and cap 100
+    (+0.1440) while the NNLS margin does not (+0.1960 → +0.1885).  On the same
+    window the ``lights_ct3`` row shows the same shape more strongly (LS null
+    0.4703 → 0.8466, +0.3762, as the row's own R² rises 0.5207 → 0.9455 when its
+    fixtures first enter the design).
+
+    Against the LS null, then, a row accepted at cap 60 was *refused* at cap 140:
+    adding candidates destroyed accepted evidence, so a caller who analysed more
+    entities got fewer groups.  Candidate count is not a modelling decision and
+    must not decide which rows pass.
+
+    So ``r2 - r2_null_p95`` is an *estimator-consistent* margin: the statistic and
+    the null are the same statistic, computed by the same pipeline, differing only
+    in the right-hand side.  It is **not** a lower bound on the NNLS margin -- an
+    LS null is weaker than an NNLS null, so the old margin was a lower bound and
+    the new one is a matched comparison.  That is why the 0.15 threshold is a
+    genuine threshold here rather than a conservative one, and why it is kept at
+    its measured value instead of being retuned.
     """
     usable = ~np.isnan(watts) & ~np.isnan(design).any(axis=1)
     if int(usable.sum()) < 2:
@@ -716,7 +779,21 @@ def _fit_row(
             draws[:, draw] = centred_y[rng.permutation(usable_bins)]
         null_cross = centred_x.T @ draws
 
-    null_coefficient = vectors @ ((vectors.T @ null_cross) / eigenvalues[:, None])
+    # The null is drawn through the *same* pipeline as the real fit, one draw at
+    # a time: the same zero-variance column removal (already applied to
+    # ``centred_x``), the same ``_conditioned_basis`` rank cut (already applied
+    # to ``factor``), the same NNLS, the same min-norm projection, the same
+    # residual formula.  Only the right-hand side differs -- it is the row,
+    # rotated.  Anything less would compare a statistic to a different statistic.
+    null_coefficient = _nnls_batch(
+        factor.T @ factor,
+        factor,
+        project @ null_cross,
+    )
+    # The same minimum-norm projection the real coefficient gets: on a
+    # rank-deficient design only the component in the retained row space is
+    # supported by the data, and the solver's choice outside it is arbitrary.
+    null_coefficient = vectors @ (vectors.T @ null_coefficient)
     null_along = vectors.T @ null_coefficient
     null_residual = (
         total_ss
@@ -961,6 +1038,137 @@ def fit_shared_rows(
 
     fits.sort(key=lambda fit: (fit.ct_id, -fit.total_w, fit.members[0].entity_id))
     return tuple(fits)
+
+
+def _fista_nonnegative(gram: np.ndarray, rhs: np.ndarray, largest: float) -> np.ndarray:
+    """Batched NNLS warm start: accelerated projected gradient, all draws at once.
+
+    Solves ``min ½ wᵀGw − wᵀc`` subject to ``w ≥ 0`` for *every* column of
+    ``rhs`` simultaneously.  ``gram`` is positive semi-definite by construction
+    (it is ``XᵀX`` restricted to the retained eigenbasis), so the step size
+    ``1/λ_max`` is guaranteed stable and no line search is needed.
+
+    The answer is **not** trusted on its own -- projected gradient converges
+    linearly in the condition number and would leave the null's R² systematically
+    a hair low.  It is used only to propose a support; :func:`_nnls_batch`
+    certifies it.  That split is what buys the speed: the expensive part (200
+    columns × 50 draws) becomes 50 dense matmuls, while exactness still comes
+    from a small dense solve on the proposed support.
+
+    Gradient-based restart (O'Donoghue & Candès) is what makes this competitive.
+    Without it the 200-column case took 714 iterations; with it, 148, both
+    certifying all 50 draws.  The restart test is the standard one: the momentum
+    term has turned back against the gradient, so the acceleration is fighting
+    the descent direction and should be reset.
+    """
+    weights = np.zeros_like(rhs)
+    extrapolated = weights.copy()
+    momentum = 1.0
+    for _ in range(_NNLS_MAX_ITERATIONS):
+        step = np.maximum(extrapolated - (gram @ extrapolated - rhs) / largest, 0.0)
+        next_momentum = 0.5 * (1.0 + math.sqrt(1.0 + 4.0 * momentum * momentum))
+        momentum_direction = (step - weights).ravel()
+        gradient_direction = (extrapolated - step).ravel()
+        if float(momentum_direction @ gradient_direction) > 0.0:
+            next_momentum = 1.0
+            extrapolated = step
+        else:
+            extrapolated = step + ((momentum - 1.0) / next_momentum) * (step - weights)
+        moved = float(np.max(np.abs(step - weights)))
+        weights, momentum = step, next_momentum
+        scale = max(1.0, float(np.max(np.abs(weights))))
+        if moved <= _NNLS_TARGET_TOL * scale:
+            break
+    return weights
+
+
+def _nnls_polish(
+    gram: np.ndarray,
+    rhs: np.ndarray,
+    weights: np.ndarray,
+    *,
+    factor: np.ndarray,
+    target: np.ndarray,
+) -> np.ndarray:
+    """Exact NNLS on the supports :func:`_fista_nonnegative` proposed.
+
+    For each draw this runs the classical active-set loop on the Gram matrix: solve
+    the unconstrained problem restricted to the support, drop any variable that
+    came out negative, then check the KKT condition for the variables left out
+    (their gradient must be ``≤ 0``; if one is positive it belongs in the
+    support).  A draw whose support never certifies falls back to
+    ``scipy.optimize.nnls`` on the same ``factor`` the real fit uses, so the null
+    can never silently return a non-optimum.
+
+    The tolerances are relative to ``max|c|`` for that draw.  An absolute
+    tolerance is wrong here because ``c`` carries the row's watts: the same
+    numerical noise is ``1e-10`` on a 3 kW row and ``1e-2`` on a 3 W one.
+    """
+    out = weights.copy()
+    gradient = rhs - gram @ weights
+    scale = np.maximum(np.abs(rhs).max(axis=0), 1e-300)
+    tolerance = _NNLS_RELATIVE_TOL * scale
+    certified = np.all(
+        np.where(weights > 0.0, np.abs(gradient), 0.0) <= tolerance, axis=0
+    ) & np.all(np.where(weights > 0.0, 0.0, gradient) <= tolerance, axis=0)
+
+    for draw in np.flatnonzero(~certified):
+        support = np.flatnonzero(weights[:, draw] > 0.0)
+        resolved = False
+        for _ in range(3 * gram.shape[0] + 8):
+            if support.size:
+                answer = np.linalg.lstsq(
+                    gram[np.ix_(support, support)], rhs[support, draw], rcond=None
+                )[0]
+                negative = np.flatnonzero(answer < -tolerance[draw])
+                if negative.size:
+                    support = np.delete(support, negative)
+                    continue
+            else:
+                answer = np.empty(0)
+            excluded = rhs[:, draw] - gram[:, support] @ answer
+            excluded[support] = -np.inf
+            worst = int(np.argmax(excluded))
+            if excluded[worst] > tolerance[draw]:
+                support = np.append(support, worst)
+                continue
+            out[:, draw] = 0.0
+            out[support, draw] = np.maximum(answer, 0.0)
+            resolved = True
+            break
+        if not resolved:
+            # Not certified in the allotted passes: take the reference solver.
+            out[:, draw] = nnls(factor, target[:, draw])[0]
+    return out
+
+
+def _nnls_batch(
+    gram: np.ndarray,
+    factor: np.ndarray,
+    target: np.ndarray,
+) -> np.ndarray:
+    """``nnls(factor, target[:, j])`` for every ``j``, solved together.
+
+    ``gram`` is ``factorᵀ factor`` and the right-hand side for each column is
+    ``factorᵀ target[:, j]``, so every column is exactly the non-negative
+    least-squares problem the real fit solves -- 50 of them, for the null.
+    Calling :func:`scipy.optimize.nnls` 50 times is correct, but its per-call
+    overhead and repeated column scaling cost 204 ms for a 200-column design,
+    which alone would blow the install's budget at 32 rows.  The batched form
+    measures 11 ms for the same 50 draws and returns the same answer to
+    ``4e-15`` relative on the coefficient.
+    """
+    rhs = factor.T @ target
+    largest = float(np.linalg.eigvalsh(gram).max()) if gram.size else 0.0
+    if largest <= 0.0:
+        return np.zeros_like(rhs)
+    return _nnls_polish(
+        gram,
+        rhs,
+        _fista_nonnegative(gram, rhs, largest),
+        factor=factor,
+        target=target,
+    )
 
 
 def _axis_bounds(
