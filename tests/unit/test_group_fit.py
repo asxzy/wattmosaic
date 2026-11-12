@@ -20,6 +20,14 @@ null.  This module fits group regressors with a rolling rotation, so on the same
 window it measures higher R² and narrower margins (+0.163 to +0.272) -- both
 tables reach the same accept/refuse verdict, which is why the thresholds are
 proven against both rather than against whichever is more flattering.
+
+The null is computed with NNLS -- the same estimator as the fit.  An
+unconstrained least-squares null is an upper bound for a *fixed* design but its
+permissiveness grows with the column count, so raising the candidate cap used to
+turn accepted rows into refused ones.
+``test_adding_irrelevant_candidates_never_refuses_an_accepted_row`` pins that
+down: the LS null on its fixture climbs 0.0209 → 0.2612 across 66 columns and
+the margin crosses the gate, while the NNLS null moves it only 0.2932 → 0.2490.
 """
 
 from __future__ import annotations
@@ -687,6 +695,282 @@ def test_the_candidate_list_decides_the_usable_window_and_so_the_answer() -> Non
 
 
 # --------------------------------------------------------------------------- #
+# Estimator consistency: the null must not drift as the design grows
+# --------------------------------------------------------------------------- #
+
+
+#: A slow square wave that no candidate column represents.  Duty cycle 0.975 and
+#: a period of ~14 h, so a rotation still overlaps it heavily -- this is the
+#: confound the rotated null exists to see, not to be defeated by.
+_CONFOUND_LO_BINS = 1_200
+_CONFOUND_HI_BINS = 2_400
+
+
+def _duty_light(seed: int, *, low: int = 30, high: int = 260, gap: int = 200) -> np.ndarray:
+    """A light with a long duty cycle and heavy autocorrelation.
+
+    This is the shape that makes the null matter: duty is spread across the whole
+    window, so a rotated copy still overlaps the row and the null is high rather
+    than near zero.  Independent short blinks would give a null of ~0.01 and could
+    not exhibit the drift this file is guarding against.
+    """
+    rng = np.random.default_rng(seed)
+    pattern = np.zeros(N_BINS, dtype=bool)
+    at = int(rng.integers(0, 20))
+    while at < N_BINS:
+        length = int(rng.integers(low, high))
+        pattern[at : at + length] = True
+        at += length + int(rng.integers(20, gap))
+    return pattern
+
+
+def _confound_envelope() -> np.ndarray:
+    """The unexplained duty component of the row, with no column in the design."""
+    return _duty_light(
+        9_999, low=_CONFOUND_LO_BINS, high=_CONFOUND_HI_BINS, gap=120
+    )
+
+
+def _drift_installation(
+    extra_columns: int,
+) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
+    """A row explained by two fixtures, plus ``extra_columns`` irrelevant ones.
+
+    The row is a 700 W always-similar envelope (not a candidate), two genuine
+    switching fixtures, and 0.4 W of jitter.  Appending the extra lights changes
+    neither the row nor the two real columns -- they share no switching instants
+    and are not members of the real groups -- so an honest gate must return the
+    same verdict at every column count.
+
+    ``extra_columns`` lights are drawn from the same long-duty family, which is
+    what production does: the candidate list is every entity in the install, not
+    a curated set.  A short-blink candidate cannot move the null, so the family
+    matters.
+    """
+    real = [_duty_light(1), _duty_light(2)]
+    row = np.full(N_BINS, BASELINE_W) + 700.0 * _confound_envelope()
+    for watts, pattern in zip((140.0, 98.0), real, strict=True):
+        row = row + watts * pattern
+    row = row + np.random.default_rng(11).normal(0.0, NOISE_W, N_BINS)
+
+    states = {
+        f"light.real{index}": _recorder_states(pattern)
+        for index, pattern in enumerate(real)
+    }
+    for index in range(extra_columns):
+        states[f"light.extra{index:03d}"] = _recorder_states(_duty_light(500 + index))
+    return {"ct1": _recorder_row(row)}, states
+
+
+def test_adding_irrelevant_candidates_never_refuses_an_accepted_row() -> None:
+    """**The production defect.** More candidates must not remove accepted evidence.
+
+    Candidate count is not a modelling decision.  A caller that raises
+    ``max_candidates`` is analysing more of the install; it is not changing the
+    row, the two real fixtures, or what either means.  So the verdict must be
+    non-decreasing in the column count.
+
+    Under the old unconstrained least-squares null this row is accepted at 2, 18
+    and 34 columns and **refused at 66**: the LS null climbs 0.0209 → 0.1071 →
+    0.1743 → 0.2612 while R² moves only 0.3050 → 0.4062, because each added
+    regressor can exploit a rotated alignment by accident and the *upper bound*
+    loosens as the design grows.  The margin therefore falls 0.2841 → 0.2279 →
+    0.1888 → 0.1450 and crosses the 0.15 gate.  That is the measured production
+    failure in miniature -- on the real install the `lights_ct2` row passed at cap
+    60 (LS null 0.8060) and was refused at cap 100 (0.8536) with its R² flat at
+    0.9930-0.9975.
+
+    With the estimator-consistent NNLS null the same row measures margin +0.2932
+    / +0.2666 / +0.2607 / +0.2490 across the same caps and is accepted at every
+    one.  The margin still narrows slightly -- adding a regressor can only help a
+    null, never a fit -- but it does not cross the gate.
+    """
+    verdicts = []
+    margins = []
+    accepted_ids = []
+    for extra in (0, 16, 32, 64):
+        rows, states = _drift_installation(extra)
+        fits = _fit(rows, states)
+        verdicts.append(bool(fits))
+        margins.append(fits[0].r2_margin if fits else None)
+        accepted_ids.append({fit.ct_id for fit in fits})
+
+    assert verdicts == [True, True, True, True], (
+        f"candidate count changed the verdict: {verdicts} (margins {margins})"
+    )
+    # The two real fixtures keep being reported; the extras are separate groups.
+    assert all(margin is not None and margin >= 0.15 for margin in margins)
+    # Monotone *and* identical: the same row ids are accepted at every column
+    # count.  A non-decreasing count alone would allow a swap, which would be
+    # just as surprising to a caller as a loss.
+    assert all(accepted == accepted_ids[0] for accepted in accepted_ids), accepted_ids
+    assert accepted_ids[0] == {"ct1"}
+    # The drift is bounded rather than merely lucky: the NNLS margin moves less
+    # than 0.05 across a 32-fold increase in candidate columns.  The LS null on
+    # the same design moves 0.240 R² (0.0209 -> 0.2612), which is what made the
+    # gate flip.
+    assert max(margins) - min(margins) < 0.05, margins
+
+
+def test_the_null_is_computed_with_the_fitted_estimator() -> None:
+    """``r2_null_p95`` must come from NNLS, not from unconstrained least squares.
+
+    The two estimators provably differ whenever a coefficient sits on the
+    non-negativity boundary -- which is the normal case here, because a null
+    regressor that does not align with the rotated row wants a negative
+    coefficient and NNLS reports 0 instead.  So the check is direct: recompute
+    both nulls from the same rotated draws and require the reported value to
+    match the NNLS one, not the LS one.
+
+    On this fixture the LS null is 0.0209 and the NNLS null 0.0117 at two
+    columns; they are not close.  The assertion is two-sided, so a future change
+    that quietly reverts to LS fails here even if every verdict still passes.
+    """
+    from scipy.optimize import nnls as scipy_nnls
+    from wattmosaic_engine.disaggregation import group_fit as module
+
+    rows, states = _drift_installation(0)
+    fits = _fit(rows, states)
+    assert fits, "the fixture must be fittable, or the null cannot be checked"
+    reported = fits[0].r2_null_p95
+
+    # Rebuild the exact pipeline _fit_row uses, then compute both nulls from the
+    # same rotation offsets.  Reproducing it here rather than importing a helper
+    # keeps the test honest about what the contract is: the null is the fit's own
+    # statistic, so its definition is the fit's definition.
+    _, design = _design_for_test(states, rows)
+    usable = ~np.isnan(design).any(axis=1)
+    x = design[usable]
+    x = x[:, np.ptp(x, axis=0) > 0]
+    y = np.array([float(row["s"]) for row in rows["ct1"]], dtype=float)[usable]
+    column_means = x.mean(axis=0)
+    centred_y = y - y.mean()
+    total_ss = float(centred_y @ centred_y)
+    centred_x, eigenvalues, vectors, _ = module._conditioned_basis(x - column_means)
+
+    root = np.sqrt(eigenvalues)
+    factor = (vectors * root).T
+    project = (vectors / root).T
+
+    usable_bins = centred_y.size
+    rng = np.random.default_rng(0)
+    shifts = rng.integers(
+        module.NULL_MIN_SHIFT_BINS, usable_bins - module.NULL_MIN_SHIFT_BINS, 50
+    )
+    draws = np.column_stack([np.roll(centred_y, -int(shift)) for shift in shifts])
+    null_cross = centred_x.T @ draws
+
+    # Unconstrained least squares: the estimator the module used to use.
+    ls_coefficient = vectors @ ((vectors.T @ null_cross) / eigenvalues[:, None])
+    ls_along = vectors.T @ ls_coefficient
+    ls_residual = (
+        total_ss
+        - 2.0 * np.einsum("ij,ij->j", ls_coefficient, null_cross)
+        + eigenvalues @ (ls_along * ls_along)
+    )
+    ls_null = float(np.percentile(1.0 - np.maximum(ls_residual, 0.0) / total_ss, 95))
+
+    # NNLS per draw, one scipy call at a time -- deliberately the slow, obviously
+    # correct reference rather than the module's batched solver.
+    target = project @ null_cross
+    nnls_coefficient = np.column_stack(
+        [scipy_nnls(factor, target[:, index])[0] for index in range(target.shape[1])]
+    )
+    nnls_coefficient = vectors @ (vectors.T @ nnls_coefficient)
+    nnls_along = vectors.T @ nnls_coefficient
+    nnls_residual = (
+        total_ss
+        - 2.0 * np.einsum("ij,ij->j", nnls_coefficient, null_cross)
+        + eigenvalues @ (nnls_along * nnls_along)
+    )
+    nnls_null = float(np.percentile(1.0 - np.maximum(nnls_residual, 0.0) / total_ss, 95))
+
+    # The estimators differ enough for this to be a real discriminator.
+    assert abs(ls_null - nnls_null) > 1e-3, (
+        f"LS null {ls_null:.6f} and NNLS null {nnls_null:.6f} are too close for "
+        "this fixture to distinguish the estimators"
+    )
+    assert reported == pytest.approx(nnls_null, abs=1e-9)
+    assert reported != pytest.approx(ls_null, abs=1e-3)
+
+
+def test_a_rotation_null_keeps_duty_cycle_and_destroys_alignment() -> None:
+    """Only the estimator changed; the null's *construction* is still a rotation.
+
+    A regression test for the fix itself: replacing least squares with NNLS must
+    not perturb the share of time the design is ON, nor reintroduce alignment
+    with the row.  A rotation preserves the ON-fraction of every column exactly
+    (it is a permutation of the bins), so the null's design has the same duty
+    cycle as the real one, while the real fit's R² must still be far above the
+    null's -- which is only possible if the rotation destroyed the alignment.
+    """
+    from wattmosaic_engine.disaggregation import group_fit as module
+
+    pattern = _duty_light(1)
+    real = _duty_light(2)
+    row = (
+        np.full(N_BINS, BASELINE_W)
+        + 140.0 * pattern
+        + 98.0 * real
+        + np.random.default_rng(11).normal(0.0, NOISE_W, N_BINS)
+    )
+    rows = {"ct1": _recorder_row(row)}
+    states = {
+        "light.real0": _recorder_states(pattern),
+        "light.real1": _recorder_states(real),
+    }
+
+    fits = _fit(rows, states)
+    assert fits
+
+    # Rotation preserves duty cycle exactly: rolling by any offset keeps the mean.
+    shifted = np.roll(pattern.astype(float), module.NULL_MIN_SHIFT_BINS)
+    assert float(shifted.mean()) == pytest.approx(float(pattern.astype(float).mean()))
+    # ... and destroys alignment: the rotated copy shares far less with itself than
+    # the unrotated copy does.  The correlation is the quantity that matters -- a
+    # light with a long duty cycle still overlaps its own rotation somewhat, which
+    # is *why* the null is high and therefore meaningful.
+    aligned = float(pattern.astype(float) @ pattern.astype(float))
+    rotated = float(shifted @ pattern.astype(float))
+    assert rotated < 0.75 * aligned, (rotated, aligned)
+
+    # The reported null is the rotated value and is well below the real fit.
+    assert 0.0 <= fits[0].r2_null_p95 < fits[0].r2
+    assert fits[0].r2_margin > 0.15
+
+
+def _design_for_test(
+    states: dict[str, list[dict]], rows: dict[str, list[dict]]
+) -> tuple[dict[str, np.ndarray], np.ndarray]:
+    """Build the group design exactly as ``fit_shared_rows`` does.
+
+    Only the states are needed for the columns, but the *window* is the union of
+    the states and the row readings, so the rows have to be passed too -- using
+    the states alone shifts the grid and misaligns the design against the row.
+    """
+    from wattmosaic_engine.disaggregation import group_fit as module
+
+    parsed = {entity_id: module._state_series(item) for entity_id, item in states.items()}
+    instants = {entity_id: module._instants(series) for entity_id, series in parsed.items()}
+    active = sorted(entity_id for entity_id, events in instants.items() if events.size)
+    groups = module._co_toggle_groups(
+        {entity_id: instants[entity_id] for entity_id in active}
+    )
+    bounds = module._axis_bounds(
+        [parsed[entity_id] for entity_id in active]
+        + [module._epoch_pairs(item) for item in rows.values()]
+    )
+    assert bounds is not None
+    t0, t1 = bounds
+    n_bins = int(np.floor((t1 - t0) / module.BIN_S)) + 1
+    series = {
+        entity_id: module._resample_state(parsed[entity_id], t0, n_bins)
+        for entity_id in active
+    }
+    return series, module._design_matrix(series, groups)
+
+
+# --------------------------------------------------------------------------- #
 # Determinism
 # --------------------------------------------------------------------------- #
 
@@ -785,10 +1069,14 @@ def test_a_full_installation_fits_inside_the_two_second_budget() -> None:
     """32 rows × 200 entities over 48 h must finish in ≤2 s.
 
     The cost is dominated by the 50-draw null per row, so the budget is a real
-    constraint on the design and not a formality: the naive form (NNLS on the
-    full ``m × n`` matrix per draw) measured 17 s before the solve was moved into
-    the Gram factor.  Timed rather than assumed, because a vectorisation that
-    does not vectorise is the easiest defect to ship unnoticed.
+    constraint on the design and not a formality.  Two naive forms were measured
+    and rejected: NNLS on the full ``m × n`` matrix per draw took 17 s, and even
+    the Gram-factor form of *50 separate* ``scipy.optimize.nnls`` calls costs
+    204 ms per 200-column row (6.5 s for 32 rows).  The batched solver that
+    replaced it solves all 50 draws together for 11 ms per row and returns the
+    same answer to ``4e-15`` relative.  Timed rather than assumed, because a
+    vectorisation that does not vectorise is the easiest defect to ship
+    unnoticed.
     """
     import time
 
