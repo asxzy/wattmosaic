@@ -41,8 +41,14 @@ from wattmosaic_engine.contracts import (
     ServiceCommand,
     Topology,
     TopologyStatus,
+    utcnow,
 )
 from wattmosaic_engine.disaggregation.auto_placement import auto_device_id
+from wattmosaic_engine.ingestion.ha_source import (
+    HISTORY_BOUNDARY_NUDGE,
+    history_window_slices,
+    merge_history_slices,
+)
 from wattmosaic_engine.main import EngineCore
 from wattmosaic_engine.storage.database import Database
 
@@ -139,16 +145,59 @@ def _history(
 
 
 class _FakeSource:
-    """Stands in for the HA WebSocket source; serves history only."""
+    """Stands in for the HA WebSocket source; serves states, registries, history.
+
+    ``history`` mirrors ``HASource.history`` including its time slicing (it uses
+    the production ``history_window_slices`` / ``merge_history_slices`` helpers),
+    so a discovery test sees the same number of recorder queries and the same
+    seam behaviour as production.  A fake that returned the whole window in one
+    payload would hide the very defect this mirrors.
+    """
 
     connected = True
 
     def __init__(
-        self, payload: dict[str, list[dict]], *, leaky: bool = False
+        self,
+        payload: dict[str, list[dict]],
+        *,
+        leaky: bool = False,
+        states: list[dict[str, Any]] | None = None,
+        registries: dict[str, Any] | None = None,
+        fail_history: bool = False,
+        fail_slice_at: int | None = None,
     ) -> None:
         self.payload = payload
         self.leaky = leaky
+        self.fail_history = fail_history
+        #: 1-based index of the slice that fails (e.g. 2 = the middle of three).
+        self.fail_slice_at = fail_slice_at
+        #: Set to make ``history`` fail the way a timeout or a dropped socket does.
+        #: ``history`` returns ``{}`` for a failure by design, so the only way a
+        #: caller can tell "the recorder is empty" from "the query did not finish"
+        #: is this attribute -- mirroring ``HASource.last_history_error``.
+        self.last_history_error: str | None = None
+        #: One entry per ``history()`` call, as discovery makes it.
         self.calls: list[dict[str, Any]] = []
+        #: One entry per recorder query actually issued (i.e. per time slice).
+        self.slice_calls: list[dict[str, Any]] = []
+        # Candidate population now comes from the *state snapshot* (contract §2),
+        # not from the topology.  Default to the two fixtures the topology used
+        # to declare so the historical assertions still describe the same run.
+        self._states = (
+            states
+            if states is not None
+            else [
+                {"entity_id": "light.first", "state": "off", "attributes": {}},
+                {"entity_id": "light.second", "state": "off", "attributes": {}},
+            ]
+        )
+        self._registries = registries or {"entities": [], "devices": []}
+
+    async def state_snapshot(self) -> list[dict[str, Any]]:
+        return list(self._states)
+
+    async def registries(self) -> dict[str, Any]:
+        return dict(self._registries)
 
     async def history(
         self,
@@ -157,20 +206,77 @@ class _FakeSource:
         start: datetime,
         end: datetime | None = None,
         include_attributes: bool = False,
+        timeout_s: float | None = None,
     ) -> dict[str, list[dict]]:
+        end = end or utcnow()
+        slices = history_window_slices(start, end)
         self.calls.append(
             {
                 "entity_ids": list(entity_ids),
                 "include_attributes": include_attributes,
+                "timeout_s": timeout_s,
+                "window_slices": len(slices),
             }
         )
-        if self.leaky:
-            # A source that ignores the request and returns everything it has.
-            # ``discover_placements`` must still reason only about the entities
-            # the topology declared.
-            return dict(self.payload)
-        wanted = set(entity_ids)
-        return {key: rows for key, rows in self.payload.items() if key in wanted}
+        if self.fail_history:
+            self.last_history_error = "TimeoutError: history query exceeded 30.0s"
+            return {}
+        self.last_history_error = None
+        parts: list[dict[str, list[dict]]] = []
+        for index, (slice_start, slice_end) in enumerate(slices, start=1):
+            # Half-open slice bounds, exactly like HASource: the recorder's own
+            # SQL is strict on both sides, hence the one-microsecond nudge.
+            query_start = (
+                slice_start if index == 1 else slice_start - HISTORY_BOUNDARY_NUDGE
+            )
+            self.slice_calls.append(
+                {
+                    "start": query_start,
+                    "end": slice_end,
+                    "include_attributes": include_attributes,
+                }
+            )
+            if self.fail_slice_at == index:
+                self.last_history_error = (
+                    f"slice {index} of {len(slices)} "
+                    f"[{slice_start.isoformat()}, {slice_end.isoformat()}) "
+                    "failed: TimeoutError: recorder query exceeded its slice budget"
+                )
+                return {}
+            if self.leaky:
+                # A source that ignores the request and returns everything it has.
+                # ``discover_placements`` must still reason only about the entities
+                # the state snapshot offered as candidates.
+                parts.append(dict(self.payload))
+                continue
+            wanted = set(entity_ids)
+            part: dict[str, list[dict]] = {}
+            for key, rows in self.payload.items():
+                if key not in wanted:
+                    continue
+                kept = [
+                    row
+                    for row in rows
+                    if query_start.timestamp() < float(row["lu"]) < slice_end.timestamp()
+                ]
+                if index == 1:
+                    # Only the first slice asks for the start-time state; later
+                    # slices would replay a stale value behind the previous
+                    # slice's rows and invent a transition at the seam.
+                    prior = [
+                        row for row in rows if float(row["lu"]) <= query_start.timestamp()
+                    ]
+                    if prior and kept:
+                        kept = [
+                            {"s": prior[-1]["s"], "lu": query_start.timestamp()},
+                            *kept,
+                        ]
+                if kept:
+                    part[key] = kept
+            parts.append(part)
+        if len(parts) == 1:
+            return parts[0]
+        return merge_history_slices(parts)  # type: ignore[return-value]
 
 
 # --------------------------------------------------------------------------- #
@@ -179,6 +285,13 @@ class _FakeSource:
 
 
 def _topology() -> Topology:
+    """A confirmed topology with a main feed and one branch lighting circuit.
+
+    The devices deliberately declare **no** state entities: contract §2 makes a
+    declared entity ineligible for auto placement, and these tests are about the
+    fixtures the *state snapshot* offers as candidates, not about re-placing an
+    entity a person already linked.
+    """
     return Topology(
         status=TopologyStatus.CONFIRMED,
         version=1,
@@ -196,20 +309,7 @@ def _topology() -> Topology:
                 phase=Phase.L1,
             ),
         ],
-        devices=[
-            DeviceTopology(
-                device_id="dev_first",
-                name="first",
-                phase=Phase.L1,
-                metadata={"state_entity_ids": ["light.first"]},
-            ),
-            DeviceTopology(
-                device_id="dev_second",
-                name="second",
-                phase=Phase.L1,
-                metadata={"state_entity_ids": ["light.second"]},
-            ),
-        ],
+        devices=[],  # type: ignore[arg-type]
     )
 
 
@@ -220,6 +320,9 @@ def _core(
     auto_placement: bool = False,
     topology: Topology | None = None,
     leaky: bool = False,
+    states: list[dict[str, Any]] | None = None,
+    fail_history: bool = False,
+    fail_slice_at: int | None = None,
 ) -> tuple[EngineCore, Database, _FakeSource]:
     db = Database(tmp_path / "wm.db")
     config = EngineConfig(
@@ -229,7 +332,11 @@ def _core(
     )
     core = EngineCore(config, db)
     source = _FakeSource(
-        payload if payload is not None else _history(_start()), leaky=leaky
+        payload if payload is not None else _history(_start()),
+        leaky=leaky,
+        states=states,
+        fail_history=fail_history,
+        fail_slice_at=fail_slice_at,
     )
     core.hasource = source  # type: ignore[assignment]
     stored = topology if topology is not None else _topology()
@@ -265,17 +372,26 @@ def test_analysis_alone_writes_nothing(tmp_path: Path) -> None:
         "light.first",
         "light.second",
     }
-    assert "topology_version" not in result
+    # The frozen §3.3 shape always reports the version it analysed against; what
+    # must *not* change is that nothing was written.
+    assert result["topology_version"] == 1
+    assert all(item["applied"] is False for item in result["accepted"])
 
 
-def test_apply_none_follows_the_stored_option(tmp_path: Path) -> None:
-    """``apply=None`` means "do what the user configured", not "do nothing"."""
+def test_apply_none_is_read_only_even_when_the_opt_in_is_on(tmp_path: Path) -> None:
+    """``apply`` defaults to false: only an explicit ``True`` may write.
+
+    The stored opt-in is a *permission*, not an instruction (contract §3.1).  A
+    caller that omits ``apply`` asked for an analysis, and an analysis writes
+    nothing -- otherwise a status poll would silently create devices.
+    """
     core, db, _ = _core(tmp_path, auto_placement=True)
 
     result = asyncio.run(core.discover_placements(lookback_hours=24, apply=None))
 
-    assert result["applied"] is True
-    assert db.load_device_configurations().devices
+    assert result["applied"] is False
+    assert db.load_device_configurations().devices == []
+    assert "apply" in result["detail"].lower()
 
 
 def test_a_disabled_opt_in_is_reported_rather_than_silent(tmp_path: Path) -> None:
@@ -291,8 +407,8 @@ def test_a_disabled_opt_in_is_reported_rather_than_silent(tmp_path: Path) -> Non
 
 
 def test_an_explicit_apply_writes_the_devices(tmp_path: Path) -> None:
-    """The user's consent on the call itself is enough, without a config change."""
-    core, db, _ = _core(tmp_path, auto_placement=False)
+    """Writing needs the request's consent *and* the stored opt-in (contract §3.1)."""
+    core, db, _ = _core(tmp_path, auto_placement=True)
 
     result = asyncio.run(core.discover_placements(lookback_hours=24, apply=True))
 
@@ -465,16 +581,160 @@ def test_no_history_is_reported_not_treated_as_a_clean_result(tmp_path: Path) ->
     assert result["skipped"].get("reason") == "no recorded history"
 
 
-def test_no_declared_state_entities_short_circuits_with_a_reason(tmp_path: Path) -> None:
-    topology = _topology().model_copy(update={"devices": []})
-    core, _, _ = _core(tmp_path, topology=topology)
+def test_a_failed_history_query_is_not_reported_as_an_empty_recorder(
+    tmp_path: Path,
+) -> None:
+    """A timeout is a fact about the query, not about the recorder.
+
+    ``HASource.history`` returns ``{}`` for *any* failure -- by design, because a
+    caller must never read failure as "no change".  The consequence was that a
+    timeout and a genuinely empty recorder were indistinguishable, and the engine
+    reported "no recorded history" for a query that had simply not finished.  That
+    is not hypothetical: 7 days of history across 485 entities takes longer than
+    the 30 s default on the reference install, so asking for a week produced a
+    confident, wrong statement that the recorder held nothing.
+
+    The distinction is a separate reason *and* the underlying cause, so a user can
+    tell "your recorder is empty" from "this window is too big to answer in time".
+    """
+    core, _, source = _core(tmp_path, fail_history=True)
 
     result = asyncio.run(core.discover_placements(lookback_hours=24, apply=None))
 
     assert result["accepted"] == []
-    assert result["skipped"][
-        "reason"
-    ] == "no branch CT rows or no declared state entities"
+    assert result["skipped"].get("reason") == "history query did not complete"
+    assert result["skipped"].get("reason") != "no recorded history"
+    assert "TimeoutError" in (result["skipped"].get("detail") or "")
+
+
+def test_the_history_timeout_grows_with_the_requested_window(tmp_path: Path) -> None:
+    """A week of history must be given more time than a day.
+
+    The query cost grows with both the window and the entity count, so a fixed
+    timeout cannot serve both: one tight enough to notice a dead socket on a 24 h
+    request is far too tight for 7 days (measured 7 s at 24 h against 17 s at
+    72 h on the reference install, with the 7-day whole-house request exceeding
+    30 s).  The budget is therefore a function of ``lookback_hours``, and this pins
+    that it actually reaches the source.
+    """
+    core, _, source = _core(tmp_path)
+
+    asyncio.run(core.discover_placements(lookback_hours=24, apply=None))
+    short = source.calls[-1]["timeout_s"]
+    asyncio.run(core.discover_placements(lookback_hours=168, apply=None))
+    long = source.calls[-1]["timeout_s"]
+
+    assert short is not None and long is not None
+    assert long > short, "a 7-day query must be given a larger budget than a 24 h one"
+    # The base keeps a short window from waiting as long as a week: 24 h asks for
+    # far less than the linear term for 168 h alone would suggest.
+    assert short < long / 3, "the budget must be dominated by the window, not a constant"
+
+
+def test_a_failed_slice_of_a_long_window_is_never_reported_as_a_smaller_answer(
+    tmp_path: Path,
+) -> None:
+    """Slice 2 of 6 failing must not silently truncate a week to a day.
+
+    ``HASource.history`` returns ``{}`` when *any* slice fails, precisely so this
+    layer cannot reason about a period it believes is complete.  The failure has
+    to reach the user as "history query did not complete" with the failing slice
+    named -- never as a successful, shorter history.  That is the whole point of
+    the previous fix: a wrong "no recorded history" is worse than an honest error.
+    """
+    core, _, source = _core(tmp_path, fail_slice_at=2)
+
+    result = asyncio.run(core.discover_placements(lookback_hours=72, apply=None))
+
+    assert result["accepted"] == []
+    assert result["skipped"].get("reason") == "history query did not complete"
+    detail = result["skipped"].get("detail") or ""
+    assert "slice 2 of 6" in detail, "the failed slice must be named, not just the error"
+    assert "TimeoutError" in detail
+    # The call stops at the failed slice; the first slice's rows are discarded.
+    assert len(source.slice_calls) == 2
+    assert result["stats"]["observations"] == 0
+
+
+def test_a_short_window_is_not_sliced_and_a_week_is(tmp_path: Path) -> None:
+    """The threshold is a cost decision as well as a safety one.
+
+    24 h measured 39.7 MB -- one safe frame, ~4 s.  Splitting it would double the
+    round trips for nothing.  168 h measured 282.5 MB and dropped the connection,
+    so it must be cut into bounded slices.
+    """
+    core, _, source = _core(tmp_path)
+
+    asyncio.run(core.discover_placements(lookback_hours=24, apply=None))
+    assert len(source.slice_calls) == 1, "a 24 h window must stay one request"
+    assert source.calls[-1]["window_slices"] == 1
+
+    source.slice_calls.clear()
+    asyncio.run(core.discover_placements(lookback_hours=168, apply=None))
+    assert len(source.slice_calls) > 1, "a 7-day window must be sliced"
+    assert source.calls[-1]["window_slices"] >= 14
+
+
+def test_a_ct_row_that_reported_unavailable_never_reaches_the_group_fit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real recorder row says ``unavailable`` when a bridge restarts.
+
+    On the reference install a Refoss CT published ``unavailable`` inside the
+    7-day window.  ``parse_history_payload`` drops it (a non-numeric state is not
+    a wattage), which is why correlation was unaffected, but the group fit's row
+    parser raises ``ValueError`` on it.  That only became reachable once 168 h
+    started returning at all -- the old code dropped the connection first -- so
+    discovery must not hand a wattage fit a row that has no wattage.
+
+    Asserted on the *input* the fit receives, not on a crash: a small fixture can
+    fail to reach the resampling step for unrelated reasons, and a test that only
+    passes because the fit bailed out early would prove nothing.
+    """
+    from wattmosaic_engine.disaggregation import group_fit
+
+    seen: list[list[dict]] = []
+    real_fit = group_fit.fit_shared_rows
+
+    def spy(**kwargs: Any):
+        seen.extend(kwargs["row_readings"].values())
+        return real_fit(**kwargs)
+
+    monkeypatch.setattr(group_fit, "fit_shared_rows", spy)
+
+    payload = _history(_start())
+    ct = payload["sensor.ct1_power"]
+    middle = len(ct) // 2
+    # A genuine outage row, not a fabricated value: the bridge said nothing.
+    ct.insert(middle, {"s": "unavailable", "lu": ct[middle]["lu"] - 15})
+    core, _, _ = _core(tmp_path, payload=payload)
+
+    result = asyncio.run(core.discover_placements(lookback_hours=24, apply=False))
+
+    assert seen, "the group fit was never called"
+    assert all(
+        str(row.get("s")).strip().lower() not in ("unavailable", "unknown")
+        for rows in seen
+        for row in rows
+    ), "a non-numeric CT row reached the wattage fit"
+    assert result.get("error") is None
+    assert result["skipped"].get("reason") is None
+
+
+def test_no_candidate_state_entities_short_circuits_with_a_reason(tmp_path: Path) -> None:
+    """An empty snapshot is "nothing to analyse", and must say so.
+
+    Candidate population comes from the state snapshot (contract §2), not from
+    the topology, so the absence of *devices* is no longer the trigger: the
+    trigger is that Home Assistant offered no entity whose domain could be a
+    fixture.
+    """
+    core, _, _ = _core(tmp_path, states=[])
+
+    result = asyncio.run(core.discover_placements(lookback_hours=24, apply=None))
+
+    assert result["accepted"] == []
+    assert result["skipped"]["reason"] == "no branch CT rows or no candidate state entities"
 
 
 # --------------------------------------------------------------------------- #
@@ -609,40 +869,27 @@ def test_a_main_row_is_never_correlated_even_when_it_tracks_a_switch(
     assert "light.first" in result["unresolved"]
 
 
-def test_an_undeclared_entity_is_never_placed(tmp_path: Path) -> None:
-    """The engine has no evidence an undeclared entity is a load at all.
+def test_an_entity_outside_the_state_snapshot_is_never_placed(tmp_path: Path) -> None:
+    """Evidence about an entity Home Assistant did not report is never collected.
 
-    ``light.rogue`` toggles in step with the moving row, so a correlation would
-    happily accept it.  It is not in the topology, which means WattMosaic was
-    never told it exists -- creating a device for it would be reading the
-    registry as evidence, and the whole point of the engine-side split is that
-    it does not.  The only declared entity never moves, so with the filter in
-    place there is nothing to place at all.
+    ``light.rogue`` toggles in step with the moving row in the *recorder* payload,
+    so a correlation would happily accept it.  It is absent from the state
+    snapshot, which is the population contract §2 defines -- so it was never a
+    candidate, and asking the recorder about it would be collecting evidence for
+    a device nobody offered.
     """
     payload = _history(_start())
     payload["light.rogue"] = [dict(row) for row in payload["light.first"]]
     payload["light.second"] = [
         {"s": "off", "lu": row["lu"]} for row in payload["sensor.ct1_power"]
     ]
-    topology = _topology().model_copy(
-        update={
-            "devices": [
-                DeviceTopology(
-                    device_id="dev_second",
-                    name="second",
-                    phase=Phase.L1,
-                    metadata={"state_entity_ids": ["light.second"]},
-                )
-            ]
-        }
-    )
-    core, _, source = _core(tmp_path, topology=topology, payload=payload)
+    core, _, source = _core(tmp_path, payload=payload)
 
     result = asyncio.run(core.discover_placements(lookback_hours=24, apply=False))
 
-    assert result["accepted"] == []
+    assert [item["entity_id"] for item in result["accepted"]] == ["light.first"]
     # It was not even requested: asking for it would be collecting evidence
-    # about an entity the topology never declared.
+    # about an entity the state snapshot never offered.
     requested = {entity for call in source.calls for entity in call["entity_ids"]}
     assert "light.rogue" not in requested
 

@@ -124,6 +124,15 @@ class EngineFacade(Protocol):
 
     def command(self, command: ServiceCommand) -> Any: ...
 
+    def discover_placements(
+        self,
+        *,
+        lookback_hours: float = 24.0,
+        apply: bool | None = None,
+        include_groups: bool = True,
+        max_candidates: int = 200,
+    ) -> Any: ...
+
     def export(self, device_id: str) -> Any: ...
 
     def metrics(self) -> Any: ...
@@ -199,6 +208,28 @@ class NullFacade:
 
     def command(self, command: ServiceCommand) -> Any:
         return self._unavailable()
+
+    def discover_placements(
+        self,
+        *,
+        lookback_hours: float = 24.0,
+        apply: bool | None = None,
+        include_groups: bool = True,
+        max_candidates: int = 200,
+    ) -> Any:
+        """No engine, so nothing was analysed and nothing may be applied.
+
+        Returning a shaped answer rather than raising keeps the transport usable
+        before startup finishes: a caller can render "not available" without
+        special-casing one endpoint.
+        """
+        return {
+            "ok": False,
+            "detail": "not available",
+            "accepted": [],
+            "refused": {},
+            "groups": [],
+        }
 
     def export(self, device_id: str) -> Any:
         return self._unavailable()

@@ -422,6 +422,62 @@ async def topology_tree(request: web.Request) -> web.Response:
     )
 
 
+async def discover_placements(request: web.Request) -> web.Response:
+    """Learn placements from recorded history; writes only when explicitly asked.
+
+    Every field is optional, so an empty body is a valid "show me what you would
+    place" request.  Validation here is transport-level only: the bounds match
+    ``topology_nesting``'s ``hours`` because both name a lookback over stored
+    history, and a non-finite or non-positive value cannot describe a window.
+
+    The planning step reads the recorder and the configuration store, so it runs
+    in a worker thread for the same reason ``topology_tree`` does -- it must not
+    stall ``/health`` or ingestion.  The frozen idiom (``to_thread`` +
+    ``maybe_await``) is required because a facade may be ``async`` and calling it
+    in a thread returns a coroutine that still needs awaiting.
+    """
+    body: Any = {}
+    if request.can_read_body:
+        body = await _read_json(request)
+        if not isinstance(body, dict):
+            raise InvalidRequest("request body must be a JSON object")
+
+    lookback_raw = body.get("lookback_hours", 24.0)
+    if isinstance(lookback_raw, bool) or not isinstance(lookback_raw, (int, float)):
+        raise InvalidRequest("lookback_hours must be a number")
+    lookback_hours = float(lookback_raw)
+    if not math.isfinite(lookback_hours) or lookback_hours <= 0 or lookback_hours > 2160:
+        raise InvalidRequest("lookback_hours must be greater than 0 and at most 2160")
+
+    apply_raw = body.get("apply")
+    if apply_raw is not None and not isinstance(apply_raw, bool):
+        raise InvalidRequest("apply must be a boolean")
+    include_groups = body.get("include_groups", True)
+    if not isinstance(include_groups, bool):
+        raise InvalidRequest("include_groups must be a boolean")
+    max_candidates_raw = body.get("max_candidates", 200)
+    if isinstance(max_candidates_raw, bool) or not isinstance(max_candidates_raw, int):
+        raise InvalidRequest("max_candidates must be an integer")
+    if max_candidates_raw < 1:
+        raise InvalidRequest("max_candidates must be at least 1")
+
+    facade = _facade(request)
+    method = getattr(facade, "discover_placements", None)
+    if method is None:
+        raise FacadeUnavailable("placement discovery is not supported by this backend")
+    return _ok(
+        await maybe_await(
+            await asyncio.to_thread(
+                method,
+                lookback_hours=lookback_hours,
+                apply=apply_raw,
+                include_groups=include_groups,
+                max_candidates=max_candidates_raw,
+            )
+        )
+    )
+
+
 async def quality(request: web.Request) -> web.Response:
     return _ok(await maybe_await(_facade(request).quality()))
 
@@ -533,6 +589,7 @@ def create_app(
     router.add_get(f"{base}/diagnostics", diagnostics)
     router.add_get(f"{base}/models/{{device_id}}", models)
     router.add_post(f"{base}/commands", commands)
+    router.add_post(f"{base}/discover/placements", discover_placements)
     router.add_get(f"{base}/export/{{device_id}}", export)
     router.add_get(f"{base}/metrics", metrics)
     return app

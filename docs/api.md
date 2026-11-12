@@ -462,7 +462,125 @@ Ordering is deterministic for a given topology and latest-results map: roots,
 circuits, devices and flat rows are sorted by stable keys, so two responses
 differ only in `generated_at` and can be diffed directly.
 
-### 3.8 `PUT /topology`
+### 3.8 `POST /discover/placements`
+
+Learns which fixtures sit on which shared CT row from recorded history, and
+reports what it could not prove. Analysis always writes nothing; a write
+requires `apply: true` **and** the engine's `auto_placement` option enabled.
+
+Every field is optional, so `{}` is a valid "show me what you would place"
+request:
+
+```json
+{"lookback_hours": 24, "apply": false, "include_groups": true, "max_candidates": 200}
+```
+
+- `apply` defaults to **false**.
+- `include_groups` defaults to **true**; it controls only the tier-B advisory
+  groups, which never become devices.
+- `lookback_hours` must be finite, greater than `0` and at most `2160`
+  (90 days); anything else is `400`.
+- `max_candidates` must be a positive integer. A run that had more candidates
+  than the limit analyses the first `max_candidates` (sorted by entity id) and
+  says so in `notes`; the omitted entities are not silently treated as analysed.
+
+Response (frozen shape; `accepted`, `refused`, `groups`, `withheld` and
+`skipped` are always present):
+
+```json
+{
+  "ok": true,
+  "applied": false,
+  "lookback_hours": 24,
+  "topology_version": 3,
+  "stats": {
+    "candidate_entities": 81, "refused_entities": 4,
+    "branch_rows": 32, "observations": 132,
+    "accepted": 8, "groups": 3, "withheld": 14
+  },
+  "accepted": [
+    {
+      "device_id": "dev_auto_kitchen_island_lights",
+      "entity_id": "light.kitchen_kitchen_island_lights",
+      "name": "Kitchen Island Lights",
+      "ct_id": "refoss_main_panel_lights_ct1",
+      "ct_label": "Lights CT1",
+      "panel_name": "Refoss - Main Panel",
+      "on_w": 74.2,
+      "off_w": 73.4,
+      "symmetry": 0.989,
+      "agreement": 0.912,
+      "corroborations": 11,
+      "specificity_z": 405.2,
+      "dimmable": false,
+      "evidence": ["Measured 74.2 W ...", "..."],
+      "applied": false
+    }
+  ],
+  "refused": {"light.x": "already configured by the user; left unchanged"},
+  "groups": [
+    {
+      "ct_id": "refoss_main_panel_lights_ct2",
+      "ct_label": "Lights CT2",
+      "panel_name": "Refoss - Main Panel",
+      "total_w": 363.8,
+      "r2": 0.7912,
+      "r2_null_p95": 0.1447,
+      "r2_margin": 0.647,
+      "individually_identifiable": false,
+      "members": [
+        {"entity_id": "light.basement_basement_bar_pot_lights",
+         "name": "Basement Bar Pot Lights", "estimated_w": null}
+      ],
+      "evidence": ["5 of 6 group members co-toggle within 5 s; ..."]
+    }
+  ],
+  "withheld": {"light.y": "co_toggles_with_another_fixture_on_lights_ct2"},
+  "skipped": {},
+  "notes": ["..."]
+}
+```
+
+- `accepted[].applied` reflects whether *that* device was actually written.
+  When the write is declined (opt-in disabled, or `apply: false`) the analysis is
+  still returned, with a `detail` explaining the refusal.
+- `groups` is always present, and empty when `include_groups` is false or group
+  fitting is unavailable. A group is **evidence only**: its members'
+  individual wattages are not identifiable, so no device is created from one.
+- `withheld` names candidates that were seen but not offered as a device.
+- `refused` names candidates declined by a rule, with the reason. A refusal is
+  never silent.
+- `stats.refused_entities` counts every state entity looked at and declined,
+  including domains that can never be a fixture (a whole-house snapshot has
+  hundreds of sensors that are not worth listing individually).
+
+Candidates come from Home Assistant state **domains** (`light`, `switch`, `fan`,
+`input_boolean`) and their evidentiary role — never from a friendly name, an HA
+area, a manufacturer or a registry device. An entity the user already declared,
+or WattMosaic's own output, is not a candidate.
+
+An entity whose registry `entity_category` is `config` or `diagnostic` is also
+not a candidate (`not_a_load_entity_category`). Those are settings and telemetry
+for a device, not loads it draws: a Sonos `crossfade` switch changes how the
+speaker mixes a source, and a Frigate `detect` switch arms a camera's motion
+detector. Neither adds watts to a circuit. The distinction is a declared
+registry field, not a name heuristic, and it matters to the *fit* as well as the
+placement: on the reference install these entities were 229 of 410 candidates and
+they all toggle together when their automation fires, so they formed one
+92-member "group" that inflated the row's shuffled null and hid real lighting
+circuits. Refusing them leaves 181 candidates — still including all 75 lights and
+all 63 Lutron switches — and the largest genuine co-toggle group is 4.
+
+An entity with **no** registry row is still a candidate: the domain check runs
+regardless, because the state alone is evidence that something is switching.
+
+- **200** — the analysis result (possibly with no placements). A missing topology
+  is reported in the body (`"ok": false`, `"detail": "no topology to place
+  devices on"`, and the same keys with empty/zero values), never as a `404`.
+- **400** — invalid `lookback_hours`/`apply`/`include_groups`/`max_candidates`.
+- **503** — no inference backend/facade is wired.
+
+### 3.9 `PUT /topology`
 
 Replaces the topology. The body is a complete `Topology` document; unknown
 fields are rejected.
@@ -497,7 +615,7 @@ curl -sS -X PUT http://127.0.0.1:8787/api/v1/topology \
 
 Returns the stored topology (with the database-assigned `version`).
 
-### 3.9 `POST /topology/confirm`
+### 3.10 `POST /topology/confirm`
 
 Promotes the current candidate topology to `confirmed`. No body required.
 
@@ -507,7 +625,7 @@ Promotes the current candidate topology to `confirmed`. No body required.
 
 `404` when no topology is configured.
 
-### 3.10 `GET /quality`
+### 3.11 `GET /quality`
 
 `DataQualityReport` for the latest evaluation:
 
@@ -556,7 +674,7 @@ Notes:
 - Repeated identical values are flagged `repeated: true` and are not treated as
   new measurements.
 
-### 3.11 `GET /diagnostics`
+### 3.12 `GET /diagnostics`
 
 Redacted support bundle: engine health, Home Assistant status, per-channel
 health, model state, database integrity, recent errors, configuration, and the
@@ -587,7 +705,7 @@ inference backend self-description.
 Every sensitive value (tokens, passwords, keys) is replaced by `"***"`
 recursively before the response is written.
 
-### 3.12 `GET /models/{device_id}`
+### 3.13 `GET /models/{device_id}`
 
 Model versions available for a device, with the currently active one.
 
@@ -613,7 +731,7 @@ Model versions available for a device, with the currently active one.
 - **404** — no model has been learned for the device yet (facade returns
   `None`/raises `NotFound`).
 
-### 3.13 `POST /commands`
+### 3.14 `POST /commands`
 
 Sends a `ServiceCommand`. The body is validated; unknown commands or fields are
 `400`, never `422`.
@@ -629,7 +747,11 @@ Sends a `ServiceCommand`. The body is validated; unknown commands or fields are
 Allowed values: `start_learning`, `pause_learning`, `resume_learning`,
 `accept_sample`, `reject_sample`, `rebuild_model`, `reset_device_model`,
 `freeze_model`, `unfreeze_model`, `rebuild_topology`, `run_diagnostics`,
-`export_device_data`.
+`export_device_data`, `discover_placements`.
+
+`discover_placements` also has a dedicated route (`POST /discover/placements`,
+§3.8); the command form accepts the same `lookback_hours`/`apply` parameters and
+is kept for clients that already speak `POST /commands`.
 
 Response is a `ServiceResult`:
 
@@ -644,7 +766,7 @@ reason — it is a valid request that the engine declined, not a malformed one:
 {"ok": false, "command": "rebuild_model", "detail": "rebuild_model requires the learning backend, which is not installed"}
 ```
 
-### 3.14 `GET /export/{device_id}`
+### 3.15 `GET /export/{device_id}`
 
 JSON export of everything the engine knows about a device: samples, inferred
 results, learning samples, model versions and metadata.
@@ -662,7 +784,7 @@ results, learning samples, model versions and metadata.
 
 `404` when the device is unknown to both the database and the topology.
 
-### 3.15 `GET /metrics`
+### 3.16 `GET /metrics`
 
 Prometheus exposition format (`text/plain`). Example:
 

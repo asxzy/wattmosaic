@@ -1,5 +1,156 @@
 # Release Notes
 
+## v0.2.1-dev.15 — 2026-11-12 (development channel)
+
+The Topology tab can now find fixtures that share a circuit. Before this release
+the engine could only attribute a device that had a CT of its own: 28 of them were
+found, and the dozens of lights behind the three lighting circuits were invisible.
+They are now placed where the measurement supports it, grouped where it does not,
+and listed with the reason in both cases. **Measured device watts are unchanged
+from v0.2.1-dev.14; this release adds evidence, it does not change attribution.**
+
+### The blocker was candidate starvation, not resolution
+
+The working theory was that a ~9 W LED was below the CT's resolution. That was
+wrong by four orders of magnitude. The lighting rows resolve 0.043 / 0.073 /
+0.099 W (1σ), so a 9 W step sits 91–209σ above the floor, and the engine recovers
+a 10.2 W fixture at 237σ. The `resolution_w: 12.0` reported for the install
+belongs to the three `main_load_manager_*` aggregates only; all 33 Refoss CTs are
+continuous floats.
+
+What actually blocked the feature was that only **one** of 28 devices declared any
+state entity, so the correlation had almost nothing to correlate. Candidate
+selection asked the topology which entities it already linked instead of asking
+Home Assistant which fixtures exist. It now enumerates `light`/`switch`/`fan`/
+`input_boolean` entities and keeps those whose state proves runtime, refusing mode
+entities with a reason (ADR-0012) and refusing entities Home Assistant marks
+`entity_category: config` or `diagnostic`, which are device settings and telemetry
+rather than loads. On the production install that is 178–181 candidates — all 75
+lights and all 63 Lutron devices — where there was 1. The range is live state
+drifting between runs, not a modelling choice.
+
+### Two tiers, because one of them would have had to lie
+
+**Measured (may become a device).** A fixture is placed only when its own
+transitions repeatedly moved one row, in the right direction, by enough, and no
+other row moved with it. Two gates were added after measuring 48 h of recorder
+data: on/off symmetry ≥ 0.70 and specificity ≥ 20× the next-best row. Every false
+positive measured below 0.5 symmetry and ≈ 1× specificity; every trusted pair was
+≥ 0.845 and 84–608×. A candidate also has to be *specific*, which is why a scene
+that switches ten lights at once places none of them.
+
+**Grouped (never becomes a device).** Where fixtures toggle together their
+individual wattages are not identifiable — one step pays for all of them. These
+are fitted as an aggregate energy balance and reported as advisory groups. A group
+whose members carry a coefficient the fit actually separated is marked
+`individually_identifiable: true`; the rest are `false`, and their per-member
+wattage stays `null` rather than being divided out of the total. Two numbers that
+are true beat six that are not. A group is never written, never counted as user
+knowledge, and never raises a confidence tier.
+
+Both are returned by one call:
+
+```
+POST /api/v1/discover/placements
+```
+
+It is read-only unless you pass `apply: true` *and* enabled auto placement, and it
+reports what it refused and why. The Topology tab gains a **Discover devices**
+button that shows the three sections — Placed, Groups, Withheld — with the
+measured evidence on each row.
+
+### What the production install actually yields
+
+Run against real recorder history, end-to-end through the engine:
+
+| window | placed | advisory groups | largest group |
+| --- | --- | --- | --- |
+| 24 h | 1 | 6 | 281.7 W |
+| 72 h | 2 | 20 | 363.6 W |
+| 168 h | 2 | 32 | 283.6 W |
+
+A longer window finds more, and never loses what a shorter one found: 72 h places
+the ensuite vanity (75.5 W) and Office Lights (73.1 W), and 168 h keeps both. Every
+reported wattage is bounded by the row's own observed maximum.
+
+The honest summary is that this install has *few* separately measurable fixtures,
+and the reason is now visible rather than silent: 56 of 81 lights never changed
+state in the window, 67% of the transitions that did occur were within 5 s of
+another light, and roughly six lights sit on conductors the monitored CTs do not
+see. Those limits are properties of the wiring and the schedule, not of the
+inference. A longer history helps, but it will not invent evidence that is not
+there.
+
+### Fixes
+
+- A fixture placed by tier A is no longer also reported as a group member. Real
+  data produced both a measured and a fitted wattage for one lamp.
+- `individually_identifiable` now reports what the fit actually identified instead
+  of always `false`. Measured at 72 h, 16 of 20 production groups are
+  single-fixture and 14 carry an identified coefficient.
+- A single-fixture group is withheld as `identified_by_aggregate_fit_on_<row>`
+  rather than claiming it co-toggles with another fixture.
+- Tier B can no longer emit a group for a `main` or `dedicated_device` row, which
+  would have attributed the whole installation, or a second device's circuit, to a
+  fixture.
+- The Topology tab now distinguishes *measured* from *inferred* devices, so an
+  unmeasured fixture no longer shows a bare `—` in the watts column or a green
+  "confirmed" pill beside a value that was not measured. Badge tooltips are
+  rendered instead of silently dropped, and the engine's `muted` tone is accepted.
+- Learning status now names the cause when it is blocked on an unconfirmed
+  topology, instead of only reporting the rejection counter.
+- The Discover card no longer blankets every group with "not individually
+  identifiable". Each row is badged from its own `individually_identifiable` —
+  `identified` where the fit separated a coefficient, `grouped` where it did not —
+  and the section banner only claims what the rows actually show. A single-member
+  identified group shows its measured wattage; no multi-member group ever shows a
+  derived per-member figure.
+
+### Four defects the first pass hid
+
+**A device setting was treated as a load.** `entity_category: config` and
+`diagnostic` entities were candidates, because they are still `switch`/`light`
+domains. On this install that was 229 of 410 candidates: 98 Sonos
+crossfade/loudness switches, 92 Frigate camera flags, Roborock child locks, IKEA
+buzzer toggles, Ubiquiti status LEDs. None of them draws wall power — a `detect`
+flag arms a camera. Worse, the 92 Frigate flags toggle together when one
+automation fires, so they merged into a single 92-member "group" that inflated the
+row's shuffled null and hid real lighting circuits. Refusing them is a declared
+registry rule, not a name heuristic, and it leaves 178–181 candidates: all 75
+lights, all 63 Lutron devices, and a largest genuine co-toggle group of 4.
+
+**Adding candidates removed accepted evidence.** The null R² was computed with
+unconstrained least squares while the fit used NNLS, and the upper bound drifted as
+the design grew: sweeping `max_candidates` 60 → 181 moved the null +0.0475 and
+turned an accepted lighting row into a refusal. More evidence producing less output
+is indefensible. The null now runs through the same NNLS pipeline as the fit
+(same rank cut, same min-norm projection, same residual formula), so it drifts
++0.0120 instead. The gate threshold is unchanged at 0.15 — the estimator was the
+bug. Fifty draws cost ~19 ms per row, keeping a 32-row install inside two seconds.
+
+**A week of history did not fit in a frame.** Placement discovery asks for
+`include_attributes`, which makes the response 4.5× larger: 39.7 MB at 24 h, 79.6 MB
+at 48 h, 282.5 MB at 168 h. The connection's frame cap is 64 MiB, so any window
+past ~40 h closed the socket. Chunking by entity count does not help — a handful of
+dense power sensors dominate the bytes. History is now sliced into 12 h windows
+(half-open, so a transition on a seam appears once) and merged; the largest observed
+request is 20.1 MB, with 3.2× headroom. The cap itself is unchanged: the fix is
+smaller requests, not a bigger limit.
+
+**A timeout was reported as an empty recorder.** `history()` returns `{}` for any
+failure, by design, so a query that had not finished was indistinguishable from a
+recorder holding nothing — and the engine said "no recorded history". Discovery now
+distinguishes the two ("history query did not complete", with the cause), gives the
+query a budget that scales with the window, and treats any failed slice as a failed
+fetch rather than returning the slices that succeeded. A partial window is not a
+smaller true answer.
+
+### Upgrading
+
+No database migration. Existing device configurations and topology revisions are
+read unchanged; new placements are additive and retractable. Nothing is written
+until you press apply.
+
 ## v0.2.1-dev.14 — 2026-11-11 (development channel)
 
 The Topology tab now draws the hierarchy the engine already knows, and it draws

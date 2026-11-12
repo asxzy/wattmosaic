@@ -32,6 +32,18 @@ candidate is only produced when *all* of the following hold:
    (a scene, a whole-house toggle, a row that follows occupancy) cannot single
    out a circuit.  When two or more rows respond equally, the evidence does not
    pick one and no candidate is emitted.
+6. **Both directions agree.**  A load that draws 74 W when it turns on and 22 W
+   when it turns off was measured against two different backgrounds; the OFF
+   edge simply happened to coincide with other loads dropping.  Requiring
+   ``min(on, off) / max(on, off)`` to clear
+   :data:`MIN_ON_OFF_SYMMETRY` rejects that mixture.
+7. **This row is the one that moved.**  Ten lights fired by one scene move
+   several circuits at the same instant, and each of them then "correlates" with
+   each light.  Dividing the winning row's step by the typical step on the
+   *other* rows at the same instant separates that case -- where every circuit
+   moves comparably and the ratio collapses to ≈1 -- from a fixture alone on its
+   circuit, which scores in the hundreds.  :data:`MIN_SPECIFICITY_Z` is the
+   measured midpoint of that gap.
 
 When any clause fails the answer is "not established", which is reported as
 ``unknown`` rather than as the nearest guess.
@@ -61,6 +73,57 @@ MIN_CORROBORATIONS = 3
 #: Fraction of *all* observed transitions of this entity that must agree with the
 #: winning row.  Below this the switch is inconsistent and no candidate is made.
 MIN_AGREEMENT = 0.8
+#: How closely the ON step and the OFF step of one fixture must agree, as
+#: ``min(on, off) / max(on, off)``.
+#:
+#: Measured by replaying **11 days of production recorder data** (409 candidate
+#: entities, 32 branch rows, 19 191 transitions) through this function with the
+#: gate disabled, so the population is every would-be candidate rather than the
+#: survivors: the 9 candidates the other gates accept and this one also accepts
+#: score **0.875 to 0.998** (vanity 0.948, upstairs pot 0.990, media pot 0.910),
+#: while the 6 this gate withholds score **0.174 to 0.670** (stairs 0.174,
+#: living room 0.324, HRV sockets 0.517/0.523, shower 0.588, office 0.670).
+#: A fixture whose ON and OFF steps disagree by more than 30 % is measuring two
+#: different events, not one load: typically the OFF edge coincides with other
+#: loads dropping.  0.70 sits inside that measured gap (0.670 < 0.70 < 0.875)
+#: and, being a *withholding* gate, errs toward silence.
+#:
+#: The cost of that conservatism is visible in the same replay: `office_main`
+#: is a genuine fixture whose OFF edges are contaminated, and at 0.670 it is
+#: withheld by a margin of 0.03.  That is the intended trade -- a wrong wattage
+#: is worse than no wattage -- but it is a real recall loss, not a clean cut,
+#: and the gate should not be described as if no true fixture ever falls below
+#: it.
+#:
+#: The feasibility study's plateau estimator (median of a 20-120 s window either
+#: side of the edge) reports higher values for the same pairs -- office 0.845,
+#: vanity 0.989 -- because it averages out the very drop-off this gate is meant
+#: to detect.  This module deliberately uses the immediate step, so its numbers
+#: run lower and its refusals are more conservative than the study's.
+MIN_ON_OFF_SYMMETRY = 0.70
+#: How many times larger the winning row's step must be than the typical step of
+#: every *other* row at the same transition, i.e. how specific the response is.
+#:
+#: Measured on the same 11-day replay: the candidates that pass every other gate
+#: score **70 to 987** (upstairs pot 70, toilet pot 81, upper-office pot 175,
+#: vanity 559, hallway pot 987) while a scene confound -- several rows moving
+#: together -- collapses toward 1, because the target is no larger than its
+#: neighbours.  20 is below the weakest measured survivor and roughly two orders
+#: of magnitude above 1, so it separates "this row was the one that moved" from
+#: "the whole scene moved" with headroom for a noisier house.
+#:
+#: This gate is *not* what withholds the scene lights: on real data they still
+#: score in the hundreds, because the scene's rows are summed by the same CT and
+#: the target step remains large.  They are caught by ambiguity and symmetry
+#: instead.  The gate earns its place on cases where a *different* circuit moves
+#: comparably at the same instant -- a shared neutral, or a second fixture on
+#: another row switched by the same scene button.
+MIN_SPECIFICITY_Z = 20.0
+#: Floor for the specificity denominator, in watts.  The recorder prints to
+#: 0.001 W, so anything below a microwatt is indistinguishable from "nothing
+#: else moved".  Using a floor keeps ``z`` finite instead of dividing by zero
+#: when a house has no other circuit with a reading at that instant.
+_MIN_SPECIFICITY_DENOM_W = 1e-6
 #: A row that responds to at least this share of an entity's transitions, when
 #: another row responds too, is not discriminating.  Both are withheld.
 AMBIGUITY_SHARE = 0.5
@@ -131,6 +194,15 @@ class CtCandidate:
     typical_on_w: float
     #: Median absolute step seen when it turned off.
     typical_off_w: float
+    #: ``min(on, off) / max(on, off)``: how closely the two directions agree.
+    #: ``1.0`` is a load that draws the same either way; near ``0`` one of the
+    #: two edges measured something else.  Defaults to ``0.0`` -- "not measured"
+    #: -- so a hand-built candidate never claims a symmetry it never measured.
+    symmetry: float = 0.0
+    #: How many times larger the winning row's step was than the typical step of
+    #: every other row at the same instant.  ``~1`` means several circuits moved
+    #: together (a scene); a large value means this row was the one that moved.
+    specificity_z: float = 0.0
     #: Why the candidate was accepted -- shown to the user, never inferred from.
     evidence: tuple[str, ...] = field(default_factory=tuple)
     #: Measured ``(level_fraction, watts)`` points, ascending, when the entity is
@@ -261,6 +333,66 @@ def _median(values: Sequence[float]) -> float:
     return (ordered[mid - 1] + ordered[mid]) / 2.0
 
 
+def _on_off_symmetry(typical_on_w: float, typical_off_w: float) -> float:
+    """How closely one fixture's ON and OFF steps agree, in ``[0, 1]``.
+
+    ``1.0`` means the row rose and fell by the same amount, which is what a real
+    load does.  A value near zero means the two edges measured different things
+    -- almost always that the OFF edge coincided with other loads dropping, so
+    the number attributed to this fixture would be a mixture.
+
+    Zero or negative input yields ``0.0`` rather than a divide-by-zero or a
+    negative ratio: neither direction was measured, so nothing is claimed.  The
+    caller treats that as a failed gate, which is the conservative reading.
+    """
+    if typical_on_w <= 0.0 or typical_off_w <= 0.0:
+        return 0.0
+    smaller = min(typical_on_w, typical_off_w)
+    larger = max(typical_on_w, typical_off_w)
+    if larger <= 0.0:
+        return 0.0
+    return smaller / larger
+
+
+def _specificity_z(
+    target_steps: Sequence[float],
+    other_steps: Sequence[float],
+    *,
+    row_noise_w: float = 0.0,
+) -> float:
+    """How many times larger the winning row's step is than any other row's.
+
+    This is the guard against a response that is not *this* circuit: when several
+    rows move together, every one of them looks correlated with every fixture.
+    Dividing the target step by the typical step of the other rows collapses that
+    case toward 1 -- the target is no bigger than its neighbours -- while a
+    fixture genuinely alone on its circuit scores in the hundreds.
+
+    On production data a *scene* often still scores high, because the scene's
+    loads are summed by one CT and the target step stays large; those are
+    withheld by the ambiguity and symmetry gates instead.  What this gate catches
+    is the case those gates cannot see: a *different* circuit moving comparably
+    at the same instant (a shared neutral, or a second fixture on another row
+    switched by the same button), where the ratio really does fall to ≈1.
+
+    ``row_noise_w`` is the winning row's own quiet jitter and is used as the
+    denominator floor.  It matters when no other row has a reading at the
+    transition (a house with one CT, or channels that publish only on change):
+    dividing by zero would either raise or report infinity, and neither is a
+    measurement.  The tiny absolute floor after it does the same for a row whose
+    noise was never estimated.
+    """
+    if not target_steps:
+        return 0.0
+    target = _median(target_steps)
+    denominator = max(
+        _median(other_steps),
+        float(max(row_noise_w, 0.0)),
+        _MIN_SPECIFICITY_DENOM_W,
+    )
+    return target / denominator
+
+
 def _step(before: Mapping[str, float], after: Mapping[str, float], ct_id: str) -> float | None:
     """The change on one row, or ``None`` when either side is missing.
 
@@ -313,6 +445,8 @@ def correlate(
     min_agreement: float = MIN_AGREEMENT,
     min_response_w: float = MIN_RESPONSE_W,
     min_response_sigmas: float = MIN_RESPONSE_SIGMAS,
+    min_on_off_symmetry: float = MIN_ON_OFF_SYMMETRY,
+    min_specificity_z: float = MIN_SPECIFICITY_Z,
 ) -> CorrelationReport:
     """Return the CT rows the history places each switch on.
 
@@ -322,6 +456,13 @@ def correlate(
     supplied rather than derived from the observations because the observations
     are *selected* around transitions and therefore not a fair sample of the
     row's quiet behaviour.
+
+    ``min_on_off_symmetry`` and ``min_specificity_z`` are the two gates measured
+    from production history (see their module constants): the first requires the
+    ON and OFF steps of a fixture to agree, the second requires its row to have
+    moved far more than any other row at the same instant.  Defaults are the
+    measured values; passing ``0.0`` disables a gate, which is useful for
+    diagnosing *why* a candidate was withheld but is not a production setting.
     """
     domains = {str(d).lower() for d in candidate_domains}
     kept: list[EntityObservation] = []
@@ -378,13 +519,21 @@ def correlate(
         off_steps: dict[str, list[float]] = {}
         explained: dict[str, int] = {}
         agreed_rows: list[tuple[bool, set[str]]] = []
+        #: Absolute step of every measured row at each transition, agreeing or
+        #: not.  Kept so the specificity gate can compare the winning row against
+        #: what the *other* circuits did at the very same instants.  A row that
+        #: moved but did not pass the response threshold still counts as
+        #: movement: it is the confound the gate is looking for.
+        steps_at: list[dict[str, float]] = []
         for observation in independent:
             row_ids = set(observation.before_w) & set(observation.after_w)
             agreed: set[str] = set()
+            measured: dict[str, float] = {}
             for ct_id in row_ids:
                 delta = _step(observation.before_w, observation.after_w, ct_id)
                 if delta is None:
                     continue
+                measured[ct_id] = abs(delta)
                 threshold = max(
                     min_response_w, min_response_sigmas * noise.get(ct_id, 0.0)
                 )
@@ -397,6 +546,7 @@ def correlate(
                 target = on_steps if observation.was_on else off_steps
                 target.setdefault(ct_id, []).append(abs(delta))
             agreed_rows.append((observation.was_on, agreed))
+            steps_at.append(measured)
 
         if not explained:
             unresolved[entity_id] = "no_row_responded"
@@ -429,18 +579,57 @@ def correlate(
             unresolved[entity_id] = "not_discriminating"
             continue
 
+        typical_on_w = _median(on_steps.get(ct_id, []))
+        typical_off_w = _median(off_steps.get(ct_id, []))
+        # A fixture whose two directions disagree is measuring a confound, not a
+        # load: its OFF edge coincided with other loads dropping.  The gate needs
+        # *both* directions to have been observed, because an unmeasured
+        # direction is not a disagreement -- a 48 h window can legitimately hold
+        # only rising edges -- and this gate withholds on evidence, never on its
+        # absence.  ``symmetry`` stays 0.0 in that case, which the candidate
+        # reports as "not measured".
+        symmetric_directions = typical_on_w > 0.0 and typical_off_w > 0.0
+        symmetry = _on_off_symmetry(typical_on_w, typical_off_w)
+        if symmetric_directions and symmetry < min_on_off_symmetry:
+            unresolved[entity_id] = "asymmetric_response"
+            continue
+
+        # Specificity: at the transitions this row explained, how big was this
+        # row's step compared with what every *other* row did at the same
+        # instant?  A scene moves several rows by comparable amounts and scores
+        # near 1; a fixture alone on its circuit scores in the hundreds.
+        target_steps: list[float] = []
+        other_steps: list[float] = []
+        for index in range(len(independent)):
+            if ct_id not in agreed_rows[index][1]:
+                continue
+            measured = steps_at[index]
+            if ct_id in measured:
+                target_steps.append(measured[ct_id])
+            other_steps.extend(value for other, value in measured.items() if other != ct_id)
+        specificity_z = _specificity_z(
+            target_steps, other_steps, row_noise_w=noise.get(ct_id, 0.0)
+        )
+        if specificity_z < min_specificity_z:
+            unresolved[entity_id] = "not_specific"
+            continue
+
         candidates.append(
             CtCandidate(
                 entity_id=entity_id,
                 ct_id=ct_id,
                 corroborations=corroborations,
                 agreement=share,
-                typical_on_w=_median(on_steps.get(ct_id, [])),
-                typical_off_w=_median(off_steps.get(ct_id, [])),
+                typical_on_w=typical_on_w,
+                typical_off_w=typical_off_w,
+                symmetry=symmetry,
+                specificity_z=specificity_z,
                 evidence=(
                     f"{best} of {len(independent)} independent transitions agreed",
                     f"row moved in the expected direction {share:.0%} of the time",
                     f"no other row responded on {AMBIGUITY_SHARE:.0%} or more",
+                    f"on/off symmetry {symmetry:.2f}",
+                    f"row moved {specificity_z:.0f}x more than any other circuit",
                 ),
                 dimming_curve=_dimming_curve(independent, ct_id),
             )
@@ -791,8 +980,10 @@ __all__ = [
     "MAX_AGE_S",
     "MIN_AGREEMENT",
     "MIN_CORROBORATIONS",
+    "MIN_ON_OFF_SYMMETRY",
     "MIN_RESPONSE_SIGMAS",
     "MIN_RESPONSE_W",
+    "MIN_SPECIFICITY_Z",
     "correlate",
     "estimate_row_noise",
     "level_from_attributes",

@@ -276,8 +276,11 @@
    * Shared components
    * ---------------------------------------------------------------------- */
 
-  const badge = (text, tone = 'mute', { dot = false } = {}) =>
-    el('span', { class: 'badge', dataset: { tone } }, [
+  // ``title`` is forwarded verbatim: the engine puts the measurement evidence
+  // behind a pill and the reader deserves to see it on hover.  It is inserted
+  // through ``setAttribute`` by ``el``, so it can never become markup.
+  const badge = (text, tone = 'mute', { dot = false, title = null } = {}) =>
+    el('span', { class: 'badge', dataset: { tone }, title: title || null }, [
       dot ? el('span', { class: 'dot', 'aria-hidden': 'true' }) : null,
       text,
     ]);
@@ -448,6 +451,9 @@
     // minutes.  Caching it means revisiting the tab paints instantly instead
     // of paying the whole comparison again.
     nesting: { data: null, at: 0, inflight: false },
+    // Placement discovery is explicit: it only runs when the user asks, so its
+    // result is kept here and survives a repaint of the same tab.
+    discover: { data: null, running: false, error: null },
   };
 
   const NESTING_TTL_MS = 10 * 60 * 1000;
@@ -1477,6 +1483,15 @@
           'The electrical model the engine solves against: panels, the circuits they feed, and the devices attributed to each circuit.'),
       ]),
       el('div', { class: 'head-actions' }, [
+        // Discovery is an explicit request: it never runs on paint and never
+        // writes anything on the first call.
+        el('button', {
+          class: 'btn',
+          id: 'topology-discover-run',
+          type: 'button',
+          onclick: () => runDiscovery(),
+          disabled: state.discover.running ? true : null,
+        }, state.discover.running ? 'Discovering…' : 'Discover devices'),
         topology && topology.status !== 'confirmed'
           ? el('button', { class: 'btn btn-primary', type: 'button', onclick: confirmTopology }, 'Confirm topology')
           : null,
@@ -1505,8 +1520,9 @@
 
     // 2. Only the fast endpoints are awaited here.  /topology/nesting compares
     //    a 12-hour window and can take tens of seconds; putting it in this
-    //    Promise.all is what made the whole tab wait for it.
-    const [topology, treeResult] = await Promise.all([
+    //    Promise.all is what made the whole tab wait for it.  /status is cheap
+    //    and carries the learning state the banner needs, so it joins here.
+    const [topology, treeResult, status] = await Promise.all([
       get('/topology', signal).catch((err) => {
         if (err && err.status === 404) return null;
         throw err;
@@ -1515,6 +1531,7 @@
         (data) => ({ ok: true, data, err: null }),
         (err) => ({ ok: false, data: null, err })
       ),
+      get('/status', signal).catch(() => null),
     ]);
     if (signal.aborted) return;
 
@@ -1536,12 +1553,18 @@
       ? treeResult.data
       : null;
 
+    const learningBanner = topologyLearningBanner(status, topology);
+    if (learningBanner) root.append(learningBanner);
     root.append(topologySummary(topology, tree));
     if (!tree) root.append(topologyFallbackNotice(treeResult.err));
 
     // The hierarchy is the subject of this tab, so it gets the full width: a
     // tree squeezed into half a page forces every ct_id to wrap.
     root.append(topologyHierarchyCard(topology, tree));
+
+    // Placement discovery renders into its own slot; it is only populated when
+    // the user asks for it (or when a previous answer is cached in state).
+    root.append(topologyDiscoverSlot());
 
     // The candidates card is a real card from the start: either the cached
     // comparison or an explicit loading state.  It is replaced in place.
@@ -1631,15 +1654,160 @@
     String((node && (node.id || node.ct_id || node.device_id)) || (node && node.label) || 'node');
 
   const BADGE_TONES = new Set(['ok', 'warn', 'bad', 'info', 'mute', 'accent']);
-  const nodeBadges = (node) =>
+  // The engine emits ``muted``; the whitelist historically said ``mute``.  The
+  // two are the same tone, so accept both instead of silently demoting every
+  // ``muted`` pill to an unstyled fallback (contract §5.3).
+  const badgeTone = (raw) => {
+    const tone = String(raw || 'mute');
+    const normalised = tone === 'muted' ? 'mute' : tone;
+    // An unknown tone would render an unstyled badge: fall back to the neutral
+    // one rather than shipping a pill with no border or colour.
+    return BADGE_TONES.has(normalised) ? normalised : 'mute';
+  };
+
+  const badgeItems = (node) =>
     (Array.isArray(node.badges) ? node.badges : [])
-      .filter((item) => item && item.text !== undefined && item.text !== null)
-      .map((item) => {
-        const tone = String(item.tone || 'mute');
-        // An unknown tone would render an unstyled badge: fall back to the
-        // neutral one rather than shipping a pill with no border or colour.
-        return badge(String(item.text), BADGE_TONES.has(tone) ? tone : 'mute');
-      });
+      .filter((item) => item && item.text !== undefined && item.text !== null);
+
+  const badgeNode = (item) =>
+    badge(String(item.text), badgeTone(item.tone), {
+      title: item.title === undefined || item.title === null ? null : String(item.title),
+    });
+
+  const nodeBadges = (node) => badgeItems(node).map(badgeNode);
+
+  /* --- Measurement honesty (contract §5.2/§5.3) ------------------------- */
+
+  const MEASUREMENT_STATES = new Set(['measured', 'inferred', 'prior', 'none']);
+
+  //: The reason the engine gives for *not* measuring a fixture, in plain words.
+  const NOT_MEASURED_REASONS = {
+    below_ct_resolution: 'The step is below what this CT can resolve',
+    scene_group: 'It toggles with a scene group, so the step cannot be attributed',
+    no_transition: 'It never transitioned in the measurement window',
+  };
+
+  //: When the engine names a measurement state but no reason, the state itself
+  //: is still an honest explanation — better than a generic shrug.
+  const MEASUREMENT_TITLES = {
+    inferred: 'Inferred from co-movement; not measured directly on a CT',
+    prior: 'Uses a configured prior, not a measurement',
+    none: 'The engine has no measurement for this fixture',
+  };
+
+  const notMeasuredTitle = (reason, measurement, hasValue = true) => {
+    if (!hasValue && String(measurement || '') === 'measured') {
+      return 'Declared as measured, but the engine has not produced a value yet';
+    }
+    return NOT_MEASURED_REASONS[String(reason || '')]
+      || MEASUREMENT_TITLES[String(measurement || '')]
+      || 'The engine has no measurement for this fixture';
+  };
+
+  const hasPowerValue = (node) =>
+    Boolean(node) && node.latest_power_w !== null && node.latest_power_w !== undefined
+      && Number.isFinite(Number(node.latest_power_w));
+
+  /**
+   * The measurement vocabulary for a device node.
+   *
+   * An old engine emits no ``measurement`` key at all.  The panel must not
+   * invent a measurement claim it never made, so the fallback is the contract's
+   * own rule (§5.4 item 4): a node with a ``source`` counts as measured.  The
+   * second half — *and it has a value to print* — is what fixes defect 4: a node
+   * with no wattage is "not measured" rather than a bare ``—``.
+   */
+  const measurementOf = (node) => {
+    if (!node) return 'none';
+    if (node.measurement !== undefined && node.measurement !== null) {
+      const value = String(node.measurement);
+      return MEASUREMENT_STATES.has(value) ? value : 'none';
+    }
+    const sourced = node.source !== null && node.source !== undefined;
+    return sourced && hasPowerValue(node) ? 'measured' : 'none';
+  };
+
+  //: One rule for the row and the circuit summary, so the same fixture is never
+  //: "measured" in one place and "unmeasured" in the other.
+  const isMeasuredNode = (node) => measurementOf(node) === 'measured';
+
+  // The engine's device ``subtitle`` used to be dropped outright.  It is now the
+  // evidence line.  Suppress only what carries no information: a repeat of the
+  // row's own name, the phase already shown as a badge, or a structural
+  // placeholder ("unknown", "unknown phase") — never real evidence text.
+  const STRUCTURAL_SUBTITLES = new Set(['unknown', 'unknown phase', 'n/a']);
+  const deviceSubtitle = (node) => {
+    if (node.subtitle === null || node.subtitle === undefined) return '';
+    const text = String(node.subtitle).trim();
+    if (!text) return '';
+    const folded = text.toLowerCase();
+    if (STRUCTURAL_SUBTITLES.has(folded)) return '';
+    if (text === String(node.label || '') || text === String(node.device_id || '')) return '';
+    const phase = String(node.phase || '');
+    if (phase && (folded === phase.toLowerCase() || folded === label(phase).toLowerCase())) return '';
+    return text;
+  };
+
+  // The first evidence string is a better subtitle than an empty row: it says
+  // *why* the engine believes what it shows.
+  const firstEvidence = (node) =>
+    (Array.isArray(node.evidence) ? node.evidence : [])
+      .map((item) => (item === null || item === undefined ? '' : String(item).trim()))
+      .filter(Boolean)[0] || '';
+
+  const deviceEvidenceLine = (node) => deviceSubtitle(node) || firstEvidence(node);
+
+  //: The engine emits ``topology_status`` as a badge whose text equals the
+  //: field.  Matching by identity (not by tone or a keyword) means an unrelated
+  //: "ok"-toned badge is never swallowed along with it.
+  const isWiringStatusBadge = (item, node) => {
+    const status = node && node.topology_status;
+    if (!status) return false;
+    return String(item.text).toLowerCase() === String(status).toLowerCase();
+  };
+
+  /**
+   * One compact chip for a circuit's direct children (contract §5.4.4).
+   *
+   * ``measurement`` is the engine's vocabulary; the count never guesses beyond
+   * it.  An old engine has no key, so a child with a source counts as measured —
+   * that is the same rule the device row applies.
+   */
+  function circuitChildSummary(node) {
+    const children = Array.isArray(node.children) ? node.children : [];
+    const devices = children.filter((child) => child && child.kind === 'device');
+    if (!devices.length) return null;
+    const measured = devices.filter(isMeasuredNode).length;
+    const unmeasured = devices.length - measured;
+    const noun = devices.length === 1 ? 'device' : 'devices';
+
+    // The chip uses the engine's own word when every unmeasured child really is
+    // an inference — the common case.  A `prior`, `none`, or a payload with no
+    // ``measurement`` key at all is not an inference, so the chip falls back to
+    // the neutral "unmeasured" rather than relabelling it.
+    const kinds = devices
+      .filter((child) => !isMeasuredNode(child))
+      .map((child) => (child.measurement !== undefined && child.measurement !== null
+        ? String(child.measurement)
+        : 'unmeasured'));
+    const bucket = kinds.every((kind) => kind === 'inferred') ? 'inferred' : 'unmeasured';
+    const text = unmeasured
+      ? `${devices.length} ${noun} · ${measured} measured · ${unmeasured} ${bucket}`
+      : `${devices.length} ${noun}`;
+
+    const detail = unmeasured
+      ? `${measured} of ${devices.length} fixtures on this circuit have a measured wattage; ${unmeasured} are ${bucket}.`
+      : `All ${devices.length} fixtures on this circuit have a measured wattage.`;
+    // The exact vocabulary the engine emitted (inferred / prior / none) belongs
+    // in the tooltip, not in a chip that must stay one short phrase.
+    const breakdown = unmeasured
+      ? ` (${Object.entries(kinds.reduce((acc, kind) => {
+          acc[kind] = (acc[kind] || 0) + 1;
+          return acc;
+        }, {})).map(([kind, count]) => `${count} ${kind}`).join(', ')})`
+      : '';
+    return el('span', { class: 'hier-count', title: detail + breakdown }, text);
+  }
 
   // Contract §1.2 R5: a group with no children is omitted entirely.  The
   // engine already does this, but a group is pure structure, so hiding an
@@ -1764,20 +1932,41 @@
     const status = el('p', { class: 'hier-status', role: 'status' });
     const announce = (text) => { status.textContent = text; };
 
+    // The engine's tree is cloned once — right here — and every paint reuses
+    // this copy.  Re-deriving it per repaint cloned the whole tree several
+    // times per keystroke and per toggle for no benefit: the payload does not
+    // change while the card is on screen.
+    const nodes = hierarchyNodes(topology, tree);
+
     const repaint = (options) => {
       const focusKey = options && options.focusKey;
-      paintHierarchy(body, topology, tree, repaint);
+      const count = paintHierarchy(body, nodes, repaint);
       if (focusKey) {
         // The button that was clicked no longer exists: the whole list was
         // rebuilt.  Put focus back on its equivalent so keyboard use does not
         // drop to the document body after every toggle.
         const next = [...body.querySelectorAll('.hier-toggle')].find((b) => b.dataset.key === focusKey);
         if (next) next.focus({ preventScroll: true });
-        const count = body.querySelectorAll('li.hier-node').length;
         announce(next
           ? `${next.getAttribute('aria-expanded') === 'true' ? 'Expanded' : 'Collapsed'}. ${count} rows visible.`
           : `${count} rows visible.`);
       }
+      return count;
+    };
+
+    // Substantial trees are ~100 rows; rebuilding one per keystroke is wasted
+    // work, and the user cannot type faster than a paint is useful.  120 ms is
+    // long enough to coalesce a burst and short enough to feel immediate.
+    let filterTimer = 0;
+    const applyFilter = () => {
+      filterTimer = 0;
+      const count = repaint();
+      const query = state.tree.filter.trim();
+      announce(
+        query
+          ? `${count} rows match “${query}”.`
+          : `${count} rows visible.`
+      );
     };
 
     const filter = el('input', {
@@ -1788,13 +1977,16 @@
       value: state.tree.filter,
       oninput: (event) => {
         state.tree.filter = event.target.value;
-        repaint();
-        const query = state.tree.filter.trim();
-        announce(
-          query
-            ? `${body.querySelectorAll('li.hier-node').length} rows match “${query}”.`
-            : `${body.querySelectorAll('li.hier-node').length} rows visible.`
-        );
+        if (filterTimer) clearTimeout(filterTimer);
+        filterTimer = setTimeout(applyFilter, 120);
+      },
+      // Enter applies immediately: a keyboard user should not have to wait out
+      // the debounce to see the result of an explicit submit.
+      onkeydown: (event) => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        if (filterTimer) clearTimeout(filterTimer);
+        applyFilter();
       },
     });
 
@@ -1802,9 +1994,8 @@
       class: 'btn btn-sm',
       type: 'button',
       onclick: () => {
-        setAllExpanded(hierarchyNodes(topology, tree), true);
-        repaint();
-        announce(`Expanded all. ${body.querySelectorAll('li.hier-node').length} rows visible.`);
+        setAllExpanded(nodes, true);
+        announce(`Expanded all. ${repaint()} rows visible.`);
       },
     }, 'Expand all');
 
@@ -1812,9 +2003,8 @@
       class: 'btn btn-sm',
       type: 'button',
       onclick: () => {
-        setAllExpanded(hierarchyNodes(topology, tree), false);
-        repaint();
-        announce(`Collapsed all. ${body.querySelectorAll('li.hier-node').length} rows visible.`);
+        setAllExpanded(nodes, false);
+        announce(`Collapsed all. ${repaint()} rows visible.`);
       },
     }, 'Collapse all');
 
@@ -1827,12 +2017,12 @@
     });
 
     // Paint in the same task as the card so the tree is never a frame late.
-    paintHierarchy(body, topology, tree, repaint);
+    const shown = paintHierarchy(body, nodes, repaint);
     // The layout actually used, recorded on the card so a bug report can name
     // it without re-deriving it from the markup.
     node.dataset.layout = tree ? 'tree' : 'legacy';
     announce(
-      `${body.querySelectorAll('li.hier-node').length} rows shown.`
+      `${shown} rows shown.`
       + (tree ? '' : ' Hierarchy endpoint unavailable; showing CT containment.')
     );
     return node;
@@ -1852,13 +2042,14 @@
     for (const node of nodes) walk(node);
   }
 
-  // ``onToggle(key)`` rebuilds the card.  It is supplied by the caller so the
-  // focus-restoring repaint lives in one place.
-  function paintHierarchy(body, topology, tree, onToggle) {
-    if (!body) return;
+  // ``onToggle(options)`` rebuilds the card.  It is supplied by the caller so
+  // the focus-restoring repaint lives in one place.  ``nodes`` is computed once
+  // by the caller; nothing here re-clones the engine's tree.  Returns the row
+  // count so the caller can announce it without another DOM query.
+  function paintHierarchy(body, nodes, onToggle) {
+    if (!body) return 0;
     clear(body);
 
-    const nodes = hierarchyNodes(topology, tree);
     const query = state.tree.filter.trim().toLowerCase();
 
     let entries;
@@ -1882,13 +2073,16 @@
           query ? `Nothing in this hierarchy matches “${state.tree.filter.trim()}”.` : 'This topology has no nodes to show.'
         )
       );
-      return;
+      return 0;
     }
 
     const ctx = {
       defaults: defaultOpenSet(nodes),
       forcedOpen,
       repaint: onToggle,
+      // Incremented by ``renderEntry`` for every row actually appended, so the
+      // row count costs nothing extra: no second DOM query, no second walk.
+      count: 0,
     };
 
     body.append(
@@ -1898,6 +2092,7 @@
         entries.map((entry) => renderEntry(entry, 0, ctx))
       )
     );
+    return ctx.count;
   }
 
   function renderEntry(entry, depth, ctx) {
@@ -1911,6 +2106,7 @@
     const item = el('li', { class: 'hier-node', dataset: { depth: String(depth) } }, [
       hierarchyRow(node, depth, expanded, key, ctx, entry.kids.length),
     ]);
+    ctx.count += 1;
 
     if (hasKids && expanded) {
       item.append(
@@ -1986,6 +2182,11 @@
       }
       row.append(badge(label(node.ct_type || 'unknown'), ctTone(node.ct_type)));
       if (node.phase && node.phase !== 'unknown') row.append(badge(label(node.phase), 'mute'));
+      // Direct-child summary: how many fixtures sit here, and how many of them
+      // the engine actually measured.  A circuit with no device children keeps
+      // today's row rather than claiming "0 devices".
+      const summary = circuitChildSummary(node);
+      if (summary) row.append(summary);
       if (node.latest_power_w !== null && node.latest_power_w !== undefined) {
         row.append(el('span', { class: 'hier-power' }, watts(node.latest_power_w)));
       }
@@ -1995,6 +2196,11 @@
       for (const item of nodeBadges(node)) row.append(item);
     } else if (kind === 'device') {
       const name = node.label || node.device_id || 'Device';
+      const measurement = measurementOf(node);
+      // ``measured`` also requires a number to print: a node the engine labels
+      // measured but has no value for yet would otherwise put a bare dash in
+      // the measured slot — defect 4.
+      const measured = measurement === 'measured' && hasPowerValue(node);
       if (node.device_id) {
         row.append(
           el('a', { class: 'hier-link', href: `#/device/${encodeURIComponent(node.device_id)}` }, name)
@@ -2003,14 +2209,36 @@
         row.append(el('span', { class: 'hier-label' }, name));
       }
       if (node.phase && node.phase !== 'unknown') row.append(badge(label(node.phase), 'mute'));
-      row.append(el('span', { class: 'hier-power' }, watts(node.latest_power_w)));
-      if (node.source) row.append(badge(label(node.source), sourceTone(node.source)));
-      if (node.confidence !== null && node.confidence !== undefined) {
-        row.append(el('span', { class: 'hier-conf' }, percent(node.confidence, 0)));
+      if (measured) {
+        // A measured fixture: the wattage is the point of the row.
+        row.append(el('span', { class: 'hier-power' }, watts(node.latest_power_w)));
+        if (node.source) row.append(badge(label(node.source), sourceTone(node.source)));
+        if (node.confidence !== null && node.confidence !== undefined) {
+          row.append(el('span', { class: 'hier-conf' }, percent(node.confidence, 0)));
+        }
+      } else {
+        // Not measured: an empty measured slot would read as "0 W", and a bare
+        // em dash in the wattage column claims a value that does not exist.
+        // Say so instead, with the engine's reason on the pill's title.
+        row.append(
+          badge('not measured', 'mute', {
+            title: notMeasuredTitle(node.not_measured_reason, measurement, hasPowerValue(node)),
+            dot: false,
+          })
+        );
       }
-      // ``via_ct_id`` is the parent circuit this device already sits under; it
-      // would repeat the tree edge on every row.
-      for (const item of nodeBadges(node)) row.append(item);
+      const sub = deviceEvidenceLine(node);
+      if (sub) row.append(el('span', { class: 'hier-sub' }, sub));
+      // ``topology_status`` is the *wiring* claim (is this device declared on
+      // these CTs?), not a measurement claim.  A green "confirmed" beside "not
+      // measured" is exactly the contradiction the audit found, so a device the
+      // engine could not measure drops the wiring-status pill altogether.  The
+      // match is by identity — the badge whose text *is* ``topology_status`` —
+      // so an unrelated badge (an alias, a disabled flag) still shows.
+      for (const item of badgeItems(node)) {
+        if (!measured && isWiringStatusBadge(item, node)) continue;
+        row.append(badgeNode(item));
+      }
     } else {
       row.append(el('span', { class: 'hier-label' }, node.label || nodeKey(node)));
       if (node.subtitle) row.append(el('span', { class: 'hier-sub' }, node.subtitle));
@@ -2246,6 +2474,523 @@
     } catch (err) {
       notify('Could not confirm topology', describeError(err), 'bad');
     }
+  }
+
+  /* --- Discover devices (contract §5.4 item 6) -------------------------- *
+   * Placement discovery reads the recorder and proposes devices for fixtures
+   * whose transitions it can prove.  Analysing writes nothing; a write needs a
+   * second, explicit click per row.  There is no modal in this panel, so the
+   * two-step confirm lives on the button label itself.
+   * ---------------------------------------------------------------------- */
+
+  const DISCOVER_PATH = '/discover/placements';
+
+  //: Why the engine withheld a fixture, in words a person can act on.
+  const WITHHELD_REASONS = {
+    not_discriminating: 'Its transitions do not move measured power',
+    asymmetric_response: 'It responds to on and off differently',
+    not_specific: 'Its transitions are not specific to one row',
+    too_few_corroborations: 'Too few independent transitions to prove it',
+    inconsistent_with_row: 'Its response contradicts the row it appears on',
+    ambiguous_rows: 'Several rows could explain it equally well',
+  };
+
+  function withheldReason(reason) {
+    const text = String(reason || '').trim();
+    if (!text) return 'No reason given';
+    if (text.startsWith('co_toggles_with_another_fixture_on_')) {
+      const ct = text.slice('co_toggles_with_another_fixture_on_'.length);
+      return `It always toggles with another fixture on ${ct.replace(/_/g, ' ')}`;
+    }
+    if (text.startsWith('already configured')) return 'Already configured by the user; left unchanged';
+    return WITHHELD_REASONS[text] || titleCase(text);
+  }
+
+  const discoverSlotNode = () =>
+    el('div', { class: 'card discover-slot', id: 'topology-discover' }, [
+      el('div', { class: 'card-head' }, [
+        el('h2', {}, 'Discover devices'),
+        el('span', { class: 'spacer' }),
+        el('span', { class: 'stat-hint' }, 'Not run yet'),
+      ]),
+      el('div', { class: 'card-body' }, [
+        el('p', { class: 'stat-hint' },
+          'Find fixtures that sit on a shared circuit by comparing their transitions with the CT rows. Analysing writes nothing.'),
+      ]),
+    ]);
+
+  function topologyDiscoverSlot() {
+    if (state.discover.error) return discoverErrorCard(state.discover.error);
+    if (state.discover.data) return discoverCard(state.discover.data);
+    if (state.discover.running) return discoverLoadingCard();
+    return discoverSlotNode();
+  }
+
+  function swapDiscover(node) {
+    const current = document.getElementById('topology-discover');
+    if (current) {
+      current.replaceWith(node);
+      return;
+    }
+    // No slot on screen (the user navigated away while the request ran): the
+    // answer is still cached in state, so the next paint of this tab shows it.
+    // Painting into a page it does not belong to would be worse than dropping
+    // the render.
+  }
+
+  function discoverLoadingCard() {
+    return card(
+      'Discover devices',
+      [
+        el('div', { class: 'cand-loading', role: 'status' }, [
+          el('span', { class: 'spinner', 'aria-hidden': 'true' }),
+          el('span', {}, 'Comparing fixture transitions with the CT rows over the last 24 hours…'),
+        ]),
+        el('div', { class: 'skeleton h-row' }),
+        el('div', { class: 'skeleton h-row' }),
+      ],
+      { id: 'topology-discover' }
+    );
+  }
+
+  function discoverErrorCard(err) {
+    const missing = Boolean(err && err.status === 404);
+    const text = missing
+      ? 'This engine does not serve POST /api/v1/discover/placements (HTTP 404). Update the engine to find devices automatically; nothing was changed.'
+      : `The comparison did not finish: ${describeError(err)}`;
+    return card(
+      'Discover devices',
+      [
+        el('p', { class: 'stat-hint', style: 'margin-bottom:12px' }, text),
+        el('button', {
+          class: 'btn btn-sm',
+          type: 'button',
+          onclick: () => runDiscovery(),
+        }, 'Try again'),
+      ],
+      { id: 'topology-discover' }
+    );
+  }
+
+  async function runDiscovery() {
+    if (state.discover.running) return;
+    state.discover = { ...state.discover, running: true, error: null };
+    // The head button says "Discovering…" while the request runs.
+    const head = document.getElementById('topology-discover-run');
+    if (head) {
+      head.disabled = true;
+      head.textContent = 'Discovering…';
+    }
+    swapDiscover(discoverLoadingCard());
+    try {
+      const data = await post(DISCOVER_PATH, { apply: false, include_groups: true });
+      state.discover = { data, running: false, error: null };
+      swapDiscover(discoverCard(data));
+    } catch (err) {
+      state.discover = { data: null, running: false, error: err };
+      swapDiscover(discoverErrorCard(err));
+      if (err && err.status === 404) {
+        notify('Discovery unavailable', 'This engine does not serve /discover/placements.', 'bad');
+      } else {
+        notify('Discovery failed', describeError(err), 'bad');
+      }
+    } finally {
+      const button = document.getElementById('topology-discover-run');
+      if (button) {
+        button.disabled = false;
+        button.textContent = 'Discover devices';
+      }
+    }
+  }
+
+  function discoverCard(data) {
+    const accepted = Array.isArray(data.accepted) ? data.accepted : [];
+    const groups = Array.isArray(data.groups) ? data.groups : [];
+    const withheld = data.withheld && typeof data.withheld === 'object' ? Object.entries(data.withheld) : [];
+    const refused = data.refused && typeof data.refused === 'object' ? Object.entries(data.refused) : [];
+    const stats = data.stats || {};
+    const nothing = !accepted.length && !groups.length && !withheld.length && !refused.length;
+
+    const body = [];
+
+    if (data.ok === false && data.detail) {
+      body.push(notice('Discovery reported a problem', String(data.detail), 'warn'));
+    }
+
+    if (nothing) {
+      body.push(emptyState(
+        'No shared circuits could be resolved',
+        'The engine compared every fixture transition it has with every branch CT row and found nothing it could prove. That is a measurement result, not an error.'
+      ));
+      return card('Discover devices', body, {
+        id: 'topology-discover',
+        foot: discoveryFoot(data, stats),
+      });
+    }
+
+    /* Placed ------------------------------------------------------------ */
+    const applyAll = accepted.length && !accepted.every((row) => row.applied)
+      ? applyButton({ name: 'all placements', all: true })
+      : null;
+
+    const placed = accepted.length
+      ? el('div', { class: 'discover-list' },
+          accepted.map((row) => discoverPlacedRow(row)))
+      : emptyState('Nothing placed', 'No fixture met the evidence bar for a measured placement.');
+
+    body.push(
+      el('section', { class: 'discover-section' }, [
+        el('div', { class: 'discover-section-head' }, [
+          el('h3', {}, 'Placed'),
+          el('span', { class: 'hier-count' }, String(accepted.length)),
+          el('span', { class: 'spacer' }),
+          applyAll,
+        ]),
+        el('p', { class: 'stat-hint' },
+          'Each fixture below was proven on one CT row by measured co-movement. Nothing is written until you apply it; the engine writes the accepted set.'),
+        placed,
+      ])
+    );
+
+    /* Groups ------------------------------------------------------------ */
+    const groupSection = el('section', { class: 'discover-section' }, [
+      el('div', { class: 'discover-section-head' }, [
+        el('h3', {}, 'Groups'),
+        el('span', { class: 'hier-count' }, String(groups.length)),
+        el('span', { class: 'spacer' }),
+        badge('advisory', 'info'),
+      ]),
+      discoverGroupsNote(groups),
+      groups.length
+        ? el('div', { class: 'discover-list' }, groups.map((group) => discoverGroupRow(group)))
+        : el('p', { class: 'stat-hint' }, 'No co-toggling groups were found on a shared row.'),
+    ]);
+    body.push(groupSection);
+
+    /* Withheld ---------------------------------------------------------- */
+    const withheldRows = withheld.concat(refused);
+    body.push(
+      el('section', { class: 'discover-section' }, [
+        el('div', { class: 'discover-section-head' }, [
+          el('h3', {}, 'Withheld'),
+          el('span', { class: 'hier-count' }, String(withheldRows.length)),
+          el('span', { class: 'spacer' }),
+        ]),
+        withheldRows.length
+          ? el('div', { class: 'discover-list' },
+              withheldRows.map(([entityId, reason]) =>
+                el('div', { class: 'discover-row withhold' }, [
+                  el('div', { class: 'discover-main' }, [
+                    el('span', { class: 'hier-sub' }, String(entityId)),
+                    el('span', { class: 'discover-ev' }, withheldReason(reason)),
+                  ]),
+                ])
+              ))
+          : el('p', { class: 'stat-hint' }, 'Nothing was withheld.'),
+      ])
+    );
+
+    return card('Discover devices', body, {
+      id: 'topology-discover',
+      foot: discoveryFoot(data, stats),
+    });
+  }
+
+  function discoveryFoot(data, stats) {
+    const parts = [];
+    if (stats.candidate_entities !== undefined) {
+      parts.push(`${stats.candidate_entities} candidate fixtures`);
+    }
+    if (stats.branch_rows !== undefined) parts.push(`${stats.branch_rows} branch rows`);
+    if (data.lookback_hours !== undefined) parts.push(`last ${num(data.lookback_hours, 0)}h`);
+    if (data.topology_version !== undefined) parts.push(`topology v${data.topology_version}`);
+    const notes = Array.isArray(data.notes) ? data.notes : [];
+    parts.push(notes.length ? `Engine notes: ${notes.join(' ')}` : 'Analysing writes nothing.');
+    return parts.join(' · ');
+  }
+
+  function discoverPlacedRow(row) {
+    const facts = [];
+    if (row.agreement !== undefined && row.agreement !== null) facts.push(`${percent(row.agreement, 0)} agreement`);
+    if (row.corroborations !== undefined && row.corroborations !== null) facts.push(`${row.corroborations} corroborations`);
+    if (row.symmetry !== undefined && row.symmetry !== null) facts.push(`${num(row.symmetry, 2)} symmetry`);
+    if (row.specificity_z !== undefined && row.specificity_z !== null) facts.push(`${num(row.specificity_z, 0)}σ specificity`);
+    const evidence = Array.isArray(row.evidence) ? row.evidence : [];
+    const button = applyButton(row);
+    return el('div', { class: 'discover-row' }, [
+      el('div', { class: 'discover-main' }, [
+        el('div', { class: 'discover-title' }, [
+          el('span', { class: 'hier-label' }, String(row.name || row.entity_id || row.device_id || 'Fixture')),
+          el('span', { class: 'arrow', 'aria-hidden': 'true' }, '→'),
+          el('span', { class: 'chip chip-ct' }, String(row.ct_label || row.ct_id || 'unknown CT')),
+          row.applied ? badge('applied', 'ok') : null,
+        ]),
+        el('div', { class: 'discover-meta' }, [
+          el('span', { class: 'hier-power' }, watts(row.on_w)),
+          ...facts.map((fact) => el('span', { class: 'discover-fact' }, fact)),
+        ]),
+        evidence.length
+          ? el('ul', { class: 'discover-evidence' },
+              evidence.map((item) => el('li', {}, String(item))))
+          : null,
+      ]),
+      el('div', { class: 'discover-actions' }, [button]),
+    ]);
+  }
+
+  /**
+   * The two-step Apply button.
+   *
+   * There is no modal library in this panel and adding one is out of scope, so
+   * the confirmation *is* the button: the first click asks, the second writes.
+   * A blur cancels, because the user looked away.
+   *
+   * ``row.all`` means "apply every accepted placement".  There is no per-entity
+   * filter in the frozen facade signature, so *both* buttons write the proven
+   * set together — the row button is a shortcut to that same engine decision,
+   * never a client-side subset.  The label and toast say so; pretending a
+   * per-row write happened would be a lie about what the engine did.
+   */
+  function applyButton(row) {
+    let armed = false;
+    const isAll = Boolean(row && row.all);
+    const idle = isAll ? 'Apply all' : 'Apply';
+    const scope = isAll
+      ? 'Write every proven placement.'
+      : 'The engine writes the proven set together; this fixture is included.';
+    const button = el('button', {
+      class: 'btn btn-sm',
+      type: 'button',
+      title: scope,
+      'aria-label': isAll ? 'Apply all placements' : `Apply ${row.name || row.entity_id || 'fixture'}`,
+      onclick: async () => {
+        if (!armed) {
+          armed = true;
+          button.textContent = 'Confirm apply?';
+          button.setAttribute('aria-label', 'Confirm apply');
+          button.dataset.armed = 'true';
+          return;
+        }
+        if (button.disabled) return;
+        button.disabled = true;
+        button.textContent = 'Applying…';
+        try {
+          // ``apply: true`` has no per-entity filter in the engine contract:
+          // the engine decides the accepted set, and re-deriving a subset in the
+          // browser would be a second placement decision.  So both the per-row
+          // and the Apply-all button write the proven set, and the toast says so
+          // instead of claiming only one device changed.
+          await post(DISCOVER_PATH, { apply: true });
+          notify(
+            'Placements applied',
+            row && row.all
+              ? 'The engine wrote every proven placement and re-projected the topology.'
+              : `The engine wrote every proven placement, including ${row.name || row.entity_id}, and re-projected the topology.`
+          );
+          state.discover = { data: null, running: false, error: null };
+          render();
+        } catch (err) {
+          notify('Could not apply placement', describeError(err), 'bad');
+          armed = false;
+          button.disabled = false;
+          button.dataset.armed = 'false';
+          button.textContent = idle;
+        }
+      },
+      onblur: () => {
+        if (!armed) return;
+        armed = false;
+        button.dataset.armed = 'false';
+        button.textContent = idle;
+        button.setAttribute(
+          'aria-label',
+          row && row.all ? 'Apply all placements' : `Apply ${row.name || row.entity_id || 'fixture'}`
+        );
+      },
+    }, idle);
+    return button;
+  }
+
+  /* --- Groups ---------------------------------------------------------- */
+
+  // ``individually_identifiable`` is the engine's statement that the aggregate
+  // fit separated a real coefficient for this group's member.  Only a literal
+  // ``true`` is evidence: an older engine omits the key, and a missing key must
+  // never be read as "a measurement happened".  Everything else renders as the
+  // conservative ``grouped`` claim.
+  const groupIdentifiable = (group) =>
+    Boolean(group && group.individually_identifiable === true);
+
+  // The coefficient the engine fitted for one member, or ``null`` when it gave
+  // none.  ``Number('')`` is ``0``, which would be a fabricated wattage, so the
+  // empty string is rejected before the numeric coercion.
+  const memberWatts = (member) => {
+    const value = member && member.estimated_w;
+    if (value === null || value === undefined || value === '') return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  /**
+   * The Groups section used to warn, once, that *no* group was individually
+   * identifiable.  That was true when the engine hard-coded the flag to false;
+   * it is false now, because a single-fixture group carries its own measured
+   * coefficient.  So the warning is emitted only when at least one group really
+   * is unidentifiable, and in a mixed section it counts how many and defers the
+   * per-row badge to say which.  An all-identified section gets a neutral note
+   * instead, so "never a device" is still stated without the false warning.
+   */
+  function discoverGroupsNote(groups) {
+    if (!groups.length) return null;
+    const unidentified = groups.filter((group) => !groupIdentifiable(group));
+    if (!unidentified.length) {
+      return el('p', { class: 'stat-hint' },
+        'Every group here is marked identified by the aggregate fit, so its fitted draw is a separated coefficient rather than an unexplained aggregate. A group is advisory evidence only and never becomes a device.');
+    }
+    const mixed = unidentified.length < groups.length;
+    const identifiedCount = groups.length - unidentified.length;
+    // The body describes what each badge means and what is on screen.  It never
+    // claims a split that was measured, and it never claims the warning applies
+    // to an identified row.  "Identified" is the engine's statement, not ours.
+    // The co-toggle sentence is conditional because a one-member group has no
+    // sibling to toggle with, and the engine may still decline to identify it.
+    const coToggle = unidentified.some(
+      (group) => (Array.isArray(group.members) ? group.members.length : 0) > 1
+    )
+      ? ' Where the members toggle together the combined draw is measured; the split between them is not.'
+      : '';
+    const body = mixed
+      ? `The ${unidentified.length} ${unidentified.length === 1 ? 'group' : 'groups'} badged grouped ${unidentified.length === 1 ? 'has' : 'have'} no identified per-fixture wattage, so only the group total is shown. The ${identifiedCount} ${identifiedCount === 1 ? 'group' : 'groups'} badged identified ${identifiedCount === 1 ? 'carries' : 'carry'} a coefficient the aggregate fit separated. No group becomes a device.`
+      : `${groups.length === 1 ? 'This group has' : 'None of these groups has'} no identified per-fixture wattage, so only the group total is shown.${coToggle} No device is created.`;
+    return el('div', { class: 'notice', dataset: { tone: 'warn' }, style: 'margin-bottom:12px' }, [
+      el('div', { class: 'banner-icon', 'aria-hidden': 'true' }, 'i'),
+      el('div', {}, [
+        el('strong', {}, mixed
+          ? `Not individually identifiable for ${unidentified.length} of ${groups.length} groups`
+          : 'Not individually identifiable'),
+        el('p', {}, body),
+      ]),
+    ]);
+  }
+
+  // The tooltip must never claim a per-member coefficient that the row does
+  // not show.  A singleton with a fitted ``estimated_w`` gets the strong claim;
+  // every other identified shape only repeats what the engine reported.
+  function identifiedTitle(soloW) {
+    if (soloW !== null) {
+      return 'The aggregate fit identified this one fixture on its own; the wattage is a fitted coefficient, not a split of a group total';
+    }
+    return 'The engine reports this group as individually identifiable: the aggregate fit separated its coefficient, so the group total is a fitted value';
+  }
+
+  // A group the engine did not mark identifiable must not claim its members
+  // "toggle together" when the row holds fewer than two of them -- there is
+  // nothing to toggle with.  The honest claim is the absence of a separated
+  // coefficient, so only the group total is shown.
+  const groupedTitle = (members) => {
+    if (members.length > 1) return 'The members toggle together; the split is not measured';
+    if (members.length === 1) {
+      return 'The engine did not report an identified coefficient for this fixture, so only the group total is shown';
+    }
+    return 'The engine did not identify a per-fixture coefficient for this group, so only the group total is shown';
+  };
+
+  function discoverGroupRow(group) {
+    const members = Array.isArray(group.members) ? group.members : [];
+    const identified = groupIdentifiable(group);
+    const margin = group.r2_margin !== undefined && group.r2_margin !== null
+      ? `${num(group.r2_margin, 2)} margin over null`
+      : null;
+    const r2 = group.r2 !== undefined && group.r2 !== null ? `R² ${num(group.r2, 3)}` : null;
+    const evidence = Array.isArray(group.evidence) ? group.evidence : [];
+    // Only a *single-member* group may carry a per-member figure, and only when
+    // the engine actually reported one.  The frozen contract sets
+    // ``estimated_w`` to ``null`` for every member of a multi-fixture group,
+    // and this panel never divides ``total_w`` by the member count -- a split
+    // would be a fabrication, not a measurement.
+    const soloW = identified && members.length === 1 ? memberWatts(members[0]) : null;
+    const facts = [r2, margin].filter(Boolean);
+    return el('div', { class: identified ? 'discover-row group identified' : 'discover-row group' }, [
+      el('div', { class: 'discover-main' }, [
+        el('div', { class: 'discover-title' }, [
+          el('span', { class: 'chip chip-ct' }, String(group.ct_label || group.ct_id || 'unknown CT')),
+          el('span', { class: 'hier-power' }, watts(group.total_w)),
+          // A singleton shows a second wattage on its member chip, so the total
+          // is captioned here; without it two equal numbers would look like a
+          // contradiction rather than one measurement stated twice.
+          soloW !== null ? el('span', { class: 'discover-fact' }, 'group total') : null,
+          identified
+            ? badge('identified', 'ok', { title: identifiedTitle(soloW) })
+            : badge('grouped', 'warn', { title: groupedTitle(members) }),
+        ]),
+        el('div', { class: 'discover-meta' }, facts
+          .map((fact) => el('span', { class: 'discover-fact' }, fact))),
+        members.length
+          ? el('div', { class: 'discover-members' },
+              members.map((member) => discoverGroupMember(member, soloW !== null)))
+          : null,
+        evidence.length
+          ? el('ul', { class: 'discover-evidence' },
+              evidence.map((item) => el('li', {}, String(item))))
+          : null,
+      ]),
+    ]);
+  }
+
+  // The member chip is captioned "identified" only when the engine actually
+  // reported a coefficient for it.  A group flagged identifiable whose member
+  // carries no number must not have a wattage (or the word "identified")
+  // attributed to that member.
+  function discoverGroupMember(member, isSolo) {
+    const name = String((member && (member.name || member.entity_id)) || 'member');
+    const value = isSolo ? memberWatts(member) : null;
+    if (value === null) return el('span', { class: 'chip' }, name);
+    return el('span', {
+      class: 'chip discover-member-identified',
+      title: 'This is the only member; the aggregate fit identified its draw directly',
+    }, [
+      el('span', { class: 'discover-member-tag' }, 'identified'),
+      name,
+      el('span', { class: 'discover-member-watts' }, watts(value)),
+    ]);
+  }
+
+  /* --- Learning blocked banner (contract §5.4 item 7) ------------------- */
+
+  function topologyLearningBanner(status, topology) {
+    const learning = (status && status.learning) || {};
+    const detail = (status && status.learning_status) || {};
+    const effective = String(learning.effective_state || detail.effective_state || '');
+    const blockedDetail = learning.blocked_reason_detail || detail.blocked_reason_detail || null;
+    const blockedBy = learning.blocked_by || detail.blocked_by || null;
+    if (effective !== 'blocked') return null;
+    // The contract's explicit key is ``blocked_reason_detail``; the engine also
+    // reports the same condition as ``blocked_by: "unconfirmed_topology"``, and
+    // older engines as ``blocked_by: "observed_rejections"`` with a candidate
+    // topology.  All three mean "the wiring is unconfirmed", which is the one
+    // thing this banner offers to fix — no other blocked reason shows it.
+    const quality = String(
+      learning.topology_quality || detail.topology_quality || ''
+    ).toLowerCase();
+    const unconfirmed =
+      blockedDetail === 'topology_not_confirmed'
+      || blockedBy === 'unconfirmed_topology'
+      || (blockedBy === 'observed_rejections' && quality === 'candidate');
+    if (!unconfirmed) return null;
+    if (topology && topology.status === 'confirmed') return null;
+
+    return el('div', { class: 'notice', dataset: { tone: 'warn' } }, [
+      el('div', { class: 'banner-icon', 'aria-hidden': 'true' }, '!'),
+      el('div', { class: 'notice-body' }, [
+        el('strong', {}, 'Learning is paused — confirm the topology to start collecting samples'),
+        el('p', {}, 'Every sample is being rejected as ambiguous until the wiring is confirmed. Confirm only when the CT roles match your wiring.'),
+        el('button', {
+          class: 'btn btn-sm btn-primary',
+          type: 'button',
+          onclick: confirmTopology,
+        }, 'Confirm topology'),
+      ]),
+    ]);
   }
 
   /* --- Quality ---------------------------------------------------------- */

@@ -664,6 +664,80 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
   border-radius: var(--radius-sm); padding: 5px 9px; width: 210px;
 }
 
+/* The "not measured" pill is deliberately quieter than a measurement: it is an
+   absence, so it never competes with a real wattage for the eye. */
+.hier .badge[data-tone="mute"][title] { cursor: help; }
+
+/* --- 6b. discover devices ------------------------------------------------ */
+
+.discover-slot .card-body { padding-bottom: 14px; }
+
+.discover-section + .discover-section {
+  margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line);
+}
+.discover-section-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.discover-section-head h3 { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--text-dim); }
+.discover-section > .stat-hint { margin-bottom: 12px; }
+
+.discover-list { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+/* The card reuses the hierarchy's vocabulary, but it does not live under
+   ``.hier``, so the type scale is restated here rather than duplicated ad hoc. */
+#topology-discover .hier-label { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+#topology-discover .hier-sub {
+  font-size: 11.5px; color: var(--text-mute);
+  font-family: var(--mono); overflow-wrap: anywhere;
+}
+#topology-discover .hier-count {
+  font-size: 10.5px; color: var(--text-mute);
+  background: var(--bg-sunken); border: 1px solid var(--line);
+  border-radius: 999px; padding: 0 6px; font-variant-numeric: tabular-nums;
+}
+#topology-discover .hier-power {
+  font-variant-numeric: tabular-nums; font-weight: 650;
+  font-size: 13px; white-space: nowrap; color: var(--text); margin-left: 0;
+}
+.discover-row {
+  display: flex; gap: 12px; align-items: flex-start; justify-content: space-between;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  padding: 12px 14px; background: var(--bg-elev-2);
+}
+.discover-row.group { border-color: color-mix(in srgb, var(--warn) 30%, var(--line)); }
+/* An identified group carries a real coefficient, so it does not get the
+   cautionary border its unidentifiable siblings wear. */
+.discover-row.group.identified { border-color: color-mix(in srgb, var(--ok) 28%, var(--line)); }
+.discover-row.withhold { padding: 8px 12px; background: transparent; }
+.discover-main { min-width: 0; display: flex; flex-direction: column; gap: 6px; flex: 1; }
+.discover-title {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 13.5px;
+}
+.discover-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.discover-meta .hier-power { margin-left: 0; }
+.discover-fact { font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.discover-ev { font-size: 12.5px; color: var(--text-dim); overflow-wrap: anywhere; }
+.discover-evidence {
+  margin: 0; padding-left: 16px; font-size: 12px;
+  color: var(--text-mute); display: flex; flex-direction: column; gap: 2px;
+}
+.discover-members { display: flex; flex-wrap: wrap; gap: 5px; }
+.discover-members .chip { font-size: 11px; padding: 1px 7px; }
+/* The one member of a singleton group whose draw the aggregate fit identified.
+   The tag distinguishes the fitted member from an unqualified member chip. */
+.discover-member-identified { border-color: color-mix(in srgb, var(--ok) 32%, transparent); }
+.discover-member-tag {
+  font-size: 9.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--ok);
+}
+.discover-member-watts { font-variant-numeric: tabular-nums; color: var(--text); }
+.discover-actions { flex: none; display: flex; align-items: center; }
+.discover-row.withhold .discover-main { gap: 2px; }
+
+.notice .notice-body { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.notice .notice-body .btn { align-self: flex-start; }
+
 /* The page-level skeleton, painted before the first await. */
 .topo-loading .stat-hint { margin-bottom: 12px; }
 
