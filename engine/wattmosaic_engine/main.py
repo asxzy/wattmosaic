@@ -2740,8 +2740,9 @@ class EngineCore:
         if not allow_apply:
             if not self.config.auto_placement:
                 result["detail"] = (
-                    "auto placement is disabled in the integration options; enable "
-                    "it and pass apply=true to write these placements"
+                    "auto placement is disabled: turn on the 'auto_placement' "
+                    "App option (Add-on → Configuration) and send apply=true "
+                    "to write these placements"
                 )
             else:
                 result["detail"] = (

@@ -18,6 +18,7 @@ that only the ingress proxy adds, so the tests rewrite ``TRUSTED_IPS`` to
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -290,3 +291,100 @@ def test_checker_rejects_eval_and_document_write(tmp_path: Path) -> None:
     errors = checker.check(root)
     assert any("eval()" in error for error in errors)
     assert any("document.write()" in error for error in errors)
+
+
+# --------------------------------------------------------------------------- #
+# Discover-card copy: no raw engine code reaches a person
+# --------------------------------------------------------------------------- #
+
+
+def _app_js() -> str:
+    return (REPO_ROOT / "addon" / "ui" / "app.js").read_text(encoding="utf-8")
+
+
+def _withheld_reason_keys() -> set[str]:
+    """The keys of the panel's ``WITHHELD_REASONS`` table, parsed statically.
+
+    ``app.js`` is a browser script with no module seam, so this is the same
+    static-parsing approach ``tools/dev/check_panel.py`` already uses for the
+    panel.  It is a drift guard, not a rendering test: it fails when the engine
+    grows a refusal the panel would show as title-cased enum text.
+    """
+    script = _app_js()
+    block = re.search(
+        r"const WITHHELD_REASONS = \{(.*?)\n  \};", script, re.DOTALL
+    )
+    assert block is not None, "WITHHELD_REASONS table not found in app.js"
+    return set(re.findall(r"^\s{4}([a-z0-9_]+):", block.group(1), re.MULTILINE))
+
+
+def test_every_named_candidate_refusal_has_a_human_phrasing() -> None:
+    """A refused fixture must not surface as ``Already Declared State Entity``.
+
+    ``already_declared_state_entity`` was exactly that on production: it reached
+    the Withheld list and was title-cased.  The candidate reasons are exported
+    constants, so the test reads them rather than restating them — a new reason
+    added to the engine fails here until the panel explains it.
+    """
+    from wattmosaic_engine.ingestion import candidate_entities
+
+    constants = {
+        name: value
+        for name, value in vars(candidate_entities).items()
+        if name.startswith("REASON_") and isinstance(value, str)
+    }
+    assert constants, "candidate_entities exports no REASON_ constants"
+
+    keys = _withheld_reason_keys()
+    missing = sorted(set(constants.values()) - keys)
+    assert not missing, f"no plain-English phrasing for {missing}"
+
+
+def test_unknown_reason_codes_still_fall_back_to_title_case() -> None:
+    """A newer engine's code must stay legible rather than render blank."""
+    script = _app_js()
+    assert "return titleCase(text);" in script
+    assert "WITHHELD_REASONS[text] || titleCase(text)" not in script, (
+        "the lookup must fall through to titleCase only for unknown codes, "
+        "after the prose passthrough"
+    )
+
+
+def test_prefixed_withheld_reasons_are_handled() -> None:
+    """The two parameterised reasons are not table keys, so pin their prefixes.
+
+    ``main.py`` emits ``identified_by_aggregate_fit_on_<ct>`` and
+    ``co_toggles_with_another_fixture_on_<ct>``.  A table lookup can never match
+    them, and ``titleCase`` would render the CT slug inside a sentence.
+    """
+    engine = (REPO_ROOT / "engine" / "wattmosaic_engine" / "main.py").read_text(
+        encoding="utf-8"
+    )
+    script = _app_js()
+    for prefix in (
+        "identified_by_aggregate_fit_on_",
+        "co_toggles_with_another_fixture_on_",
+    ):
+        assert prefix in engine, f"{prefix} is no longer emitted by the engine"
+        assert prefix in script, f"app.js does not phrase {prefix}"
+
+
+def test_placed_empty_state_does_not_blame_the_evidence_bar_unconditionally() -> None:
+    """The Placed slot must choose its message from why nothing is placed.
+
+    On production a second Apply left ``accepted`` empty because every fixture
+    was already written (``already_declared_state_entity``), yet the card said no
+    fixture met the evidence bar.  The fix keys the message on that reason; this
+    pins the branch so the false claim cannot come back silently.
+    """
+    script = _app_js()
+    assert "isAlreadyWritten(reason)" in script, "empty state no longer reads the reason"
+    assert "'already_declared_state_entity'" in script
+    assert "already configured" in script
+    # The evidence-bar claim survives only as the conservative fallback for
+    # when no reason says "already written", and the old unconditional sentence
+    # is gone.
+    assert "Everything this window proved is already written" in script
+    assert "No fixture reached the evidence bar for a measured placement." in script
+    assert "No fixture met the evidence bar for a measured placement." not in script
+

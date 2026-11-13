@@ -23,6 +23,7 @@ no database, no network.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from pathlib import Path
 
@@ -150,3 +151,42 @@ def test_engine_parses_wm_auto_placement(
 def test_the_option_is_reported_in_the_redacted_config() -> None:
     """An operator can confirm the setting without reading the source."""
     assert "auto_placement" in EngineConfig().redacted()
+
+
+# --------------------------------------------------------------------------- #
+# The refusal names the switch that actually gates the write
+# --------------------------------------------------------------------------- #
+
+
+def test_refusal_names_the_app_option_not_the_integration_checkbox(
+    tmp_path: Path,
+) -> None:
+    """The message must point at a control the user can reach.
+
+    ``allow_apply = apply is True and bool(self.config.auto_placement)``, and
+    ``auto_placement`` comes from the App option (``WM_AUTO_PLACEMENT``).  When
+    the message blamed "the integration options" it named a checkbox that cannot
+    enable the write, so a user who followed it still got nothing.
+
+    This is behavioural rather than a string constant: it drives the real
+    discovery path with ``apply=True`` and the flag off, and asserts nothing was
+    written as well as what the user is told.  The core is the same fixture the
+    engine-side gate tests use, so the two cannot drift apart.
+    """
+    from tests.unit.test_placement_discovery import _core
+
+    core, db, _, writes = _core(tmp_path, auto_placement=False)
+
+    result = asyncio.run(core.discover_placements(lookback_hours=24, apply=True))
+
+    assert result["applied"] is False
+    assert result["accepted"], "the fixture must be proven, or this proves nothing"
+    assert writes == []
+    assert db.load_device_configurations().devices == []
+
+    detail = result["detail"]
+    assert "App option" in detail
+    assert "auto_placement" in detail
+    assert "apply=true" in detail
+    # The old wording sent the user to a control that cannot turn this on.
+    assert "integration options" not in detail

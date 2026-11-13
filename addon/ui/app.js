@@ -2485,14 +2485,34 @@
 
   const DISCOVER_PATH = '/discover/placements';
 
-  //: Why the engine withheld a fixture, in words a person can act on.
+  //: Why the engine withheld or refused a fixture, in words a person can act on.
+  //: Keys are the engine's own codes; an unlisted code still falls back to
+  //: ``titleCase`` so a newer engine is legible rather than blank.
   const WITHHELD_REASONS = {
+    // Correlation withheld the transition evidence.
     not_discriminating: 'Its transitions do not move measured power',
     asymmetric_response: 'It responds to on and off differently',
     not_specific: 'Its transitions are not specific to one row',
     too_few_corroborations: 'Too few independent transitions to prove it',
     inconsistent_with_row: 'Its response contradicts the row it appears on',
     ambiguous_rows: 'Several rows could explain it equally well',
+    // The candidate population refused the entity outright.
+    already_declared_state_entity: 'Already configured by the user; left unchanged',
+    wattmosaic_entity: "It is WattMosaic's own output, not a load",
+    not_a_load_entity_category: 'Home Assistant marks it as a setting, not a load',
+    mode_entity: 'It is a mode control, so its state does not prove a load',
+    not_a_load_domain: 'Its state does not prove a load is running',
+  };
+
+  //: Reasons that mean "a device already carries this evidence", i.e. nothing is
+  //: wrong with the measurement -- there is simply nothing new to write.
+  //: ``already configured`` is a prefix check because the placement layer emits
+  //: "already configured by the user; left unchanged".
+  const ALREADY_DECLARED_REASON = 'already_declared_state_entity';
+
+  const isAlreadyWritten = (reason) => {
+    const text = String(reason || '').trim();
+    return text === ALREADY_DECLARED_REASON || text.startsWith('already configured');
   };
 
   function withheldReason(reason) {
@@ -2502,8 +2522,17 @@
       const ct = text.slice('co_toggles_with_another_fixture_on_'.length);
       return `It always toggles with another fixture on ${ct.replace(/_/g, ' ')}`;
     }
+    if (text.startsWith('identified_by_aggregate_fit_on_')) {
+      const ct = text.slice('identified_by_aggregate_fit_on_'.length);
+      return `Only the aggregate fit found it on ${ct.replace(/_/g, ' ')}; that is not proof of one fixture`;
+    }
     if (text.startsWith('already configured')) return 'Already configured by the user; left unchanged';
-    return WITHHELD_REASONS[text] || titleCase(text);
+    if (WITHHELD_REASONS[text]) return WITHHELD_REASONS[text];
+    // Placement refusals are already sentences written for a person
+    // ("CT row 'ct1' measures the whole installation; ...").  Only a bare
+    // single-token code needs title-casing.
+    if (/[^a-z0-9_]/.test(text)) return text;
+    return titleCase(text);
   }
 
   const discoverSlotNode = () =>
@@ -2608,6 +2637,9 @@
     const groups = Array.isArray(data.groups) ? data.groups : [];
     const withheld = data.withheld && typeof data.withheld === 'object' ? Object.entries(data.withheld) : [];
     const refused = data.refused && typeof data.refused === 'object' ? Object.entries(data.refused) : [];
+    //: Candidate-level refusals and placement-level refusals are both shown
+    //: under Withheld, so the Placed empty state has to read them together.
+    const withheldRows = withheld.concat(refused);
     const stats = data.stats || {};
     const nothing = !accepted.length && !groups.length && !withheld.length && !refused.length;
 
@@ -2633,10 +2665,30 @@
       ? applyButton({ name: 'all placements', all: true })
       : null;
 
+    /* Placed ------------------------------------------------------------ *
+     * An empty "Placed" list does not mean the evidence was thin.  On a
+     * second run every candidate a previous apply wrote is refused as
+     * ``already_declared_state_entity``, so the honest message depends on
+     * why nothing is placed.  Only claim the evidence bar was missed when
+     * no candidate was refused for already being written; when the reasons
+     * are mixed, say which is which rather than generalising either way.
+     * ------------------------------------------------------------------- */
+    const alreadyWritten = withheldRows.filter(([, reason]) => isAlreadyWritten(reason)).length;
+    const everythingWritten = alreadyWritten > 0 && alreadyWritten === withheldRows.length;
     const placed = accepted.length
       ? el('div', { class: 'discover-list' },
           accepted.map((row) => discoverPlacedRow(row)))
-      : emptyState('Nothing placed', 'No fixture met the evidence bar for a measured placement.');
+      : alreadyWritten
+        ? emptyState(
+            'Nothing new to place',
+            everythingWritten
+              ? 'Everything this window proved is already written as a device. These entries sit under Withheld because there is nothing new to add, not because the measurements were weak.'
+              : 'Every fixture this window proved is already written as a device. The other entries under Withheld did not reach the evidence bar.'
+          )
+        : emptyState(
+            'Nothing placed',
+            'No fixture reached the evidence bar for a measured placement.'
+          );
 
     body.push(
       el('section', { class: 'discover-section' }, [
@@ -2668,7 +2720,6 @@
     body.push(groupSection);
 
     /* Withheld ---------------------------------------------------------- */
-    const withheldRows = withheld.concat(refused);
     body.push(
       el('section', { class: 'discover-section' }, [
         el('div', { class: 'discover-section-head' }, [
