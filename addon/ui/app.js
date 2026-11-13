@@ -2496,6 +2496,8 @@
     too_few_corroborations: 'Too few independent transitions to prove it',
     inconsistent_with_row: 'Its response contradicts the row it appears on',
     ambiguous_rows: 'Several rows could explain it equally well',
+    no_row_responded: 'No CT row moved when it switched',
+    no_independent_transitions: 'Its transitions came in bursts, so none could be paired',
     // The candidate population refused the entity outright.
     already_declared_state_entity: 'Already configured by the user; left unchanged',
     wattmosaic_entity: "It is WattMosaic's own output, not a load",
@@ -2645,8 +2647,19 @@
 
     const body = [];
 
-    if (data.ok === false && data.detail) {
-      body.push(notice('Discovery reported a problem', String(data.detail), 'warn'));
+    // The engine answers ``ok: true`` with ``detail`` set for a *refusal*
+    // (``applied: false``: auto placement off, or ``apply`` not requested), and
+    // ``ok: false`` with ``detail`` for a hard precondition.  Both are worth
+    // showing -- a refusal is often the only explanation of why the card is
+    // empty -- so the gate is "is there a detail?" and only the tone/label
+    // change with ``ok``.  On a successful write the engine sets neither
+    // ``detail`` nor ``total_detail``, so this notice does not appear.
+    if (data.detail) {
+      body.push(
+        data.ok === false
+          ? notice('Discovery reported a problem', String(data.detail), 'bad')
+          : notice('Nothing written yet', String(data.detail), 'warn')
+      );
     }
 
     if (nothing) {
@@ -2683,8 +2696,8 @@
         ? emptyState(
             'Nothing new to place',
             everythingWritten
-              ? 'Everything this window proved is already written as a device. These entries sit under Withheld because there is nothing new to add, not because the measurements were weak.'
-              : 'Every fixture this window proved is already written as a device. Nothing new was placed; see Withheld for why each other entry was left out.'
+              ? 'The fixtures already written as devices are refused as duplicates, so nothing new was placed. They sit under Withheld because there is nothing new to add.'
+              : 'Each fixture already written as a device is refused as a duplicate, so nothing new was placed; see Withheld for why each other entry was left out.'
           )
         : emptyState(
             'Nothing placed',
@@ -2748,6 +2761,78 @@
     });
   }
 
+  //: How many ``<entity>: <reason>`` notes are listed by name before the footer
+  //: groups them by reason instead.  Production returns about 25, which is over
+  //: 1600 characters of footer nobody reads.
+  const NOTE_DETAIL_LIMIT = 4;
+
+  /**
+   * Split an engine note into ``{entity, reason}`` when it is an entity note.
+   *
+   * ``main.py`` appends two shapes to ``notes``: ``<entity_id>: <reason>`` from
+   * the correlation report, and free prose for the truncation and refusal
+   * counts.  Matching the entity id as ``domain.object_id`` is what keeps a
+   * colon inside a sentence from being read as an entity note.  Returns
+   * ``null`` for prose, which the caller passes through verbatim.
+   */
+  function splitEntityNote(note) {
+    const text = String(note == null ? '' : note);
+    const at = text.indexOf(': ');
+    if (at < 0) return null;
+    const entity = text.slice(0, at).trim();
+    const reason = text.slice(at + 2).trim();
+    // An engine entity id is ``domain.object_id`` with no whitespace, so prose
+    // such as "12 state entities are not candidates (...)" can never be read as
+    // an entity note merely because it contains a colon.
+    if (!/^[a-z0-9_]+\.[a-z0-9_]+$/.test(entity)) return null;
+    // ``/[^a-z0-9_]/`` is the same bare-code test ``withheldReason`` uses: a
+    // reason containing any other character is already a sentence, and
+    // title-casing it would mangle it.
+    if (!reason || /[^a-z0-9_]/.test(reason)) return null;
+    return { entity, reason };
+  }
+
+  /**
+   * The footer's engine-note text: no raw enum, and short enough to read.
+   *
+   * A few entity notes are listed one per line ("light.hall: Too few
+   * independent transitions to prove it"); many are grouped by reason with a
+   * count, which still states exactly how many entries each reason covered.
+   * Prose notes pass through untouched and are never title-cased.
+   */
+  function discoveryNoteText(notes) {
+    const entityNotes = [];
+    const prose = [];
+    for (const note of notes) {
+      const parsed = splitEntityNote(note);
+      if (parsed) entityNotes.push(parsed);
+      else prose.push(String(note));
+    }
+
+    const segments = [];
+    if (entityNotes.length && entityNotes.length <= NOTE_DETAIL_LIMIT) {
+      segments.push(
+        entityNotes
+          .map(({ entity, reason }) => `${entity}: ${withheldReason(reason)}`)
+          .join('; ')
+      );
+    } else if (entityNotes.length) {
+      const counts = new Map();
+      for (const { reason } of entityNotes) {
+        const phrase = withheldReason(reason);
+        counts.set(phrase, (counts.get(phrase) || 0) + 1);
+      }
+      const grouped = Array.from(counts, ([phrase, count]) => [phrase, count])
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .map(([phrase, count]) => `${phrase} (${count})`);
+      segments.push(
+        `${entityNotes.length} entries not placed, by reason: ${grouped.join('; ')}`
+      );
+    }
+    segments.push(...prose);
+    return `Engine notes: ${segments.join('; ')}`;
+  }
+
   function discoveryFoot(data, stats) {
     const parts = [];
     if (stats.candidate_entities !== undefined) {
@@ -2757,7 +2842,7 @@
     if (data.lookback_hours !== undefined) parts.push(`last ${num(data.lookback_hours, 0)}h`);
     if (data.topology_version !== undefined) parts.push(`topology v${data.topology_version}`);
     const notes = Array.isArray(data.notes) ? data.notes : [];
-    parts.push(notes.length ? `Engine notes: ${notes.join(' ')}` : 'Analysing writes nothing.');
+    parts.push(notes.length ? discoveryNoteText(notes) : 'Analysing writes nothing.');
     return parts.join(' · ');
   }
 
@@ -2832,14 +2917,45 @@
           // browser would be a second placement decision.  So both the per-row
           // and the Apply-all button write the proven set, and the toast says so
           // instead of claiming only one device changed.
-          await post(DISCOVER_PATH, { apply: true });
-          notify(
-            'Placements applied',
-            row && row.all
-              ? 'The engine wrote every proven placement and re-projected the topology.'
-              : `The engine wrote every proven placement, including ${row.name || row.entity_id}, and re-projected the topology.`
-          );
-          state.discover = { data: null, running: false, error: null };
+          //
+          // A 2xx does *not* mean a write: a refusal comes back ``ok: true``
+          // with ``applied: false`` and a ``detail`` (auto placement disabled,
+          // apply not requested).  Claiming "applied" there is a false success,
+          // so the toast is chosen by the flag, not by the HTTP status.
+          const result = await post(DISCOVER_PATH, { apply: true });
+          if (result && result.applied === true) {
+            notify(
+              'Placements applied',
+              isAll
+                ? 'The engine wrote every proven placement and re-projected the topology.'
+                : `The engine wrote every proven placement, including ${row.name || row.entity_id}, and re-projected the topology.`
+            );
+            // The cached analysis is now stale: the written rows carry
+            // ``applied``, so re-showing the old answer would misreport them.
+            state.discover = { data: null, running: false, error: null };
+          } else {
+            // Say only what happened: the call returned no write.  Relay the
+            // engine's own explanation (it names the switch to turn on) and add
+            // the one mechanical fact -- nothing changed.
+            const raw = result && result.detail ? String(result.detail).trim() : '';
+            const detail = raw
+              ? `${raw.charAt(0).toUpperCase()}${raw.slice(1).replace(/[.\s]+$/, '')}. `
+              : '';
+            notify(
+              'Nothing changed',
+              `${detail}No placement was made; the topology is unchanged.`,
+              'warn'
+            );
+            // Nothing was written, so the analysis on the card is still the
+            // current one: keep it (and its explanation) rather than blanking
+            // the panel after a refusal.  Reset the button in case this render
+            // does not reach the discover slot.
+            armed = false;
+            button.disabled = false;
+            button.dataset.armed = 'false';
+            button.textContent = idle;
+            state.discover = { ...state.discover, running: false };
+          }
           render();
         } catch (err) {
           notify('Could not apply placement', describeError(err), 'bad');

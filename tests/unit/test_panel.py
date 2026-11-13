@@ -384,7 +384,6 @@ def test_placed_empty_state_does_not_blame_the_evidence_bar_unconditionally() ->
     # The evidence-bar claim survives only as the conservative fallback for
     # when no reason says "already written", and the old unconditional sentence
     # is gone.
-    assert "Everything this window proved is already written" in script
     assert "No fixture reached the evidence bar for a measured placement." in script
     assert "No fixture met the evidence bar for a measured placement." not in script
     # The mixed branch (some already written, some not) must not excuse the
@@ -403,4 +402,111 @@ def test_placed_empty_state_does_not_blame_the_evidence_bar_unconditionally() ->
     assert "evidence bar" not in mixed["mixed"], (
         "the mixed branch blames the evidence bar for rows that were never measured"
     )
+
+
+def test_already_written_empty_states_do_not_claim_a_measurement() -> None:
+    """Neither branch may say the run *proved* the fixtures it skipped.
+
+    An already-declared entity is refused at the candidate layer, before any
+    measurement, so "everything this window proved is already written" was
+    vacuously true and implied a re-proof that never happened.  The mechanical
+    fact (a duplicate refusal) is what the copy may state.  This is a
+    source-shape guard, not a rendering test.
+    """
+    script = _app_js()
+    assert "this window proved" not in script, (
+        "the empty state claims the window re-proved rows that were refused "
+        "before measurement"
+    )
+    mixed = re.search(
+        r"everythingWritten\s*\?\s*'(?P<all>[^']*)'\s*:\s*'(?P<mixed>[^']*)'",
+        script,
+    )
+    assert mixed is not None, "the everythingWritten ternary is gone"
+    for arm in (mixed["all"], mixed["mixed"]):
+        assert "duplicate" in arm, "the empty state does not state the mechanical refusal"
+        assert "proved" not in arm
+        assert "measured" not in arm
+
+
+# --------------------------------------------------------------------------- #
+# Discover-card honesty: apply toasts, refusal detail, and the notes footer
+# --------------------------------------------------------------------------- #
+
+
+def test_apply_toast_is_branched_on_the_applied_flag() -> None:
+    """A 2xx is not a write, so the toast must read ``applied`` first.
+
+    The engine answers a refusal with ``ok: true`` / ``applied: false`` / a
+    ``detail``, and ``post()`` resolves for any 2xx.  Unconditionally toasting
+    "Placements applied" therefore claimed a write that never happened.
+    Source-shape guard only: it does not execute the button.
+    """
+    script = _app_js()
+    handler = re.search(
+        r"const result = await post\(DISCOVER_PATH, \{ apply: true \}\);(?P<body>.*?)\n        \} catch",
+        script,
+        re.DOTALL,
+    )
+    assert handler is not None, "the apply handler no longer inspects the response"
+    body = handler.group("body")
+    assert "result.applied === true" in body, (
+        "the success toast must be conditioned on applied === true"
+    )
+    # The success text exists, but only inside the applied branch.
+    applied_branch = body[body.index("result.applied === true") :]
+    assert "'Placements applied'" in applied_branch
+    assert "The engine wrote every proven placement" in applied_branch
+    # The refusal branch says nothing about a write and relays ``detail``.
+    refusal = applied_branch[applied_branch.index("} else {") :]
+    assert "Nothing changed" in refusal
+    assert "result.detail" in refusal
+    for word in ("Placements applied", "wrote", "re-projected"):
+        assert word not in refusal, f"the refusal toast claims {word!r}"
+
+
+def test_detail_notice_is_not_gated_on_ok_false() -> None:
+    """A refusal is ``ok: true``, so gating the explanation on ``ok === false``
+    hid the one message that names the switch to turn on."""
+    script = _app_js()
+    assert "if (data.ok === false && data.detail)" not in script, (
+        "the detail notice is still unreachable for an ``ok: true`` refusal"
+    )
+    assert "if (data.detail)" in script
+    # Tone follows ``ok``: a real problem is an error, a refusal is advisory.
+    assert (
+        "data.ok === false\n          ? notice('Discovery reported a problem', "
+        "String(data.detail), 'bad')"
+    ) in script
+    assert "notice('Nothing written yet', String(data.detail), 'warn')" in script
+
+
+def test_engine_notes_are_phrased_not_joined_raw() -> None:
+    """The footer used to join ~25 ``entity: code`` notes verbatim.
+
+    That printed ``too_few_corroborations`` and friends in the most visible
+    place on the card.  ``withheldReason`` already has a human phrasing for
+    them, so the note formatter must route through it and must not simply
+    ``notes.join(' ')``.  Source-shape guard.
+    """
+    script = _app_js()
+    assert "`Engine notes: ${notes.join(' ')}`" not in script, (
+        "the footer still joins raw reason codes"
+    )
+    formatter = script[
+        script.index("function splitEntityNote(") : script.index(
+            "function discoveryFoot("
+        )
+    ]
+    assert "withheldReason(reason)" in formatter, (
+        "the note formatter must phrase through withheldReason"
+    )
+    # Prose notes are passed through, decided by the same bare-code test
+    # withheldReason uses -- a sentence must not be title-cased.
+    assert "/[^a-z0-9_]/.test(reason)" in formatter
+    assert "const parsed = splitEntityNote(note)" in formatter
+    # Many notes are grouped by reason with counts instead of dumped.
+    assert "NOTE_DETAIL_LIMIT" in formatter
+    assert "not placed, by reason" in formatter
+
 
