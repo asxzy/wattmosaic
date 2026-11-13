@@ -2663,10 +2663,24 @@
     }
 
     if (nothing) {
-      body.push(emptyState(
-        'No shared circuits could be resolved',
-        'The engine compared every fixture transition it has with every branch CT row and found nothing it could prove. That is a measurement result, not an error.'
-      ));
+      // Empty collections mean two different things and only ``ok`` tells them
+      // apart.  An ``ok: false`` response is a hard precondition -- with no
+      // active topology the engine answers "no topology to place devices on"
+      // before it reads a single transition, so every list comes back empty.
+      // That looks exactly like a completed run that proved nothing, but the
+      // comparison never happened, so only ``ok: true`` may describe one.
+      if (data.ok === false) {
+        body.push(emptyState(
+          'Discovery could not run',
+          'The engine stopped before reading any fixture transition, so nothing was analysed and no placement was computed.'
+            + (data.detail ? ' The notice above names the precondition.' : '')
+        ));
+      } else {
+        body.push(emptyState(
+          'No shared circuits could be resolved',
+          'The engine compared every fixture transition it has with every branch CT row and found nothing it could prove. That is a measurement result, not an error.'
+        ));
+      }
       return card('Discover devices', body, {
         id: 'topology-discover',
         foot: discoveryFoot(data, stats),

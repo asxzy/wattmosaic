@@ -13,6 +13,11 @@ the interesting behaviours are:
 ``_peer_trusted`` requires both the Supervisor IP **and** the identity header
 that only the ingress proxy adds, so the tests rewrite ``TRUSTED_IPS`` to
 ``127.0.0.1`` (the test client's peer address) rather than spoofing an IP.
+
+The Discover-card copy has no JS test harness: ``addon/ui/app.js`` is a browser
+script with no module seam, so those tests read the shipped source and pin its
+shape (the same static approach ``tools/dev/check_panel.py`` uses).  They are
+drift guards for user-visible wording, not rendering tests.
 """
 
 from __future__ import annotations
@@ -532,6 +537,58 @@ def test_hard_precondition_sentence_is_not_repeated_in_the_footer() -> None:
     assert "String(note) === String(data.detail)" in footer, (
         "the footer does not drop a note that repeats the detail notice"
     )
+
+
+def test_all_empty_discovery_does_not_claim_a_measurement_when_it_could_not_run() -> None:
+    """An ``ok: false`` run must not be described as a comparison.
+
+    ``POST /api/v1/discover/placements`` answers a hard precondition (no active
+    topology) with ``ok: false``, ``detail`` "no topology to place devices on"
+    and *every* collection empty.  That is indistinguishable from a run that
+    finished and proved nothing by looking at the lists alone, so the card used
+    to say the engine "compared every fixture transition ... and found nothing
+    it could prove. That is a measurement result".  With no topology the engine
+    returns before it reads a transition, so that sentence claims a measurement
+    that never happened.  The empty state must branch on ``ok``.
+
+    Source-shape guard only: this panel has no JS test harness, so the branch is
+    pinned statically, like the other guards in this module.
+    """
+    script = _app_js()
+    start = script.index("if (nothing) {")
+    end = script.index("return card('Discover devices', body, {", start)
+    block = script[start:end]
+    arms = re.search(
+        r"if \(data\.ok === false\) \{(?P<hard>.*?)\n      \} else \{(?P<ran>.*?)\n      \}",
+        block,
+        re.DOTALL,
+    )
+    assert arms is not None, (
+        "the all-empty empty state no longer branches on ok, so a hard "
+        "precondition renders the measurement verdict again"
+    )
+    hard, ran = arms["hard"], arms["ran"]
+    assert "'Discovery could not run'" in hard
+    for claim in (
+        "found nothing it could prove",
+        "measurement result",
+        "compared",
+        "measured",
+    ):
+        assert claim not in hard, (
+            f"the ok:false empty state still claims a measurement ({claim!r})"
+        )
+    # The reason lives in the notice above; repeating the sentence is the
+    # duplicate ``discoveryFoot`` already filters out of the footer.  Compare
+    # rendered strings only: the branch's own comments quote the engine detail.
+    rendered = "\n".join(
+        line for line in block.splitlines() if not line.strip().startswith("//")
+    )
+    assert "no topology to place devices on" not in rendered
+    # A completed run that proved nothing keeps its accurate wording.
+    assert "'No shared circuits could be resolved'" in ran
+    assert "found nothing it could prove" in ran
+    assert "measurement result" in ran
 
 
 def test_engine_notes_are_phrased_not_joined_raw() -> None:
