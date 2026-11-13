@@ -387,4 +387,20 @@ def test_placed_empty_state_does_not_blame_the_evidence_bar_unconditionally() ->
     assert "Everything this window proved is already written" in script
     assert "No fixture reached the evidence bar for a measured placement." in script
     assert "No fixture met the evidence bar for a measured placement." not in script
+    # The mixed branch (some already written, some not) must not excuse the
+    # remainder with the evidence bar.  On a real 24 h response only 3 of 759
+    # withheld+refused rows were previously applied fixtures; the rest were
+    # ``mode_entity`` / ``not_a_load_*`` / ``wattmosaic_entity`` refusals that
+    # were never load candidates, so they were never measured and cannot have
+    # missed a bar.  Pin the branch by the false arm of the
+    # ``everythingWritten`` ternary, which only exists for the mixed case.
+    mixed = re.search(
+        r"everythingWritten\s*\?\s*'(?P<all>[^']*)'\s*:\s*'(?P<mixed>[^']*)'",
+        script,
+    )
+    assert mixed is not None, "the everythingWritten ternary is gone"
+    assert "already written as a device" in mixed["mixed"]
+    assert "evidence bar" not in mixed["mixed"], (
+        "the mixed branch blames the evidence bar for rows that were never measured"
+    )
 

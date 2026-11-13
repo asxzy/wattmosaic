@@ -2660,7 +2660,6 @@
       });
     }
 
-    /* Placed ------------------------------------------------------------ */
     const applyAll = accepted.length && !accepted.every((row) => row.applied)
       ? applyButton({ name: 'all placements', all: true })
       : null;
@@ -2671,7 +2670,9 @@
      * ``already_declared_state_entity``, so the honest message depends on
      * why nothing is placed.  Only claim the evidence bar was missed when
      * no candidate was refused for already being written; when the reasons
-     * are mixed, say which is which rather than generalising either way.
+     * are mixed, claim only that the proved fixtures are already written and
+     * let Withheld speak for itself -- the remaining rows were often never
+     * measured at all, so they cannot have missed a measurement bar.
      * ------------------------------------------------------------------- */
     const alreadyWritten = withheldRows.filter(([, reason]) => isAlreadyWritten(reason)).length;
     const everythingWritten = alreadyWritten > 0 && alreadyWritten === withheldRows.length;
@@ -2683,7 +2684,7 @@
             'Nothing new to place',
             everythingWritten
               ? 'Everything this window proved is already written as a device. These entries sit under Withheld because there is nothing new to add, not because the measurements were weak.'
-              : 'Every fixture this window proved is already written as a device. The other entries under Withheld did not reach the evidence bar.'
+              : 'Every fixture this window proved is already written as a device. Nothing new was placed; see Withheld for why each other entry was left out.'
           )
         : emptyState(
             'Nothing placed',
