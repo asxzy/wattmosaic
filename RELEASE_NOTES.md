@@ -1,5 +1,74 @@
 # Release Notes
 
+## v0.2.1-dev.22 — 2026-11-12 (development channel)
+
+The Discover card no longer claims things that did not happen. Verification on
+`dev.21` found one serious false success and three places where the card hid or
+mangled the engine's own explanation. **No measurement, threshold, or fitted
+wattage changes in this release; nothing is placed or withheld differently.**
+
+### Apply said "Placements applied" when it had written nothing
+
+The Apply button treated any HTTP 2xx as a write:
+
+```js
+await post(DISCOVER_PATH, { apply: true });
+notify('Placements applied', 'The engine wrote every proven placement ...');
+```
+
+But a refusal is a **200 with `applied: false`** — the engine also returns a
+`detail` explaining the refusal. With the App option off, pressing Apply told
+the user the engine had written every proven placement, when it had written
+nothing and the topology was unchanged. That is the worst kind of lie this panel
+can tell: it reports a mutation of the user's house that did not occur.
+
+The toast is now chosen by `applied`, not by the status code. A real write keeps
+the existing wording (including the honest "the engine writes the proven set
+together" for the per-row button). A refusal now says **"Nothing changed"**,
+relays the engine's explanation, and adds the one mechanical fact: no placement
+was made and the topology is unchanged.
+
+### The explanation was unreachable
+
+The card only rendered `detail` when `ok === false`, but a refusal comes back
+`ok: true` with `detail` set — so the one message that tells the user which
+switch to turn on was never displayed. With the option off the card showed an
+empty result and no reason at all. It now shows `detail` whenever it is present,
+with the tone following `ok`: a hard precondition reads as a problem, a refusal
+as an explanation. A successful apply sets no `detail`, so it cannot sprout a
+spurious notice.
+
+### Raw reason codes in the footer
+
+The card footer printed the engine's `notes` verbatim, which on production was 25
+raw strings:
+
+```
+Engine notes: light.double_garage: too_few_corroborations light.exterior_exterior_front_fixture: too_few_corroborations ...
+```
+
+Entity notes are now phrased with the same table the Withheld rows use, and when
+there are many they are grouped by reason with a count, which still states
+exactly how many entries each reason covered:
+
+```
+Engine notes: 24 entries not placed, by reason: Too few independent transitions
+to prove it (15); Several rows could explain it equally well (6); ...
+```
+
+Prose notes — the `max_candidates` truncation, panel and alias notes — pass
+through untouched, because a count is accurate where title-casing a sentence
+would not be.
+
+### "Already written" no longer implies a fresh proof
+
+Both empty-state messages said the fixtures this window *proved* were already
+written. An already-declared entity is refused at the candidate layer **before
+any measurement**, so in the real run those fixtures were never measured in that
+window. The wording now states the mechanical fact — they are refused as
+duplicates, so nothing new was placed — and makes no claim either way about
+whether a measurement happened.
+
 ## v0.2.1-dev.21 — 2026-11-12 (development channel)
 
 The Discover card now explains itself correctly in every state. Three messages
