@@ -1,5 +1,49 @@
 # Release Notes
 
+## v0.2.1-dev.23 — 2026-11-12 (development channel)
+
+`dev.22` fixed a false success on Apply and, in doing so, introduced a false
+alarm. This release corrects that and two further messages that described a
+measurement nobody made. **No measurement, threshold, or fitted wattage changes;
+nothing is placed or withheld differently.**
+
+### Discover warned about a write nobody asked for
+
+`dev.22` made the card show the engine's `detail` whenever it was present, to
+stop hiding a refusal. But the ordinary **Discover** button is a read-only
+request, and the engine answers *any* read-only run that found something with
+
+```json
+{"ok": true, "applied": false, "accepted": [ ... ],
+ "detail": "apply is false; pass apply=true to write these placements"}
+```
+
+So every successful discovery warned **"Nothing written yet — apply is false"**.
+The user had not attempted a write; they had pressed Discover. A normal analysis
+looked like something went wrong.
+
+The card notice is back to the hard-precondition case only (`ok: false`, where
+the run produced no result at all). A refusal explanation belongs to the apply
+action that can actually hit it, and `dev.22` already put it there: pressing
+Apply with the option off says **"Nothing changed"** and relays the switch to
+turn on. Nothing is lost — a refusal can only happen when at least one placement
+was accepted, so the Apply button is always on screen when that message exists.
+
+### "No topology" claimed a comparison that never ran
+
+With no active topology the engine answers `ok: false` before reading a single
+transition, and every collection in the response is empty. That is
+indistinguishable from a completed run that proved nothing — except by `ok`. The
+card treated both the same and said *"The engine compared every fixture
+transition it has with every branch CT row and found nothing it could prove. That
+is a measurement result, not an error."* Nothing had been compared.
+
+The two states now read differently: a hard precondition says discovery could
+not run and why; only an `ok: true` run may describe a completed comparison. The
+precondition's sentence also appeared twice on the card — once as the notice and
+once in the engine notes — so the footer drops a note identical to the detail it
+already showed.
+
 ## v0.2.1-dev.22 — 2026-11-12 (development channel)
 
 The Discover card no longer claims things that did not happen. Verification on

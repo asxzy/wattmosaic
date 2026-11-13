@@ -20,7 +20,7 @@
 #   auto_placement         -> WM_AUTO_PLACEMENT
 
 name: "WattMosaic Engine"
-version: "0.2.1-dev.22"
+version: "0.2.1-dev.23"
 slug: "wattmosaic_engine"
 description: >-
   Multi-CT load disaggregation engine for WattMosaic. Learns device-level power
