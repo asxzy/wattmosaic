@@ -465,20 +465,73 @@ def test_apply_toast_is_branched_on_the_applied_flag() -> None:
         assert word not in refusal, f"the refusal toast claims {word!r}"
 
 
-def test_detail_notice_is_not_gated_on_ok_false() -> None:
-    """A refusal is ``ok: true``, so gating the explanation on ``ok === false``
-    hid the one message that names the switch to turn on."""
+def test_detail_notice_is_gated_on_a_hard_precondition() -> None:
+    """Only ``ok: false`` may put ``detail`` on the card.
+
+    ``e1448a8`` widened this gate to "is there a detail?", which made every
+    ordinary read-only Discover that found a fixture render
+    "Nothing written yet -- apply is false; pass apply=true ...".  The user
+    pressed Discover; they never attempted a write, so a warning about not
+    having written is a false alarm.  A refusal is ``ok: true`` /
+    ``applied: false`` and its explanation belongs to the Apply toast (pinned
+    by ``test_apply_toast_is_branched_on_the_applied_flag``), which is the only
+    place the user can learn which switch to turn on.
+    Source-shape guard only: there is no JS test harness for this panel.
+    """
     script = _app_js()
-    assert "if (data.ok === false && data.detail)" not in script, (
-        "the detail notice is still unreachable for an ``ok: true`` refusal"
+    assert "if (data.ok === false && data.detail)" in script, (
+        "the card notice must fire only for a hard precondition"
     )
-    assert "if (data.detail)" in script
-    # Tone follows ``ok``: a real problem is an error, a refusal is advisory.
-    assert (
-        "data.ok === false\n          ? notice('Discovery reported a problem', "
-        "String(data.detail), 'bad')"
-    ) in script
-    assert "notice('Nothing written yet', String(data.detail), 'warn')" in script
+    assert "if (data.detail) {" not in script, (
+        "the card notice is ungated again, so a read-only refusal warns"
+    )
+    assert "notice('Nothing written yet'" not in script, (
+        "a refusal is rendered on the analysis card instead of the apply toast"
+    )
+    assert "notice('Discovery reported a problem', String(data.detail), 'bad')" in script
+
+
+def test_refusal_detail_reaches_the_user_through_the_apply_toast() -> None:
+    """Gating the card must not drop the refusal explanation.
+
+    The only way to learn "auto placement is disabled: turn on the
+    'auto_placement' App option" is the apply toast, because the engine only
+    emits that sentence when a write was attempted.  The toast must relay
+    ``detail`` and must not claim anything was written.
+    """
+    script = _app_js()
+    handler = re.search(
+        r"const result = await post\(DISCOVER_PATH, \{ apply: true \}\);(?P<body>.*?)\n        \} catch",
+        script,
+        re.DOTALL,
+    )
+    assert handler is not None, "the apply handler no longer inspects the response"
+    body = handler.group("body")
+    refusal = body[body.index("} else {") :]
+    assert "result.detail" in refusal, "the refusal toast does not relay the engine's detail"
+    assert "Nothing changed" in refusal
+    assert "No placement was made; the topology is unchanged." in refusal
+    # The card keeps the prior analysis after a refusal, so the toast is the
+    # only surface for the explanation -- it must not be blanked or blank-capable.
+    assert "state.discover = { ...state.discover, running: false }" in body, (
+        "a refusal must keep the analysis on the card, not blank it"
+    )
+    for word in ("Placements applied", "wrote", "re-projected"):
+        assert word not in refusal, f"the refusal toast claims {word!r}"
+
+
+def test_hard_precondition_sentence_is_not_repeated_in_the_footer() -> None:
+    """``ok: false`` carries its sentence in both ``detail`` and ``notes``.
+
+    The notice renders ``detail``; the footer renders ``notes``.  Without a
+    dedupe the card shows "no topology to place devices on" twice, once as an
+    error and once as an engine note.
+    """
+    script = _app_js()
+    footer = script[script.index("function discoveryFoot(") : script.index("function discoverPlacedRow(")]
+    assert "String(note) === String(data.detail)" in footer, (
+        "the footer does not drop a note that repeats the detail notice"
+    )
 
 
 def test_engine_notes_are_phrased_not_joined_raw() -> None:

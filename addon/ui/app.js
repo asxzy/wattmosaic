@@ -2647,19 +2647,19 @@
 
     const body = [];
 
-    // The engine answers ``ok: true`` with ``detail`` set for a *refusal*
-    // (``applied: false``: auto placement off, or ``apply`` not requested), and
-    // ``ok: false`` with ``detail`` for a hard precondition.  Both are worth
-    // showing -- a refusal is often the only explanation of why the card is
-    // empty -- so the gate is "is there a detail?" and only the tone/label
-    // change with ``ok``.  On a successful write the engine sets neither
-    // ``detail`` nor ``total_detail``, so this notice does not appear.
-    if (data.detail) {
-      body.push(
-        data.ok === false
-          ? notice('Discovery reported a problem', String(data.detail), 'bad')
-          : notice('Nothing written yet', String(data.detail), 'warn')
-      );
+    // Only a hard precondition (``ok: false``, e.g. "no topology to place
+    // devices on") belongs on this card: the run produced no result at all.
+    //
+    // A refusal is different: the engine answers ``ok: true`` with
+    // ``applied: false`` and a ``detail`` ("auto placement is disabled...", or
+    // "apply is false; pass apply=true...").  That detail is produced by a
+    // *read-only* run as well, so rendering it here made every ordinary
+    // Discover that found anything warn "Nothing written yet" -- a write the
+    // user never asked for.  The refusal explanation belongs to the Apply
+    // action that can actually hit it, where the toast relays it; see
+    // ``applyButton``.
+    if (data.ok === false && data.detail) {
+      body.push(notice('Discovery reported a problem', String(data.detail), 'bad'));
     }
 
     if (nothing) {
@@ -2841,8 +2841,16 @@
     if (stats.branch_rows !== undefined) parts.push(`${stats.branch_rows} branch rows`);
     if (data.lookback_hours !== undefined) parts.push(`last ${num(data.lookback_hours, 0)}h`);
     if (data.topology_version !== undefined) parts.push(`topology v${data.topology_version}`);
-    const notes = Array.isArray(data.notes) ? data.notes : [];
-    parts.push(notes.length ? discoveryNoteText(notes) : 'Analysing writes nothing.');
+    const notes = (Array.isArray(data.notes) ? data.notes : [])
+      // A hard precondition repeats its sentence in both ``detail`` and
+      // ``notes`` (e.g. "no topology to place devices on"), and the notice
+      // above already shows it.  Printing it again as an engine note is the
+      // same sentence twice on one card.
+      .filter((note) => !(data.detail && String(note) === String(data.detail)));
+    // With every note deduped there is nothing to report; "Analysing writes
+    // nothing" would be a claim about a run that never analysed.
+    if (notes.length) parts.push(discoveryNoteText(notes));
+    else if (!data.detail) parts.push('Analysing writes nothing.');
     return parts.join(' · ');
   }
 
