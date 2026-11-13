@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wattmosaic-engine"
-version = "0.2.1-dev.20"
+version = "0.2.1-dev.21"
 description = "WattMosaic load disaggregation engine: multi-CT home energy inference and self-learning"
 readme = "README.md"
 requires-python = ">=3.11"

@@ -1,5 +1,69 @@
 # Release Notes
 
+## v0.2.1-dev.21 — 2026-11-12 (development channel)
+
+The Discover card now explains itself correctly in every state. Three messages
+were false after `dev.20` began writing devices, and one of them was made false
+by `dev.20` itself. **No measurement, threshold, or fitted wattage changes in
+this release; nothing new is placed or withheld.**
+
+### The refusal named a switch that cannot enable it
+
+`dev.20` exposed `auto_placement` as an App option, because the engine requires
+two independent consents before it writes:
+
+```python
+allow_apply = apply is True and bool(self.config.auto_placement)
+```
+
+The refusal message still said
+
+```
+auto placement is disabled in the integration options; enable it ...
+```
+
+which points at the integration's checkbox. That checkbox only supplies the
+first consent (`apply`); it cannot turn on the engine's flag, so following the
+instruction never worked. The message now names both consents and where the one
+that gates the write actually lives: the `auto_placement` App option, plus
+`apply=true` in the request.
+
+### "Nothing placed" blamed the evidence when the answer was "already written"
+
+Applying writes devices. Run discovery again and those fixtures are correctly
+refused as `already_declared_state_entity` — the engine will not create the same
+device twice — so **Placed** is empty even though the evidence was perfect. The
+card said *"No fixture met the evidence bar for a measured placement"*, which is
+false in exactly the case where the feature worked.
+
+The empty state now reads the reasons. When everything this window proved is
+already written it says so; when the reasons are mixed it claims only that fact
+and points at Withheld. The old wording survives as the conservative fallback
+for an engine that reports nothing recognisable, so an older engine still reads
+correctly.
+
+One further overstatement came out of measuring the real response rather than
+reasoning about it: the mixed case had said the *other* rows "did not reach the
+evidence bar". On production those 759 rows are 3 already-written fixtures and
+756 refusals that were never load candidates at all — plain automations, and
+entities Home Assistant marks `config` or `diagnostic`. They were never
+measured, so they cannot have missed a measurement bar. The mixed case now makes
+no measurement claim about them and defers to each row's own reason.
+
+### Raw reason codes no longer reach the screen
+
+Withheld rows rendered `already_declared_state_entity` as **"Already Declared
+State Entity"**. The candidate-refusal codes now read as sentences — a mode
+control, a setting rather than a load, the integration's own output, an entity
+already configured — and the parameterised `identified_by_aggregate_fit_on_<ct>`
+names its circuit. A genuinely unknown future code still falls back to title
+case, so a newer engine stays legible instead of showing a blank.
+
+These are copy changes: which candidates are accepted, which are withheld, and
+every fitted wattage are untouched. A drift guard compares the panel's phrasing
+table against the engine's reason constants, so a new refusal code cannot ship
+unexplained.
+
 ## v0.2.1-dev.20 — 2026-11-12 (development channel)
 
 The Discover card can now actually create the devices it finds. It has been able
