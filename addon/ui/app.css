@@ -672,6 +672,30 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 
 .discover-slot .card-body { padding-bottom: 14px; }
 
+/* The window control sits next to the Discover button in the page head.  It is
+   deliberately quiet: the button is the action, this is context. */
+.discover-window {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 12px; color: var(--text-mute);
+}
+.discover-window-label {
+  font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+}
+.discover-window-select {
+  font: inherit; font-size: 13px; color: var(--text);
+  background: var(--bg-elev-2); border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm); padding: 7px 9px; cursor: pointer;
+}
+.discover-window-select:hover { background: var(--line); }
+.discover-window-select[disabled] { opacity: .5; cursor: not-allowed; }
+
+/* The long-window wait: the spinner is the liveness (CSS-only animation, kept
+   from the shared ``.spinner`` rule) and the elapsed clock counts real time, so
+   a two-minute run never looks dead.  No percentage is shown because the engine
+   sends nothing until it is done. */
+.discover-long-note { margin-bottom: 10px; }
+.discover-elapsed { font-variant-numeric: tabular-nums; }
+
 .discover-section + .discover-section {
   margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line);
 }

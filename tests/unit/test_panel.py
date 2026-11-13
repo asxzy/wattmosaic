@@ -449,7 +449,7 @@ def test_apply_toast_is_branched_on_the_applied_flag() -> None:
     """
     script = _app_js()
     handler = re.search(
-        r"const result = await post\(DISCOVER_PATH, \{ apply: true \}\);(?P<body>.*?)\n        \} catch",
+        r"const result = await post\(DISCOVER_PATH, \{.*?\}\);(?P<body>.*?)\n        \} catch",
         script,
         re.DOTALL,
     )
@@ -506,7 +506,7 @@ def test_refusal_detail_reaches_the_user_through_the_apply_toast() -> None:
     """
     script = _app_js()
     handler = re.search(
-        r"const result = await post\(DISCOVER_PATH, \{ apply: true \}\);(?P<body>.*?)\n        \} catch",
+        r"const result = await post\(DISCOVER_PATH, \{.*?\}\);(?P<body>.*?)\n        \} catch",
         script,
         re.DOTALL,
     )
@@ -620,3 +620,225 @@ def test_engine_notes_are_phrased_not_joined_raw() -> None:
     assert "not placed, by reason" in formatter
 
 
+# --------------------------------------------------------------------------- #
+# Discover-card window selector
+#
+# ``addon/ui/app.js`` is a browser script with no module seam, so there is no JS
+# unit harness to call ``discoverWindow()`` (the same reason every guard in this
+# module reads the source).  These are static drift guards: they pin that the
+# request body carries a *selected* window, that a long option exists, and that
+# the write path reuses the window the reviewed run used.  Rendering, the
+# ``<select>`` itself, and the elapsed clock are not executed here.
+# --------------------------------------------------------------------------- #
+
+
+def _discover_window_options() -> list[tuple[int, str]]:
+    """The ``(hours, label)`` pairs of the panel's ``DISCOVER_WINDOWS`` table.
+
+    Parsed statically for the same reason as ``_withheld_reason_keys``.  It
+    fails loudly if the table is reshaped, because the guards below lean on the
+    options actually shipped rather than a restated copy.
+    """
+    script = _app_js()
+    block = re.search(
+        r"const DISCOVER_WINDOWS = Object\.freeze\(\[(.*?)\n  \]\);",
+        script,
+        re.DOTALL,
+    )
+    assert block is not None, "DISCOVER_WINDOWS table not found in app.js"
+    return [
+        (int(hours), label)
+        for hours, label in re.findall(
+            r"\{ hours: (\d+), label: '([^']*)'", block.group(1)
+        )
+    ]
+
+
+def test_discover_window_options_cover_the_useful_windows() -> None:
+    """The card must offer the long windows, not just the 24 h default.
+
+    On production a 24 h window found 0 groups on light CTs, 48 h found 10 and
+    168 h found 60.  Without a long option in the selector the shared
+    light-circuit disaggregation the engine can do is unreachable from the UI.
+    """
+    options = _discover_window_options()
+    hours = [value for value, _ in options]
+    assert hours == [24, 48, 72, 168], f"unexpected windows: {hours}"
+    # A 72/168-style option exists, and the week option says so in words.
+    assert 168 in hours
+    week = dict(options)[168]
+    assert "7 days" in week and "168" in week
+    # The default is an explicit constant, not a bare literal at the call site,
+    # and it is the fast first run.
+    script = _app_js()
+    assert "const DISCOVER_DEFAULT_HOURS = 24;" in script
+
+
+#: The pure window helper block: the table, the default and the three lookups.
+#: It is sliced out of the IIFE because the panel has no module seam, and it is
+#: *executed* under node rather than pattern-matched -- this is the one
+#: behaviour test in this section, the rest are source-shape guards.
+_WINDOW_HELPER_START = "const DISCOVER_WINDOWS"
+_WINDOW_HELPER_END = "/* ---------------------------------------------------------------------- *\n   * Application state"
+
+
+def _node_window_helpers():
+    """Load ``DISCOVER_WINDOWS`` and its helpers into node and report them.
+
+    Returns ``None`` when node is not installed: the panel itself does not need
+    node at runtime, so a missing toolchain skips this test instead of failing
+    the suite, exactly as ``scripts/validate_addon.sh`` does for ``node --check``.
+    """
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        return None
+    script = _app_js()
+    start = script.index(_WINDOW_HELPER_START)
+    end = script.index(_WINDOW_HELPER_END, start)
+    block = script[start:end]
+    program = (
+        "const num = (v, d = 0) => String(v);\n"
+        f"{block}\n"
+        "const hours = [24, 48, 72, 168, 12, 2160];\n"
+        "console.log(JSON.stringify({\n"
+        "  options: DISCOVER_WINDOWS.map((o) => ({ hours: o.hours, label: o.label })),\n"
+        "  defaultHours: DISCOVER_DEFAULT_HOURS,\n"
+        "  long: hours.map((h) => [h, discoverLongRun(h)]),\n"
+        "  labels: hours.map((h) => [h, discoverWindowLabel(h)]),\n"
+        "  known: hours.map((h) => [h, Boolean(discoverWindow(h))]),\n"
+        "}));\n"
+    )
+    completed = subprocess.run(
+        [node, "-e", program],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(completed.stdout)
+
+
+def test_window_helper_lookups_and_long_threshold_behaviour() -> None:
+    """Execute the pure window helper in node and pin what it returns.
+
+    Unlike the request-flow guards in this section, this is a behaviour test:
+    the helper is sliced out of the IIFE (the panel has no module seam) and run
+    under node.  It pins the offered windows, the 24 h default, that 72 h and
+    168 h are treated as long waits, and that an unlisted window still gets a
+    readable label rather than ``undefined``.  Skipped without node, which is
+    not needed to serve the panel.
+    """
+    result = _node_window_helpers()
+    if result is None:
+        pytest.skip("node is not installed; the panel does not need it at runtime")
+
+    assert [option["hours"] for option in result["options"]] == [24, 48, 72, 168]
+    assert result["defaultHours"] == 24
+    # The pairs come back as lists, so coerce the hours back to ``int``.
+    assert {int(hours): flag for hours, flag in result["long"]} == {
+        24: False, 48: False, 72: True, 168: True,
+        12: False, 2160: True,
+    }
+    labels = {int(hours): text for hours, text in result["labels"]}
+    assert labels[24] == "24 h"
+    assert labels[168] == "7 days (168 h)"
+    # An unlisted but valid engine window is still labelled, never "undefined".
+    assert labels[12] == "12 h"
+    assert labels[2160] == "2160 h"
+    known = {int(hours): flag for hours, flag in result["known"]}
+    assert known[168] is True
+    assert known[12] is False
+
+
+
+def test_discover_request_posts_the_selected_window() -> None:
+    """The read-only body must carry ``lookback_hours`` from the selector.
+
+    The shipped card posted a literal 24 h.  The engine accepts up to 2160 h and
+    its evidence grows strongly with the window, so the request must read the
+    selection instead of a hardcoded value.  It must still be read-only:
+    ``apply: false`` stays in the same body.
+    """
+    script = _app_js()
+    call = re.search(
+        r"const data = await post\(DISCOVER_PATH, \{(?P<body>.*?)\n      \}\);",
+        script,
+        re.DOTALL,
+    )
+    assert call is not None, "the read-only discover request moved or was removed"
+    body = call.group("body")
+    assert "apply: false" in body, "discovery must stay read-only"
+    assert "lookback_hours" in body, (
+        "the discover body no longer sends a lookback window"
+    )
+    assert "lookback_hours: hours" in body, (
+        "the request must use the selected window, not a literal"
+    )
+    # The pinned value comes from the selection read before the request.
+    assert "const hours = state.discover.window;" in script
+    # No literal 24 survives as the request's window.
+    assert "lookback_hours: 24" not in script
+
+
+def test_apply_request_reuses_the_reviewed_window() -> None:
+    """An apply must write the window the card's analysis was run with.
+
+    Showing evidence for one window and writing another is the failure this
+    pins against: ``runDiscovery`` sets ``ranWindow`` and the apply body reads
+    it, so a later selector change cannot move the write off the reviewed
+    window.
+    """
+    script = _app_js()
+    call = re.search(
+        r"const result = await post\(DISCOVER_PATH, \{(?P<body>.*?)\n          \}\);",
+        script,
+        re.DOTALL,
+    )
+    assert call is not None, "the apply request moved or was removed"
+    body = call.group("body")
+    assert "apply: true" in body
+    assert "lookback_hours" in body, "the apply request dropped the window"
+    assert "state.discover.ranWindow" in body, (
+        "apply must use the window the reviewed analysis ran with"
+    )
+    # The run pins that window before the read-only request is sent.
+    run = script[script.index("async function runDiscovery()") : script.index("function discoverCard(")]
+    assert "ranWindow: hours" in run, "runDiscovery does not pin the window it reads"
+    # Both call sites must agree: the same pinned field feeds discover, footer
+    # and apply, so there is one selected window rather than two opinions.
+    assert body.count("lookback_hours") == 1
+
+
+def test_long_window_loading_state_says_the_wait_is_long() -> None:
+    """168 h measured 155 s, so a silent card looks dead.
+
+    The loading path must keep its spinner and state the long wait in words,
+    without inventing a progress percentage.  The elapsed clock reports real
+    time only.
+    """
+    script = _app_js()
+    loading = script[
+        script.index("function discoverLoadingCard()") : script.index(
+            "function discoverErrorCard("
+        )
+    ]
+    assert "spinner" in loading, "the loading state lost its liveness animation"
+    assert "discoverLongRun(hours)" in loading, "the long-window branch is gone"
+    assert "2.5 minutes" in loading, "the long-window wait is not stated in words"
+    assert "topology-discover-elapsed" in loading, "the elapsed clock is gone"
+    assert "duration((Date.now() - startedAt) / 1000)" in script, (
+        "the elapsed clock does not count real elapsed time"
+    )
+    # Compare rendered strings and calls only: the comments *say* there is no
+    # percentage, so searching the raw block would match its own denial.
+    rendered = "\n".join(
+        line for line in loading.splitlines() if not line.strip().startswith("//")
+    )
+    assert not re.search(r"percent\(|progress|width:\s*['\"`]", rendered), (
+        "the loading state fabricates a percentage or a progress bar"
+    )
+    # The selector is disabled for the duration of a run and restored after it.
+    assert "windowSelect.disabled = false;" in script

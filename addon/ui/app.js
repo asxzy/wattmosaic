@@ -423,6 +423,51 @@
   };
 
   /* ---------------------------------------------------------------------- *
+   * Discovery lookback windows
+   * ---------------------------------------------------------------------- */
+
+  //: The windows the Discover card offers, in hours, with the label a person
+  //: reads.  The engine accepts any value up to 2160 h, but these four are the
+  //: ones with a known evidence/cost profile: on production recorder history
+  //: 24 h found 0 groups on light CTs, 48 h found 10, and 168 h found 60.
+  //: A longer window is strictly better evidence and strictly slower, so the
+  //: choice is the user's, not a silent default.
+  const DISCOVER_WINDOWS = Object.freeze([
+    { hours: 24, label: '24 h', name: null },
+    { hours: 48, label: '48 h', name: null },
+    { hours: 72, label: '72 h', name: null },
+    { hours: 168, label: '7 days (168 h)', name: '7 days' },
+  ]);
+
+  //: A fast first run.  A week of history is the useful window for shared
+  //: light circuits, but it costs minutes, so it must be an explicit choice.
+  const DISCOVER_DEFAULT_HOURS = 24;
+
+  //: From this window on, a real recorder took minutes (168 h measured 155 s
+  //: on production).  The loading copy must say so rather than imply a pause.
+  const DISCOVER_LONG_HOURS = 72;
+
+  const discoverWindow = (hours) => {
+    const value = Number(hours);
+    return DISCOVER_WINDOWS.find((option) => option.hours === value) || null;
+  };
+
+  const discoverWindowName = (hours) => {
+    const option = discoverWindow(hours);
+    return option ? option.name : null;
+  };
+
+  const discoverWindowLabel = (hours) => {
+    const option = discoverWindow(hours);
+    return option ? option.label : `${num(hours, 0)} h`;
+  };
+
+  const discoverLongRun = (hours) => {
+    const value = Number(hours);
+    return Number.isFinite(value) && value >= DISCOVER_LONG_HOURS;
+  };
+
+  /* ---------------------------------------------------------------------- *
    * Application state
    * ---------------------------------------------------------------------- */
 
@@ -453,7 +498,20 @@
     nesting: { data: null, at: 0, inflight: false },
     // Placement discovery is explicit: it only runs when the user asks, so its
     // result is kept here and survives a repaint of the same tab.
-    discover: { data: null, running: false, error: null },
+    discover: {
+      data: null,
+      running: false,
+      error: null,
+      //: The window the user selected.  Selecting a window changes this only;
+      //: it deliberately does *not* issue a request.  A long window costs
+      //: minutes, so a stray click on the selector must never start one -- the
+      //: choice takes effect when the user presses Discover.
+      window: DISCOVER_DEFAULT_HOURS,
+      //: The window the request that produced ``data``/``error`` actually read.
+      //: It is pinned when the request starts, so changing the selector after
+      //: a run cannot make Apply write a window the card never showed.
+      ranWindow: null,
+    },
   };
 
   const NESTING_TTL_MS = 10 * 60 * 1000;
@@ -1485,6 +1543,7 @@
       el('div', { class: 'head-actions' }, [
         // Discovery is an explicit request: it never runs on paint and never
         // writes anything on the first call.
+        discoverWindowSelect(),
         el('button', {
           class: 'btn',
           id: 'topology-discover-run',
@@ -2485,6 +2544,11 @@
 
   const DISCOVER_PATH = '/discover/placements';
 
+  //: When the run in flight started, so a repaint mid-run (a poll, a route
+  //: change) re-shows the true elapsed time instead of restarting at zero.
+  //: Only one discovery runs at a time (``runDiscovery`` guards on ``running``).
+  let discoverStartedAt = 0;
+
   //: Why the engine withheld or refused a fixture, in words a person can act on.
   //: Keys are the engine's own codes; an unlisted code still falls back to
   //: ``titleCase`` so a newer engine is legible rather than blank.
@@ -2542,13 +2606,60 @@
       el('div', { class: 'card-head' }, [
         el('h2', {}, 'Discover devices'),
         el('span', { class: 'spacer' }),
-        el('span', { class: 'stat-hint' }, 'Not run yet'),
+        el('span', { class: 'stat-hint' },
+          `${discoverWindowLabel(state.discover.window)} window · not run yet`),
       ]),
       el('div', { class: 'card-body' }, [
         el('p', { class: 'stat-hint' },
           'Find fixtures that sit on a shared circuit by comparing their transitions with the CT rows. Analysing writes nothing.'),
+        el('p', { class: 'stat-hint' },
+          'A longer window is stronger evidence and slower: a week of history found the shared light-circuit groups a 24 h window could not, but it reads far more recorder history.'),
       ]),
     ]);
+
+  /**
+   * The window control, next to the Discover button.
+   *
+   * A plain ``<select>``: four options, one visible label, keyboard- and
+   * screen-reader-friendly with no library and no inline handler.  Changing it
+   * only records the choice in ``state.discover.window``; it never issues a
+   * request.  A long window costs minutes, so a stray change must not start
+   * one -- the request is the explicit Discover click, as before.
+   *
+   * The control is also disabled while a run is in flight, because the window
+   * of a running request cannot change; the *next* run reads whatever is
+   * selected when it starts.
+   */
+  const discoverWindowSelect = () =>
+    el('label', { class: 'discover-window', for: 'topology-discover-window' }, [
+      el('span', { class: 'discover-window-label' }, 'Window'),
+      el('select', {
+        class: 'discover-window-select',
+        id: 'topology-discover-window',
+        'aria-label': 'Discovery lookback window',
+        title: 'How much recorder history this analysis reads. A longer window finds more shared circuits and takes longer.',
+        disabled: state.discover.running ? true : null,
+        onchange: (event) => selectDiscoverWindow(event.target.value),
+      }, DISCOVER_WINDOWS.map((option) =>
+        el('option', {
+          value: String(option.hours),
+          selected: option.hours === state.discover.window ? true : null,
+        }, option.label))),
+    ]);
+
+  function selectDiscoverWindow(raw) {
+    const option = discoverWindow(Number(raw));
+    if (!option) return;
+    // Selection is intent, not action: nothing is fetched here.  Only the
+    // Discover click sends a request (see ``runDiscovery``), so a long window
+    // can never start by accident.  A result already on the card keeps its own
+    // window -- its footer names it -- because relabelling a finished analysis
+    // with a window it never read would misstate the evidence.
+    state.discover = { ...state.discover, window: option.hours };
+    if (!state.discover.data && !state.discover.error && !state.discover.running) {
+      swapDiscover(discoverSlotNode());
+    }
+  }
 
   function topologyDiscoverSlot() {
     if (state.discover.error) return discoverErrorCard(state.discover.error);
@@ -2570,18 +2681,51 @@
   }
 
   function discoverLoadingCard() {
-    return card(
-      'Discover devices',
-      [
-        el('div', { class: 'cand-loading', role: 'status' }, [
-          el('span', { class: 'spinner', 'aria-hidden': 'true' }),
-          el('span', {}, 'Comparing fixture transitions with the CT rows over the last 24 hours…'),
-        ]),
-        el('div', { class: 'skeleton h-row' }),
-        el('div', { class: 'skeleton h-row' }),
-      ],
-      { id: 'topology-discover' }
+    // The pinned window of the request in flight, not the selector's value: a
+    // disabled selector cannot be changed meanwhile, but the copy must name the
+    // window the running request actually reads.
+    const hours = state.discover.ranWindow !== null
+      ? state.discover.ranWindow
+      : state.discover.window;
+    const long = discoverLongRun(hours);
+    const body = [
+      el('div', { class: 'cand-loading', role: 'status' }, [
+        el('span', { class: 'spinner', 'aria-hidden': 'true' }),
+        el('span', {},
+          `Comparing fixture transitions with the CT rows over the last ${discoverWindowLabel(hours)}…`),
+      ]),
+    ];
+    if (long) {
+      // Say what the wait is.  168 h measured 155 s on production recorder
+      // history, and the engine sends nothing until the whole comparison is
+      // done, so a silent card reads as a hung one.  This is a duration, not a
+      // progress claim: the elapsed clock below only reports real elapsed time.
+      body.push(
+        el('p', { class: 'stat-hint discover-long-note' },
+          (Number(hours) >= 168
+            ? 'A week of recorder history measured about 2.5 minutes on production'
+            : 'This window reads days of recorder history and can take a minute or more')
+          + ', and the engine answers only once the whole window has been read. '
+          + 'The spinner and the elapsed clock keep moving while it works; keep this tab open.')
+      );
+    }
+    // A ticking elapsed clock is the honest sign of life for a request that
+    // can run for minutes; it reports time spent, never a percentage done.
+    const spent = discoverStartedAt
+      ? duration((Date.now() - discoverStartedAt) / 1000)
+      : '0s';
+    body.push(
+      el('p', { class: 'stat-hint discover-elapsed' }, [
+        el('span', {}, 'Elapsed '),
+        el('span', { id: 'topology-discover-elapsed' }, spent),
+      ])
     );
+    body.push(el('div', { class: 'skeleton h-row' }));
+    body.push(el('div', { class: 'skeleton h-row' }));
+    return card('Discover devices', body, {
+      id: 'topology-discover',
+      foot: `Window: ${discoverWindowLabel(hours)}${long ? ' · long runs read the full window before answering' : ''}`,
+    });
   }
 
   function discoverErrorCard(err) {
@@ -2599,26 +2743,59 @@
           onclick: () => runDiscovery(),
         }, 'Try again'),
       ],
-      { id: 'topology-discover' }
+      {
+        id: 'topology-discover',
+        // The failed run still read a named window; saying which one makes the
+        // failure reproducible, and the Try again button re-reads the selector.
+        foot: `Window: ${discoverWindowLabel(
+          state.discover.ranWindow !== null ? state.discover.ranWindow : state.discover.window
+        )} · the comparison did not finish`,
+      }
     );
   }
 
   async function runDiscovery() {
     if (state.discover.running) return;
-    state.discover = { ...state.discover, running: true, error: null };
+    // The window is read once, before the request, and pinned for the whole
+    // run: a repaint must not mix the reviewed window with a different one.
+    const hours = state.discover.window;
+    state.discover = { ...state.discover, running: true, error: null, ranWindow: hours };
     // The head button says "Discovering…" while the request runs.
     const head = document.getElementById('topology-discover-run');
     if (head) {
       head.disabled = true;
       head.textContent = 'Discovering…';
     }
+    const select = document.getElementById('topology-discover-window');
+    if (select) select.disabled = true;
+    discoverStartedAt = Date.now();
     swapDiscover(discoverLoadingCard());
+    // Honest liveness for a request that can run for minutes: the clock counts
+    // elapsed real time.  It is not a progress bar -- the engine reports
+    // nothing until it is done, so a percentage or an ETA would be invented.
+    const startedAt = discoverStartedAt;
+    const ticker = setInterval(() => {
+      const node = document.getElementById('topology-discover-elapsed');
+      if (!node) return;
+      node.textContent = duration((Date.now() - startedAt) / 1000);
+    }, 1000);
     try {
-      const data = await post(DISCOVER_PATH, { apply: false, include_groups: true });
-      state.discover = { data, running: false, error: null };
+      // The read-only request carries the window the user is looking at, and
+      // writes nothing: ``apply`` stays false.  The apply path below sends the
+      // same selection, so an apply writes the window that was reviewed.
+      const data = await post(DISCOVER_PATH, {
+        apply: false,
+        include_groups: true,
+        lookback_hours: hours,
+      });
+      state.discover = {
+        data, running: false, error: null, window: hours, ranWindow: hours,
+      };
       swapDiscover(discoverCard(data));
     } catch (err) {
-      state.discover = { data: null, running: false, error: err };
+      state.discover = {
+        data: null, running: false, error: err, window: hours, ranWindow: hours,
+      };
       swapDiscover(discoverErrorCard(err));
       if (err && err.status === 404) {
         notify('Discovery unavailable', 'This engine does not serve /discover/placements.', 'bad');
@@ -2626,11 +2803,15 @@
         notify('Discovery failed', describeError(err), 'bad');
       }
     } finally {
+      clearInterval(ticker);
+      discoverStartedAt = 0;
       const button = document.getElementById('topology-discover-run');
       if (button) {
         button.disabled = false;
         button.textContent = 'Discover devices';
       }
+      const windowSelect = document.getElementById('topology-discover-window');
+      if (windowSelect) windowSelect.disabled = false;
     }
   }
 
@@ -2853,7 +3034,16 @@
       parts.push(`${stats.candidate_entities} candidate fixtures`);
     }
     if (stats.branch_rows !== undefined) parts.push(`${stats.branch_rows} branch rows`);
-    if (data.lookback_hours !== undefined) parts.push(`last ${num(data.lookback_hours, 0)}h`);
+    // The engine echoes the window it read.  An older engine omits it, so fall
+    // back to the window the card's own request was pinned to: the footer must
+    // name the window the numbers came from, not a later selector change.
+    const windowHours = data.lookback_hours !== undefined
+      ? data.lookback_hours
+      : (state.discover.ranWindow !== null ? state.discover.ranWindow : state.discover.window);
+    if (windowHours !== undefined) {
+      const named = discoverWindowName(windowHours);
+      parts.push(`last ${num(windowHours, 0)}h${named ? ` (${named})` : ''}`);
+    }
     if (data.topology_version !== undefined) parts.push(`topology v${data.topology_version}`);
     const notes = (Array.isArray(data.notes) ? data.notes : [])
       // A hard precondition repeats its sentence in both ``detail`` and
@@ -2944,7 +3134,19 @@
           // with ``applied: false`` and a ``detail`` (auto placement disabled,
           // apply not requested).  Claiming "applied" there is a false success,
           // so the toast is chosen by the flag, not by the HTTP status.
-          const result = await post(DISCOVER_PATH, { apply: true });
+          //
+          // The window is the one the analysis on this card was run with, not
+          // the selector's current value: an apply must write the evidence the
+          // user just reviewed.  ``runDiscovery`` pins that value in
+          // ``state.discover.ranWindow`` when the read-only request is sent.
+          const result = await post(DISCOVER_PATH, {
+            apply: true,
+            // ``ranWindow`` is null only before any run; there is no card to
+            // apply from then, so the selected window is the safe fallback.
+            lookback_hours: state.discover.ranWindow !== null
+              ? state.discover.ranWindow
+              : state.discover.window,
+          });
           if (result && result.applied === true) {
             notify(
               'Placements applied',
@@ -2954,7 +3156,14 @@
             );
             // The cached analysis is now stale: the written rows carry
             // ``applied``, so re-showing the old answer would misreport them.
-            state.discover = { data: null, running: false, error: null };
+            // The chosen window survives, so the next Discover re-reads it.
+            state.discover = {
+              data: null,
+              running: false,
+              error: null,
+              window: state.discover.window,
+              ranWindow: null,
+            };
           } else {
             // Say only what happened: the call returned no write.  Relay the
             // engine's own explanation (it names the switch to turn on) and add
