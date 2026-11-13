@@ -1,5 +1,48 @@
 # Release Notes
 
+## v0.2.1-dev.24 — 2026-11-12 (development channel)
+
+You can now choose how much history discovery reads, and that choice is what
+makes shared-light-circuit disaggregation reachable from the panel. **No
+measurement, threshold, or fitted wattage changes in this release.**
+
+### The feature was shipped but unreachable from the UI
+
+The Discover button always read **24 hours**. Discovery's evidence grows
+strongly with the window, so the default was hiding nearly all of it. Measured
+on the production install against real recorder history:
+
+| window | time | placed | groups | groups on light CTs |
+| --- | --- | --- | --- | --- |
+| 24 h | 14 s | 0 | 3 | **0** |
+| 48 h | 20 s | 0 | 14 | 10 |
+| 7 days | 155 s | 1 | 76 | **60** |
+
+At the shipped default the panel found **nothing** on the light circuits — the
+exact case this whole line of work exists to solve. A week of history finds 60
+groups there. The engine had accepted `lookback_hours` all along; only the panel
+never asked.
+
+The card now has a **Window** selector — 24 h, 48 h, 72 h, 7 days — defaulting to
+24 h so a first look stays fast. The selection is intent, not action: it takes
+effect when you press Discover, so a two-and-a-half-minute request cannot start
+by accident.
+
+### An apply writes the window you reviewed
+
+The selector would be a trap if the numbers on screen came from one window and
+Apply wrote another. The window a run actually read is pinned when the request
+starts, and Apply reuses that pinned value — changing the selector afterwards
+cannot move a write onto history the card never showed. The footer names the
+window the numbers came from, so a result is never anonymous about its evidence.
+
+### A long window says it is long
+
+A week of history measured 155 s on production, and the engine answers only when
+the whole window is read. Loading now states that, keeps the spinner moving, and
+counts real elapsed time. There is deliberately no percentage or estimate: the
+engine reports nothing until it is done, so a progress bar would be invented.
+
 ## v0.2.1-dev.23 — 2026-11-12 (development channel)
 
 `dev.22` fixed a false success on Apply and, in doing so, introduced a false
