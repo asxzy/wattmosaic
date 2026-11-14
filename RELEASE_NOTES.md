@@ -1,5 +1,20 @@
 # Release Notes
 
+## v0.2.1-dev.26 — 2026-11-13 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- Deprecate the manual `dedicated_device` CT declaration. The measurement capability it enables is **unchanged** and still reports; nothing is auto-converted.
+- Emit one deprecation notice per CT at topology install, deduplicated across the three places the declaration is stored
+- Expose `deprecations` in engine health diagnostics with the replacement path named
+- Add `WM_DEPRECATE_DEDICATED_DECLARATION` (default true) to silence notices; it never changes watts
+- Mark the role as deprecated in the setup wizard help text; the option stays selectable
+- Record the decision as ADR-0029, including the evidence that the live install depends on the direct path
+
+No measurement, threshold, inference or confidence arithmetic changes in this release. Cases that previously reported `direct_measured` still do.
+
 ## v0.2.1-dev.25 — 2026-11-13 (development channel)
 
 Automatic development build.

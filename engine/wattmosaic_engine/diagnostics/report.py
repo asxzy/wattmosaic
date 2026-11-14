@@ -20,6 +20,8 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 from ..contracts import CONTRACT_VERSION, HealthResponse, utcnow
+from ..deprecations import collect as collect_deprecations
+from ..deprecations import declares_dedicated
 
 log = logging.getLogger("wattmosaic.diagnostics")
 
@@ -112,6 +114,51 @@ def _health_section(
     return data
 
 
+def _deprecations_section(
+    config: Any, database: Any, core: Any, health_details: Mapping[str, Any] | None = None
+) -> list[dict[str, Any]]:
+    """Deprecated declarations, one object per ``ct_id`` (ADR-0029).
+
+    Additive: an empty list when nothing is declared, a declaration exists, or
+    the notice is switched off.  The notices themselves are messages; this is
+    read-only, so the function never logs and never writes.
+
+    An engine core already answers this for ``HealthResponse.details``; reusing
+    that answer avoids reading the topology and device configurations twice.
+    """
+    if health_details is not None and "deprecations" in health_details:
+        reported = health_details["deprecations"]
+        return [dict(item) for item in reported] if isinstance(reported, list) else []
+    if config is not None and not bool(
+        getattr(config, "deprecate_dedicated_declaration", True)
+    ):
+        return []
+    topology = _safe_call(core, "topology")
+    if not isinstance(topology, Mapping) and not hasattr(topology, "channels"):
+        topology = None
+    if topology is None or not declares_dedicated(topology):
+        # No in-memory declaration: nothing the configuration could add, and the
+        # probe path must not read the database to prove a negative.
+        return []
+    configurations = _safe_call(database, "load_device_configurations")
+    if not hasattr(configurations, "devices"):
+        configurations = None
+    try:
+        found = collect_deprecations(topology, configurations)
+    except Exception as exc:  # noqa: BLE001 - diagnostics must never fail
+        log.warning("deprecation scan failed: %s", exc)
+        return []
+    return [notice.as_dict() for notice in found]
+
+
+def _health_details(health: Any) -> Mapping[str, Any] | None:
+    """``HealthResponse.details`` as a mapping, or ``None`` when unavailable."""
+    details = getattr(health, "details", None)
+    if details is None and isinstance(health, Mapping):
+        details = health.get("details")
+    return details if isinstance(details, Mapping) else None
+
+
 def _channel_section(aligner: Any) -> dict[str, Any]:
     health = _safe_call(aligner, "channel_health", {})
     if not isinstance(health, Mapping):
@@ -172,7 +219,8 @@ def collect_diagnostics(
 ) -> dict[str, Any]:
     """Assemble the diagnostics report as a plain JSON-safe dict."""
     generated = utcnow()
-    health = _health_section(None, core)
+    core_health = _safe_call(core, "health") if core is not None else None
+    health = _health_section(core_health, None)
     engine_health = {
         "status": health.get("status", "unknown"),
         "contract_version": health.get("contract_version", CONTRACT_VERSION),
@@ -181,6 +229,13 @@ def collect_diagnostics(
         "learning_active": health.get("learning_active"),
         "queue_depth": health.get("queue_depth"),
         "inference_last_run_at": health.get("inference_last_run_at"),
+        # Frozen additive key (ADR-0029).  Always present, possibly empty: a
+        # consumer that looks for it must not have to distinguish "absent" from
+        # "nothing deprecated".  The core's own answer is reused when present so
+        # this never scans the topology twice.
+        "deprecations": _deprecations_section(
+            config, database, core, _health_details(core_health)
+        ),
     }
     ha = {
         "connected": bool(_safe_call(hasource, "connected", False)) if hasource is not None else False,

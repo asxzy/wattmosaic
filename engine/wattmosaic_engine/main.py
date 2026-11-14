@@ -69,6 +69,8 @@ from .contracts import (
     TopologyStatus,
     utcnow,
 )
+from .deprecations import collect as collect_deprecations
+from .deprecations import declares_dedicated, warn_once
 from .device_links import (
     device_for_entity,
     state_entity_for_device,
@@ -695,6 +697,10 @@ class EngineCore:
         # waiting a bounded time here is what makes discovery see real entities
         # instead of an empty cache on a genuine fresh install.
         await self.bootstrap_topology(wait_connected_s=TOPOLOGY_BOOTSTRAP_WAIT_S)
+        # One notice per deprecated CT, at the one place a topology becomes
+        # active.  Never in the inference loop: ``warn_once`` deduplicates, but a
+        # per-sample call would still walk the topology every cycle (ADR-0029).
+        self._announce_deprecations()
         if start_loops:
             self._tasks = [
                 asyncio.create_task(self._writer_loop(), name="wm-writer"),
@@ -827,6 +833,47 @@ class EngineCore:
             return None
         self._last_topology_attempt = now
         return await self.bootstrap_topology()
+
+    def _deprecations_payload(self) -> list[dict[str, Any]]:
+        """Deprecated manual declarations from the active topology (ADR-0029).
+
+        Additive diagnostics only: ``warn_once`` is *not* called here, because
+        ``/health`` is polled every few seconds.  The one warning per CT is
+        emitted where a topology is installed (see ``_announce_deprecations``).
+        """
+        if not self.config.deprecate_dedicated_declaration:
+            return []
+        topology = self._active_topology()
+        if topology is None or not declares_dedicated(topology):
+            # Cheap negative on the in-memory topology: the probe path must not
+            # read the configuration table just to prove there is nothing to say.
+            return []
+        try:
+            configurations = self.db.load_device_configurations()
+        except Exception:  # noqa: BLE001 - a read failure must not break /health
+            configurations = None
+        try:
+            return [notice.as_dict() for notice in collect_deprecations(topology, configurations)]
+        except Exception:  # noqa: BLE001 - diagnostics must never fail
+            return []
+    def _announce_deprecations(self) -> None:
+        """Log one ``WARNING`` per deprecated CT for the current topology.
+
+        Called from topology installation only.  ``warn_once`` deduplicates across
+        calls for the life of the process, so repeated installations (and the
+        per-cycle inference path, which never calls this) cannot flood the log.
+        """
+        if not self.config.deprecate_dedicated_declaration:
+            return
+        topology = self._active_topology()
+        if topology is None:
+            return
+        try:
+            configurations = self.db.load_device_configurations()
+            notices = collect_deprecations(topology, configurations)
+        except Exception:  # noqa: BLE001 - announcement must never break startup
+            return
+        warn_once(notices, log)
 
     def _topology_health(self) -> dict[str, Any]:
         """Topology presence for ``/health``; a missing topology is not healthy."""
@@ -1450,6 +1497,12 @@ class EngineCore:
                 # new top-level field so an older HA integration keeps parsing
                 # the response unchanged.
                 "learning_status": self._learning_status_payload(),
+                # Deprecated manual ``dedicated_device`` declarations (ADR-0029).
+                # Additive and schema-free, like ``learning_status`` above: the
+                # objects themselves match the frozen schema.  The direct
+                # measurement path is untouched, so this list is information
+                # only and never a refusal.
+                "deprecations": self._deprecations_payload(),
                 "samples_ingested": self.samples_ingested,
                 "events_ingested": self.events_ingested,
                 "queue": self.persist_queue.stats(),
@@ -1825,6 +1878,7 @@ class EngineCore:
             pass
         self.db.save_topology(topology, note="api: replace topology")
         self.topology_cache = self.db.load_topology()
+        self._announce_deprecations()
         self.db.log_system_event(
             "info",
             "topology",
@@ -1848,6 +1902,7 @@ class EngineCore:
         )
         self.db.save_topology(confirmed, note="api: confirm topology")
         self.topology_cache = self.db.load_topology()
+        self._announce_deprecations()
         self.db.log_system_event("info", "topology", "topology confirmed via API")
         return self.topology_cache or confirmed
 

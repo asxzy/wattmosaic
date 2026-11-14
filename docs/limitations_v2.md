@@ -285,6 +285,16 @@ Honest list. Each is a real behaviour, not a documentation gap.
    other three (`hierarchy:` prefix plus the audit version, versus
    `HierarchyConfig`'s own `wp8-hierarchy-1.0.0`). Any consumer grouping
    relations by version must not assume the class default.
+6. **The manual `dedicated_device` declaration is deprecated but not removable
+   yet** (ADR-0029). The role still works and still produces
+   `Source.DIRECT_MEASURED`, because the reference installation's ~1032 W of
+   measured power depends on it; `WM_DEPRECATE_DEDICATED_DECLARATION` only
+   controls the notice. Three storage locations still describe the same fact
+   (`CTChannel.device_id`, `DeviceTopology.dedicated_ct_ids`,
+   `DeviceConfiguration.monitored_by_ct_ids`) and nothing auto-converts an
+   existing declaration. A `branch` CT reaching `CircuitClass.DEDICATED` at
+   `CONFIRMED` is the documented replacement, and it must be shown on live data
+   before the declaration can be retired.
 
 None of these were fixed in this task: the scope was documentation, and every
 claim above is written from the shipped code as it stands.

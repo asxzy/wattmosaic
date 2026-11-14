@@ -223,6 +223,11 @@ class EngineConfig:
     reanalysis_interval_s: float = 3600.0
     #: How much stored raw history a reanalysis pass reads.
     reanalysis_lookback_s: float = 21600.0
+    #: Emit the deprecation notices for a manual ``dedicated_device``
+    #: declaration (ADR-0029).  Diagnostics only: this silences the notice, it
+    #: never changes watts, source, tier or confidence, and the direct
+    #: measurement path keeps working either way.
+    deprecate_dedicated_declaration: bool = True
 
     # Learning thresholds (documented; not magic constants)
     min_samples_for_model: int = 12
@@ -325,6 +330,9 @@ class EngineConfig:
         cfg.reanalysis_lookback_s = float(
             get("WM_REANALYSIS_LOOKBACK_S", default=str(cfg.reanalysis_lookback_s))
             or cfg.reanalysis_lookback_s
+        )
+        cfg.deprecate_dedicated_declaration = _bool(
+            get("WM_DEPRECATE_DEDICATED_DECLARATION", default="true"), True
         )
         cfg.log_level = (get("WM_LOG_LEVEL", "LOG_LEVEL", default="INFO") or "INFO").upper()
         cfg.log_json = _bool(get("WM_LOG_JSON"), True)
@@ -450,4 +458,5 @@ class EngineConfig:
             "audit_algorithm_version": self.audit_algorithm_version,
             "reanalysis_interval_s": self.reanalysis_interval_s,
             "reanalysis_lookback_s": self.reanalysis_lookback_s,
+            "deprecate_dedicated_declaration": self.deprecate_dedicated_declaration,
         }

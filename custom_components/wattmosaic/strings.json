@@ -45,10 +45,10 @@
         },
         "data_description": {
           "channel": "Which CT to configure.",
-          "role": "main = utility feed, branch = circuit, dedicated_device = single device.",
+          "role": "main = utility feed, branch = circuit, dedicated_device = single device (deprecated: declare branch and let circuit inference classify it; nothing is auto-converted).",
           "phase": "l1, l2, both (double-pole) or unknown.",
           "paired_ct_id": "The other leg of a double-pole load, if any.",
-          "device_id": "Required for a dedicated_device CT. Suggestions are never applied automatically."
+          "device_id": "Only used by a dedicated_device CT, whose manual declaration is deprecated; existing declarations keep working and are not auto-converted. Suggestions are never applied automatically."
         }
       },
       "mapping": {

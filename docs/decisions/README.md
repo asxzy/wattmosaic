@@ -1547,3 +1547,100 @@ producer of an existing field, not a new field.
 * Fail-before proof: with `engine/wattmosaic_engine/device_links.py` at `HEAD`
   the intake tests reproduce the live signature verbatim (`samples_seen: 0`,
   `samples_rejected: 0`, `dominant_rejection_count: 0`).
+
+---
+
+## ADR-0029 — The manual `dedicated_device` declaration is deprecated; the measurement is not
+
+**Status:** Accepted · 2026-11-13 · Deprecates the *declaration* only; extends ADR-0025/ADR-0026
+
+**Context.** The engine's only path to `Source.DIRECT_MEASURED` is a user
+declaring a channel `CTType.DEDICATED_DEVICE` (or listing it in
+`DeviceTopology.dedicated_ct_ids`). Two findings make *the requirement* the
+problem while leaving *the capability* sound.
+
+*The live install depends on it.* The instrumented installation reports
+**~1032 W** of `direct_measured` power through `resolve_direct()` →
+`dedicated_channel_for()`. Removing the capability would silently reclassify
+those watts as `inferred` and drop confidence from **0.97 to 0.88 or lower** —
+a measurement downgraded to a guess, with nothing in the UI saying so.
+
+*The declaration is stored three times with no precedence.* The same fact lives
+in `CTChannel.device_id` (on a `dedicated_device` row),
+`DeviceTopology.dedicated_ct_ids`, and
+`DeviceConfiguration.monitored_by_ct_ids`. Three copies cannot disagree and
+cannot be validated together: which one is authoritative is decided by whichever
+code path reads first, and a partial edit leaves the others stale.
+
+*Discovery no longer produces it.* ADR-0025 moved the single-channel fallback to
+`branch`, and ADR-0026's evidence bar stands on measured circuit *changes*, not a
+private-row assertion. After ADR-0026 a `dedicated_device` row comes only from a
+declaration — that is, from manual user input and nowhere else.
+
+**Decision.**
+
+1. **Deprecate the declaration, never the capability.**
+   `CTType.DEDICATED_DEVICE`, `DeviceTopology.dedicated_ct_ids`,
+   `Source.DIRECT_MEASURED`, `resolve_direct()` and
+   `dedicated_channel_for()` all keep working exactly as they do today. The role
+   stays **selectable** in the wizard. This ADR adds notices and documentation;
+   it removes no code path, no contract field and no option.
+2. **One notice per CT, not one per storage location.** The new
+   `engine/wattmosaic_engine/deprecations.py` scans all three locations and
+   deduplicates by `ct_id`. That dedup *is* the finding: the user wrote one fact,
+   not three. The registry (`DEPRECATED_DECLARATIONS`) carries the code
+   `dedicated_declaration` and `since` version `1.7.0`.
+3. **The replacement is documented, not applied.** The advised path is to declare
+   the CT as `branch` and let circuit inference classify it; a circuit reaching
+   `CircuitClass.DEDICATED` at `CONFIRMED` is the evidenced equivalent of the old
+   declaration. There is **no auto-conversion** of existing declarations:
+   conversion drops the direct path today (a branch CT is deliberately *not* a
+   direct measurement — `docs/electrical_model.md` §9.1), so it must stay opt-in
+   until the inferred path is wired as its replacement.
+4. **Diagnostics only, byte-identical output.** The new setting
+   `WM_DEPRECATE_DEDICATED_DECLARATION` (default `true`) gates the notices and
+   the `health["deprecations"]` list. `false` silences them; it must not — and
+   does not — change a single output value.
+5. **Emit once, never per sample.** `warn_once` logs one `WARNING` per `ct_id`
+   for the process lifetime (module-level, resettable for tests). It is called
+   from topology installation (`set_topology`, `confirm_topology`, startup), never
+   from the inference or per-sample loop, so a 5 s inference cycle cannot turn a
+   deprecation into log spam.
+6. **The payload is additive.** `health["deprecations"]` is
+   `[{"code", "ct_id", "device_id", "since", "replacement", "message"}]`, present
+   and empty when nothing is declared. `CONTRACT_VERSION` is unchanged — an
+   additive diagnostics key is not a contract change, and a pre-change topology
+   (no `deprecations` key anywhere) still loads.
+
+**Consequences.** A declaration that used to look supported now announces its own
+replacement while continuing to produce the identical measured value. An
+operator who does not want the notice sets one flag and loses nothing else. The
+direct path stays testable and stays in use, so the ~1032 W reading is preserved
+until the inferred equivalent is proven on live data.
+
+**Deprecation window.** Notices begin at **1.7.0**. Removal of the *declaration*
+(never the capability) requires a later ADR that demonstrates on live evidence
+that a `branch` CT reaching `CircuitClass.DEDICATED` at `CONFIRMED` reproduces
+the direct reading. Until then the role remains selectable and works.
+
+**Verification.**
+
+* `tests/unit/test_deprecations.py` — the same declaration written in all three
+  storage locations yields exactly **one** entry; a branch declaration yields
+  none.
+* `test_inference_output_is_identical_with_the_flag_on_and_off` — a topology with
+  a dedicated CT is inferred twice and the per-device
+  `(power_w, source, confidence, tier)` tuples must be **byte-identical**; the
+  dedicated device is still `direct_measured` at 75 W in both runs.
+* `test_resolve_direct_still_measures_a_dedicated_ct` — the capability regression
+  guard: `resolve_direct` returns the same usable 75 W reading, same `ct_ids`,
+  same quality.
+* `warn_once` tests — one `WARNING` across repeated collection (250 iterations of
+  a per-sample shape emit nothing further), and `reset_warnings` re-arms it.
+* Diagnostics tests — the exact six keys, an empty list for a branch-only
+  topology, an empty list when the setting is off, and a legacy topology payload
+  without the key loading and reporting normally.
+
+**Non-claims.** This does not claim the inferred path is equivalent yet, does not
+remove the direct path, and does not migrate anything. It makes the deprecation
+visible in the log, in `/api/v1/diagnostics` and in the wizard help text.
