@@ -23,7 +23,12 @@ from wattmosaic_engine.storage.database import Database
 
 TOKEN = "history-token"
 HEADERS = {"X-API-Token": TOKEN}
-BASE = dt.datetime(2026, 11, 13, 12, 0, tzinfo=dt.UTC)
+#: Anchored to *now*, not a calendar literal: the endpoint filters with the
+#: configured lookback (24 h by default), so a fixed date silently fell out of
+#: the window the day after it was written and the history came back empty.
+#: ``test_device_history_excludes_rows_older_than_the_lookback`` already worked
+#: this way; this makes the rest of the file agree with it.
+BASE = dt.datetime.now(dt.UTC).replace(microsecond=0)
 
 
 def _core(tmp_path, *, history_lookback_s: float | None = None):

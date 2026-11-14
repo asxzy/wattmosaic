@@ -34,6 +34,46 @@
 
   const API_PREFIX = `${BASE}api/v1`;
 
+  //: Under Home Assistant ingress the panel lives at
+  //: ``/api/hassio_ingress/<token>/``.  That token's session is a 15-minute
+  //: sliding window held by the Supervisor, renewed on *every* request it
+  //: proxies.  When the tab is hidden -- or a page sits open overnight -- no
+  //: request is made, nothing renews the session, and the first request after
+  //: the window answers 401.  Only the Supervisor can mint a new session, and it
+  //: does so when the top-level document is reloaded; a script cannot renew it.
+  const INGRESS = BASE.startsWith('/api/hassio_ingress/');
+
+  function clearSessionReloadMark() {
+    try {
+      sessionStorage.removeItem('wm-session-reload');
+    } catch {
+      /* sessionStorage unavailable in private mode; nothing to clear */
+    }
+  }
+
+  function reloadForSession() {
+    // A reload should happen at most once per expiry.  If the fresh document
+    // still answers 401, reloading again only flickers the page -- so record the
+    // attempt and surface the error instead.  The mark is cleared by the first
+    // successful call, so a *later* expiry still recovers.
+    try {
+      if (sessionStorage.getItem('wm-session-reload') === '1') {
+        clearSessionReloadMark();
+        throw new ApiError('The Home Assistant session expired.', {
+          status: 401,
+          code: 'session_expired',
+        });
+      }
+      sessionStorage.setItem('wm-session-reload', '1');
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      // sessionStorage can be unavailable (private mode); reload anyway.
+    }
+    // ``replace`` avoids stacking an unusable entry in history, and keeping the
+    // hash means the user lands back on the view they were reading.
+    location.replace(location.href);
+  }
+
   class ApiError extends Error {
     constructor(message, { status = 0, code = 'network_error', retryable = false, detail = '' } = {}) {
       super(message);
@@ -76,6 +116,20 @@
       }
     }
 
+    // A 401 under ingress is normally the Supervisor's expired session: the
+    // panel never sends an API token (the gateway trusts the ingress peer), so
+    // it cannot be a bad token from this side.  Reloading is the only way to
+    // obtain a fresh session -- but the *gateway's* own 401 (a misconfigured
+    // WM_API_TOKEN) answers JSON, and reloading cannot fix that.  Distinguish
+    // them so a bad token does not put the panel in a reload loop.
+    if (response.status === 401 && INGRESS && !(payload && payload.error)) {
+      reloadForSession();
+      throw new ApiError('The Home Assistant session expired; reloading.', {
+        status: 401,
+        code: 'session_expired',
+      });
+    }
+
     if (!response.ok) {
       const message =
         (payload && payload.error) || `Request failed (HTTP ${response.status})`;
@@ -86,6 +140,9 @@
         detail: (payload && payload.detail) || '',
       });
     }
+    // The session works, so any earlier expiry mark is spent; a later expiry
+    // must still be able to reload once.
+    if (INGRESS) clearSessionReloadMark();
     return payload;
   }
 
@@ -3831,7 +3888,13 @@
     });
 
     document.addEventListener('visibilitychange', () => {
-      if (!document.hidden && state.view === 'overview') pollTick();
+      if (document.hidden) return;
+      // Touch the API on *every* resume, not just the overview.  The ingress
+      // session is renewed per request, so a tab hidden past the Supervisor's
+      // 15-minute window comes back expired; probing here makes the 401 (and the
+      // reload that fixes it) happen immediately instead of on the next click.
+      if (state.view === 'overview') pollTick();
+      else get('/health').catch(() => {});
     });
 
     // Escape returns to the section list from a detail page.

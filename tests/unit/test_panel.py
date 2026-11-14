@@ -842,3 +842,63 @@ def test_long_window_loading_state_says_the_wait_is_long() -> None:
     )
     # The selector is disabled for the duration of a run and restored after it.
     assert "windowSelect.disabled = false;" in script
+
+
+# --------------------------------------------------------------------------- #
+# Expired ingress session
+#
+# The Supervisor holds the ingress session for 15 minutes and renews it on every
+# request it proxies.  A tab left hidden or open past that window makes no
+# requests, so the session lapses and the next call answers 401 -- which the
+# panel used to render as a bare error with no way forward.  ``app.js`` has no
+# module seam, so these are static guards on the recovery path, the same
+# approach as the Discover-card guards above.
+# --------------------------------------------------------------------------- #
+
+
+def test_the_panel_reloads_the_document_when_the_ingress_session_expires() -> None:
+    """A 401 under ingress must recover, not strand the user on an error.
+
+    Only the Supervisor can mint a new session, and it does so when the
+    top-level document is loaded.  The panel therefore has to reload rather than
+    retry: the same request keeps failing until the document is fetched again.
+    """
+    script = _app_js()
+    assert "INGRESS" in script, "app.js does not detect the ingress prefix"
+    assert "reloadForSession" in script, "app.js has no session-recovery path"
+    assert "location.replace(location.href)" in script, (
+        "recovery must reload the current document so the Supervisor issues a "
+        "fresh ingress session"
+    )
+
+    # The reload is wired to the 401 branch specifically, not to every failure.
+    assert "response.status === 401 && INGRESS" in script, (
+        "the session-expiry reload is not gated on 401 under ingress"
+    )
+    # ...and not to the gateway's own JSON 401 (a bad WM_API_TOKEN), which a
+    # reload cannot fix and would turn into a reload loop.
+    assert "!(payload && payload.error)" in script, (
+        "the reload does not exclude the gateway's JSON 401 (bad API token)"
+    )
+
+
+def test_a_resumed_tab_probes_the_session_even_off_the_overview() -> None:
+    """Coming back to a hidden tab must not wait for a click to find a 401.
+
+    The poll only runs on the overview, so a topology or device page resumed
+    after a long hide would otherwise discover the expired session on the next
+    interaction.  The resume path touches ``/health`` regardless of view.
+    """
+    script = _app_js()
+    match = re.search(
+        r"document\.addEventListener\('visibilitychange'.*?\n    \}\);",
+        script,
+        re.DOTALL,
+    )
+    assert match is not None, "visibilitychange handler not found"
+    handler = match.group(0)
+    assert "document.hidden" in handler, "a hidden tab must not issue requests"
+    assert "pollTick()" in handler, "the overview must refresh on resume"
+    assert "get('/health')" in handler, (
+        "a non-overview resume must still probe the session"
+    )

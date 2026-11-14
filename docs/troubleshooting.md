@@ -200,6 +200,26 @@ integration and the ingress panel. Set it if you publish a host port.
 If you are upgrading from 0.1.0, install the new App version and restart it; the
 database and options are preserved.
 
+### 9.2 Device discovery returns HTTP 504 `timeout` on a long window
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| "Discover devices" with a 48 h, 72 h or 168 h window fails with `504 timeout` ("request exceeded the engine timeout"), while 24 h works | The engine's route-timeout table is keyed by exact path. `POST /api/v1/discover/placements` had the analysis budget, but the integration's `discover_placements` service reaches the same work through `POST /api/v1/commands`, which kept the 30 s default. A multi-hour window needs tens of seconds. | Fixed in the next release. The engine now grants the analysis budget to the commands route when the command is `discover_placements`, and the integration's client no longer cuts it at 10 s. |
+
+Until you are on that version, use the panel's **Discover devices** button (the
+direct route) instead of the `wattmosaic.discover_placements` service, and keep
+the window at 24 h.
+
+### 9.3 The panel returns 401 after it has been open for a while
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| The panel shows an "unauthorized" error after the tab was hidden for a while, or after the page sat open overnight | Home Assistant's ingress session is a 15-minute sliding window that is renewed on every request the Supervisor proxies. Polling pauses while the tab is hidden, so nothing renews the session and the next call answers 401. | Fixed in the next release. The panel now reloads the document once to obtain a fresh session (only the Supervisor can mint one), and it probes `/health` on every tab resume, not just on the overview. |
+
+A 401 that says `unauthorized` in JSON is *not* an expired session — that is the
+gateway rejecting a wrong `WM_API_TOKEN`, and reloading will not fix it. Check
+that the integration's `api_token` matches the App's.
+
 ---
 
 ## 10. Working with support

@@ -1752,3 +1752,164 @@ per row as well as per home.
 declaration from being subtracted as if it had been measured. It does not bound
 `MODEL_ESTIMATED` values, which carry their own validated bounds, and it does
 not change what a prior is graded as.
+
+---
+
+## ADR-0031 — A timeout budget follows the work, not the path
+
+**Status:** Accepted · 2026-11-14 · Amends ADR-0029's timeout note
+
+**Context.** ADR-0029's fix gave placement discovery a budget derived from the
+window it analyses (`max(60, 2.5 s/h) + 1200`), because a multi-hour window runs
+for tens of seconds and the engine writes nothing until it is done. It applied
+that budget by adding the discovery path to `DEFAULT_ROUTE_TIMEOUTS`, an **exact
+path** table.
+
+Two callers reach the same work:
+
+* the panel posts to `POST /api/v1/discover/placements`; and
+* the Home Assistant integration's `discover_placements` service posts the
+  identical command to `POST /api/v1/commands`.
+
+Only the first had the work in its path. The second kept the 30 s default, so a
+72 h run was cut off by the middleware and answered:
+
+```
+504 {"error": "timeout", "detail": "request exceeded the engine timeout", "retryable": true}
+```
+
+The ingress gateway had *already* recognised `discover_placements` on
+`/commands` and granted it 6600 s; the engine cut it at 30 s anyway. The
+integration's own client added a third, shorter bound: a 10 s default for every
+command, so the request often never reached the engine at all.
+
+This is the same defect class ADR-0029 fixed, one layer down: the budget was
+attached to a *route* when the cost belongs to the *work*.
+
+**Decision.**
+
+1. **A slow command borrows the analysis budget.** The middleware resolves the
+   budget from the route table first (unchanged), then, for
+   `POST /api/v1/commands`, reads the body and returns the analysis budget when
+   `command` is in `SLOW_COMMANDS`.
+2. **The body is cached, not consumed.** Reading it to choose a budget would
+   otherwise leave the handler with "request body is required"; `_request_body`
+   stores the raw bytes under a `web.RequestKey` and `_read_json` reuses them.
+3. **A malformed body keeps the default budget.** It is the handler's job to
+   report a bad request; the middleware must not turn it into a different error.
+4. **Only the named commands are widened.** An ordinary command keeps the 30 s
+   default, so a hung `start_learning` cannot pin a request for nearly two hours.
+5. **The client mirrors the engine's formula.** The integration derives its
+   per-command timeout from the same `max(60, 2.5 s/h) + 1200`, clamping the
+   window to the API's 2160 h maximum, so it never cuts short work the engine and
+   gateway still allow.
+6. **The list is pinned across deployments.** The engine, the gateway and the
+   custom component each carry the set (they ship as separate units, so a shared
+   import is not available); a test fails when they disagree.
+
+**Rejected alternatives.**
+
+* *Add `/commands` to the path table with the full analysis budget.* Makes every
+  command slow-capable, including the ones that answer in milliseconds.
+* *Move the integration's service onto `/discover/placements`.* A larger change
+  to a public surface, and it would still leave `watch`-style callers of the
+  commands route unprotected.
+* *Remove the 30 s default.* The defect was never "there is a timeout"; it was
+  that the budget did not match the work. Removing it makes a hung engine pin a
+  request indefinitely.
+* *Peek at the body with `request.json()` and rely on aiohttp caching it.* It
+  does not rewind the stream; the handler then sees an empty body. This was
+  measured, not assumed.
+
+**Consequences.** A long discovery succeeds from either entry point. Malformed
+commands still report `400 bad_request` with the default budget, and fast
+commands are still bounded at 30 s.
+
+**Verification.**
+
+* `tests/unit/test_api.py::test_a_slow_discovery_survives_when_called_through_commands`
+  — a 0.3 s command against a 0.05 s default and a 0.6 s analysis budget answers
+  200 through `/commands`; without the guard it answers 504.
+* `test_ordinary_commands_keep_the_default_budget` — a slow `start_learning`
+  still times out, so the guard did not widen everything.
+* `test_every_layer_agrees_on_which_commands_are_slow` — the engine, the gateway
+  and `custom_components/wattmosaic/const.py` name the same set.
+* `tests/integration/test_ha_integration.py` — ordinary commands keep the 10 s
+  client timeout, `discover_placements` gets `2.5 * 72 + 1200`, an omitted window
+  uses 24 h, and an absurd window is clamped to 2160 h.
+* Manual end-to-end: a real `APIServer` with a handler that sleeps 35 s answers
+  **200** through `/commands`; with the guard removed it answers **504**
+  `{"error": "timeout"}`.
+
+**Non-claims.** This does not make the analysis faster, and it does not raise the
+30 s default for anything else. It does not change what the engine does with the
+window; only how long it is allowed to do it.
+
+---
+
+## ADR-0032 — An expired ingress session is recovered by reloading, once
+
+**Status:** Accepted · 2026-11-14
+
+**Context.** Under Home Assistant ingress the panel is served at
+`/api/hassio_ingress/<token>/`. The Supervisor holds that token's session for
+**15 minutes**, and `validate_session` renews it on *every* request it proxies —
+a sliding window, not a fixed lifetime.
+
+The panel polls every 8 s, but `pollTick` returns immediately while the document
+is hidden. A hidden tab, or a page left open overnight, therefore makes no
+requests, nothing renews the session, and the first request after the window
+answers **401**. `api()` had no branch for it, so the panel rendered the 401 as a
+bare error with no way forward: the only cure is a fresh session, and a script
+cannot mint one.
+
+**Decision.**
+
+1. **A 401 under ingress reloads the document.** Only the Supervisor can issue a
+   session, and it does so when the top-level document is fetched. `location
+   .replace(location.href)` keeps the hash, so the user lands back on the view
+   they were reading, and does not stack an unusable history entry.
+2. **The reload is bounded to one attempt.** A `sessionStorage` mark is set
+   before reloading and cleared by the first successful response; if the fresh
+   document still answers 401 the mark is consumed and the error is surfaced
+   instead of reloading again. A later expiry can still recover.
+3. **The gateway's own JSON 401 is excluded.** A wrong `WM_API_TOKEN` also
+   answers 401, with `{"error": "unauthorized"}`; reloading cannot fix it, so
+   that case keeps its error message. The Supervisor's expired-session response
+   is not JSON, which is what distinguishes them.
+4. **Every tab resume probes the session.** `visibilitychange` calls
+   `pollTick()` on the overview and a `GET /health` on any other view, so an
+   expired session is discovered on resume instead of on the next click.
+
+**Rejected alternatives.**
+
+* *Poll while hidden.* Browsers throttle background timers aggressively and the
+  panel deliberately pauses; keeping a tab polling forever to hold a session open
+  is the wrong trade.
+* *Call `/ingress/validate_session` from the panel.* That is a Supervisor
+  WebSocket command available to the Home Assistant frontend, not to an add-on's
+  iframe; the panel has no such channel.
+* *Retry the failed request.* It fails identically until the document is fetched
+  again, so a retry only delays the reload.
+* *Reload on every 401 regardless of body.* Turns a misconfigured token into a
+  reload loop.
+
+**Consequences.** A tab that sat idle past the window recovers with one reload
+instead of an error the user cannot act on. A genuinely bad token still reports
+itself, and an unrecoverable session fails once rather than flickering.
+
+**Verification.**
+
+* `tests/unit/test_panel.py::test_the_panel_reloads_the_document_when_the_ingress_session_expires`
+  — the recovery path, the `location.replace(location.href)` call, the 401 gate,
+  and the exclusion of the JSON 401.
+* `test_a_resumed_tab_probes_the_session_even_off_the_overview` — the
+  `visibilitychange` handler still refuses to act while hidden and probes on
+  every visible resume.
+* Manual: the four decision branches (expired session, gateway bad token,
+  standalone, success) were exercised against the shipped predicate; only the
+  expired-session-under-ingress case reloads.
+
+**Non-claims.** This does not extend the Supervisor's 15-minute window, and it
+does not keep a session alive while a tab is hidden. It makes the expiry
+recoverable rather than silent.

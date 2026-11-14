@@ -7,6 +7,8 @@ in-memory ``StubFacade``/``NullFacade``; the inference engine is never imported.
 from __future__ import annotations
 
 import asyncio
+import re
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -24,6 +26,8 @@ from wattmosaic_engine.contracts import (
     ServiceCommand,
     ServiceResult,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 TOKEN = "test-token"
 HEADERS = {"X-API-Token": TOKEN}
@@ -842,3 +846,121 @@ def test_route_timeout_defaults_cover_discovery_and_leave_others_alone() -> None
         "/api/v1/health": 1.0,
     }
 
+
+
+# --------------------------------------------------------------------------- #
+# A slow command must not inherit the 30 s default
+# --------------------------------------------------------------------------- #
+
+
+async def _slow_discovery_command(self, **_kwargs: Any) -> Any:
+    await asyncio.sleep(0.3)
+    return {"ok": True, "accepted": [], "refused": {}, "groups": []}
+
+
+def test_a_slow_discovery_survives_when_called_through_commands() -> None:
+    """``discover_placements`` reaches the same work through ``/commands``.
+
+    The panel posts to ``/api/v1/discover/placements``, but the Home Assistant
+    integration's ``discover_placements`` service posts the identical command to
+    ``/api/v1/commands``.  ``DEFAULT_ROUTE_TIMEOUTS`` is keyed by *exact path*, so
+    the commands route kept the 30 s default while the gateway had already
+    granted the analysis 6600 s.  A 72 h run needs tens of seconds, so the
+    engine answered 504 ``timeout`` -- from the middleware, not from the
+    analysis, which is the same class of defect the 0.2.1-dev.19 fix addressed
+    for the direct route.
+
+    The scaled pair is the production shape: handler 0.3 s, default 0.05 s,
+    analysis budget 0.6 s.  If ``/commands`` is not in the route table this
+    request dies at 0.05 s.
+    """
+    from wattmosaic_engine.api import server as server_mod
+
+    class SlowCommand(StubFacade):
+        async def command(self, command: Any) -> Any:  # type: ignore[override]
+            self.commands.append(command)
+            return await _slow_discovery_command(self)
+
+    async def fn(session, base):
+        async with session.post(
+            f"{base}/commands",
+            json={"command": "discover_placements", "parameters": {"lookback_hours": 72}},
+            headers=HEADERS,
+        ) as resp:
+            assert resp.status == 200, await resp.text()
+            body = await resp.json()
+            assert body["ok"] is True
+        return True
+
+    assert run(
+        _with_server(
+            SlowCommand(),
+            fn,
+            request_timeout_s=0.05,
+            route_timeouts={server_mod.DISCOVERY_PLACEMENTS_PATH: 0.6},
+        )
+    )
+
+
+def test_ordinary_commands_keep_the_default_budget() -> None:
+    """The slow-command escape hatch must not widen every command.
+
+    ``start_learning`` and the rest answer quickly; giving them the 6600 s
+    analysis budget would mean a hung command pins a request for nearly two
+    hours.  Only the commands in ``SLOW_COMMANDS`` borrow it.
+    """
+
+    class SlowAnyCommand(StubFacade):
+        async def command(self, command: Any) -> Any:  # type: ignore[override]
+            self.commands.append(command)
+            await asyncio.sleep(0.3)
+            return {"ok": True}
+
+    async def fn(session, base):
+        async with session.post(
+            f"{base}/commands", json={"command": "start_learning"}, headers=HEADERS
+        ) as resp:
+            assert resp.status == 504, await resp.text()
+        return True
+
+    from wattmosaic_engine.api import server as server_mod
+
+    assert run(
+        _with_server(
+            SlowAnyCommand(),
+            fn,
+            request_timeout_s=0.05,
+            route_timeouts={server_mod.DISCOVERY_PLACEMENTS_PATH: 0.6},
+        )
+    )
+
+
+def test_every_layer_agrees_on_which_commands_are_slow() -> None:
+    """The engine, the gateway and the integration must name the same commands.
+
+    A command that is slow in one layer and fast in another is how the 504
+    happened: the gateway granted ``discover_placements`` 6600 s, the engine gave
+    the ``/commands`` route 30 s, and the client gave it 10 s.  Each layer is a
+    separate deployment unit, so the lists are duplicated on purpose -- this
+    guard makes a divergence fail loudly instead of showing up as a timeout.
+    """
+    from wattmosaic_engine.api import server as server_mod
+
+    # ``custom_components`` imports Home Assistant at module scope, so the
+    # constant is read from source -- the same static approach ``test_panel.py``
+    # uses for ``app.js``.
+    component_const = (
+        REPO_ROOT / "custom_components" / "wattmosaic" / "const.py"
+    ).read_text(encoding="utf-8")
+    match = re.search(r'^SLOW_COMMANDS = frozenset\((\{[^}]*\})\)', component_const, re.MULTILINE)
+    assert match is not None, "custom_components/wattmosaic/const.py has no SLOW_COMMANDS"
+    assert set(re.findall(r'"([^"]+)"', match.group(1))) == set(server_mod.SLOW_COMMANDS)
+
+    assert frozenset({"discover_placements"}) == server_mod.SLOW_COMMANDS
+
+    # The gateway hard-codes the same single command in ``_analysis_request``.
+    gateway = (REPO_ROOT / "addon" / "gateway.py").read_text(encoding="utf-8")
+    for command in server_mod.SLOW_COMMANDS:
+        assert f'payload.get("command") == "{command}"' in gateway, (
+            f"gateway._analysis_request does not treat {command} as an analysis request"
+        )

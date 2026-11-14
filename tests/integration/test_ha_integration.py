@@ -268,6 +268,44 @@ class TestApiClient:
         assert body["parameters"] == {"x": 1}
         assert "requested_at" not in body  # engine stamps it
 
+    def test_ordinary_commands_keep_the_short_client_timeout(self) -> None:
+        """A fast command must not wait nearly two hours on a hung engine."""
+        client, session = self._client(json_response({"ok": True, "command": "start_learning"}))
+        run(client.command("start_learning"))
+        assert session.calls[0]["timeout"] == 10
+
+    def test_discover_placements_gets_the_analysis_budget(self) -> None:
+        """The client must not cut a 72 h discovery short before the engine can.
+
+        The engine and the ingress gateway both grant placement discovery a
+        budget derived from the requested window (``max(60, 2.5 s/h) + 1200``).
+        With the client's 10 s default, a 72 h run -- which answers in tens of
+        seconds -- failed with a timeout long before either could finish.
+        """
+        client, session = self._client(
+            json_response({"ok": True, "command": "discover_placements"})
+        )
+        run(client.command("discover_placements", parameters={"lookback_hours": 72}))
+        budget = session.calls[0]["timeout"]
+        assert budget == 2.5 * 72 + 1200
+        assert budget > 10
+
+    def test_discovery_without_parameters_uses_the_engine_default_window(self) -> None:
+        client, session = self._client(
+            json_response({"ok": True, "command": "discover_placements"})
+        )
+        run(client.command("discover_placements"))
+        # The engine assumes 24 h when the caller omits the window.
+        assert session.calls[0]["timeout"] == max(60.0, 2.5 * 24) + 1200
+
+    def test_an_absurd_lookback_is_clamped_to_the_api_maximum(self) -> None:
+        """A huge window must not become an unbounded client timeout."""
+        client, session = self._client(
+            json_response({"ok": True, "command": "discover_placements"})
+        )
+        run(client.command("discover_placements", parameters={"lookback_hours": 10**9}))
+        assert session.calls[0]["timeout"] == 2.5 * 2160 + 1200
+
     def test_401_raises_auth_error_without_token(self) -> None:
         client, _ = self._client(
             StubResponse(401, json.dumps({"error": "unauthorized"}), {})

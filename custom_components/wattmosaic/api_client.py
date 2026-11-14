@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
@@ -32,8 +33,14 @@ from .const import (
     DEFAULT_BACKOFF_BASE,
     DEFAULT_MAX_RETRIES,
     DEFAULT_REQUEST_TIMEOUT,
+    DISCOVERY_DEFAULT_LOOKBACK_H,
+    DISCOVERY_FIT_OVERHEAD_S,
+    DISCOVERY_HISTORY_BASE_S,
+    DISCOVERY_HISTORY_PER_HOUR_S,
+    DISCOVERY_MAX_LOOKBACK_H,
     HEADER_API_TOKEN,
     HEADER_CONTRACT_VERSION,
+    SLOW_COMMANDS,
 )
 from .util import is_token_configured, sanitize_text
 
@@ -223,6 +230,7 @@ class EngineClient:
         json_body: Any = None,
         params: Mapping[str, Any] | None = None,
         expect: type | tuple[type, ...] = dict,
+        timeout: float | None = None,
     ) -> Any:
         """Perform a request with bounded retries and typed errors."""
         url = self._url(path)
@@ -233,7 +241,7 @@ class EngineClient:
             kwargs["params"] = {k: v for k, v in params.items() if v is not None}
         # aiohttp accepts a float timeout on request(); everything else is
         # tolerant of an unknown kwarg being ignored by test doubles.
-        kwargs["timeout"] = self._timeout
+        kwargs["timeout"] = self._timeout if timeout is None else max(0.1, float(timeout))
 
         attempt = 0
         last_error: EngineError | None = None
@@ -387,7 +395,14 @@ class EngineClient:
         sample_id: str | None = None,
         parameters: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """``POST /commands`` -> ``ServiceResult``."""
+        """``POST /commands`` -> ``ServiceResult``.
+
+        Placement discovery is the one command whose cost grows with the window
+        it analyses, and it stays silent until it is done.  The engine gives it
+        a budget derived from ``lookback_hours`` and the gateway grants it the
+        same; the client must not cut it short first, which is exactly what a
+        10 s default did -- a 72 h run answers in tens of seconds.
+        """
         body: dict[str, Any] = {
             "command": command,
             "parameters": dict(parameters or {}),
@@ -396,7 +411,34 @@ class EngineClient:
             body["device_id"] = device_id
         if sample_id is not None:
             body["sample_id"] = sample_id
-        return await self._request("POST", "/commands", json_body=body)
+        return await self._request(
+            "POST",
+            "/commands",
+            json_body=body,
+            timeout=self._command_timeout(command, body["parameters"]),
+        )
+
+    def _command_timeout(self, command: str, parameters: Mapping[str, Any]) -> float:
+        """Budget for one command: the analysis window for discovery, else default.
+
+        Mirrors the engine's own formula (``max(60, 2.5 s/h) + 1200``) so the
+        client never times out on work the engine and gateway still allow.  The
+        constants are duplicated here rather than imported because the custom
+        component must not depend on the engine package.
+        """
+        if command not in SLOW_COMMANDS:
+            return self._timeout
+        hours = parameters.get("lookback_hours", DISCOVERY_DEFAULT_LOOKBACK_H)
+        try:
+            window = float(hours)
+        except (TypeError, ValueError):
+            window = DISCOVERY_DEFAULT_LOOKBACK_H
+        if not (window > 0) or not math.isfinite(window):
+            window = DISCOVERY_DEFAULT_LOOKBACK_H
+        window = min(window, DISCOVERY_MAX_LOOKBACK_H)
+        return max(DISCOVERY_HISTORY_BASE_S, DISCOVERY_HISTORY_PER_HOUR_S * window) + (
+            DISCOVERY_FIT_OVERHEAD_S
+        )
 
     async def export_device(self, device_id: str) -> dict[str, Any]:
         """``GET /export/{device_id}`` -> device data export."""

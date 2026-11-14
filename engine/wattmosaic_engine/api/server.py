@@ -70,6 +70,19 @@ DEFAULT_MAX_CONCURRENCY = 32
 #: Keep this table small and explicit; a pattern language here would make it
 #: impossible to say which budget an endpoint actually has.
 DISCOVERY_PLACEMENTS_PATH = f"{API_PREFIX}/discover/placements"
+COMMANDS_PATH = f"{API_PREFIX}/commands"
+
+#: Commands that run the same whole-house analysis as the discovery route.
+#:
+#: The path-keyed timeout table cannot express this: both callers post the
+#: *same* work, but only one of them has the work in its path.  The Home
+#: Assistant integration's ``discover_placements`` service reaches discovery
+#: through ``POST /commands``, and keying the budget on the path alone left that
+#: caller on the 30 s default while the gateway had already granted the analysis
+#: 6600 s.  A 72 h run answers in tens of seconds, so the engine returned 504
+#: ``timeout`` from this middleware -- for work it was still perfectly able to
+#: finish.
+SLOW_COMMANDS = frozenset({"discover_placements"})
 
 #: Paths that are allowed to outlive ``DEFAULT_REQUEST_TIMEOUT_S``.  The
 #: discovery budget comes from ``api/timeouts.py``, which is also where the
@@ -82,6 +95,11 @@ DEFAULT_ROUTE_TIMEOUTS: dict[str, float] = {
 FACADE_KEY: web.AppKey[Any] = web.AppKey("wm_facade", Any)
 CONFIG_KEY: web.AppKey[dict[str, Any]] = web.AppKey("wm_config", dict)
 TIMEOUTS_KEY: web.AppKey[dict[str, float]] = web.AppKey("wm_route_timeouts", dict)
+
+#: Per-request cache for the raw body.  Reading it in the middleware (to pick a
+#: budget) must not consume it for the handler, and ``web.Request`` exposes
+#: ``__setitem__``/``get`` for exactly this kind of handler-local state.
+BODY_KEY: web.RequestKey[bytes] = web.RequestKey("wm_raw_body", bytes)
 SEMAPHORE_KEY: web.AppKey[asyncio.Semaphore] = web.AppKey("wm_semaphore", asyncio.Semaphore)
 STARTED_AT_KEY: web.AppKey[float] = web.AppKey("wm_started_at", float)
 
@@ -210,14 +228,50 @@ class APIServer:
 # --------------------------------------------------------------------------- #
 
 
-def _effective_timeout(request: web.Request, cfg: dict[str, Any]) -> float:
-    """The middleware budget for this request.
+async def _request_body(request: web.Request) -> bytes:
+    """The raw request body, cached so reading it twice is free.
 
-    Route-level overrides win; everything else keeps the global default.  The
-    lookup is an exact path match on purpose (see ``TIMEOUTS_KEY``).
+    ``_is_slow_command`` has to inspect the body *before* the handler runs to
+    decide the budget, and aiohttp does not rewind the stream.  Caching it here
+    keeps ``_read_json`` working instead of making the handler see an empty body.
     """
+    cached = request.get(BODY_KEY)
+    if cached is not None:
+        return cached
+    raw = await request.read()
+    request[BODY_KEY] = raw
+    return raw
+
+
+async def _is_slow_command(request: web.Request) -> bool:
+    """True when ``POST /commands`` carries one of the slow analysis commands.
+
+    A body that cannot be parsed is *not* an error at this point -- the handler
+    reports that -- so it simply keeps the default budget.
+    """
+    if request.method != "POST" or not request.can_read_body:
+        return False
+    try:
+        raw = await _request_body(request)
+        payload = json.loads(raw) if raw else None
+    except Exception:  # noqa: BLE001 - malformed bodies are the handler's problem
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return payload.get("command") in SLOW_COMMANDS
+
+
+async def _timeout_for_request(request: web.Request, cfg: dict[str, Any]) -> float:
+    """Resolve the budget, letting a slow command borrow the analysis one."""
     overrides: dict[str, float] = request.app.get(TIMEOUTS_KEY, {})
-    return overrides.get(request.path, cfg["request_timeout_s"])
+    budget = overrides.get(request.path)
+    if budget is not None:
+        return budget
+    if request.path == COMMANDS_PATH and await _is_slow_command(request):
+        # ``/commands`` is the integration's route to the same analysis, so it
+        # gets the same budget rather than the 30 s default.
+        return overrides.get(DISCOVERY_PLACEMENTS_PATH, DISCOVERY_REQUEST_TIMEOUT_S)
+    return cfg["request_timeout_s"]
 
 
 @web.middleware
@@ -233,7 +287,7 @@ async def _contract_and_auth(request: web.Request, handler: Any) -> web.StreamRe
             return response
 
     try:
-        async with asyncio.timeout(_effective_timeout(request, cfg)):
+        async with asyncio.timeout(await _timeout_for_request(request, cfg)):
             response = await handler(request)
     except Exception as exc:  # noqa: BLE001 - mapped below
         response = _map_exception(request, exc)
@@ -292,10 +346,11 @@ def _code_for_status(status: int) -> str:
 
 
 async def _read_json(request: web.Request) -> Any:
-    if not request.can_read_body:
+    raw = await _request_body(request)
+    if not raw:
         raise InvalidRequest("request body is required")
     try:
-        return await request.json()
+        return json.loads(raw)
     except json.JSONDecodeError as exc:
         raise InvalidRequest(f"request body is not valid JSON: {exc.msg}") from exc
     except Exception as exc:  # noqa: BLE001 - aiohttp raises several types

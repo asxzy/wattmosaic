@@ -74,6 +74,21 @@ DEFAULT_REQUEST_TIMEOUT = 10
 DEFAULT_MAX_RETRIES = 2
 DEFAULT_BACKOFF_BASE = 0.5
 
+#: Placement discovery is the one command whose cost grows with the window it
+#: analyses, and it stays silent until it is done.  These mirror the engine's
+#: own budget (``max(60, 2.5 s/h) + 1200``; see
+#: ``engine/wattmosaic_engine/api/timeouts.py``) so the client does not cut a
+#: request short that the engine and gateway are still willing to finish.  They
+#: are duplicated rather than imported because the custom component must not
+#: depend on the engine package.
+SLOW_COMMANDS = frozenset({"discover_placements"})
+DISCOVERY_HISTORY_BASE_S = 60.0
+DISCOVERY_HISTORY_PER_HOUR_S = 2.5
+DISCOVERY_FIT_OVERHEAD_S = 1200.0
+DISCOVERY_MAX_LOOKBACK_H = 2160.0
+#: What the engine assumes when a caller omits ``lookback_hours``.
+DISCOVERY_DEFAULT_LOOKBACK_H = 24.0
+
 MIN_SCAN_INTERVAL = 5
 MAX_SCAN_INTERVAL = 3600
 MIN_STALE_AFTER = 10
