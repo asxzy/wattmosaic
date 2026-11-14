@@ -1,5 +1,13 @@
 # Release Notes
 
+## v0.2.1-dev.29 — 2026-11-14 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- fix(timeouts,panel): follow the work, not the path; recover an expired session
+
 ## v0.2.1-dev.28 — 2026-11-14 (development channel)
 
 Automatic development build.
