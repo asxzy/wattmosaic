@@ -1,5 +1,21 @@
 # Release Notes
 
+## v0.2.1-dev.27 — 2026-11-13 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- Fix a health-probe regression introduced in 0.2.1-dev.26 (the deprecation release). `/health` no longer reads the `device_configurations` table on every poll; the deprecated-declaration list is cached and refreshed only when the topology or a device configuration changes.
+- Add a regression test that pins the positive case: a topology *with* a declaration must answer from cache, not from the database.
+- Add `WM_DEPRECATE_DEDICATED_DECLARATION` (default true) to silence deprecation notices; it never changes watts.
+- Deprecate the manual `dedicated_device` CT declaration. The measurement capability it enables is unchanged and still reports; nothing is auto-converted.
+- Expose `deprecations` in engine health diagnostics with the replacement path named.
+- Mark the role as deprecated in the setup wizard help text; the option stays selectable.
+- Record the decision as ADR-0029, including the evidence that the live install depends on the direct path.
+
+No measurement, threshold, inference or confidence arithmetic changes in this release. Cases that previously reported `direct_measured` still do.
+
 ## v0.2.1-dev.26 — 2026-11-13 (development channel)
 
 Automatic development build.

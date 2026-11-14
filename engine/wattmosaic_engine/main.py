@@ -645,6 +645,11 @@ class EngineCore:
         #: Bounded by the number of declared devices, not by HA's event rate.
         self._pending_transitions: deque[dict[str, Any]] = deque(maxlen=4096)
         self.topology_cache: Topology | None = None
+        #: Deprecated-declaration payload (ADR-0029), recomputed only when the
+        #: topology or a device configuration changes.  ``/health`` is polled
+        #: every few seconds on the event loop, so it must read this cache and
+        #: never the configuration table (see ``test_health_probe_cost.py``).
+        self._deprecations_cache: list[dict[str, Any]] = []
         #: Why startup discovery produced no topology (``None`` = no problem).
         #: Surfaced by ``/health`` so a fresh install cannot look healthy while
         #: having nothing to infer, which is how the original defect hid.
@@ -667,6 +672,9 @@ class EngineCore:
         self.events_persisted = 0
         self.persistence_errors = 0
         self.cycles = 0
+        # Prime the deprecated-declaration cache so the very first ``health()``
+        # call is already cheap (ADR-0029).
+        self._refresh_deprecations()
 
     # -- lifecycle -------------------------------------------------------- #
     async def start(self, *, start_loops: bool = True) -> None:
@@ -796,6 +804,9 @@ class EngineCore:
 
         self.topology_cache = self.db.load_topology()
         self.topology_bootstrap_error = None
+        # Populate the deprecated-declaration cache once, here, rather than on
+        # the probe path (ADR-0029).
+        self._refresh_deprecations()
         self.db.log_system_event(
             "info",
             "topology",
@@ -840,38 +851,64 @@ class EngineCore:
         Additive diagnostics only: ``warn_once`` is *not* called here, because
         ``/health`` is polled every few seconds.  The one warning per CT is
         emitted where a topology is installed (see ``_announce_deprecations``).
+
+        The list is **cached**, not recomputed: computing it reads
+        ``device_configurations``, and ``health()`` runs on the event loop while
+        the container ``HEALTHCHECK`` and Supervisor watchdog poll it every five
+        seconds.  A table read here would block ingestion on every poll — the
+        exact defect ``test_health_probe_cost.py`` exists to prevent.  The cache
+        is refreshed by :meth:`_refresh_deprecations` at every point that can
+        change the answer.
         """
         if not self.config.deprecate_dedicated_declaration:
             return []
-        topology = self._active_topology()
-        if topology is None or not declares_dedicated(topology):
-            # Cheap negative on the in-memory topology: the probe path must not
-            # read the configuration table just to prove there is nothing to say.
+        return list(self._deprecations_cache)
+
+    def _refresh_deprecations(self) -> list[Any]:
+        """Recompute the deprecated-declaration cache; return the notices.
+
+        Called wherever the topology or a device configuration changes, never
+        from a probe or a sample loop.  Walks the three storage locations that
+        can describe the same declaration and deduplicates by ``ct_id``.
+        """
+        self._deprecations_cache = []
+        if not self.config.deprecate_dedicated_declaration:
+            return []
+        topology = self.topology_cache
+        if topology is None:
+            # Read without populating ``topology_cache``: this runs during
+            # ``__init__``, and an eager cache would pre-empt startup discovery.
+            try:
+                topology = self.db.load_topology()
+            except Exception:  # noqa: BLE001 - diagnostics must never fail
+                return []
+        if not declares_dedicated(topology):
+            # Cheap negative on the in-memory topology: do not read the
+            # configuration table just to prove there is nothing to say.
             return []
         try:
             configurations = self.db.load_device_configurations()
-        except Exception:  # noqa: BLE001 - a read failure must not break /health
+        except Exception:  # noqa: BLE001 - a read failure must not break health
             configurations = None
         try:
-            return [notice.as_dict() for notice in collect_deprecations(topology, configurations)]
+            notices = list(collect_deprecations(topology, configurations))
         except Exception:  # noqa: BLE001 - diagnostics must never fail
             return []
+        self._deprecations_cache = [notice.as_dict() for notice in notices]
+        return notices
+
     def _announce_deprecations(self) -> None:
         """Log one ``WARNING`` per deprecated CT for the current topology.
 
         Called from topology installation only.  ``warn_once`` deduplicates across
         calls for the life of the process, so repeated installations (and the
         per-cycle inference path, which never calls this) cannot flood the log.
+
+        Also refreshes the cached ``/health`` payload, so a change is reflected
+        in diagnostics without ever putting the scan on a probe path.
         """
-        if not self.config.deprecate_dedicated_declaration:
-            return
-        topology = self._active_topology()
-        if topology is None:
-            return
-        try:
-            configurations = self.db.load_device_configurations()
-            notices = collect_deprecations(topology, configurations)
-        except Exception:  # noqa: BLE001 - announcement must never break startup
+        notices = self._refresh_deprecations()
+        if not notices:
             return
         warn_once(notices, log)
 
@@ -2397,6 +2434,7 @@ class EngineCore:
             projected = project_configuration(topology, new_set)
             self.db.save_topology(projected, note=f"api: remove configuration {device_id}")
             self.topology_cache = projected
+            self._announce_deprecations()
             self.db.log_system_event(
                 "info", "configuration", f"set_device_configuration {device_id} (removed)"
             )
@@ -2427,6 +2465,7 @@ class EngineCore:
         projected = project_configuration(topology, new_set)
         self.db.save_topology(projected, note=f"api: set configuration {device_id}")
         self.topology_cache = projected
+        self._announce_deprecations()
         self.db.log_system_event("info", "configuration", f"set_device_configuration {device_id}")
         return ServiceResult(
             ok=True,
@@ -2948,6 +2987,7 @@ class EngineCore:
         self.db.save_device_configurations(merged)
         self.db.save_topology(projected, note="auto placement from observed co-movement")
         self.topology_cache = projected
+        self._announce_deprecations()
         self.db.log_system_event(
             "info",
             "configuration",

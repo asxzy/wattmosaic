@@ -387,6 +387,45 @@ def test_health_probe_does_not_read_configurations_without_a_declaration(tmp_pat
         db.close()
 
 
+def test_health_probe_does_not_read_configurations_even_with_a_declaration(
+    tmp_path,
+) -> None:
+    """The positive case must be as cheap as the negative one.
+
+    ``/healthz`` proxies ``/api/v1/health`` and the container ``HEALTHCHECK``
+    and Supervisor watchdog poll it every 5 s.  ``health()`` runs on the event
+    loop, so any table read here blocks ingestion — the defect recorded in
+    ``test_health_probe_cost.py``.  A declaration must therefore be answered
+    from the in-memory topology and the already-cached probe value, never by
+    reading ``device_configurations`` per poll.
+    """
+    from wattmosaic_engine.main import EngineCore
+    from wattmosaic_engine.storage.database import Database
+
+    db = Database(tmp_path / "probe_positive.db")
+    try:
+        db.save_topology(_topology())
+        core = EngineCore(EngineConfig(ha_token="not-used"), db)
+        # Prime the cache so the read below is the *repeat* poll, not the first.
+        core.health()
+
+        statements: list[str] = []
+        db._conn.set_trace_callback(statements.append)
+        try:
+            health = core.health()
+        finally:
+            db._conn.set_trace_callback(None)
+
+        assert [d["ct_id"] for d in health.details["deprecations"]] == ["ct_tv"]
+        offenders = [s for s in statements if "device_configurations" in s.lower()]
+        assert not offenders, (
+            "health() read the configuration table on a probe path; that blocks "
+            f"the event loop every poll. Statements: {offenders}"
+        )
+    finally:
+        db.close()
+
+
 # --------------------------------------------------------------------------- #
 # 6. A pre-change topology (no ``deprecations`` key anywhere) still loads
 # --------------------------------------------------------------------------- #
