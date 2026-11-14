@@ -832,3 +832,181 @@ def test_a_value_at_the_ceiling_with_no_surplus_is_still_measured() -> None:
     assert result.source == Source.INFERRED
     assert result.confidence_tier == ConfidenceTier.TIER_3_MEASURED
     assert "declared_ceiling_hit" not in batch.diagnostics
+
+
+# --------------------------------------------------------------------------- #
+# Declared priors must still fit the row they sit on
+# --------------------------------------------------------------------------- #
+
+
+def test_configured_priors_cannot_exceed_the_row_they_share() -> None:
+    """Declarations are bounded by the circuit, not only by themselves.
+
+    ADR-0025 caps each claimant at its own declared wattage, and ADR-0026 bounds a
+    measured step by the row.  Neither bound applied at Level 3b, so three
+    fixtures declaring 60 + 120 + 240 W reported 420 W on a 58 W circuit -- and
+    because a ``configured_prior`` is subtracted from the residual as if it had
+    been measured, that surplus reduced the unknown load instead of staying in it.
+
+    The measured case came from the reference install: 420 W of declarations on a
+    58.35 W circuit, and two 600 W declarations that drove the residual to
+    -296.69 W.  A negative residual is physically impossible.
+    """
+    topology = _shared_topology_with_watts(
+        {"lamp_a": 60.0, "lamp_b": 120.0, "lamp_c": 240.0}
+    )
+    batch = _infer(
+        topology,
+        {"ct_main": 58.0, "ct_lights": 58.0},
+        {"lamp_a": "on", "lamp_b": "on", "lamp_c": "on"},
+    )
+    results = _by_device(batch)
+    reported = sum(results[d].power_w for d in ("lamp_a", "lamp_b", "lamp_c"))
+    assert reported <= 58.0 + 1e-6, (
+        f"declarations totalling 420 W reported {reported:.1f} W on a 58 W circuit"
+    )
+    assert batch.reconciliation.unknown_residual_w >= -1e-6, (
+        "priors that do not fit the row must not push the residual negative"
+    )
+
+
+def test_a_single_oversized_prior_cannot_exceed_its_row() -> None:
+    """One fixture declaring 600 W on a 58 W circuit is bounded by the solve.
+
+    With a single claimant the row is identifiable, so the value comes from the
+    constrained fit and the measurement bounds it.  This is the case the engine
+    already gets right; it is pinned here so a future change to Level 3b cannot
+    silently move the single-claimant case onto the unbounded prior path.
+    """
+    topology = _shared_topology_with_watts({"lamp_a": 600.0, "lamp_b": 600.0})
+    batch = _infer(
+        topology,
+        {"ct_main": 58.0, "ct_lights": 58.0},
+        {"lamp_a": "on", "lamp_b": "on"},
+    )
+    reported = sum(_by_device(batch)[d].power_w for d in ("lamp_a", "lamp_b"))
+    assert reported <= 58.0 + 1e-6
+
+
+def test_an_over_declared_row_is_shared_in_proportion_to_the_declarations() -> None:
+    """The clip follows the declaration ratio, never an even split.
+
+    A 30 W claimant and a 10 W claimant on a 20 W row cannot both be right, but
+    their *relative* claims are the only evidence available.  Splitting evenly
+    would credit the 10 W fixture double what it said it draws.
+    """
+    topology = _shared_topology_with_watts({"lamp_a": 30.0, "lamp_b": 10.0})
+    batch = _infer(
+        topology,
+        {"ct_main": 20.0, "ct_lights": 20.0},
+        {"lamp_a": "on", "lamp_b": "on"},
+    )
+    results = _by_device(batch)
+    # 20 W row across a 3:1 declaration ratio.
+    assert results["lamp_a"].power_w == pytest.approx(15.0)
+    assert results["lamp_b"].power_w == pytest.approx(5.0)
+    assert results["lamp_a"].power_w + results["lamp_b"].power_w == pytest.approx(20.0)
+
+
+def test_a_prior_is_not_clipped_below_zero_by_a_reverse_flow_row() -> None:
+    """Reverse flow on a device row is not capacity to spend.
+
+    A negative reading means the conductor is exporting, which says nothing
+    favourable about the declared draw.  Clipping to zero would invent an "off"
+    the state contradicts, so the row is skipped entirely and the declaration
+    stands.
+    """
+    topology = _shared_topology_with_watts({"lamp_a": 60.0, "lamp_b": 120.0})
+    batch = _infer(
+        topology,
+        {"ct_main": 500.0, "ct_lights": -25.0},
+        {"lamp_a": "on", "lamp_b": "on"},
+    )
+    results = _by_device(batch)
+    assert "declared_priors_bounded_by_row" not in batch.diagnostics
+    assert results["lamp_a"].power_w == pytest.approx(60.0)
+    assert results["lamp_b"].power_w == pytest.approx(120.0)
+
+
+def test_a_prior_within_the_row_is_still_reported() -> None:
+    """The guard must not discard an honest declaration that does fit.
+
+    A row carrying 58 W from fixtures declaring 20 + 20 W is explained by them and
+    all of it should be reported.  The bound is a ceiling, not a market.
+    """
+    topology = _shared_topology_with_watts({"lamp_a": 20.0, "lamp_b": 20.0})
+    batch = _infer(
+        topology,
+        {"ct_main": 58.0, "ct_lights": 58.0},
+        {"lamp_a": "on", "lamp_b": "on"},
+    )
+    results = _by_device(batch)
+    assert results["lamp_a"].power_w == pytest.approx(20.0, abs=1e-6)
+    assert results["lamp_b"].power_w == pytest.approx(20.0, abs=1e-6)
+
+
+def test_a_prior_spends_only_what_the_row_has_left() -> None:
+    """A measurement on another row does not license a bigger prior here.
+
+    The branch row reads 200 W; a device with its own dedicated CT sits on a
+    different row, so the priors get the whole 200 W and the residual closes to
+    zero when the mains agree with the panel feeds.  Bounding priors by the
+    enclosing main (500 W) instead of their own branch would have allowed 500 W
+    of declarations here, which is the over-attribution this guard prevents.
+    """
+    topology = Topology(
+        status=TopologyStatus.CONFIRMED,
+        channels=[
+            CTChannel(
+                ct_id="main",
+                entity_id="sensor.main",
+                ct_type=CTType.MAIN,
+                phase=Phase.BOTH,
+            ),
+            CTChannel(
+                ct_id="ct_a",
+                entity_id="sensor.a",
+                ct_type=CTType.DEDICATED_DEVICE,
+                phase=Phase.L1,
+                device_id="a",
+                parent_ct_id="main",
+            ),
+            CTChannel(
+                ct_id="ct_bc",
+                entity_id="sensor.bc",
+                ct_type=CTType.BRANCH,
+                phase=Phase.L2,
+                parent_ct_id="main",
+            ),
+        ],
+        devices=[
+            DeviceTopology(device_id="a", phase=Phase.L1, dedicated_ct_ids=["ct_a"]),
+            DeviceTopology(device_id="b", phase=Phase.L2, branch_ct_ids=["ct_bc"]),
+            DeviceTopology(device_id="c", phase=Phase.L2, branch_ct_ids=["ct_bc"]),
+        ],
+    )
+    topology = project_configuration(
+        topology,
+        [
+            DeviceConfiguration(
+                device_id=device_id,
+                connectivity=HaConnectivity.CONNECTED,
+                monitoring=MonitoringLevel.SHARED,
+                state_entity_ids=[f"switch.{device_id}"],
+                monitored_by_ct_ids=["ct_bc"],
+                expected=ExpectedPower(on_w=500.0),
+            )
+            for device_id in ("b", "c")
+        ],
+    )
+    batch = _infer(
+        topology,
+        {"main": 500.0, "ct_a": 300.0, "ct_bc": 200.0},
+        {"b": "on", "c": "on"},
+    )
+    results = _by_device(batch)
+    assert results["a"].source == Source.DIRECT_MEASURED
+    # Two 500 W declarations on a 200 W row share it evenly, not the 500 W main.
+    assert results["b"].power_w == pytest.approx(100.0)
+    assert results["c"].power_w == pytest.approx(100.0)
+    assert batch.reconciliation.unknown_residual_w == pytest.approx(0.0, abs=1e-6)

@@ -282,8 +282,20 @@ def test_a_curve_without_full_on_watts_is_not_used() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_modelled_siblings_make_the_row_separable() -> None:
-    """Two declared fixtures on one row are each bounded by their own prior."""
+def test_modelled_siblings_share_the_row_instead_of_over_reporting() -> None:
+    """Two declared fixtures on one row are bounded by the row, not just themselves.
+
+    Each claimant is bounded individually by its own declared wattage (ADR-0025),
+    and their **sum** is bounded by the circuit that carries them.  The fixture
+    used here is the measured case: an 8.35 W standing load plus a 19.57 W step
+    reads 27.92 W on ``ct1``, while the two fixtures declare 19.57 W each.  Both
+    declarations cannot be true at once on that row.
+
+    Reporting 39.14 W here (what this test asserted before) is the over-attribution
+    defect: the surplus was then subtracted from the whole-home residual as if it
+    had been measured.  The priors are shared out in proportion to what each
+    declared, so both are still reported and neither claims the whole row.
+    """
     topology = project_configuration(
         _topology(), [_fixture("bar"), _fixture("laundry")]
     )
@@ -298,9 +310,13 @@ def test_modelled_siblings_make_the_row_separable() -> None:
     by_id = {result.device_id: result for result in both_on}
 
     # Both priors are reported, and neither claims the whole row.
-    assert by_id["bar"].power_w == pytest.approx(19.57)
-    assert by_id["laundry"].power_w == pytest.approx(19.57)
+    assert by_id["bar"].power_w == pytest.approx(27.92 / 2)
+    assert by_id["laundry"].power_w == pytest.approx(27.92 / 2)
     assert by_id["bar"].source == Source.CONFIGURED_PRIOR.value
+    # The sum is the row, never more than it.
+    assert by_id["bar"].power_w + by_id["laundry"].power_w == pytest.approx(27.92)
+    assert "declared_prior_bounded_by_row" in by_id["bar"].explanation
+    assert "declared_prior_bounded_by_row" in by_id["laundry"].explanation
 
 
 def test_both_off_leaves_the_baseline_unattributed() -> None:

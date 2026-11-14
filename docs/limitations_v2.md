@@ -295,9 +295,54 @@ Honest list. Each is a real behaviour, not a documentation gap.
    existing declaration. A `branch` CT reaching `CircuitClass.DEDICATED` at
    `CONFIRMED` is the documented replacement, and it must be shown on live data
    before the declaration can be retired.
+7. **Configured priors were not bounded by the row that carries them** (fixed
+   in this change; kept here so the history and the guard are recorded together).
+   ADR-0025 bounds each claimant *individually* (`config_ceiling_w` is a solver
+   upper bound) and ADR-0026 bounds a *measured step* by the row's own reading
+   (`step_w = min(step_w, |row|)`), but Level 3b had neither check: a declared
+   `on_w` was reported whenever the device's state said "on", whether or not the
+   circuit carried that much.
 
-None of these were fixed in this task: the scope was documentation, and every
-claim above is written from the shipped code as it stands.
+   The measured symptom: three fixtures declaring 60 + 120 + 240 W reported
+   **420 W** on the `soffit_plug` circuit, which reads 58.01 W at the sampled
+   instant (56.72-154.92 W over the capture; median 58.18 W), and two 600 W
+   declarations drove the whole-home residual from +873.48 W to **-326.52 W**.
+   Because a `configured_prior` is subtracted from the residual exactly like a
+   measurement
+   (`engine.py:_reconcile`, `accounted = direct + inferred + model + prior`), the
+   surplus silently reduced the unknown load and could make the residual
+   physically impossible.
+
+   `DisaggregationEngine._bound_configured_priors_by_row` now bounds the **sum**
+   of the priors on a row by that row's own usable reading, sharing it in
+   proportion to what each claimant declared (never evenly, so a 10 W fixture is
+   not credited double). Only `CONFIGURED_PRIOR` results are touched — direct
+   readings are observations and fits were already constrained by the solver. A
+   stale row or reverse flow skips the guard rather than substituting a wrong
+   number. Replaying the 24 h capture with declarations of 420 W and 1200 W on
+   that circuit now reports 58.01 W in both cases, with the residual staying
+   positive (815.47 W); with the guard reverted they report 420 W / 1200 W and
+   the latter drives the residual to -326.52 W.
+
+   Not reachable on the current reference install: it declares no `expected.on_w`
+   and no `monitored_by_ct_ids` (0 occurrences in its diagnostics payload), so
+   every device takes the direct path and the whole-install replay is identical
+   with and without the guard (65.25 % coverage, 34.75 % unknown load). The fix
+   guards future and manual configuration; it is proven by the injected
+   declaration probe and the tests below, not by the install's aggregate numbers.
+
+   Verification: `tests/unit/test_device_attachment.py` —
+   `test_configured_priors_cannot_exceed_the_row_they_share`,
+   `test_an_over_declared_row_is_shared_in_proportion_to_the_declarations`,
+   `test_a_prior_spends_only_what_the_row_has_left`,
+   `test_a_prior_is_not_clipped_below_zero_by_a_reverse_flow_row`, and
+   `test_a_prior_within_the_row_is_still_reported`. The previously pinned
+   over-attribution in `test_auto_placement.py` is now
+   `test_modelled_siblings_share_the_row_instead_of_over_reporting`.
+
+Items 1–6 were not fixed in this task, and every claim above is written from the
+shipped code as it stands. Item 7 was fixed; §10.7 records the guard, its
+verification and the fact that the reference install cannot reach it today.
 
 ---
 

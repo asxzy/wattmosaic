@@ -730,6 +730,7 @@ class DisaggregationEngine:
                 result = self._fallback_result(did, coerced.at, exc)
             results.append(result)
 
+        self._bound_configured_priors_by_row(graph, coerced, results, diagnostics)
         reconciliation = self._reconcile(
             graph, coerced, results, matrix, direct, diagnostics
         )
@@ -2069,6 +2070,121 @@ class DisaggregationEngine:
     # ------------------------------------------------------------------ #
     # Reconciliation
     # ------------------------------------------------------------------ #
+    def _bound_configured_priors_by_row(
+        self,
+        graph: TopologyGraph,
+        window: CoercedWindow,
+        results: Sequence[InferenceResult],
+        diagnostics: dict[str, Any],
+    ) -> None:
+        """Bound configured priors by the power their own row actually carries.
+
+        ADR-0025 bounds each claimant *individually*: a lamp declaring 150 W is
+        never credited more than 150 W.  ADR-0026 bounds a *measured step* by the
+        row's own reading.  Level 3b had neither, so a declaration was reported
+        whenever its device's state said "on", whether or not the circuit carried
+        that much.  Three fixtures declaring 60 + 120 + 240 W therefore reported
+        420 W on a 58 W circuit, and because a ``configured_prior`` is subtracted
+        from the whole-home residual exactly like a measurement, the surplus
+        silently reduced the unknown load -- driving the residual negative when
+        the declarations were large enough.
+
+        A prior is the weakest evidence the engine has.  It may explain part of a
+        row; the part that does not fit is undeclared load and stays in the
+        residual.  Only ``CONFIGURED_PRIOR`` results are touched: a direct
+        reading is an observation, a fit was already constrained by the solver,
+        and a model estimate is a separate evidence class.
+
+        The row is shared out **in proportion to what each claimant declared**, so
+        no single declaration silently absorbs another device's share.  A row with
+        no usable reading, or a stale one, is left alone: there is no present
+        capacity to compare against, and substituting an out-of-date number would
+        trade one wrong value for another.
+
+        Devices are grouped by their *own* attribution row set rather than per CT,
+        because a double-pole device legitimately sits on two legs -- treating the
+        legs independently would clip it once per leg.
+        """
+        priors = [
+            result
+            for result in results
+            if result.source == Source.CONFIGURED_PRIOR and result.power_w > 0.0
+        ]
+        if not priors:
+            return
+        by_device = {result.device_id: result for result in results}
+
+        # Power already attributed to a row by any source other than a prior.
+        # A prior may only spend what is left: the fit and any measurement have
+        # first claim on the row they observed.
+        claimed: dict[str, float] = {}
+        for result in results:
+            if result.source == Source.CONFIGURED_PRIOR or result.power_w <= 0.0:
+                continue
+            for cid in graph.attribution_ct_ids(result.device_id):
+                claimed[cid] = claimed.get(cid, 0.0) + float(result.power_w)
+
+        # Group by the tuple of rows the device attributes through.
+        groups: dict[tuple[str, ...], list[str]] = {}
+        for result in priors:
+            rows = tuple(graph.attribution_ct_ids(result.device_id))
+            if rows:
+                groups.setdefault(rows, []).append(result.device_id)
+        if not groups:
+            return
+
+        bounded: dict[str, float] = {}
+        for rows, device_ids in groups.items():
+            capacity = 0.0
+            usable = True
+            for cid in rows:
+                reading = window.readings.get(cid)
+                if reading is None:
+                    usable = False
+                    break
+                # A stale row says nothing about what the circuit carries *now*.
+                if reading.age_s > self.max_measurement_age_s:
+                    usable = False
+                    break
+                value = reading.signed_w()
+                # Reverse flow on a device row is not capacity to spend on a
+                # declaration; leave the prior untouched rather than clip to 0.
+                if value is None or value < 0.0:
+                    usable = False
+                    break
+                capacity += float(value)
+            if not usable:
+                continue
+            # Spend only what the row has left after measurement and fits.
+            capacity -= sum(claimed.get(cid, 0.0) for cid in rows)
+            if capacity <= 0.0:
+                capacity = 0.0
+
+            declared = sum(by_device[d].power_w for d in device_ids)
+            if declared <= capacity + 1e-9:
+                continue
+            share = capacity / declared
+            for device_id in device_ids:
+                result = by_device[device_id]
+                clipped = result.power_w * share
+                bounded[device_id] = clipped
+                result.power_w = clipped
+                result.explanation = list(
+                    dict.fromkeys([*result.explanation, "declared_prior_bounded_by_row"])
+                )
+                result.provenance = {
+                    **dict(result.provenance or {}),
+                    "declared_prior_w": declared,
+                    "row_capacity_w": capacity,
+                    "row_capacity_ct_ids": list(rows),
+                    "row_shared_between": list(device_ids),
+                }
+
+        if bounded:
+            diagnostics["declared_priors_bounded_by_row"] = {
+                device_id: round(value, 6) for device_id, value in sorted(bounded.items())
+            }
+
     def _reconcile(
         self,
         graph: TopologyGraph,

@@ -1644,3 +1644,111 @@ the direct reading. Until then the role remains selectable and works.
 **Non-claims.** This does not claim the inferred path is equivalent yet, does not
 remove the direct path, and does not migrate anything. It makes the deprecation
 visible in the log, in `/api/v1/diagnostics` and in the wizard help text.
+
+---
+
+## ADR-0030 — A configured prior is bounded by the row that carries it
+
+**Status:** Accepted · 2026-11-14 · Extends ADR-0025 and ADR-0026
+
+**Context.** ADR-0025 made a declared wattage a non-relaxable upper bound, so a
+fixture could never be credited more than it said it draws. ADR-0026 bounded a
+*measured step* by the row's own reading. Both check one claimant at a time.
+
+Neither bound applies at Level 3b, where a device with no usable direct reading,
+no model and no identifiable fit falls back to `configured_power`. That path
+returns the declared `on_w` whenever the device's own state says it is running,
+with no reference to the circuit. The sum of the declarations on one row could
+therefore exceed the row without limit.
+
+Two measurements on the reference installation:
+
+* three fixtures declaring 60 + 120 + 240 W reported **420 W** on the
+  `soffit_plug` circuit, which reads 58.01 W at the sampled instant;
+* two 600 W declarations on the same circuit drove the whole-home residual from
+  **+873.48 W** to **−326.52 W**.
+
+The second number is the serious one. `_reconcile` computes
+`accounted = direct + inferred + model + prior`, so a prior is subtracted from
+the residual exactly like a measurement. A prior that does not fit the row does
+not merely mis-report a device — it *reduces the unknown load*, making the
+engine look as though it explained power nobody measured. A negative residual is
+physically impossible, and the existing explanation for it
+(`sample_vintage_skew`) would have been the wrong diagnosis.
+
+**Decision.**
+
+1. **Priors on one row share that row's reading.** Before reconciliation,
+   `_bound_configured_priors_by_row` sums the `CONFIGURED_PRIOR` results that
+   attribute through the same row set. If the sum exceeds what the row carries,
+   each is scaled by `capacity / declared`.
+2. **The split is proportional to the declarations, never even.** The relative
+   claims are the only evidence available; an even split would credit a 10 W
+   fixture double what it stated.
+3. **Capacity is the device's own attribution rows, not its enclosing main.** A
+   branch row's priors are bounded by that branch. Using the main would allow a
+   sub-panel circuit to claim the whole service.
+4. **Only priors are touched.** A direct reading is an observation; a fit was
+   already constrained by the solver; a model estimate is a separate evidence
+   class with its own lifecycle.
+5. **A stale row or reverse flow skips the guard.** An out-of-date reading says
+   nothing about the circuit now, and a negative reading is not capacity to
+   spend. Clipping to either would trade one wrong number for another, so the
+   declaration stands and the row is left alone.
+6. **The clipped value stays `configured_prior`.** It is still an assertion, and
+   the explanation records `declared_prior_bounded_by_row` with the declared
+   total, the row capacity and the co-claimants in `provenance`.
+
+**Rejected alternatives.**
+
+* *Average the claimants evenly.* Wrong whenever the declarations differ, which
+  is the common case — it contradicts the one piece of evidence present.
+* *Drop every prior whose row is over-subscribed.* Discards honest knowledge: a
+  row carrying 58 W from fixtures declaring 20 + 20 + 18 W is fully explained and
+  should report all three.
+* *Clip against the enclosing main instead of the branch.* A sub-panel feed would
+  then license its circuits to consume the entire service, reintroducing the
+  defect one level up.
+* *Treat the surplus as a negative prior.* A prior cannot be negative; the
+  surplus is undeclared load, and it belongs in the residual.
+
+**Consequences.** Declarations can no longer manufacture attribution. The
+unknown residual remains the honest home for load the engine cannot explain, and
+the invariant "accounted never exceeds the measurement that carries it" now holds
+per row as well as per home.
+
+**Verification.**
+
+* `tests/unit/test_device_attachment.py` —
+  `test_configured_priors_cannot_exceed_the_row_they_share` (420 W of
+  declarations on a 58 W row reports 58 W and keeps the residual non-negative),
+  `test_an_over_declared_row_is_shared_in_proportion_to_the_declarations` (a 3:1
+  declaration ratio splits a 20 W row as 15 + 5),
+  `test_a_prior_spends_only_what_the_row_has_left` (two 500 W declarations on a
+  200 W branch against a 500 W main report 100 + 100, residual 0),
+  `test_a_prior_is_not_clipped_below_zero_by_a_reverse_flow_row`, and
+  `test_a_prior_within_the_row_is_still_reported`.
+* `tests/unit/test_auto_placement.py::test_modelled_siblings_share_the_row_instead_of_over_reporting`
+  — this test previously *pinned* the defect at 19.57 + 19.57 = 39.14 W on a
+  27.92 W row; it now asserts 13.96 + 13.96.
+* Negative verification: reverting `_bound_configured_priors_by_row` makes
+  `test_configured_priors_cannot_exceed_the_row_they_share` fail with 420 W, the
+  proportional test report 30 W instead of 15 W, and the remainder test report
+  500 W instead of 100 W.
+* Live probe against the reference topology: adding declarations of 420 W and
+  1200 W to the 58.01 W `soffit_plug` circuit (replaying the real 24 h capture)
+  reports 58.01 W in both cases with the residual staying positive; with the
+  guard reverted they report 420 W and 1200 W and the 1200 W case drives the
+  residual from +873.48 W to −326.52 W.
+* **The whole-install 24 h replay is unchanged by this fix**: 65.25 % coverage,
+  34.75 % unknown load, 52 negative residuals and 0 nested double counts, both
+  with and without the guard. That is expected, not a null result — the
+  reference install declares no `expected.on_w` and no `monitored_by_ct_ids`
+  (0 occurrences in its diagnostics payload), so no device reaches Level 3b.
+  The fix is proven by the injected-declaration probe above and by the unit
+  tests, not by the install's aggregate numbers.
+
+**Non-claims.** This does not improve attribution quality — it prevents a
+declaration from being subtracted as if it had been measured. It does not bound
+`MODEL_ESTIMATED` values, which carry their own validated bounds, and it does
+not change what a prior is graded as.
