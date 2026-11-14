@@ -1,5 +1,13 @@
 # Release Notes
 
+## v0.2.1-dev.31 — 2026-11-14 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- test(correlation): measure pairing cost with headroom for a shared runner
+
 ## v0.2.1-dev.30 — 2026-11-14 (development channel)
 
 Automatic development build.
