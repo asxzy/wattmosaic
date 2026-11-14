@@ -1913,3 +1913,75 @@ itself, and an unrecoverable session fails once rather than flickering.
 **Non-claims.** This does not extend the Supervisor's 15-minute window, and it
 does not keep a session alive while a tab is hidden. It makes the expiry
 recoverable rather than silent.
+
+---
+
+## ADR-0033 — A long analysis must not run on the event loop
+
+**Status.** Accepted, implemented in `0.2.1-dev.30`.
+
+**Context.** Device discovery answered `504` on long windows. ADR-0031 had
+widened the timeout budget and was live-verified — `POST /api/v1/commands` with
+`discover_placements` returned 200 in 30.8 s, past the old 30 s cap — yet 504s
+continued. So the budget was not the cause.
+
+Measured against the live install rather than inferred:
+
+| Probe, during a 120 h discovery | Healthy | During discovery |
+| --- | --- | --- |
+| `GET /api/v1/health` | 0.03 s | 4.01–4.10 s, then 504 `upstream_timeout` |
+| `GET /healthz` (Supervisor watchdog) | 0.01 s | **503 at 4.01–4.67 s** |
+
+Both endpoints run on the same loop as the analysis. Profiling the analysis
+found the cost: `observations_from_history` paired each state transition with
+the reading on either side of it by scanning that row's **entire** history, so
+it was `transitions × rows × readings`. At production volume (180 candidate
+entities, 32 branch rows) that measured **25 s at 72 h and 139 s at 168 h**, all
+synchronous, all inline in the request handler.
+
+**Decision.** Two changes, because they fix different halves:
+
+1. **Index the pairing.** Each row is sorted once and binary-searched
+   (`bisect_left` for the last reading before a transition, `bisect_right` for
+   the level in force). Cost becomes linear in the readings, output unchanged.
+2. **Move the compute off the loop.** `discover_placements` hands its whole
+   compute block — parse, pair, correlate, plan placements, fit groups — to
+   `asyncio.to_thread`, the precedent already used for `snapshot` and
+   `devices`. A fast algorithm still cannot block the loop for a whole window;
+   a free loop still cannot make a slow algorithm fast.
+
+The thread is safe because the database connection is already opened with
+`check_same_thread=False`.
+
+**Alternatives rejected.**
+
+* *Raise the timeouts again.* The loop was blocked, so no budget on the same
+  loop could be honoured — a longer budget only lengthens the outage.
+* *Cache the analysis result.* Correctness is not the problem and a cache hides
+  the cost behind a warm path that a first run still pays.
+* *Chunk the computation into cooperating async steps.* More machinery than the
+  work needs; the block is a pure function of the payload.
+
+**Consequences.** Health and the watchdog probe stay responsive during a long
+analysis, so the App is no longer restarted mid-discovery and the gateway no
+longer reports a busy engine as a timeout. A week-long window is still bounded
+by whatever proxy sits in front of Home Assistant — that is a separate,
+unavoidable layer (see `docs/troubleshooting.md` §9.2), not this defect.
+
+**Verification.**
+
+* `tests/unit/test_correlation.py::test_pairing_agrees_with_a_slice_scan_reference`
+  rebuilds every observation from the definition and requires an exact match, so
+  the index cannot be fast-and-wrong.
+* `test_pairing_cost_grows_linearly_with_the_window_not_quadratically` and
+  `test_a_real_72_hour_window_pairs_in_seconds` pin the cost.
+* `test_discovery_analysis_runs_off_the_event_loop` and
+  `test_the_pairing_pass_is_what_made_discovery_slow` pin the shape of the fix.
+* Live, on `0.2.1-dev.31` during a 120 h discovery: `/health` worst 2.38 s,
+  `/healthz` worst 0.34 s, neither ever non-200 (before: 4.10 s and six 503s).
+  168 h then completed 200 in 45.6 s internal / 36.2 s external, where it had
+  previously been cut off at 90.0 s.
+
+**Non-claims.** This does not make a 168 h window complete within any particular
+proxy's timeout, and it does not claim the earlier timeout-budget work
+(ADR-0031) was the cause — it was a real but different defect.

@@ -200,15 +200,28 @@ integration and the ingress panel. Set it if you publish a host port.
 If you are upgrading from 0.1.0, install the new App version and restart it; the
 database and options are preserved.
 
-### 9.2 Device discovery returns HTTP 504 `timeout` on a long window
+### 9.2 Device discovery returns HTTP 504 on a long window
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| "Discover devices" with a 48 h, 72 h or 168 h window fails with `504 timeout` ("request exceeded the engine timeout"), while 24 h works | The engine's route-timeout table is keyed by exact path. `POST /api/v1/discover/placements` had the analysis budget, but the integration's `discover_placements` service reaches the same work through `POST /api/v1/commands`, which kept the 30 s default. A multi-hour window needs tens of seconds. | Fixed in the next release. The engine now grants the analysis budget to the commands route when the command is `discover_placements`, and the integration's client no longer cuts it at 10 s. |
+| "Discover devices" with a long window fails with `504`, the panel shows `Request failed (HTTP 504)`, or the App restarts mid-analysis | The engine blocked its own event loop while correlating history. Pairing every state transition against every CT row scanned each row's whole history, so the cost was `transitions × rows × readings`. At production volume that was 25 s for a 72 h window and 139 s for 168 h, inline in the request. The loop could not answer `/health` (which the gateway cuts off at 4 s) or `/healthz` (the Supervisor watchdog probe), so the App was reported unreachable and could be restarted. | Fixed in `0.2.1-dev.30`. Pairing is now binary-searched per row (identical output, linear cost) and the whole compute block runs in a worker thread, so health stays responsive while a discovery works. |
 
-Until you are on that version, use the panel's **Discover devices** button (the
-direct route) instead of the `wattmosaic.discover_placements` service, and keep
-the window at 24 h.
+Two separate layers that are *not* this defect, but have the same symptom, are
+worth knowing:
+
+* **The gateway's own liveness budget is 4 s.** Before the fix above, a busy
+  engine answered `GET /api/v1/health` in 4.0–4.1 s and the gateway returned
+  `504 {"error": "upstream_timeout"}` — that JSON is the gateway, not the engine.
+* **A reverse proxy in front of Home Assistant adds a ceiling.** The reference
+  install sits behind openresty, whose default `proxy_read_timeout` is 90 s; it
+  answers an HTML `<center>504 Gateway Time-out</center>` at exactly 90.0 s. A
+  168 h window exceeded that even after the engine fix, because a whole-week
+  recorder read really does take longer than 90 s. Raise that timeout if you
+  need week-long windows through an external proxy.
+
+`Request failed (HTTP 504)` in the panel is the fallback text used when the body
+is not JSON, which is how an HTML 504 from an outer proxy is told apart from the
+engine's and gateway's own JSON errors.
 
 ### 9.3 The panel returns 401 after it has been open for a while
 
