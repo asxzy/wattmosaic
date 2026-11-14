@@ -1,5 +1,13 @@
 # Release Notes
 
+## v0.2.1-dev.32 — 2026-11-14 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- docs: record the real 504 cause (blocked event loop), not a timeout budget
+
 ## v0.2.1-dev.31 — 2026-11-14 (development channel)
 
 Automatic development build.
