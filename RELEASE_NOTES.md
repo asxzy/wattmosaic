@@ -1,5 +1,13 @@
 # Release Notes
 
+## v0.2.1-dev.33 — 2026-11-14 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- test(correlation): prove the pairing's work is window-shaped, not ratio-timed
+
 ## v0.2.1-dev.32 — 2026-11-14 (development channel)
 
 Automatic development build.
