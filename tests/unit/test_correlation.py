@@ -1549,45 +1549,81 @@ def _best_pairing_time(hours: int, *, repeats: int = 3) -> tuple[float, int]:
     return best, count
 
 
-def test_pairing_cost_grows_linearly_with_the_window_not_quadratically() -> None:
-    """Doubling the window must not quadruple the pairing cost.
+def test_pairing_does_the_same_work_regardless_of_how_many_readings_a_row_has() -> None:
+    """The pairing's work must not depend on a row's history length.
 
-    ``hours`` doubling doubles both the transitions and the readings-per-row, so
-    the old scan grew ~4x.  The measurement is taken at 72 h and 144 h: below
-    that the per-call constant dominates and the ratio is noisy, while at these
-    sizes the linear term is what is actually being timed.  Measured on this
-    machine after the index: 0.39 s at 72 h, 0.81 s at 144 h (~2.1x); before it,
-    25 s and ~100 s (~4x).
+    A wall-clock ratio is not a usable guard here: at these volumes the pass is
+    fast enough that fixed overhead and runner noise dominate (CI measured 3.1x
+    and 3.8x on correct code, 0.23 s -> 0.85 s).  This measures the thing the
+    ratio was only a proxy for.
 
-    Two independent tripwires, because a wall-clock *ratio* alone is fragile on
-    a shared runner (CI once measured 3.1x on correct code):
-
-    * an absolute ceiling at 144 h, which the quadratic form misses by two
-      orders of magnitude -- this is what actually catches a regression and it
-      tolerates a machine several times slower than the reference;
-    * the ratio itself, with enough headroom that runner noise cannot trip it
-      while a return to ~4x growth still does.
+    The indexed pairing asks each row exactly two questions per transition --
+    "last reading at or before" and "first reading at or after" -- so it performs
+    ``transitions x rows`` binary searches.  A scan over the row's history would
+    perform ``transitions x rows x readings`` *comparisons*.  So: same window,
+    same transitions, ten times the readings, and the search count must not move.
     """
-    long_hours, long_count = _best_pairing_time(144)
-    short_hours, short_count = _best_pairing_time(72)
+    from unittest import mock
 
-    # Both runs must do real work: a timing test that paired nothing is void.
-    assert short_count > 0 and long_count > short_count, (
-        f"the workload produced {short_count} and {long_count} observations; "
-        "the timing would not measure the pairing pass"
+    from wattmosaic_engine.ingestion import correlation as correlation_module
+
+    def count_searches(hours: int, *, reading_seconds: int) -> tuple[int, int, int, int]:
+        origin = T0
+        total_minutes = hours * 60
+        states = {
+            f"light.e{index}": [
+                (origin + timedelta(minutes=minute), "on" if (minute // 4) % 2 else "off")
+                for minute in range(0, total_minutes, 4)
+            ]
+            for index in range(6)
+        }
+        readings = {
+            f"ct_{row}": [
+                (origin + timedelta(seconds=second), 50.0 + row)
+                for second in range(0, total_minutes * 60, reading_seconds)
+            ]
+            for row in range(4)
+        }
+        transitions = sum(len(rows) - 1 for rows in states.values())
+        calls = 0
+        real = correlation_module.bisect_left
+
+        def counting(stamps: list, at: object) -> int:
+            nonlocal calls
+            calls += 1
+            return real(stamps, at)
+
+        with mock.patch.object(correlation_module, "bisect_left", counting):
+            observations = observations_from_history(
+                entity_states=states, row_readings=readings, window_s=30
+            )
+        assert observations, "the workload produced nothing to pair"
+        per_row = len(next(iter(readings.values())))
+        return calls, transitions, len(readings), per_row
+
+    # Both cadences keep every transition inside ``window_s`` (30 s); only the
+    # amount of history per row changes.
+    sparse = count_searches(3, reading_seconds=10)
+    dense = count_searches(3, reading_seconds=1)
+
+    # The dense workload really does carry ten times as much history; without
+    # that, the equal-work assertion below would prove nothing.
+    assert dense[2] == sparse[2], "both workloads must use the same rows"
+    assert dense[3] == sparse[3] * 10, (
+        f"the dense row has {dense[3]} readings, the sparse one {sparse[3]}; "
+        f"this test needs a 10x difference to be meaningful"
     )
-
-    # ~0.8 s here, ~360 s if every transition scanned a row's whole history.
-    assert long_hours < 20.0, (
-        f"144 h pairing took {long_hours:.1f}s; the indexed pass is sub-second, "
-        f"so this is a whole-history scan per transition again"
+    assert sparse[0] > 0
+    # Same transitions, same rows, ten times the readings -> same work.
+    assert dense[0] == sparse[0], (
+        f"pairing did {sparse[0]} searches over {sparse[3]} readings per row and "
+        f"{dense[0]} over {dense[3]}; a per-row bisect must not care how long the "
+        f"row is, a scan would have done ten times the work"
     )
-
-    ratio = long_hours / max(short_hours, 1e-9)
-    assert ratio < 3.5, (
-        f"72 h -> 144 h cost grew {ratio:.1f}x ({short_hours:.2f}s -> {long_hours:.2f}s). "
-        f"Doubling the window doubles transitions and readings, so anything near "
-        f"4x means each transition still scans a whole row history."
+    # And that work is the transition count times the row count, not more.
+    assert sparse[0] == sparse[1] * sparse[2], (
+        f"expected {sparse[1]} transitions x {sparse[2]} rows = {sparse[1] * sparse[2]} "
+        f"searches, got {sparse[0]}"
     )
 
 
