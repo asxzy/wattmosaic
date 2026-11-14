@@ -1,5 +1,13 @@
 # Release Notes
 
+## v0.2.1-dev.28 — 2026-11-14 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- fix(disaggregation): bound configured priors by the row that carries them
+
 ## v0.2.1-dev.27 — 2026-11-13 (development channel)
 
 Automatic development build.
