@@ -1,5 +1,13 @@
 # Release Notes
 
+## v0.2.1-dev.30 — 2026-11-14 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- perf(discovery): pair transitions by index and keep the loop free
+
 ## v0.2.1-dev.29 — 2026-11-14 (development channel)
 
 Automatic development build.
