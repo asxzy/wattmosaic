@@ -10,6 +10,18 @@
       "title": "CTType",
       "type": "string"
     },
+    "MeasurementBasis": {
+      "description": "What produced the watt value, independent of how much we trust it.\n\n``Source`` answers *\"how was the value obtained\"*; this answers *\"what kind\nof instrument produced the watts\"*.  A ``DIRECT_MEASURED`` result can be\n``FACTOR_ADJUSTED``, and a ``MODEL_ESTIMATED`` result can never be\n``CT_MEASURED``.",
+      "enum": [
+        "ct_measured",
+        "monitor_reported",
+        "factor_adjusted",
+        "estimated_appliance_total",
+        "unknown"
+      ],
+      "title": "MeasurementBasis",
+      "type": "string"
+    },
     "Phase": {
       "enum": [
         "l1",
@@ -203,6 +215,22 @@
       ],
       "default": null,
       "title": "Panel Name"
+    },
+    "measurement_basis": {
+      "$ref": "#/$defs/MeasurementBasis",
+      "default": "unknown"
+    },
+    "circuit_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Circuit Id"
     }
   },
   "required": [
@@ -212,5 +240,5 @@
   "title": "CTChannel",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/ct_channel.json",
-  "x-contract-version": "1.5.0"
+  "x-contract-version": "1.6.0"
 }

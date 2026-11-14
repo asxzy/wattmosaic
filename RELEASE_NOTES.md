@@ -1,5 +1,25 @@
 # Release Notes
 
+## v0.2.1-dev.25 — 2026-11-13 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- Add Refoss factor semantics: four explicit measurement bases (`CT_MEASURED`, `MONITOR_REPORTED`, `FACTOR_ADJUSTED`, `ESTIMATED_APPLIANCE_TOTAL`, `UNKNOWN`), per-sample factor-in-force resolution, and refusal to double-apply or apply retroactively
+- Add event isolation with `ISOLATED` / `CONTAMINATED` / `INSUFFICIENT_DATA`, configurable analysis offset and isolation window, per-device and per-device-class overrides, and multi-entity to one-physical-device collapse
+- Repair the learning concurrency guard: `SampleRejection.CONCURRENT_EVENTS` can now fire (it was unreachable in production)
+- Add device-to-CT association discovery with evidence-bearing, versioned relations and explicit ambiguity
+- Add circuit classification: `DEDICATED` / `SHARED` / `PARTIALLY_UNDERSTOOD` / `UNKNOWN` with independent per-circuit confidence
+- Add residual decomposition: signed, never clamped, baseline/dynamic split, and an explicit unresolved state
+- Add conservative CT hierarchy discovery with cycle prevention and declared-edge precedence
+- Add versioned inference records (`InferenceRecord`) with algorithm version, revision chain, confidence deltas, reasons and resolvable evidence references
+- Add five read-only API routes: `/circuits`, `/relations`, `/devices/{id}/records`, `/residuals`, `/isolation`
+- Fix device history always returning empty (`since=utcnow()` excluded every stored row)
+- Add simulator factor channels, the Hot Tub regression fixture and 21 household strata with enforced ground-truth separation
+
+Contract version advances to `1.6.0`; schema to migration 10. All changes are additive.
+
 ## v0.2.1-dev.24 — 2026-11-12 (development channel)
 
 You can now choose how much history discovery reads, and that choice is what

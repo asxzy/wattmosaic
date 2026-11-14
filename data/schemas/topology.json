@@ -166,6 +166,22 @@
           ],
           "default": null,
           "title": "Panel Name"
+        },
+        "measurement_basis": {
+          "$ref": "#/$defs/MeasurementBasis",
+          "default": "unknown"
+        },
+        "circuit_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Circuit Id"
         }
       },
       "required": [
@@ -183,6 +199,99 @@
         "unknown"
       ],
       "title": "CTType",
+      "type": "string"
+    },
+    "Circuit": {
+      "additionalProperties": false,
+      "description": "A circuit: its electrical scope, with its own evidence and status.\n\n``CTType`` classifies a sensor and ``MonitoringLevel`` classifies a device's\nvisibility; neither classifies a circuit's scope.  A circuit can exist\nbefore any device or CT names it (``circuit_id`` is the only anchor), which\nis what lets ``CIRCUIT_MEMBERSHIP`` be a real relation.",
+      "properties": {
+        "circuit_id": {
+          "title": "Circuit Id",
+          "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "panel_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Panel Id"
+        },
+        "classification": {
+          "$ref": "#/$defs/CircuitClass",
+          "default": "unknown"
+        },
+        "classification_status": {
+          "$ref": "#/$defs/TopologyStatus",
+          "default": "candidate"
+        },
+        "parent_circuit_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent Circuit Id"
+        },
+        "ct_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Ct Ids",
+          "type": "array"
+        },
+        "device_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Device Ids",
+          "type": "array"
+        },
+        "measurement_basis": {
+          "$ref": "#/$defs/MeasurementBasis",
+          "default": "unknown"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        }
+      },
+      "required": [
+        "circuit_id"
+      ],
+      "title": "Circuit",
+      "type": "object"
+    },
+    "CircuitClass": {
+      "description": "Electrical scope of a circuit -- never the type of the sensor on it.\n\n``CTType`` describes a sensor and ``MonitoringLevel`` describes a device's\nvisibility.  Neither can say \"this circuit carries two known devices\" or\n\"it carries two known devices *and* load we cannot name\", which are\nmaterially different facts.  ``PARTIALLY_UNDERSTOOD`` exists for exactly\nthat distinction.",
+      "enum": [
+        "dedicated",
+        "shared",
+        "partially_understood",
+        "unknown"
+      ],
+      "title": "CircuitClass",
       "type": "string"
     },
     "DeviceTopology": {
@@ -256,6 +365,18 @@
       "title": "DeviceTopology",
       "type": "object"
     },
+    "MeasurementBasis": {
+      "description": "What produced the watt value, independent of how much we trust it.\n\n``Source`` answers *\"how was the value obtained\"*; this answers *\"what kind\nof instrument produced the watts\"*.  A ``DIRECT_MEASURED`` result can be\n``FACTOR_ADJUSTED``, and a ``MODEL_ESTIMATED`` result can never be\n``CT_MEASURED``.",
+      "enum": [
+        "ct_measured",
+        "monitor_reported",
+        "factor_adjusted",
+        "estimated_appliance_total",
+        "unknown"
+      ],
+      "title": "MeasurementBasis",
+      "type": "string"
+    },
     "Phase": {
       "enum": [
         "l1",
@@ -273,6 +394,128 @@
       ],
       "title": "Polarity",
       "type": "string"
+    },
+    "RelationKind": {
+      "description": "The four electrical relations, which must never imply one another.\n\nStoring them in one typed edge is what keeps them separate: nothing can set\na parent pointer and thereby assert membership, and \"two CTs on one device\"\nstays a measurement overlap rather than becoming parenthood.",
+      "enum": [
+        "device_ct_association",
+        "ct_measurement_overlap",
+        "circuit_membership",
+        "electrical_parent_child"
+      ],
+      "title": "RelationKind",
+      "type": "string"
+    },
+    "TopologyRelation": {
+      "additionalProperties": false,
+      "description": "One typed edge between two electrical objects.\n\nKeeping the four kinds in one model is what stops them implying one another:\na ``DEVICE_CT_ASSOCIATION`` cannot assert parenthood, and a duplicate CT is\nan overlap rather than a nested feed.",
+      "properties": {
+        "relation_id": {
+          "title": "Relation Id",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/RelationKind"
+        },
+        "subject_id": {
+          "title": "Subject Id",
+          "type": "string"
+        },
+        "object_id": {
+          "title": "Object Id",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/TopologyStatus",
+          "default": "candidate"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
+        "evidence": {
+          "additionalProperties": true,
+          "title": "Evidence",
+          "type": "object"
+        },
+        "requires_confirmation": {
+          "default": true,
+          "title": "Requires Confirmation",
+          "type": "boolean"
+        },
+        "declared_by": {
+          "default": "user",
+          "enum": [
+            "user",
+            "inference",
+            "discovery",
+            "default"
+          ],
+          "title": "Declared By",
+          "type": "string"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "valid_from": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Valid From"
+        },
+        "valid_to": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Valid To"
+        },
+        "algorithm_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Algorithm Version"
+        }
+      },
+      "required": [
+        "relation_id",
+        "kind",
+        "subject_id",
+        "object_id"
+      ],
+      "title": "TopologyRelation",
+      "type": "object"
     },
     "TopologyStatus": {
       "enum": [
@@ -320,10 +563,36 @@
       },
       "title": "Notes",
       "type": "array"
+    },
+    "circuits": {
+      "items": {
+        "$ref": "#/$defs/Circuit"
+      },
+      "title": "Circuits",
+      "type": "array"
+    },
+    "relations": {
+      "items": {
+        "$ref": "#/$defs/TopologyRelation"
+      },
+      "title": "Relations",
+      "type": "array"
+    },
+    "algorithm_version": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Algorithm Version"
     }
   },
   "title": "Topology",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/topology.json",
-  "x-contract-version": "1.5.0"
+  "x-contract-version": "1.6.0"
 }

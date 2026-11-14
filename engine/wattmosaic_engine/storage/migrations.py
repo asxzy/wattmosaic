@@ -114,6 +114,25 @@ def _add_panel_identity_columns(conn: sqlite3.Connection) -> None:
     add_column_if_missing(conn, "ct_channels", "panel_name", "TEXT")
 
 
+#: Audit tables introduced by migration 9.  They are **not** raw samples: an
+#: inference record, a factor interval, a typed relation, an entity binding, a
+#: circuit or a residual is the history itself.  ``Database.prune`` reads this
+#: tuple, so the exemption is declared once, beside the DDL that creates them.
+AUDIT_TABLES: tuple[str, ...] = (
+    "circuits",
+    "topology_relations",
+    "inference_records",
+    "ct_measurement_factors",
+    "ha_entity_bindings",
+    "residual_power",
+    # Migration 10: an isolation verdict is the durable answer to "was this
+    # event's power window clean?" -- an ``inference_records.evidence_refs``
+    # entry of the form ``event:<id>`` must still resolve after a restart, and
+    # that is impossible if the verdict only lives in process memory.
+    "isolation_verdicts",
+)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
@@ -467,6 +486,160 @@ MIGRATIONS: tuple[Migration, ...] = (
         # that already ran the other one, leaving ``save_topology`` to fail with
         # "no column named panel_id" on each write.
         apply=_add_panel_identity_columns,
+    ),
+    Migration(
+        version=9,
+        name="audit_records_and_circuits",
+        # Purely additive: six new tables and two indexes, no ``ALTER`` on any
+        # existing table, so a v8 install keeps every row and the migration is a
+        # no-op on a database that already carries the tables
+        # (``CREATE ... IF NOT EXISTS`` is inherently idempotent, which is why
+        # this migration needs no ``apply`` hook).
+        #
+        # Zero non-null backfill: every column that is not the primary key is
+        # either nullable or carries a SQL default, so pre-existing rows -- there
+        # are none in these tables -- would still satisfy the schema.
+        #
+        # ``inference_records`` supersedes ``inference_results`` for audit.  It
+        # is deliberately a separate table: the old one is retention-pruned and
+        # must keep its current behaviour for readers that already depend on it.
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS circuits (
+                circuit_id TEXT PRIMARY KEY,
+                name TEXT,
+                panel_id TEXT,
+                classification TEXT NOT NULL DEFAULT 'unknown',
+                classification_status TEXT NOT NULL DEFAULT 'candidate',
+                parent_circuit_id TEXT,
+                ct_ids_json TEXT NOT NULL DEFAULT '[]',
+                device_ids_json TEXT NOT NULL DEFAULT '[]',
+                measurement_basis TEXT NOT NULL DEFAULT 'unknown',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS topology_relations (
+                relation_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                object_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'candidate',
+                confidence REAL,
+                evidence_json TEXT NOT NULL DEFAULT '{}',
+                requires_confirmation INTEGER NOT NULL DEFAULT 1,
+                declared_by TEXT NOT NULL DEFAULT 'user',
+                algorithm_version TEXT,
+                valid_from TEXT,
+                valid_to TEXT,
+                created_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_relations_kind ON topology_relations(kind, status)",
+            "CREATE INDEX IF NOT EXISTS idx_relations_subject ON topology_relations(subject_id)",
+            """
+            CREATE TABLE IF NOT EXISTS inference_records (
+                record_id TEXT PRIMARY KEY,
+                device_id TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                algorithm_version TEXT NOT NULL,
+                contract_version TEXT NOT NULL,
+                topology_version INTEGER NOT NULL DEFAULT 1,
+                revision INTEGER NOT NULL DEFAULT 1,
+                previous_record_id TEXT,
+                previous_power_w REAL,
+                power_w REAL NOT NULL,
+                source TEXT NOT NULL DEFAULT 'unknown',
+                measurement_basis TEXT NOT NULL DEFAULT 'unknown',
+                confidence_json TEXT NOT NULL DEFAULT '{}',
+                previous_confidence_json TEXT,
+                confidence_delta_json TEXT NOT NULL DEFAULT '{}',
+                reason TEXT NOT NULL DEFAULT '',
+                explanation_json TEXT NOT NULL DEFAULT '[]',
+                evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+                evidence_json TEXT NOT NULL DEFAULT '{}'
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_records_device_time ON inference_records(device_id, timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_records_device_revision ON inference_records(device_id, revision)",
+            """
+            CREATE TABLE IF NOT EXISTS ct_measurement_factors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ct_id TEXT NOT NULL,
+                multiplier REAL NOT NULL,
+                effective_from TEXT NOT NULL,
+                effective_to TEXT,
+                applied_by TEXT NOT NULL DEFAULT 'unknown',
+                declared_by TEXT NOT NULL DEFAULT 'user',
+                note TEXT
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_factors_ct_time ON ct_measurement_factors(ct_id, effective_from)",
+            """
+            CREATE TABLE IF NOT EXISTS ha_entity_bindings (
+                entity_id TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'unknown',
+                is_load_evidence INTEGER NOT NULL DEFAULT 0,
+                contributes_power INTEGER NOT NULL DEFAULT 0,
+                attributes_key TEXT,
+                PRIMARY KEY (entity_id, device_id)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_bindings_device ON ha_entity_bindings(device_id)",
+            """
+            CREATE TABLE IF NOT EXISTS residual_power (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                reconciliation_id INTEGER,
+                residual_w REAL NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'near_zero',
+                resolved INTEGER NOT NULL DEFAULT 0,
+                unresolved_since TEXT,
+                explained_by_json TEXT NOT NULL DEFAULT '{}',
+                quality_status TEXT NOT NULL DEFAULT 'good',
+                basis TEXT NOT NULL DEFAULT 'unknown',
+                baseline_w REAL,
+                dynamic_w REAL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_residual_time ON residual_power(timestamp)",
+        ),
+    ),
+    Migration(
+        version=10,
+        name="isolation_verdicts",
+        statements=(
+            # An isolation verdict is cited by ``inference_records.evidence_refs``
+            # (``event:<event_id>``).  Without a row here that reference dangles
+            # after a restart: the record claims traceability to a raw
+            # observation it can no longer name.  Additive only -- one new table,
+            # no changes to an existing one, so a v9 install keeps every row.
+            """
+            CREATE TABLE IF NOT EXISTS isolation_verdicts (
+                event_id TEXT PRIMARY KEY,
+                device_id TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                occurred_at TEXT NOT NULL,
+                received_at TEXT NOT NULL,
+                analysis_offset_s REAL NOT NULL DEFAULT 0.0,
+                isolation_window_s REAL NOT NULL DEFAULT 0.0,
+                window_start TEXT NOT NULL,
+                window_end TEXT NOT NULL,
+                competing_event_ids_json TEXT NOT NULL DEFAULT '[]',
+                competing_device_ids_json TEXT NOT NULL DEFAULT '[]',
+                power_window_contaminated INTEGER NOT NULL DEFAULT 0,
+                evidence_json TEXT NOT NULL DEFAULT '{}',
+                algorithm_version TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_isolation_time ON isolation_verdicts(occurred_at)",
+            "CREATE INDEX IF NOT EXISTS idx_isolation_device ON isolation_verdicts(device_id, occurred_at)",
+        ),
     ),
 )
 

@@ -12,6 +12,101 @@
       "title": "ConfidenceTier",
       "type": "string"
     },
+    "ConfidenceVector": {
+      "additionalProperties": false,
+      "description": "Independent confidence dimensions.\n\nDeliberately has **no** aggregate field, no ``__float__`` and no arithmetic:\na consumer that wants one number must say which dimension it means.  Merging\nthe six components into one weighted blend is the defect this model exists\nto stop repeating (see ``docs/assessment_gap_analysis.md`` G14).",
+      "properties": {
+        "power": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Power"
+        },
+        "ct_association": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ct Association"
+        },
+        "topology": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Topology"
+        },
+        "circuit_classification": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Circuit Classification"
+        },
+        "residual": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Residual"
+        },
+        "method": {
+          "default": "unavailable",
+          "title": "Method",
+          "type": "string"
+        }
+      },
+      "title": "ConfidenceVector",
+      "type": "object"
+    },
+    "MeasurementBasis": {
+      "description": "What produced the watt value, independent of how much we trust it.\n\n``Source`` answers *\"how was the value obtained\"*; this answers *\"what kind\nof instrument produced the watts\"*.  A ``DIRECT_MEASURED`` result can be\n``FACTOR_ADJUSTED``, and a ``MODEL_ESTIMATED`` result can never be\n``CT_MEASURED``.",
+      "enum": [
+        "ct_measured",
+        "monitor_reported",
+        "factor_adjusted",
+        "estimated_appliance_total",
+        "unknown"
+      ],
+      "title": "MeasurementBasis",
+      "type": "string"
+    },
     "MonitoringLevel": {
       "description": "Axis 2 \u2014 how closely does the electrical tree observe the device?",
       "enum": [
@@ -200,6 +295,45 @@
       "default": false,
       "title": "Confidence Is Calibrated",
       "type": "boolean"
+    },
+    "measurement_basis": {
+      "$ref": "#/$defs/MeasurementBasis",
+      "default": "unknown"
+    },
+    "confidence_dimensions": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ConfidenceVector"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "algorithm_version": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Algorithm Version"
+    },
+    "record_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Record Id"
     }
   },
   "required": [
@@ -212,5 +346,5 @@
   "title": "InferenceResult",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/inference_result.json",
-  "x-contract-version": "1.5.0"
+  "x-contract-version": "1.6.0"
 }

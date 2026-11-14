@@ -20,22 +20,30 @@ from pathlib import Path
 from typing import Any
 
 from ..contracts import (
+    Circuit,
     CTChannel,
     DeviceConfiguration,
     DeviceConfigurationSet,
     DeviceModelParameters,
     DeviceModelVersion,
     DeviceTopology,
+    EventIsolation,
+    InferenceRecord,
     InferenceResult,
     LearningSample,
+    MeasurementFactor,
     ModelStatus,
     ModelType,
     Reconciliation,
+    RelationKind,
+    ResidualPower,
     Topology,
+    TopologyRelation,
     TopologyStatus,
     utcnow,
+    validate_factor_intervals,
 )
-from .migrations import LATEST_VERSION, apply_migrations, current_version
+from .migrations import AUDIT_TABLES, LATEST_VERSION, apply_migrations, current_version
 
 
 def iso(dt: datetime | None) -> str | None:
@@ -49,6 +57,12 @@ def iso(dt: datetime | None) -> str | None:
 def _enum_value(value: Any) -> str:
     """Plain string for a contract enum, tolerant of a bare string."""
     return str(getattr(value, "value", value) if value is not None else "unknown")
+
+
+def _as_utc(value: str) -> datetime:
+    """Parse an ISO instant and normalise it to UTC for a storage comparison."""
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 #: Rows per ``fetchmany`` during a bulk sample read.  Large enough that the
@@ -351,6 +365,30 @@ class Database:
                     "INSERT OR REPLACE INTO schema_metadata(key, value) VALUES(?,?)",
                     ("device_configuration_version", str(configurations.version)),
                 )
+                # Project the typed entity roles into their own table (migration
+                # 9).  The payload above remains the source of truth -- a 1.5.0
+                # row has no bindings and every reader still works -- but the
+                # projection is what lets a consumer ask "which entities belong to
+                # this device, by role?" without parsing every payload, and what
+                # makes "at most one power contributor" checkable in SQL.
+                self._conn.execute("DELETE FROM ha_entity_bindings")
+                self._conn.executemany(
+                    """INSERT INTO ha_entity_bindings(entity_id, device_id, role,
+                    is_load_evidence, contributes_power, attributes_key)
+                    VALUES(?,?,?,?,?,?)""",
+                    [
+                        (
+                            binding.entity_id,
+                            binding.device_id,
+                            _enum_value(binding.role),
+                            int(bool(binding.is_load_evidence)),
+                            int(bool(binding.contributes_power)),
+                            binding.attributes_key,
+                        )
+                        for config in configurations.devices
+                        for binding in config.entity_bindings
+                    ],
+                )
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
@@ -572,6 +610,457 @@ class Database:
                 (device_id, iso(since), limit),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # -- versioned inference records (contract 1.6.0, migration 9) --------- #
+    #
+    # Append-only audit state, deliberately separate from ``inference_results``:
+    # the old table is retention-pruned and readers depend on that.  These rows
+    # are exempt from raw retention (see ``AUDIT_TABLES`` / ``prune``).
+    def insert_inference_record(self, record: InferenceRecord) -> None:
+        """Append one revision.  A revision never overwrites its predecessor."""
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO inference_records(record_id, device_id, timestamp,
+                algorithm_version, contract_version, topology_version, revision,
+                previous_record_id, previous_power_w, power_w, source, measurement_basis,
+                confidence_json, previous_confidence_json, confidence_delta_json, reason,
+                explanation_json, evidence_refs_json, evidence_json)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    record.record_id,
+                    record.device_id,
+                    iso(record.timestamp),
+                    record.algorithm_version,
+                    record.contract_version,
+                    record.topology_version,
+                    record.revision,
+                    record.previous_record_id,
+                    record.previous_power_w,
+                    record.power_w,
+                    _enum_value(record.source),
+                    _enum_value(record.measurement_basis),
+                    json.dumps(record.confidence.model_dump(mode="json"), default=str),
+                    None
+                    if record.previous_confidence is None
+                    else json.dumps(
+                        record.previous_confidence.model_dump(mode="json"), default=str
+                    ),
+                    json.dumps(record.confidence_delta, default=str),
+                    record.reason,
+                    json.dumps(list(record.explanation)),
+                    json.dumps(list(record.evidence_refs)),
+                    json.dumps(record.evidence, default=str),
+                ),
+            )
+
+    @staticmethod
+    def _row_to_inference_record(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        """Decode one ``inference_records`` row into a model-shaped dict."""
+        data = dict(row)
+        data["confidence"] = json.loads(data.pop("confidence_json") or "{}")
+        raw_previous = data.pop("previous_confidence_json", None)
+        data["previous_confidence"] = (
+            None if raw_previous is None else json.loads(raw_previous)
+        )
+        data["confidence_delta"] = json.loads(data.pop("confidence_delta_json") or "{}")
+        data["explanation"] = json.loads(data.pop("explanation_json") or "[]")
+        data["evidence_refs"] = json.loads(data.pop("evidence_refs_json") or "[]")
+        data["evidence"] = json.loads(data.pop("evidence_json") or "{}")
+        return data
+
+    def inference_records_for_device(
+        self, device_id: str, since: datetime | None = None, limit: int = 5000
+    ) -> list[dict[str, Any]]:
+        """Records for one device, oldest revision first.
+
+        Ordered by ``(timestamp, revision)`` ascending so a caller can replay the
+        chain in the order it happened; ``limit`` keeps the **newest** rows,
+        which is what a bounded history read wants.
+        """
+        query = "SELECT * FROM inference_records WHERE device_id=?"
+        params: list[Any] = [device_id]
+        if since is not None:
+            query += " AND timestamp >= ?"
+            params.append(iso(since))
+        query += " ORDER BY timestamp DESC, revision DESC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
+        return [
+            self._row_to_inference_record(row)
+            for row in sorted(rows, key=lambda r: (r["timestamp"], r["revision"]))
+        ]
+
+    def latest_inference_record(self, device_id: str) -> dict[str, Any] | None:
+        """The highest-revision record for a device, or ``None``."""
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT * FROM inference_records WHERE device_id=?
+                ORDER BY revision DESC, timestamp DESC LIMIT 1""",
+                (device_id,),
+            ).fetchone()
+        return None if row is None else self._row_to_inference_record(row)
+
+    # -- measurement factors (contract 1.6.0) ----------------------------- #
+    def insert_measurement_factor(self, factor: MeasurementFactor) -> None:
+        """Append a validity interval, refusing an overlap for the same CT.
+
+        The interval invariant is re-checked here against the stored history, not
+        just within one caller-supplied list: storage is the last line of
+        defence, and a historical reconstruction that resolves two overlapping
+        factors would pick one arbitrarily.
+        """
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                existing_rows = self._conn.execute(
+                    "SELECT * FROM ct_measurement_factors WHERE ct_id=?",
+                    (factor.ct_id,),
+                ).fetchall()
+                existing = [
+                    MeasurementFactor(
+                        ct_id=row["ct_id"],
+                        multiplier=float(row["multiplier"]),
+                        effective_from=datetime.fromisoformat(str(row["effective_from"])),
+                        effective_to=None
+                        if row["effective_to"] is None
+                        else datetime.fromisoformat(str(row["effective_to"])),
+                        applied_by=row["applied_by"],
+                        declared_by=row["declared_by"],
+                        note=row["note"],
+                    )
+                    for row in existing_rows
+                ]
+                validate_factor_intervals([*existing, factor])
+                self._conn.execute(
+                    """INSERT INTO ct_measurement_factors(ct_id, multiplier, effective_from,
+                    effective_to, applied_by, declared_by, note) VALUES(?,?,?,?,?,?,?)""",
+                    (
+                        factor.ct_id,
+                        float(factor.multiplier),
+                        iso(factor.effective_from),
+                        iso(factor.effective_to),
+                        factor.applied_by,
+                        factor.declared_by,
+                        factor.note,
+                    ),
+                )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    def factors_for_ct(self, ct_id: str) -> list[dict[str, Any]]:
+        """Every factor interval for a CT, oldest ``effective_from`` first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM ct_measurement_factors WHERE ct_id=? "
+                "ORDER BY effective_from ASC, id ASC",
+                (ct_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- typed topology relations (contract 1.6.0) ------------------------ #
+    def insert_topology_relation(self, relation: TopologyRelation) -> None:
+        """Upsert one typed edge.  The relation id is the identity."""
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO topology_relations(relation_id, kind, subject_id, object_id,
+                status, confidence, evidence_json, requires_confirmation, declared_by,
+                algorithm_version, valid_from, valid_to, created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(relation_id) DO UPDATE SET
+                kind=excluded.kind, subject_id=excluded.subject_id,
+                object_id=excluded.object_id, status=excluded.status,
+                confidence=excluded.confidence, evidence_json=excluded.evidence_json,
+                requires_confirmation=excluded.requires_confirmation,
+                declared_by=excluded.declared_by, algorithm_version=excluded.algorithm_version,
+                valid_from=excluded.valid_from, valid_to=excluded.valid_to""",
+                (
+                    relation.relation_id,
+                    _enum_value(relation.kind),
+                    relation.subject_id,
+                    relation.object_id,
+                    _enum_value(relation.status),
+                    relation.confidence,
+                    json.dumps(relation.evidence, default=str),
+                    int(bool(relation.requires_confirmation)),
+                    relation.declared_by,
+                    relation.algorithm_version,
+                    iso(relation.valid_from),
+                    iso(relation.valid_to),
+                    iso(relation.created_at),
+                ),
+            )
+
+    def relations_of_kind(self, kind: RelationKind | str) -> list[dict[str, Any]]:
+        """Every stored edge of one kind, so kinds cannot be conflated by query."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM topology_relations WHERE kind=? ORDER BY created_at ASC",
+                (_enum_value(kind),),
+            ).fetchall()
+        out = [dict(r) for r in rows]
+        for row in out:
+            row["evidence"] = json.loads(row.pop("evidence_json") or "{}")
+            row["requires_confirmation"] = bool(row["requires_confirmation"])
+        return out
+
+    # -- isolation verdicts (migration 10) --------------------------------- #
+    def insert_isolation_verdict(
+        self, verdict: EventIsolation, *, algorithm_version: str = ""
+    ) -> None:
+        """Upsert one verdict by ``event_id``; a reanalysis replaces it.
+
+        Verdicts are cited by ``inference_records.evidence_refs`` as
+        ``event:<event_id>``, so they must outlive the process that produced
+        them.  The event id is the identity: analysing the same event again
+        updates its verdict rather than accumulating a second row.
+        """
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO isolation_verdicts(event_id, device_id, entity_id,
+                status, reason, occurred_at, received_at, analysis_offset_s,
+                isolation_window_s, window_start, window_end,
+                competing_event_ids_json, competing_device_ids_json,
+                power_window_contaminated, evidence_json, algorithm_version, created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(event_id) DO UPDATE SET
+                device_id=excluded.device_id, entity_id=excluded.entity_id,
+                status=excluded.status, reason=excluded.reason,
+                occurred_at=excluded.occurred_at, received_at=excluded.received_at,
+                analysis_offset_s=excluded.analysis_offset_s,
+                isolation_window_s=excluded.isolation_window_s,
+                window_start=excluded.window_start, window_end=excluded.window_end,
+                competing_event_ids_json=excluded.competing_event_ids_json,
+                competing_device_ids_json=excluded.competing_device_ids_json,
+                power_window_contaminated=excluded.power_window_contaminated,
+                evidence_json=excluded.evidence_json,
+                algorithm_version=excluded.algorithm_version""",
+                (
+                    verdict.event_id,
+                    verdict.device_id,
+                    verdict.entity_id,
+                    _enum_value(verdict.status),
+                    verdict.reason,
+                    iso(verdict.occurred_at),
+                    iso(verdict.received_at),
+                    float(verdict.analysis_offset_s),
+                    float(verdict.isolation_window_s),
+                    iso(verdict.window_start),
+                    iso(verdict.window_end),
+                    json.dumps(list(verdict.competing_event_ids)),
+                    json.dumps(list(verdict.competing_device_ids)),
+                    int(bool(verdict.power_window_contaminated)),
+                    json.dumps(verdict.evidence, default=str),
+                    algorithm_version,
+                    iso(utcnow()),
+                ),
+            )
+
+    def isolation_verdict(self, event_id: str) -> dict[str, Any] | None:
+        """One stored verdict, or ``None`` if this event was never analysed."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM isolation_verdicts WHERE event_id=?", (str(event_id),)
+            ).fetchone()
+        return None if row is None else self._row_to_isolation_verdict(row)
+
+    def isolation_verdicts(
+        self, since: datetime | None = None, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        """Verdicts, oldest first, so a report can be rebuilt after a restart."""
+        query = "SELECT * FROM isolation_verdicts"
+        params: list[Any] = []
+        if since is not None:
+            query += " WHERE occurred_at >= ?"
+            params.append(iso(since))
+        query += " ORDER BY occurred_at DESC, event_id DESC LIMIT ?"
+        params.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
+        return [
+            self._row_to_isolation_verdict(row)
+            for row in sorted(rows, key=lambda r: (r["occurred_at"], r["event_id"]))
+        ]
+
+    @staticmethod
+    def _row_to_isolation_verdict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        data = dict(row)
+        data["competing_event_ids"] = json.loads(
+            data.pop("competing_event_ids_json") or "[]"
+        )
+        data["competing_device_ids"] = json.loads(
+            data.pop("competing_device_ids_json") or "[]"
+        )
+        data["power_window_contaminated"] = bool(data["power_window_contaminated"])
+        data["evidence"] = json.loads(data.pop("evidence_json") or "{}")
+        return data
+
+    def _circuit_exists(self, circuit_id: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM circuits WHERE circuit_id=?", (str(circuit_id),)
+            ).fetchone()
+        return row is not None
+
+    def _record_exists(self, record_id: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM inference_records WHERE record_id=?", (str(record_id),)
+            ).fetchone()
+        return row is not None
+
+    def _relation_exists(self, relation_id: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM topology_relations WHERE relation_id=?",
+                (str(relation_id),),
+            ).fetchone()
+        return row is not None
+
+    def _sample_exists(self, key: str) -> bool:
+        """``sample:<ct_id>@<iso timestamp>`` -> a stored raw sample.
+
+        The pair is what identifies a sample to a reader; the row id is an
+        implementation detail that changes between databases, so it must not be
+        the reference.
+        """
+        if "@" not in key:
+            return False
+        ct_id, stamp = key.split("@", 1)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM ct_samples WHERE ct_id=? AND state_timestamp=? LIMIT 1",
+                (ct_id, iso(_as_utc(stamp))),
+            ).fetchone()
+        return row is not None
+
+    def resolve_evidence_ref(self, ref: str) -> bool:
+        """Whether one ``evidence_refs`` entry names a row that still exists.
+
+        The whole point of an evidence reference is that it can be *checked*: a
+        reference to a verdict kept only in memory, or to a row a later pass
+        replaced, is a dangling claim.  Every prefix this engine emits is
+        answered here, so a caller (and the test suite) can assert that a
+        record is traceable instead of trusting the string.
+
+        Recognised forms:
+
+        ``event:<event_id>``        an isolation verdict (migration 10)
+        ``relation:<relation_id>``  a typed topology edge
+        ``circuit:<circuit_id>``    a classified circuit
+        ``record:<record_id>``      an inference record
+        ``sample:<ct_id>@<iso>``    a raw stored sample
+        """
+        text = str(ref or "").strip()
+        if ":" not in text:
+            return False
+        prefix, key = text.split(":", 1)
+        if not key:
+            return False
+        if prefix == "event":
+            return self.isolation_verdict(key) is not None
+        if prefix == "relation":
+            return self._relation_exists(key)
+        if prefix == "circuit":
+            return self._circuit_exists(key)
+        if prefix == "record":
+            return self._record_exists(key)
+        if prefix == "sample":
+            return self._sample_exists(key)
+        return False
+
+    # -- circuits (contract 1.6.0) ---------------------------------------- #
+    def upsert_circuit(self, circuit: Circuit) -> None:
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO circuits(circuit_id, name, panel_id, classification,
+                classification_status, parent_circuit_id, ct_ids_json, device_ids_json,
+                measurement_basis, metadata_json, updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(circuit_id) DO UPDATE SET
+                name=excluded.name, panel_id=excluded.panel_id,
+                classification=excluded.classification,
+                classification_status=excluded.classification_status,
+                parent_circuit_id=excluded.parent_circuit_id,
+                ct_ids_json=excluded.ct_ids_json, device_ids_json=excluded.device_ids_json,
+                measurement_basis=excluded.measurement_basis,
+                metadata_json=excluded.metadata_json, updated_at=excluded.updated_at""",
+                (
+                    circuit.circuit_id,
+                    circuit.name,
+                    circuit.panel_id,
+                    _enum_value(circuit.classification),
+                    _enum_value(circuit.classification_status),
+                    circuit.parent_circuit_id,
+                    json.dumps(list(circuit.ct_ids)),
+                    json.dumps(list(circuit.device_ids)),
+                    _enum_value(circuit.measurement_basis),
+                    json.dumps(circuit.metadata, default=str),
+                    iso(utcnow()),
+                ),
+            )
+
+    def circuits_all(self) -> list[dict[str, Any]]:
+        """Every circuit, ordered by id, decoded into model-shaped dicts."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM circuits ORDER BY circuit_id ASC"
+            ).fetchall()
+        out = [dict(r) for r in rows]
+        for row in out:
+            row["ct_ids"] = json.loads(row.pop("ct_ids_json") or "[]")
+            row["device_ids"] = json.loads(row.pop("device_ids_json") or "[]")
+            row["metadata"] = json.loads(row.pop("metadata_json") or "{}")
+        return out
+
+    # -- residual power (contract 1.6.0) ---------------------------------- #
+    def insert_residual_power(
+        self,
+        residual: ResidualPower,
+        timestamp: datetime | None = None,
+        reconciliation_id: int | None = None,
+    ) -> None:
+        """Append one residual observation.  Sign and kind are never rewritten."""
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO residual_power(timestamp, reconciliation_id, residual_w, kind,
+                resolved, unresolved_since, explained_by_json, quality_status, basis,
+                baseline_w, dynamic_w) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    iso(timestamp or utcnow()),
+                    reconciliation_id,
+                    residual.residual_w,
+                    _enum_value(residual.kind),
+                    int(bool(residual.resolved)),
+                    iso(residual.unresolved_since),
+                    json.dumps(residual.explained_by_device_w, default=str),
+                    _enum_value(residual.quality_status),
+                    _enum_value(residual.basis),
+                    residual.baseline_w,
+                    residual.dynamic_w,
+                ),
+            )
+
+    def residual_history(
+        self, since: datetime | None = None, limit: int = 5000
+    ) -> list[dict[str, Any]]:
+        """Residual observations, newest first, decoded for a reader."""
+        query = "SELECT * FROM residual_power"
+        params: list[Any] = []
+        if since is not None:
+            query += " WHERE timestamp >= ?"
+            params.append(iso(since))
+        query += " ORDER BY timestamp DESC, id DESC LIMIT ?"
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
+        out = [dict(r) for r in rows]
+        for row in out:
+            row["explained_by_device_w"] = json.loads(row.pop("explained_by_json") or "{}")
+            row["resolved"] = bool(row["resolved"])
+        return out
 
     # -- reconciliation --------------------------------------------------- #
     def insert_reconciliation(self, rec: Reconciliation) -> None:
@@ -814,6 +1303,16 @@ class Database:
             )
 
     def prune(self, raw_days: int = 30, aggregate_days: int = 730) -> dict[str, int]:
+        """Delete raw samples past their horizon; never delete audit state.
+
+        ``inference_results``/``reconciliation_results`` stay on the raw horizon:
+        they are per-cycle telemetry, and existing readers depend on that.  The
+        tables in ``AUDIT_TABLES`` are *not* raw samples -- they are the versioned
+        history itself (an inference record, a factor interval, a typed relation,
+        an entity binding, a circuit, a residual observation).  Applying the raw
+        horizon to them would delete the very history they exist to keep, so they
+        are reported with a count of ``0`` and left untouched.
+        """
         now = utcnow()
         raw_cutoff = iso(now - timedelta(days=raw_days))
         agg_cutoff = iso(now - timedelta(days=aggregate_days))
@@ -832,6 +1331,10 @@ class Database:
                 ):
                     cur = self._conn.execute(f"DELETE FROM {table} WHERE {col} < ?", (raw_cutoff,))
                     removed[table] = cur.rowcount
+                # Audit state: exempt by construction.  Explicitly reported as 0
+                # so "deleted nothing" is visible rather than merely absent.
+                for table in AUDIT_TABLES:
+                    removed[table] = 0
                 for table in ("power_aggregates", "energy_aggregates"):
                     cur = self._conn.execute(f"DELETE FROM {table} WHERE bucket_start < ?", (agg_cutoff,))
                     removed[table] = cur.rowcount

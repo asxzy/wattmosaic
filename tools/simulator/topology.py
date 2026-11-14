@@ -44,6 +44,8 @@ class SimDeviceType(str, Enum):
     DISHWASHER = "dishwasher"
     DRYER = "dryer"
     DOUBLE_POLE = "double_pole"
+    MOTOR = "motor"
+    STEP = "step"
     UNKNOWN = "unknown"
 
 

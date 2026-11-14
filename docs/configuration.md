@@ -266,3 +266,97 @@ Generate the API token with:
 ```bash
 python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
+
+## Versioned audit and analysis pass (contract 1.6.0)
+
+These settings control the pass documented in `docs/inference_audit.md`. All
+defaults below are the code defaults (`engine/wattmosaic_engine/config/settings.py:99-133`),
+and the same values are documented in `.env.example:32-53`.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `WM_AUDIT_ENABLED` | `true` | Master switch. When `false`, no isolation verdict, association, circuit, residual, hierarchy edge or `InferenceRecord` is written and the existing inference output is unchanged. |
+| `WM_AUDIT_ISOLATION_ENABLED` | `true` | Persist isolation verdicts. |
+| `WM_AUDIT_ASSOCIATION_ENABLED` | `true` | Persist device→CT association relations. |
+| `WM_AUDIT_CIRCUITS_ENABLED` | `true` | Persist classified circuits. |
+| `WM_AUDIT_RESIDUAL_ENABLED` | `true` | Persist residual observations. |
+| `WM_AUDIT_HIERARCHY_ENABLED` | `true` | Persist hierarchy and overlap relations. |
+| `WM_AUDIT_RECORDS_ENABLED` | `true` | Persist the append-only `InferenceRecord` trail. |
+| `WM_ANALYSIS_OFFSET_S` | `0` | Seconds between an HA event and the start of its analysis window. Raise it when a CT publishes less often than the device's physical response. |
+| `WM_ISOLATION_WINDOW_S` | `30` | Width of the "was anything else changing?" window. Must be positive. |
+| `WM_ISOLATION_POWER_WINDOW_S` | `60` | Width of the window whose readings are attributed to the event. Must be `>= WM_ISOLATION_WINDOW_S`. |
+| `WM_REANALYSIS_INTERVAL_S` | `3600` | Wall-clock interval between reanalysis passes from stored raw history. `0` disables reanalysis. |
+| `WM_REANALYSIS_LOOKBACK_S` | `21600` | How much stored raw history one reanalysis reads. Must be positive. |
+| `WM_HISTORY_LOOKBACK_S` | `86400` | How far back `GET /api/v1/devices/{id}` reads inference history. One day is the shortest lookback that still shows a yesterday-evening load cycle. |
+
+### What the per-artifact switches actually gate
+
+Each `WM_AUDIT_*_ENABLED` flag gates **writing that family only**. The algorithms
+still run, because a family that is not written may still be an input to one
+that is — a circuit is classified from associations — and disabling it must not
+silently change a value another family derives
+(`settings.py:111-113`, `audit.py:132`).
+
+Consequence: turning off `WM_AUDIT_ASSOCIATION_ENABLED` stops rows appearing in
+`topology_relations`, but `GET /circuits` still reports the classes those
+associations produced during the pass, and `InferenceRecord.evidence_refs` will
+cite fewer `relation:` refs because `_resolvable_refs` only keeps refs whose row
+exists (`audit.py:1768`).
+
+The master switch is `AND`-ed with each per-artifact flag in
+`AuditConfig.from_settings` (`audit.py:176-196`), so
+`WM_AUDIT_ENABLED=false` turns everything off regardless of the individual
+values.
+
+### Reanalysis is not a thread
+
+`WM_REANALYSIS_INTERVAL_S` is read on the existing inference loop
+(`integration.py:817`). No timer, thread or task is created; `0` disables it.
+A pass reads stored `ct_samples` and `device_events` from the last
+`WM_REANALYSIS_LOOKBACK_S` seconds and re-derives every artifact, which is what
+lets it reach a verdict for an event that was too fresh when it arrived.
+
+### Validation
+
+`EngineConfig.validate` (`settings.py:243-255`) reports, rather than silently
+clamps:
+
+- `analysis_offset_s` must not be negative;
+- `isolation_window_s` must be positive;
+- `isolation_power_window_s` must be at least `isolation_window_s`;
+- `reanalysis_interval_s` must not be negative;
+- `reanalysis_lookback_s` must be positive.
+
+`AuditConfig.__post_init__` (`audit.py:156`) enforces the same bounds plus a
+non-empty `algorithm_version` and a positive `event_max_age_s`.
+
+### Retention interaction
+
+`WM_RETENTION_DAYS_RAW` prunes `ct_samples`, `inference_results`,
+`device_events`, `device_state_samples`, `data_quality_events`, `system_events`
+and `reconciliation_results`. It **never** prunes the seven `AUDIT_TABLES`
+(`migrations.py:121`, `database.py:1305`). See `docs/limitations_v2.md` §7 for
+the scale consequence.
+
+### Recommended starting configuration (v2)
+
+```bash
+WM_AUDIT_ENABLED=true
+WM_AUDIT_ISOLATION_ENABLED=true
+WM_AUDIT_ASSOCIATION_ENABLED=true
+WM_AUDIT_CIRCUITS_ENABLED=true
+WM_AUDIT_RESIDUAL_ENABLED=true
+WM_AUDIT_HIERARCHY_ENABLED=true
+WM_AUDIT_RECORDS_ENABLED=true
+WM_ANALYSIS_OFFSET_S=0
+WM_ISOLATION_WINDOW_S=30
+WM_ISOLATION_POWER_WINDOW_S=60
+WM_REANALYSIS_INTERVAL_S=3600
+WM_REANALYSIS_LOOKBACK_S=21600
+WM_HISTORY_LOOKBACK_S=86400
+```
+
+Raise `WM_ANALYSIS_OFFSET_S` if CTs publish slower than the device responds.
+Raise `WM_ISOLATION_WINDOW_S` **only** if you are seeing false `CONTAMINATED`
+verdicts from unrelated load: widening it admits more competitors, so it cannot
+fix co-toggling devices (`docs/limitations_v2.md` §6).

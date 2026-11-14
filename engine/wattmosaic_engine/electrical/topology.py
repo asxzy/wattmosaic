@@ -27,6 +27,7 @@ values exactly once, never from a sum of CT rows.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from wattmosaic_engine.contracts import (
     CTChannel,
@@ -36,6 +37,7 @@ from wattmosaic_engine.contracts import (
     Topology,
     TopologyStatus,
 )
+from wattmosaic_engine.electrical.factors import FactorRegistry, scale_reading
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +68,11 @@ class TopologyGraph:
 
     topology: Topology
     phase_split_l1: float = 0.5
+    #: Per-sample factor semantics (contract 1.6.0).  When supplied, scaling is
+    #: resolved against the interval that covers the sample's timestamp, and a
+    #: monitor-applied factor is *not* applied again.  ``None`` keeps the legacy
+    #: ``measurement_multiplier`` scalar behaviour for every existing caller.
+    factors: FactorRegistry | None = None
     problems: list[str] = field(default_factory=list, init=False)
     channel_ids: list[str] = field(default_factory=list, init=False)
     device_ids: list[str] = field(default_factory=list, init=False)
@@ -612,29 +619,50 @@ class TopologyGraph:
                     pairs.append((inner, anc))
         return pairs
 
-    def multiplier_for(self, ct_id: str) -> float:
-        """The declared ``measurement_multiplier`` for a channel (default 1.0).
+    def multiplier_for(self, ct_id: str, timestamp: datetime | None = None) -> float:
+        """The multiplier the engine must apply to one reading of a channel.
 
-        This is a per-circuit scaling declaration for the case where one CT
-        watches one leg of a 240 V load and the monitor does not already scale
-        it.  It is *never* inferred: the device commonly applies the circuit
-        multiplier itself and already publishes the full load, so inferring it
-        from ``phase`` or ``ct_type`` would double-count.
+        Defaults to 1.0.  Two sources exist and they are not interchangeable:
+
+        * a :class:`FactorRegistry` supplied at construction.  The factor in
+          force **at ``timestamp``** decides, and a monitor-applied factor
+          resolves to 1.0 because the published value already includes it.
+          Without a ``timestamp`` the registry cannot answer honestly (a factor
+          change makes "now" ambiguous), so the declared *current* scalar is
+          used -- exactly the legacy behaviour.
+        * otherwise ``CTChannel.measurement_multiplier``.
+
+        The multiplier is *never* inferred from ``phase`` or ``ct_type``: the
+        device commonly applies the circuit multiplier itself and already
+        publishes the full load, so inferring it would double-count.
         """
         ch = self._channels.get(ct_id)
+        if self.factors is not None and timestamp is not None:
+            return self.factors.applied_multiplier_at(ct_id, timestamp)
         if ch is None:
             return 1.0
         return float(ch.measurement_multiplier or 1.0)
 
-    def scale_w(self, ct_id: str, value: float | None) -> float | None:
-        """Apply a channel's multiplier to one raw reading.
+    def scale_w(
+        self,
+        ct_id: str,
+        value: float | None,
+        timestamp: datetime | None = None,
+    ) -> float | None:
+        """Apply the factor in force to one raw reading.
 
         Readings are only ever scaled on the way out of this method.  Nothing
         writes the scaled value back into a window or a reading object, so the
-        multiplier cannot be applied twice to the same measurement.
+        multiplier cannot be applied twice to the same measurement.  With a
+        registry the decision is delegated to
+        :func:`wattmosaic_engine.electrical.factors.scale_reading`, which keeps
+        that "once, on the read path" invariant in one place.
         """
         if value is None:
             return None
+        if self.factors is not None and timestamp is not None:
+            scaled, _, _ = scale_reading(value, ct_id, timestamp, self.factors)
+            return scaled
         m = self.multiplier_for(ct_id)
         return value if m == 1.0 else value * m
 
@@ -694,5 +722,10 @@ class TopologyGraph:
         return [self._channels[cid] for cid in self.effective_feeds() if cid in self._channels]
 
 
-def build_graph(topology: Topology, *, phase_split_l1: float = 0.5) -> TopologyGraph:
-    return TopologyGraph(topology, phase_split_l1=phase_split_l1)
+def build_graph(
+    topology: Topology,
+    *,
+    phase_split_l1: float = 0.5,
+    factors: FactorRegistry | None = None,
+) -> TopologyGraph:
+    return TopologyGraph(topology, phase_split_l1=phase_split_l1, factors=factors)

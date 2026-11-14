@@ -544,3 +544,273 @@ Being explicit matters more than being reassuring:
 * **A passing test proves the assertion held on the measured run**, not that
   the underlying thresholds are physically optimal. Thresholds are documented
   where they are pinned.
+
+---
+
+## 7. Reusable synthetic fixtures (WP2)
+
+The simulator originally described one household in one way: 36 CTs, a fixed
+device set, no factor concept. Every new behaviour therefore needed its own
+hand-built topology inside the test that wanted it, and the Refoss ×2 case could
+not be generated at all — the simulator had no way to publish a whole-load value
+from a single-leg clamp, so Group B of the scenario matrix was untestable
+end-to-end.
+
+This section documents the builder layer that replaced that. It is **additive**:
+`HouseholdScenario` and every existing test are unchanged.
+
+### 7.1 The seam: observations vs ground truth
+
+The single rule the fixtures enforce is that an algorithm may only ever be given
+observations. `tools/simulator/frames.py` splits a simulator record into two
+disjoint frames:
+
+| Frame | Contains | Given to |
+| --- | --- | --- |
+| `observation_view(record)` | delivered values, the three timestamps, quality/repeat flags, declared factor metadata, HA states, declared events, scenario seed/cadence | the engine |
+| `truth_view(record)` | per-device watts, true CT aggregation, panel totals, unmetered power, integrated energy | assertions only |
+
+`find_ground_truth_keys(view)` walks the observation frame **recursively** and
+returns the dotted path of every key that names truth
+(`measurements.ct_main_l1.true_channel_power_w`,
+`ha_states[...].attributable`, …). `assert_no_ground_truth_keys` raises naming
+all of them. The detector is structural — key names, not values — because a leak
+that happens to look plausible is exactly the leak that survives review.
+
+Two deliberate decisions:
+
+* **`attributable` is stripped.** Whether a load *can* be attributed is a
+  property of the household, not of the state message; leaving it in would hand
+  the engine the answer for every unknown load.
+* **Declared factor metadata survives.** "The user says this CT is ×2" is
+  configuration an integration legitimately reads back. What must not leak is
+  the *physical* conductor/appliance split behind it.
+
+`tests/unit/test_simulator_fixtures.py` asserts the seam three ways: every
+stratum, every Hot Tub variant, and the raw record (proving the fixture still
+holds truth, so the test is not passing because the oracle is empty).
+
+### 7.2 Refoss factor semantics
+
+A Refoss monitor clamps **one leg** of a 240 V appliance, so the conductor
+reading is roughly half the appliance's power. The monitor — or the user — may
+apply a ×2 factor so the published number becomes an *estimate of the whole
+load*. `tools/simulator/factors.py` models that as three separate quantities:
+
+| Quantity | Meaning | Source |
+| --- | --- | --- |
+| `conductor_w` | what the clamp physically sees on its one leg | physics (ground truth) |
+| `reported_w` | `conductor_w ×` the multiplier already published | observation |
+| `appliance_total_truth_w` | the true two-leg appliance power | fixture spec, never derived |
+
+`FactorEpoch` is a claim with a **validity interval**, an owner
+(`monitor` / `user` / `none`) and a `published` flag. `FactorTimeline` is the
+history of claims, resolved per sample: the epoch covering a reading's timestamp
+decides the factor, so a change at *t* never rescales readings from before *t*.
+A gap in the timeline means *no metadata*, which is deliberately distinct from a
+declared ×1 — `estimated_appliance_total_w` returns `None` in that case instead
+of inventing a basis.
+
+`published=True` marks a value the monitor already multiplied. Multiplying it
+again is expressible (`double_applied`) precisely so tests can prove it is
+refused: the guard is only testable if the wrong state can be represented.
+
+### 7.3 The mandatory Hot Tub fixture
+
+`tools/simulator/hot_tub.py` ships the brief's dataset as a permanent fixture:
+
+| Observation | Before | After | Delta |
+| --- | ---: | ---: | ---: |
+| Hot Tub HA power | 0 W | 500 W | +500 W |
+| CT1 (L1 conductor) | 1000 W | 1250 W | +250 W |
+| CT2 (L2 conductor) | 900 W | 1150 W | +250 W |
+
+Each variant is a `HotTubFixture` exposing `observations()`,
+`ground_truth_view()` and an `ExpectedInterpretation`. Ten variants build by name
+(`hot_tub("factor_two")`; short shorthands like `"factor_two"` resolve through
+`HOT_TUB_VARIANTS`):
+
+| Variant | What it proves | Expected |
+| --- | --- | --- |
+| `factor_one` | baseline: two genuine legs, sum is the appliance | `ct_measured`, sum |
+| `factor_two` | **the regression**: ×2 on one leg claims the whole 500 W | `factor_adjusted`, no sum |
+| `monitor_published` | monitor already multiplied; must not multiply again | `monitor_reported` |
+| `factor_changes_midhistory` | ×1 before the step, ×2 after; per-sample resolution | `factor_adjusted` |
+| `factor_missing` | no metadata: 250 W could be a leg or a load | `unknown`, refuse |
+| `factor_incorrect_metadata` | user ×2 *and* monitor-published: self-contradictory | `unknown`, conflict |
+| `multiple_factor_cts` | two ×2 CTs on one appliance are an overlap | `factor_adjusted`, no sum |
+| `independent_physical_cts` | identical numbers, but summing is correct | `ct_measured`, sum |
+| `noisy_unbalanced_legs` | observed asymmetry ≠ physical asymmetry | `ct_measured`, sum |
+| `inconsistent_ha_vs_ct` | power entity says 500 W, state entity says `off` | `unknown`, conflict |
+
+The variants that must **not** be explainable are the interesting half. In
+`factor_missing` the arithmetic still sums to exactly 500 W — which is why the
+test asserts the *basis* refuses, not that the numbers differ. A fixture set
+that only contained the pass cases could be satisfied by "add every CT", which is
+the 250 W double count the brief exists to prevent.
+
+### 7.4 Scenario strata
+
+`tools/simulator/labhouse.py` exposes `build_scenario(name, seed, minutes=…,
+interval=…) -> LabHouse`. A `LabHouse` carries the scenario plus
+`observations()`, `ground_truth()`, `flags()`, `channel_counts()` and
+`signature()` (SHA-256 of the observation stream).
+
+Twenty-one strata are buildable, all on the same realistic shape — main panel plus
+nested sub-panel, 18 CTs per panel (CT1/CT2 mains + 16 branches),
+L1/L2 split-phase, 120 V and 240 V loads, dedicated and shared circuits, standby
+and unmetered loads:
+
+`dedicated`, `shared`, `standby`, `unknown_load`, `dynamic`, `factor2`,
+`noisy_legs`, `unbalanced`, `automation_burst`, `ambiguous_pair`,
+`hvac_modulation`, `ev_rate_change`, `fridge_cycling`, `motor_startup`,
+`delayed_ct`, `irregular_sampling`, `missing_intervals`, `spikes`,
+`main_subpanel_overlap`, `reversed_orientation`, `negative_ct`.
+
+Each stratum declares a `StratumPlan` naming the devices, channels and behaviour
+flags it promises; `validate_strata()` builds every one and raises if a promise
+is unmet, so a builder that silently stops producing its defining feature fails
+instead of passing vacuously. `tests/fixtures/labhouse.py` maps matrix rows A1–I8
+onto strata and `assert_matrix_coverage()` fails in both directions: an
+unbuildable row, and a builder no row exercises.
+
+Four controls were added to the simulator to make strata possible:
+`missing_windows` (a channel produces *no* sample — silence, not a stale
+repeat), `spike_windows` (measurement-only impulses that leave truth untouched),
+`polarity_flips` (a mid-run re-clamp whose declared polarity stays normal) and
+`channel_delay_s` (extra delivery latency on one poller).
+New profiles: `MOTOR` (inrush decaying to a steady load), `STEP` (explicit step
+schedule, used for EV rate changes) and `HotTubProfile` (explicit cycles).
+
+### 7.5 Determinism
+
+Every builder takes a seed and is a pure function of it. `LabHouse.signature()`
+hashes the observation stream, and `tests/unit/test_simulator_fixtures.py`
+asserts equal seeds produce equal digests for all 21 strata and all 10 Hot Tub
+variants, and that different seeds differ. `SimulatorConfig.as_metadata()` now
+records every new control (`factor_channels`, `missing_windows`, `spike_windows`,
+`polarity_flips`, `channel_delay_s`) so a manifest fully describes a capture.
+
+### 7.6 Using the fixtures
+
+```python
+from tests.fixtures import build_scenario, hot_tub
+
+house = build_scenario("factor2", seed=42)
+house.observations()      # -> engine
+house.ground_truth()      # -> assertions
+
+tub = hot_tub("factor_two")
+tub.table()               # the before/after/delta table
+tub.expected              # ExpectedInterpretation (may be "refuse")
+```
+
+Pytest wrappers exist as `lab_house`, `lab_houses` and `hot_tub_fixture` in
+`tests/conftest.py`. They are thin over the plain functions, so the same builders
+can be used inside a `parametrize` list or a script.
+
+The same strata are reachable from the shell, which keeps the CLI useful for
+manual investigations:
+
+```bash
+python -m tools.simulator.cli --list-strata
+python -m tools.simulator.cli --stratum factor2 --seed 42 --minutes 60 --out /tmp/f2
+```
+
+`--stratum` emits the *unchanged* record shape, so no consumer needs new code.
+Impairment flags (`--invert-ct`, `--drift-ct`, `--outage`, `--quality`,
+`--no-unknown-loads`) are **refused** alongside `--stratum` rather than applied:
+a stratum already fixes its quality and wiring, and honouring a conflicting flag
+would silently produce something that is not the stratum that was asked for. The
+default invocation is byte-identical to before this work.
+
+**What this does not prove.** The fixtures make the *inputs* correct and
+reproducible; they say nothing about whether the engine interprets them
+correctly. That is WP3's job (`electrical/factors.py`), and the fixtures are
+shaped so its tests can consume them unchanged.
+
+---
+
+## 8. The v2 analysis-layer suites
+
+§7 documents the *input* side (fixtures and strata). This section documents the
+*layers added in v2* and what each one is allowed to prove. Every count below
+was measured with
+`python -m pytest <file> --collect-only -q -p no:cacheprovider`.
+
+### 8.1 Measured suite state
+
+```
+python -m pytest tests -p no:cacheprovider
+2725 passed, 9 skipped, 23 warnings in 198.96s
+```
+
+The nine skips are all `tests/simulation/test_real_topology.py`, gated on the
+local-only capture (`test_real_topology.py:61`). See
+`docs/limitations_v2.md` §3.
+
+### 8.2 Layer by layer
+
+| File | Tests | Layer | What it pins |
+| --- | --- | --- | --- |
+| `tests/unit/test_factors.py` | 59 | electrical | `_derive` decision table, `resolve` as-of-timestamp lookups, interval overlap rejection, the Refoss ×2 double-apply, `resolve_factor_ownership` |
+| `tests/unit/test_event_isolation.py` | 47 | isolation | three statuses, two windows, physical-device collapse, load-evidence filtering, config layering |
+| `tests/unit/test_association.py` | 52 | association | evidence gates, refusal codes, verdicts, confidence formula, orientation |
+| `tests/unit/test_circuits.py` | 34 | circuits | `dedicated`/`shared`/`partially_understood`/`unknown`, unattributed-load requirement, candidate status |
+| `tests/unit/test_hierarchy.py` | 34 | hierarchy | evidence bar, 11 refusal reasons, overlap-before-parenthood, cycle rejection, declared-wins |
+| `tests/unit/test_residual_power.py` | 70 | residual | sign preservation, `ZERO_TOL_W` behaviour, basis compatibility, duplicate/enclosure removal, `resolved` semantics |
+| `tests/unit/test_inference_records.py` | 15 | audit storage | migration 9/10 idempotence, round-trip of every field, append-only insert, `prune` exemption |
+| `tests/unit/test_simulator_fixtures.py` | 140 | fixtures | 21 strata coverage, determinism per seed, Hot Tub variants, CLI parity |
+| `tests/end_to_end/test_audit_api_e2e.py` | 10 | API | five routes, empty-database honesty, `400`, `503`, contract header |
+
+The unit counts deliberately exceed the "one test per rule" minimum: each
+refusal code and each confidence term has at least one test that fails if it is
+removed.
+
+### 8.3 What the v2 suites prove, and what they do not
+
+**They prove** (behavioural, on synthetic inputs):
+
+- every refusal path returns its documented reason code rather than a plausible
+  number;
+- every confidence term is recomputable from published evidence;
+- the audit pass writes byte-identical records for identical inputs and a
+  `previous_record_id` chain that strictly increases;
+- `prune` deletes raw samples and leaves all seven `AUDIT_TABLES` untouched
+  (`test_inference_records.py:350`);
+- the five read routes answer `503` without a facade and never fabricate an
+  all-clear from an empty database.
+
+**They do not prove:**
+
+- that the thresholds are physically optimal — only that the code honours them;
+- that the artifacts are *correct* on a real house (no ground truth);
+- that the audit pass populates `topology`/`residual` confidence (it does not —
+  `docs/confidence_model.md` §2);
+- that the hierarchy gates pass on a real capture (those nine tests skip).
+
+### 8.4 Determinism assertions
+
+Three properties are asserted rather than assumed:
+
+1. **Record identity.** Same `(device, algorithm_version, timestamp, revision)`
+   → same `record_id` (`record_id_for`, `audit.py:415`).
+2. **Ordering.** A device's chain comes back `(timestamp, revision)` ascending,
+   so a replay is a plain loop (`database.py:671`).
+3. **No clock in a decision.** Every analysis function takes `now` from the
+   caller; `AssociationFinder` and the hierarchy fall back to `valid_from` or the
+   wall clock only when building an assertion's timestamp, never while deciding
+   (`association.py:194`).
+
+### 8.5 What a new feature should add here
+
+The pattern the existing suites follow, and the one new work should extend:
+
+- a new **rule** → a unit test that fails if the rule is deleted (not merely one
+  that exercises the happy path);
+- a new **refusal** → assert the exact reason code string, because codes are the
+  machine interface;
+- a new **artifact** → an end-to-end test asserting the empty-database payload
+  and the `503` path alongside the populated one;
+- a new **persistence field** → a round-trip test plus a `prune` observation, so
+  "stored" and "retained" are separate claims.

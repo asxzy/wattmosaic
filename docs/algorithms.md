@@ -538,3 +538,263 @@ topology still rejects, because the association is unverified.
 * SVD `O(m·n²)`, only on the free columns and only usable rows.
 * No randomness anywhere in the inference path; seeded RNG appears only in
   tests. Repeated identical input gives bit-identical `x`.
+
+---
+
+## 13. Measurement-factor semantics (v2)
+
+New in contract 1.6.0. Full reference: `docs/factor_semantics.md`.
+
+A single reading can mean three different physical quantities depending on what
+instrument produced it and whether a factor was already applied by the monitor.
+`MeasurementBasis` (`contracts.py:187`) names that basis explicitly, and
+`engine/wattmosaic_engine/electrical/factors.py` derives it from the interval
+history rather than from a global setting.
+
+| Basis | Meaning |
+| --- | --- |
+| `ct_measured` | the reading is the conductor value, no factor involved |
+| `factor_adjusted` | a declared factor was applied by this engine |
+| `monitor_reported` | the monitor already applied a factor and publishes the appliance total |
+| `estimated_appliance_total` | an explicit model/prior total, not a reading |
+| `unknown` | the basis could not be established |
+
+The derivation is a 12-row decision table (`FactorRegistry.resolve`,
+`electrical/factors.py:533`) fed by `_derive` (`electrical/factors.py:238`). Two rules matter most:
+
+* **No factor was ever declared** → `no_factor_declared` → `ct_measured`. This is
+  a positive answer ("the reading is the conductor value"), not a default.
+* **A factor is required but absent / gapped / not yet declared** → `unknown`.
+  Arithmetic that would need the missing factor is refused rather than applied
+  as ×1.
+
+`MeasurementFactor` (`contracts.py:590`) carries a half-open validity interval,
+so "what factor was in force at this sample" is answerable. Overlapping
+intervals for one CT are rejected both by `validate_factor_intervals`
+(`contracts.py:642`) and by storage (`database.py:705`). Today's factor is never
+applied retroactively.
+
+The Refoss ×2 case is the canonical instance: a clamp on one leg of a 240 V load
+needs ×2 to reach the appliance total, while a monitor that reports the total
+itself must not be multiplied again. Applying both is the 2× error the table
+prevents.
+
+---
+
+## 14. Event isolation (v2)
+
+Reference: `docs/event_isolation.md`. Implementation:
+`disaggregation/isolation.py`.
+
+Isolation answers one question before any watt is attributed: *when this device
+changed, was anything else changing in the same window?*
+
+```
+ISOLATED          nothing else changed in the isolation window
+CONTAMINATED      another physical device changed nearby (or the power window
+                  was polluted by a later step)
+INSUFFICIENT_DATA the window was not observed well enough to say
+```
+
+Three properties make the verdict usable:
+
+* **Two windows.** A tight `isolation_window_s` (30 s) decides cleanliness; a
+  wider `power_window_s` (60 s) is the span whose readings would be attributed.
+  `IsolationWindow` clamps the wider to be at least the tighter
+  (`isolation.py:172`).
+* **Physical, not identity, competition.** `physical_device_events`
+  (`isolation.py:505`) collapses entities of one appliance via typed bindings, so
+  a second entity of the *same* device never counts as a competitor.
+* **Absence is not clean.** A `SampleCoverage` that is missing or insufficient
+  yields `INSUFFICIENT_DATA`; it never defaults to `ISOLATED`.
+
+The offset (`analysis_offset_s`) shifts the *window*, never `occurred_at`
+(`isolation.py:214`), so the timestamp of the physical event survives analysis
+unchanged.
+
+---
+
+## 15. Device↔CT association (v2)
+
+Reference: `docs/association_and_topology.md`. Implementation:
+`disaggregation/association.py`.
+
+An association is a typed claim: this device's step is observed on this CT. It
+is emitted only after repeated, isolated, in-basis, in-direction, same-instant
+corroboration (`AssociationFinder.analyze`, `association.py:695`).
+
+Evidence gates, all defaults from `AssociationConfig` (`association.py:285`):
+
+| Gate | Default | Refusal code |
+| --- | --- | --- |
+| isolated events | `min_events = 2` | `too_few_events` |
+| magnitude floor | `min_magnitude_w = 10.0` | `insufficient_magnitude` |
+| lag search | `max_lag_s = 60.0`, step `15.0` | `lag_exceeded` |
+| ratio tolerance | `magnitude_tolerance_frac = 0.10` | outside `0…1.1` |
+| stability | `stability_min = 0.70` | `unstable` |
+| noise significance | `noise_sigmas = 3.0` | `response_within_noise` |
+| cleanup | every `CONTAMINATED` event | `contaminated_event` |
+
+Confidence is a product of five named terms, not a blend
+(`association.py:84-95`):
+
+```
+repeatability = 1 - 0.5 ** n_events        # 1 -> 0.50, 5 -> 0.96875
+stability     = clip(1 - MAD/median, 0, 1)
+basis_term    = min(registry confidence over the support)
+lag_term      = 1 - 0.5 * (lag_s / max_lag_s)   # 0 s -> 1.0, 60 s -> 0.5
+ambiguity     = 1.0 / 0.75 (split) / 0.25 (ambiguous)
+
+confidence = min(MAX_CONFIDENCE,
+                 repeatability * stability * basis_term * lag_term * ambiguity
+                 / (1 + conflict_penalty * n_conflicts))
+```
+
+So a relation supported by five clean events, agreeing within ~2 %, on an
+established basis, responding by the same instant, with nothing contradicting
+them reads `0.96875 × 0.98 = 0.949375` (the module's own docstring abbreviates
+this to `0.9688 × 0.98 = 0.949`). Every term is recomputable from
+`evidence["stats"]`, and the cap is `MAX_CONFIDENCE = 0.99`, never `1.0`.
+
+Direction is never silently flipped: a reversed CT step is withheld as
+`opposite_direction`. Reversal is handled upstream by declared
+`Polarity.INVERTED`, applied exactly once.
+
+---
+
+## 16. Circuit classification (v2)
+
+Implementation: `disaggregation/circuits.py`.
+
+A circuit's *scope* is a different axis from a CT's type and a device's
+monitoring level, so it is its own object (`contracts.py:691`). Classification is
+derived from the associations that name the circuit's CTs:
+
+| Class | Requirement |
+| --- | --- |
+| `dedicated` | exactly one device on the scope |
+| `shared` | at least two devices |
+| `partially_understood` | two or more devices **plus** recorded unattributed load (`metadata["unattributed_load_w"]`) |
+| `unknown` | the evidence does not support any of the above |
+
+`PARTIALLY_UNDERSTOOD` is the class that stops "two known devices" from being
+reported as "the whole circuit is explained". `classification_status` stays
+`candidate` until a user confirms it — the classifier never promotes its own
+output (`docs/limitations_v2.md` §4).
+
+---
+
+## 17. Residual power (v2)
+
+Reference: `docs/residual_analysis.md`. Implementation:
+`models/residual_power.py`.
+
+A residual is `measured − Σ counted contributions`, kept **signed**:
+
+* positive = load present and unexplained
+* negative = measured load that no device explains
+* exact zero = resolved
+
+`ZERO_TOL_W = 1e-9` (`residual_power.py:112`) and only an exactly-zero value is
+`NEAR_ZERO` (`contracts.py:521`). Nothing is clamped: a 1 W residual is a real
+finding, and a negative residual is evidence of a wrong model rather than an
+error to hide.
+
+Three gates must pass before a number exists at all: the scope has one CT, it has
+a current reading, and its measurement basis is known. Each failure is reported
+as a refusal code (`multi_ct_scope`, `no_scope_reading`, `unknown_scope_basis`)
+in `AuditReport.refused`, never as a zero residual.
+
+`bases_are_compatible` decides whether two contributions may be summed at all
+(`factor_adjusted` + `monitor_reported` is not a valid sum), and
+`_counted_contributions` removes double counts from duplicate CTs and nested
+scopes. Baseline is a median, not a mean, so one spike cannot move the
+comparison.
+
+`resolved=False` is a permanent, legitimate state carrying `unresolved_since`.
+
+---
+
+## 18. Conservative CT hierarchy (v2)
+
+Reference: `docs/association_and_topology.md` §hierarchy. Implementation:
+`electrical/hierarchy.py`.
+
+Parent/child is proposed only when containment is demonstrated, never because
+two CTs correlate:
+
+| Evidence | Default |
+| --- | --- |
+| independent devices responding through both CTs | `min_independent_devices = 2` |
+| fraction of conditions where containment holds | `min_response_consistency = 0.9` |
+| fraction of instants where child may exceed parent | `max_power_violation_frac = 0.02` |
+| unknown basis blocks inference | `require_scope_evidence = True` |
+
+Two rules keep the output honest:
+
+* **Overlap before parenthood.** `overlaps` (`hierarchy.py:521`) runs first and
+  without any series: "one device on two CTs" is a `CT_MEASUREMENT_OVERLAP`, not
+  a parent link. This is the Hot Tub bar.
+* **Declared wins.** A user-declared parent link outranks an inferred one
+  (`hierarchy.py:619`), and the loser is recorded under `declared_wins` rather
+  than dropped silently.
+
+`validate` (`hierarchy.py:897`) rejects a cycle, a self-edge, a non-feed child
+and a parent asserted by an association. Every refusal carries a stable reason
+code.
+
+---
+
+## 19. The analysis pass and the audit trail (v2)
+
+Reference: `docs/inference_audit.md`. Implementation:
+`disaggregation/audit.py`.
+
+The modules above are each correct in isolation; `AuditPass` is the only place
+their order lives:
+
+```
+HA event → isolation → association → circuits → residual → hierarchy → record
+```
+
+Four properties of the pass, each load-bearing:
+
+* **Import, never reimplement.** Every verdict comes from the owning module; the
+  pass supplies inputs, orders stages and persists results.
+* **Nothing invented on refusal.** A scope that cannot be computed is reported in
+  `refused` with the module's reason code.
+* **Failure isolation per stage and per item.** One bad device, circuit or
+  relation cannot abort the pass or the inference loop; the error lands in
+  `errors` under a stable key.
+* **Deterministic.** `record_id` hashes `(device, algorithm_version, timestamp,
+  revision)`, and stage outputs are ordered before writing, so a replay is
+  byte-identical.
+
+`InferenceRecord` (`contracts.py:875`) is append-only: it cites
+`previous_record_id`, strictly increases `revision`, and travels with the
+algorithm version. Writes are gated by *change* — power moving by more than
+`1.0 W`, source or basis changing, or a `3600 s` heartbeat — so the trail records
+transitions rather than every cycle.
+
+Confidence is reported as independent dimensions (`ConfidenceVector`,
+`contracts.py:481`) with **no aggregate**: `power`, `ct_association`,
+`topology`, `circuit_classification`, `residual`, plus a `method` *name*. See
+`docs/confidence_model.md`; the audit pass populates the first, second and fourth
+and leaves `topology`/`residual` unassessed.
+
+---
+
+## 20. Determinism and complexity of the v2 stages
+
+* Every stage is a pure function of its inputs plus a caller-supplied `now`;
+  the clock is never read inside a decision (`association.py:194`).
+* `record_id` is a SHA-256 prefix over identity fields only — no wall clock, no
+  UUID, no row id (`audit.py:415`).
+* Sorting is explicit at every persistence boundary: verdicts by
+  `(occurred_at, device_id, event_id)`, circuits by `circuit_id`, records by
+  `(timestamp, revision)`, relation payloads by `created_at`.
+* Bounded memory: pending events `256`, per-device power history `512`,
+  observations `8192`, retained verdicts `512` (`audit.py:85-93`).
+* Cost scales with the window, not the database: a pass reads this cycle's
+  tracker history, and a reanalysis reads
+  `WM_REANALYSIS_LOOKBACK_S` (default 21600 s) of stored samples.

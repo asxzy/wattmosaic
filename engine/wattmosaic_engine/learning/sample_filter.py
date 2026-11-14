@@ -56,6 +56,10 @@ class SampleEvidence:
     baseline_samples: int | None = None
     event_samples: int | None = None
     concurrent_events: int = 0
+    #: Identifiers of the competing physical devices (audit only).
+    competing_device_ids: list[str] = field(default_factory=list)
+    #: The isolation window the count was measured over, in seconds.
+    concurrency_window_s: float | None = None
     topology_confirmed: bool = True
     association_confidence: float | None = None
     timestamp_quality: str | None = None

@@ -53,6 +53,7 @@ from .device_links import (
     device_for_entity,
     entity_links,
 )
+from .disaggregation.audit import AuditConfig, AuditPass
 from .disaggregation.engine import DisaggregationEngine, InferenceBatch
 from .disaggregation.events import StepTracker
 from .electrical.topology import build_graph
@@ -70,6 +71,8 @@ DEFAULT_TRAIN_INTERVAL_S = 3600.0
 DEFAULT_EVENT_BUFFER = 512
 #: How far back crash recovery replays stored inference results.
 RECOVERY_LOOKBACK_HOURS = 24.0
+#: Bound on remembered reanalysis timestamps (one entry per pass).
+DEFAULT_REANALYSIS_HISTORY = 64
 
 
 @dataclass(slots=True)
@@ -136,6 +139,9 @@ class WattMosaicBackend:
         train_interval_s: float = DEFAULT_TRAIN_INTERVAL_S,
         flush_every_cycles: int = DEFAULT_FLUSH_EVERY_CYCLES,
         event_buffer: int = DEFAULT_EVENT_BUFFER,
+        audit: AuditConfig | None = None,
+        reanalysis_interval_s: float = 3600.0,
+        reanalysis_lookback_s: float = 21600.0,
     ) -> None:
         # The synchroniser exposes only a point-in-time snapshot (no per-channel
         # history, cadence or previous cycle).  Without a tracker the CT step
@@ -171,6 +177,27 @@ class WattMosaicBackend:
         #: (``confirmed`` / ``candidate``).  Reported in ``learning_status`` so a
         #: ``candidate`` topology is explained before the first rejection lands.
         self._topology_quality_seen: str | None = None
+
+        # -- analysis pass -------------------------------------------------- #
+        # The six inference modules (isolation, association, circuits, factors,
+        # residual, hierarchy) only ran in their own unit tests before this: no
+        # production call site ordered them, so on a live install none of their
+        # artifacts existed.  The pass runs on this backend's existing inference
+        # loop -- it starts no thread, task or timer of its own -- and writes its
+        # versioned ``InferenceRecord`` audit trail beside the existing output.
+        self.audit_config = audit or AuditConfig()
+        self.audit = AuditPass(database, config=self.audit_config, tracker=self.tracker)
+        self.reanalysis_interval_s = max(0.0, float(reanalysis_interval_s))
+        self.reanalysis_lookback_s = max(60.0, float(reanalysis_lookback_s))
+        self.reanalysis_attempts = 0
+        #: Seeded to construction time so the first stored-history scan happens
+        #: one interval after start, not on the first cycle: at t=0 the pass has
+        #: nothing to re-derive and would only duplicate the incremental record.
+        self.last_reanalysis_at: datetime | None = utcnow()
+        self.last_audit_report: Any | None = None
+        self._reanalysis_history: deque[datetime] = deque(
+            maxlen=DEFAULT_REANALYSIS_HISTORY
+        )
 
         if database is not None:
             try:
@@ -282,10 +309,10 @@ class WattMosaicBackend:
         models: Any = None,
         events: Iterable[Any] | None = None,
     ) -> BackendBatch:
-        if events is not None:
-            for event in events:
+        cycle_events: list[Any] = list(events) if events is not None else []
+        if cycle_events:
+            for event in cycle_events:
                 self._pending_events.append(event)
-
         self._refresh_links(topology)
         registry = models if models is not None else self.registry
         try:
@@ -317,10 +344,13 @@ class WattMosaicBackend:
 
         self._update_energy(results)
         self._learn(window, topology)
+        self._analyze(window, topology, results, cycle_events)
+        self._maybe_reanalyze(results, topology)
 
         diagnostics = dict(batch.diagnostics or {})
         diagnostics["energy"] = self._energy_summary()
         diagnostics["learning"] = self._learning_summary()
+        diagnostics["audit"] = self._audit_summary()
         gaps = self._measurement_gap_summary(topology, results, batch.diagnostics or {})
         diagnostics["measurement_gaps"] = gaps
         self._explain_measurement_gaps(batch.reconciliation, gaps)
@@ -732,6 +762,141 @@ class WattMosaicBackend:
         value = getattr(status, "value", status)
         return "confirmed" if str(value) == "confirmed" else "candidate"
 
+    # -- analysis pass ----------------------------------------------------- #
+    def _analyze(
+        self,
+        window: Any,
+        topology: Topology,
+        results: Sequence[InferenceResult],
+        events: Sequence[Any],
+    ) -> None:
+        """One incremental pass: isolation → association → circuits → residual → hierarchy → record.
+
+        Guarded whole-call *and* internally: the pass reports a per-item error in
+        ``AuditReport.errors`` rather than raising, so one bad event or circuit
+        can never abort the inference loop.  A failure here cannot change the
+        inference results main.py already has -- the artifacts are written
+        beside them, never instead of them.
+        """
+        if not self.audit_config.write_records and not any(
+            (
+                self.audit_config.write_isolation,
+                self.audit_config.write_association,
+                self.audit_config.write_circuits,
+                self.audit_config.write_residual,
+                self.audit_config.write_hierarchy,
+            )
+        ):
+            return
+        try:
+            report = self.audit.analyze(
+                window,
+                topology=topology,
+                results=results,
+                events=events,
+                mode="incremental",
+            )
+        except Exception as exc:  # noqa: BLE001 - the audit never kills inference
+            self.last_error = f"audit: {type(exc).__name__}: {exc}"
+            log.warning("analysis pass failed: %s", exc)
+            return
+        self.last_audit_report = report
+        if report.errors:
+            log.debug("analysis pass reported %d error(s)", len(report.errors))
+
+    def _maybe_reanalyze(
+        self, results: Sequence[InferenceResult], topology: Topology
+    ) -> None:
+        """Periodic re-derivation from stored raw history.
+
+        Runs on the existing inference loop, never on a timer of its own: the
+        clock is only *read* here to decide whether the interval elapsed.  A pass
+        that re-derives from stored samples is what can reach ``ISOLATED`` for an
+        event that was still inside its own analysis window when it arrived.
+        """
+        interval = self.reanalysis_interval_s
+        if interval <= 0.0 or self.database is None:
+            return
+        now = utcnow()
+        last = self.last_reanalysis_at
+        if last is not None and (now - last).total_seconds() < interval:
+            return
+        self.last_reanalysis_at = now
+        self.reanalysis_attempts += 1
+        self._reanalysis_history.append(now)
+        try:
+            report = self.audit.reanalyze(
+                topology=topology,
+                lookback_s=self.reanalysis_lookback_s,
+                now=now,
+                results=results,
+            )
+        except Exception as exc:  # noqa: BLE001 - reanalysis is an optimisation
+            self.last_error = f"reanalysis: {type(exc).__name__}: {exc}"
+            log.warning("reanalysis pass failed: %s", exc)
+            return
+        self.last_audit_report = report
+
+    def _audit_summary(self) -> dict[str, Any]:
+        report = self.audit_report()
+        summary: dict[str, Any] = {
+            "enabled": self.audit_config.write_records
+            or self.audit_config.write_isolation
+            or self.audit_config.write_association
+            or self.audit_config.write_circuits
+            or self.audit_config.write_residual
+            or self.audit_config.write_hierarchy,
+            "algorithm_version": self.audit_config.algorithm_version,
+            "reanalysis_interval_s": self.reanalysis_interval_s,
+            "reanalysis_attempts": self.reanalysis_attempts,
+            "last_reanalysis_at": (
+                None if self.last_reanalysis_at is None else self.last_reanalysis_at.isoformat()
+            ),
+        }
+        if report is None:
+            summary["last_pass"] = None
+            return summary
+        summary["last_pass"] = report.as_dict()
+        return summary
+
+    def audit_report(self) -> Any:
+        """The last pass's report, for the read-only audit endpoints.
+
+        Reads through to the pass rather than caching a second copy: two
+        "last report" attributes would be able to disagree about what was
+        analysed, and the API would then serve the stale one.
+        """
+        report = self.audit.last_report
+        return report if report is not None else self.last_audit_report
+
+    def isolation_status(self) -> dict[str, Any]:
+        """Verdict counts over the retained analysis window, or an honest empty answer.
+
+        Reads the *pass* rather than the last report: a live pass matures a
+        handful of events per hour, so the most recent cycle's report is usually
+        empty and would render as "0 analysed" even though analysis is running.
+        """
+        status = getattr(self.audit, "isolation_status", None)
+        if status is not None:
+            try:
+                return status()
+            except Exception:  # noqa: BLE001 - the endpoint must still answer
+                pass
+        report = self.audit_report()
+        if report is None:
+            return {
+                "source": "no_analysis_pass_yet",
+                "algorithm_version": self.audit_config.algorithm_version,
+                "counts": {
+                    "analysed": 0,
+                    "isolated": 0,
+                    "contaminated": 0,
+                    "insufficient_data": 0,
+                },
+                "verdicts": [],
+            }
+        return report.isolation_status()
+
     def _learning_summary(self) -> dict[str, Any]:
         pipeline = self.learning
         if pipeline is None:
@@ -772,6 +937,7 @@ class WattMosaicBackend:
             "models_promoted": self.models_promoted,
             "energy_updates": self.energy_updates,
             "last_train_at": None if self.last_train_at is None else self.last_train_at.isoformat(),
+            "audit": self._audit_summary(),
             "last_error": self.last_error,
         }
 
@@ -784,11 +950,23 @@ class WattMosaicBackend:
 
 
 def build_backend(config: Any, database: Any | None = None) -> WattMosaicBackend:
-    """Construct the backend with config-derived settings."""
+    """Construct the backend with config-derived settings.
+
+    The analysis pass is configured from the same ``EngineConfig`` the rest of
+    the process reads, so an install that turns a family off gets that family
+    unwritten without the other families changing value (see ``AuditConfig``).
+    """
     return WattMosaicBackend(
         database,
         max_measurement_age_s=float(getattr(config, "stale_after_s", 120.0)),
         learning_enabled=bool(getattr(config, "learning_enabled", True)),
+        audit=AuditConfig.from_settings(config),
+        reanalysis_interval_s=float(
+            getattr(config, "reanalysis_interval_s", 3600.0)
+        ),
+        reanalysis_lookback_s=float(
+            getattr(config, "reanalysis_lookback_s", 21600.0)
+        ),
     )
 
 

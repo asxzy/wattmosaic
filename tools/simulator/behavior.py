@@ -103,6 +103,11 @@ class BinaryProfile(DeviceProfile):
     def __post_init__(self) -> None:
         super().__post_init__()
         self.on_power = self.device.nominal_power_w
+        # Optional startup transient, supplied by a fixture rather than guessed:
+        # ``ExpectedPower.startup_w`` existed in the contract but no simulator
+        # profile ever produced one, so an inrush could not be tested end to end.
+        self.startup_w = float(self.device.metadata.get("startup_w", 0.0) or 0.0)
+        self.startup_s = float(self.device.metadata.get("startup_s", 2.0) or 2.0)
         self.standby = self.rng.uniform(0.4, 2.5)
         # Occupancy-ish windows spread over the horizon.
         self.windows: list[tuple[float, float]] = []
@@ -120,8 +125,13 @@ class BinaryProfile(DeviceProfile):
         # Small inrush for the first 2 s of an activation.
         if on:
             for a, _ in self.windows:
-                if 0 <= t - a < 2.0:
-                    return self.on_power * (1.25 - 0.125 * (t - a))
+                elapsed = t - a
+                if 0 <= elapsed < self.startup_s:
+                    if self.startup_w > 0.0:
+                        # Explicit inrush that decays to the steady state.
+                        frac = 1.0 - elapsed / self.startup_s
+                        return self.on_power + (self.startup_w - self.on_power) * frac
+                    return self.on_power * (1.25 - 0.125 * elapsed)
             return self.on_power
         return self.standby
 
@@ -391,9 +401,117 @@ class DoublePoleProfile(DeviceProfile):
         return "heating" if self.power(t) > self.standby * 3 else "idle"
 
 
+class MotorProfile(DeviceProfile):
+    """Pump/motor: a hard inrush that decays into a steady running load.
+
+    The inrush is *physical truth*: it is visible in the CT aggregation, so a
+    test can prove the model learns the steady state and the energy integral
+    does not treat the spike as a device event or as sustained power.
+    """
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.run_power = self.device.nominal_power_w
+        self.startup_w = float(self.device.metadata.get("startup_w", self.run_power * 5.0))
+        self.startup_s = float(self.device.metadata.get("startup_s", 5.0))
+        self.standby = float(self.device.metadata.get("standby_w", 0.0) or 0.0)
+        self.windows: list[tuple[float, float]] = []
+        explicit = self.device.metadata.get("windows")
+        if explicit:
+            self.windows = [(float(a), float(b)) for a, b in explicit]
+        else:
+            t = self.rng.uniform(60, 600)
+            while t < self.horizon_s:
+                dur = self.rng.uniform(300, 1200)
+                self.windows.append((t, min(self.horizon_s, t + dur)))
+                t += dur + self.rng.uniform(1800, 7200)
+        for start, end in self.windows:
+            self.events.append(
+                ScheduledEvent(start, self.device.device_id, "on", self.startup_w, "motor_inrush")
+            )
+            self.events.append(
+                ScheduledEvent(end, self.device.device_id, "off", self.standby, "motor_off")
+            )
+
+    def power(self, t: float) -> float:
+        for start, end in self.windows:
+            if start <= t < end:
+                elapsed = t - start
+                if elapsed < self.startup_s:
+                    frac = 1.0 - elapsed / self.startup_s
+                    return self.run_power + (self.startup_w - self.run_power) * frac
+                return self.run_power
+        return self.standby
+
+    def state(self, t: float) -> str:
+        return "on" if any(a <= t < b for a, b in self.windows) else "off"
+
+
+class StepProfile(DeviceProfile):
+    """A load whose power follows an explicit step schedule (EV, hot tub, EVSE).
+
+    ``metadata["steps"]`` is a list of ``(t_seconds, watts)`` pairs evaluated as
+    a right-continuous step function.  It is data, not a random draw, so a
+    fixture can state exactly the rate change it wants to exercise.
+    """
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        raw = self.device.metadata.get("steps") or [(0.0, self.device.nominal_power_w)]
+        self.steps: list[tuple[float, float]] = sorted(
+            (float(t), max(0.0, float(w))) for t, w in raw
+        )
+        self.standby = float(self.device.metadata.get("standby_w", 0.0) or 0.0)
+        for t, watts in self.steps:
+            self.events.append(
+                ScheduledEvent(
+                    t, self.device.device_id, "on" if watts > 0 else "off", watts, "step_change"
+                )
+            )
+
+    def power(self, t: float) -> float:
+        value = self.standby
+        for start, watts in self.steps:
+            if t >= start:
+                value = watts
+        return value
+
+
+class HotTubProfile(DeviceProfile):
+    """Spa: jet/heater stages with a long standby between heating cycles.
+
+    The mandatory regression fixture needs an exact before/after pair, so the
+    fixture supplies ``metadata["cycle"]``: ``(t_on, t_off, on_watts)`` tuples
+    evaluated as a rectangular wave with a small standby draw.
+    """
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.cycles: list[tuple[float, float, float]] = [
+            (float(a), float(b), float(w))
+            for a, b, w in (self.device.metadata.get("cycle") or [])
+        ]
+        self.standby = float(self.device.metadata.get("standby_w", 0.0) or 0.0)
+        for start, end, watts in self.cycles:
+            self.events.append(
+                ScheduledEvent(start, self.device.device_id, "on", watts, "spa_heat_on")
+            )
+            self.events.append(
+                ScheduledEvent(end, self.device.device_id, "off", self.standby, "spa_heat_off")
+            )
+
+    def power(self, t: float) -> float:
+        for start, end, watts in self.cycles:
+            if start <= t < end:
+                return watts
+        return self.standby
+
+    def state(self, t: float) -> str:
+        return "heating" if self.power(t) > max(self.standby * 3, 1.0) else "idle"
+
+
 class UnknownLoadProfile(DeviceProfile):
     """Unmetered load: bounded random walk, smoothed, never identifiable."""
-
     def __post_init__(self) -> None:
         super().__post_init__()
         self.base = self.device.nominal_power_w * 0.5
@@ -426,6 +544,8 @@ _PROFILE_BY_TYPE = {
     SimDeviceType.DISHWASHER: DishwasherProfile,
     SimDeviceType.DRYER: DryerProfile,
     SimDeviceType.DOUBLE_POLE: DoublePoleProfile,
+    SimDeviceType.MOTOR: MotorProfile,
+    SimDeviceType.STEP: StepProfile,
     SimDeviceType.UNKNOWN: UnknownLoadProfile,
 }
 

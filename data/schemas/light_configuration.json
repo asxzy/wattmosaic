@@ -90,5 +90,5 @@
   "title": "LightConfiguration",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/light_configuration.json",
-  "x-contract-version": "1.5.0"
+  "x-contract-version": "1.6.0"
 }

@@ -213,6 +213,13 @@
           },
           "title": "Notes",
           "type": "array"
+        },
+        "entity_bindings": {
+          "items": {
+            "$ref": "#/$defs/HaEntityBinding"
+          },
+          "title": "Entity Bindings",
+          "type": "array"
         }
       },
       "required": [
@@ -358,6 +365,65 @@
       "title": "HaConnectivity",
       "type": "string"
     },
+    "HaEntityBinding": {
+      "additionalProperties": false,
+      "description": "One Home Assistant entity's role for one physical device.\n\nAt most one binding per device may have ``contributes_power=True``: that is\nthe anti-double-count rule, enforced on ``DeviceConfiguration``.",
+      "properties": {
+        "entity_id": {
+          "title": "Entity Id",
+          "type": "string"
+        },
+        "device_id": {
+          "title": "Device Id",
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/HaEntityRole",
+          "default": "unknown"
+        },
+        "is_load_evidence": {
+          "default": false,
+          "title": "Is Load Evidence",
+          "type": "boolean"
+        },
+        "contributes_power": {
+          "default": false,
+          "title": "Contributes Power",
+          "type": "boolean"
+        },
+        "attributes_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attributes Key"
+        }
+      },
+      "required": [
+        "entity_id",
+        "device_id"
+      ],
+      "title": "HaEntityBinding",
+      "type": "object"
+    },
+    "HaEntityRole": {
+      "description": "What one Home Assistant entity means for a physical device.\n\nA role makes \"many entities, one appliance\" a contract instead of a\nconvention, which is what makes double counting preventable.",
+      "enum": [
+        "load_state",
+        "mode_only",
+        "power_measurement",
+        "energy_counter",
+        "availability",
+        "unknown"
+      ],
+      "title": "HaEntityRole",
+      "type": "string"
+    },
     "LightConfiguration": {
       "additionalProperties": false,
       "description": "Advanced light detail \u2014 the highest-value confidence lever in a house\nwith 81 dimmable ``light.*`` entities.",
@@ -496,5 +562,5 @@
   "title": "DeviceConfigurationSet",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/device_configuration_set.json",
-  "x-contract-version": "1.5.0"
+  "x-contract-version": "1.6.0"
 }

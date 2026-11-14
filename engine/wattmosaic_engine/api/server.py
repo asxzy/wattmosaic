@@ -519,6 +519,92 @@ async def diagnostics(request: web.Request) -> web.Response:
     return _ok(await maybe_await(_facade(request).diagnostics()))
 
 
+# -- audit artifacts (read-only, additive) ---------------------------------- #
+
+
+def _bounded_float(
+    request: web.Request, name: str, *, default: float, minimum: float, maximum: float
+) -> float:
+    """Parse a bounded numeric query parameter with the transport's error shape."""
+    raw = request.query.get(name)
+    if raw is None:
+        return float(default)
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise InvalidRequest(f"{name} must be a number") from exc
+    if not math.isfinite(value) or value < minimum or value > maximum:
+        raise InvalidRequest(
+            f"{name} must be at least {minimum:g} and at most {maximum:g}"
+        )
+    return value
+
+
+async def circuits(request: web.Request) -> web.Response:
+    """Stored circuit scopes from the last analysis pass.
+
+    Read-only.  A circuit is written only after a pass had the evidence to name a
+    class, and its status stays ``candidate`` until a user confirms it, so this
+    never presents a guess as a fact.
+    """
+    method = getattr(_facade(request), "circuits", None)
+    if method is None:
+        raise FacadeUnavailable("circuits are not supported by this backend")
+    return _ok(await maybe_await(await asyncio.to_thread(method)))
+
+
+async def relations(request: web.Request) -> web.Response:
+    """Typed edges, grouped by kind.
+
+    ``?kind=`` filters to one kind.  The kinds are never merged: an association,
+    a measurement overlap and a parent link are different claims about the
+    installation and combining them would hide which one is true.
+    """
+    kind = request.query.get("kind")
+    method = getattr(_facade(request), "relations", None)
+    if method is None:
+        raise FacadeUnavailable("relations are not supported by this backend")
+    return _ok(await maybe_await(await asyncio.to_thread(method, kind)))
+
+
+async def inference_records(request: web.Request) -> web.Response:
+    """The append-only revision chain for one device, oldest revision first."""
+    device_id = request.match_info["device_id"]
+    limit_raw = _bounded_float(
+        request, "limit", default=200.0, minimum=1.0, maximum=5000.0
+    )
+    method = getattr(_facade(request), "inference_records", None)
+    if method is None:
+        raise FacadeUnavailable("inference records are not supported by this backend")
+    payload = await asyncio.to_thread(method, device_id, limit=int(limit_raw))
+    return _ok(await maybe_await(payload))
+
+
+async def residual_components(request: web.Request) -> web.Response:
+    """Recent residual observations: signed, never clamped, never zeroed."""
+    hours = _bounded_float(request, "hours", default=24.0, minimum=0.0, maximum=2160.0)
+    limit_raw = _bounded_float(
+        request, "limit", default=500.0, minimum=1.0, maximum=5000.0
+    )
+    method = getattr(_facade(request), "residual_components", None)
+    if method is None:
+        raise FacadeUnavailable("residual components are not supported by this backend")
+    payload = await asyncio.to_thread(method, hours=hours, limit=int(limit_raw))
+    return _ok(await maybe_await(payload))
+
+
+async def isolation_status(request: web.Request) -> web.Response:
+    """Isolation verdicts from the last analysis pass.
+
+    ``source`` names where the answer came from, so "no pass yet" is never
+    rendered as "all clear".
+    """
+    method = getattr(_facade(request), "isolation_status", None)
+    if method is None:
+        raise FacadeUnavailable("isolation status is not supported by this backend")
+    return _ok(await maybe_await(method()))
+
+
 async def models(request: web.Request) -> web.Response:
     return _ok(await maybe_await(_facade(request).models(request.match_info["device_id"])))
 
@@ -629,6 +715,13 @@ def create_app(
     router.add_get(f"{base}/topology/tree", topology_tree)
     router.add_get(f"{base}/quality", quality)
     router.add_get(f"{base}/diagnostics", diagnostics)
+    # Audit artifacts (contract 1.6.0).  Additive and read-only: each one
+    # reports what a pass already derived and never triggers analysis or a write.
+    router.add_get(f"{base}/circuits", circuits)
+    router.add_get(f"{base}/relations", relations)
+    router.add_get(f"{base}/devices/{{device_id}}/records", inference_records)
+    router.add_get(f"{base}/residuals", residual_components)
+    router.add_get(f"{base}/isolation", isolation_status)
     router.add_get(f"{base}/models/{{device_id}}", models)
     router.add_post(f"{base}/commands", commands)
     router.add_post(f"{base}/discover/placements", discover_placements)

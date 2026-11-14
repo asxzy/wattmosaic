@@ -523,7 +523,7 @@ def test_reconciliation_fields_are_additive_with_zero_defaults():
     assert rec.unknown_residual_w == 0.0
 
 
-def test_contract_version_is_1_5_0():
+def test_contract_version_is_1_6_0():
     from wattmosaic_engine import contracts
 
-    assert contracts.CONTRACT_VERSION == "1.5.0"
+    assert contracts.CONTRACT_VERSION == "1.6.0"

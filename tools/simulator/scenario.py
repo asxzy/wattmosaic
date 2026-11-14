@@ -29,6 +29,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .behavior import DeviceProfile, build_profiles, inject_simultaneous_events
+from .factors import RefossFactorChannel
 from .sensors import (
     ChannelImpairment,
     Observation,
@@ -67,6 +68,28 @@ class SimulatorConfig:
     #: Used to prove transition attribution does not depend on the two clocks
     #: agreeing.
     state_lag_s: dict[str, float] = field(default_factory=dict)
+    #: Extra delivery latency per channel, on top of the quality preset's mean.
+    #: Reproduces a slower poller on one CT (``delayed_ct``); the value is still
+    #: the value at ``state_timestamp``, only its arrival is late.
+    channel_delay_s: dict[str, float] = field(default_factory=dict)
+    #: Samples that are *not produced at all* inside the window, as opposed to
+    #: :attr:`outage_windows` which produces a delivered stale value.  The
+    #: difference matters: an outage says "no new information", a gap says "the
+    #: channel was silent".
+    missing_windows: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
+    #: Measurement-only impulses: ``ct_id -> [(start, end, extra_watts)]``.  The
+    #: spike is added to the reported value only; ground truth is untouched, so a
+    #: test can prove a single spike is neither learned nor charged as device
+    #: power.
+    spike_windows: dict[str, list[tuple[float, float, float]]] = field(default_factory=dict)
+    #: Physical polarity changes at a simulated second (a CT re-clamped the wrong
+    #: way round mid-run): ``ct_id -> t_s``.  The *declared* polarity stays
+    #: normal, so the reading flips sign with no metadata explaining it.
+    polarity_flips: dict[str, float] = field(default_factory=dict)
+    #: Refoss factor channels: a 240 V appliance whose one leg is metered, with
+    #: an explicit factor history.  Absent by default on purpose — a bare float
+    #: default would make "no metadata" indistinguishable from a deliberate ×1.
+    factor_channels: dict[str, RefossFactorChannel] = field(default_factory=dict)
 
     @property
     def horizon_s(self) -> float:
@@ -86,7 +109,14 @@ class SimulatorConfig:
             "outage_windows": {k: list(v) for k, v in self.outage_windows.items()},
             "include_unknown_loads": self.include_unknown_loads,
             "state_lag_s": dict(self.state_lag_s),
-            "simulator_version": "1.0.0",
+            "channel_delay_s": dict(self.channel_delay_s),
+            "missing_windows": {k: list(v) for k, v in self.missing_windows.items()},
+            "spike_windows": {k: list(v) for k, v in self.spike_windows.items()},
+            "polarity_flips": dict(self.polarity_flips),
+            "factor_channels": {
+                k: v.as_metadata() for k, v in self.factor_channels.items()
+            },
+            "simulator_version": "1.1.0",
             "topology_notes": [],
         }
 
@@ -161,6 +191,9 @@ class HouseholdScenario:
             imp.polarity = ch.polarity
             imp.drift_ppm_per_hour = self.config.drifting_channels.get(ch.ct_id, 0.0)
             imp.outage_windows = list(self.config.outage_windows.get(ch.ct_id, []))
+            extra_delay = float(self.config.channel_delay_s.get(ch.ct_id, 0.0))
+            if extra_delay:
+                imp.delay_s = imp.delay_s + extra_delay
             out[ch.ct_id] = imp
         return out
 
@@ -243,6 +276,43 @@ class HouseholdScenario:
         imp = self._impairments[ct_id]
         return any(a <= t < b for a, b in imp.outage_windows)
 
+    def _in_gap(self, ct_id: str, t: float) -> bool:
+        """True when the channel produced *no sample at all* at ``t``."""
+        return any(
+            a <= t < b for a, b in self.config.missing_windows.get(ct_id, ())
+        )
+
+    def _spike_at(self, ct_id: str, t: float) -> float:
+        extra = 0.0
+        for start, end, watts in self.config.spike_windows.get(ct_id, ()):
+            if start <= t < end:
+                extra += float(watts)
+        return extra
+
+    def _reported_multiplier(self, ct_id: str, t: float) -> float:
+        channel = self.config.factor_channels.get(ct_id)
+        return 1.0 if channel is None else channel.reported_multiplier_at(t)
+
+    def factor_frame(self, ct_id: str, t: float) -> dict[str, Any] | None:
+        """Observable factor metadata for a factor channel at ``t``.
+
+        Deliberately contains no truth: it is what the integration's
+        configuration says about the CT, which a user could read back.
+        """
+        channel = self.config.factor_channels.get(ct_id)
+        if channel is None:
+            return None
+        epoch = channel.epoch_at(t)
+        return {
+            "factor": channel.factor_at(t),
+            "applied_by": channel.applied_by_at(t).value,
+            "published": bool(epoch is not None and epoch.published),
+            "declared": channel.is_declared_at(t),
+            "double_applied": channel.double_applied_at(t),
+            "metered_leg": channel.metered_leg.value,
+            "interval_s": list(epoch.interval) if epoch is not None else None,
+        }
+
     def _observations_for_tick(
         self, t_start: float, t_end: float
     ) -> tuple[dict[str, dict[str, Any]], dict[str, Observation]]:
@@ -262,6 +332,9 @@ class HouseholdScenario:
                 sample_t = times[idx]
                 idx += 1
                 self._next_sample[ch.ct_id] = idx
+                if self._in_gap(ch.ct_id, sample_t):
+                    # A gap is silence, not staleness: no sample is produced.
+                    continue
                 # Evaluate physical truth at the *sample* instant, not tick start.
                 truth_devices = {
                     dev.device_id: self.profiles[dev.device_id].effective_power(sample_t)
@@ -269,7 +342,11 @@ class HouseholdScenario:
                 }
                 ct_truth = self.topology.true_ct_powers(truth_devices)
                 outage = self._in_outage(ch.ct_id, sample_t)
-                truth = ct_truth.get(ch.ct_id, 0.0)
+                conductor = ct_truth.get(ch.ct_id, 0.0)
+                # A Refoss factor channel publishes ``conductor * factor``.  The
+                # conductor reading is ground truth and is never derived from
+                # the factor; only the published value is scaled.
+                truth = conductor * self._reported_multiplier(ch.ct_id, sample_t)
                 obs = self._pipeline.observe(
                     ch,
                     self._impairments[ch.ct_id],
@@ -281,6 +358,14 @@ class HouseholdScenario:
                 self._cumulative_sequence += 1
                 if obs is None:
                     continue
+                flip = self.config.polarity_flips.get(ch.ct_id)
+                if flip is not None and sample_t >= float(flip) and not obs.dropped_by_outage:
+                    # Re-clamped the wrong way round mid-run.  The declared
+                    # polarity still says "normal", so nothing explains it.
+                    obs.reported_w = -obs.reported_w
+                spike = self._spike_at(ch.ct_id, sample_t)
+                if spike and not obs.dropped_by_outage:
+                    obs.reported_w = obs.reported_w + spike
                 self._previous_reported[ch.ct_id] = obs.reported_w
                 self._pending[ch.ct_id].append(obs)
 
@@ -317,6 +402,11 @@ class HouseholdScenario:
                     "delivered": not obs.dropped_by_outage,
                     "samples_in_tick": count,
                 }
+                factor = self.factor_frame(ch.ct_id, obs.sample_time)
+                if factor is not None:
+                    # Metadata only: ``factor`` describes the *declaration* in
+                    # force, never the physical truth behind the reading.
+                    delivered[ch.ct_id]["factor"] = factor
             self._pending[ch.ct_id] = keep
 
         latest = {

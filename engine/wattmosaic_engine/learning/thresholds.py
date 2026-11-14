@@ -8,9 +8,19 @@ numbers.  See ``docs/learning.md`` for the justification of each default.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import Any
 
 from ..config.settings import EngineConfig
+
+#: Keys accepted in an isolation override map.  Anything else is ignored so a
+#: typo in one key cannot silently change an unrelated timing.
+ISOLATION_TIMING_KEYS: tuple[str, ...] = (
+    "analysis_offset_s",
+    "isolation_window_s",
+    "power_window_s",
+)
 
 
 @dataclass(slots=True)
@@ -39,10 +49,29 @@ class LearningThresholds:
     max_event_alignment_s: float = 120.0
 
     # -- event isolation ------------------------------------------------- #
-    #: two state transitions closer than this are concurrent for our purposes
+    #: two state transitions closer than this are concurrent for our purposes.
+    #: This is the *global default*: an appliance whose physical response lags
+    #: (a compressor, a water heater) needs a wider window than a lamp, so
+    #: resolve per device through :meth:`isolation_timings` rather than reading
+    #: this field directly.
     concurrency_window_s: float = 10.0
-    #: maximum plausible number of *other* device events in the window
+    #: wide window inspected for a *later* sibling step that pollutes the
+    #: measured delta.  Never narrower than ``concurrency_window_s``.
+    power_analysis_window_s: float = 60.0
+    #: shift between the HA event and the analysis window, for a device whose
+    #: physical response trails its control signal.
+    analysis_offset_s: float = 0.0
+    #: maximum plausible number of *other physical devices* changing in the
+    #: window.  ``1`` tolerates one sibling (its effect is separable); two or
+    #: more makes the CT delta unattributable.
     max_concurrent_events: int = 1
+    #: ``class label -> timing overrides`` (middle layer).  Labels are whatever
+    #: the caller uses; ``PowerBehavior``/``DeviceType`` values work unchanged.
+    isolation_by_class: dict[str, dict[str, float]] = field(default_factory=dict)
+    #: ``device_id -> timing overrides`` (strongest layer).
+    isolation_by_device: dict[str, dict[str, float]] = field(default_factory=dict)
+    #: ``device_id -> class labels`` used to look up ``isolation_by_class``.
+    isolation_device_classes: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     # -- signal quality -------------------------------------------------- #
     #: minimum robust sigma (W) used as the "unstable" floor
@@ -99,5 +128,61 @@ class LearningThresholds:
         raw = cadence * self.window_cadences
         return max(self.min_window_s, min(self.max_window_s, raw))
 
+    # -- event isolation ------------------------------------------------- #
+    def isolation_timings(
+        self,
+        device_id: str | None = None,
+        device_classes: Sequence[str] = (),
+    ) -> dict[str, float]:
+        """Resolve the isolation timings for one device.
 
-__all__ = ["LearningThresholds"]
+        Layering is ``device_id`` override > first matching class label >
+        global default, so the global ``concurrency_window_s`` stays the
+        documented default instead of a universal answer.  The returned dict
+        always carries all :data:`ISOLATION_TIMING_KEYS`.
+        """
+        timings: dict[str, float] = {
+            "analysis_offset_s": float(self.analysis_offset_s),
+            "isolation_window_s": float(self.concurrency_window_s),
+            "power_window_s": float(self.power_analysis_window_s),
+        }
+        labels = device_classes or (self.isolation_device_classes.get(device_id or "") or ())
+        for label in labels:
+            override = self.isolation_by_class.get(str(label))
+            if override:
+                timings.update(_clean_timing_map(override))
+                break
+        if device_id:
+            override = self.isolation_by_device.get(str(device_id))
+            if override:
+                timings.update(_clean_timing_map(override))
+        if timings["power_window_s"] < timings["isolation_window_s"]:
+            timings["power_window_s"] = timings["isolation_window_s"]
+        return timings
+
+    def concurrency_window_for(
+        self,
+        device_id: str | None = None,
+        device_classes: Sequence[str] = (),
+    ) -> float:
+        """The window actually applied to ``device_id``, in seconds."""
+        return self.isolation_timings(device_id, device_classes)["isolation_window_s"]
+
+
+def _clean_timing_map(values: Mapping[str, Any]) -> dict[str, float]:
+    """Keep only known timing keys with finite, non-negative values."""
+    out: dict[str, float] = {}
+    for key in ISOLATION_TIMING_KEYS:
+        if key not in values:
+            continue
+        try:
+            number = float(values[key])
+        except (TypeError, ValueError):
+            continue
+        if number != number or number in (float("inf"), float("-inf")) or number < 0.0:
+            continue
+        out[key] = number
+    return out
+
+
+__all__ = ["ISOLATION_TIMING_KEYS", "LearningThresholds"]

@@ -120,6 +120,16 @@ class EngineFacade(Protocol):
 
     def diagnostics(self) -> Any: ...
 
+    def circuits(self) -> Any: ...
+
+    def relations(self, kind: str | None = None) -> Any: ...
+
+    def inference_records(self, device_id: str, *, limit: int = 200) -> Any: ...
+
+    def residual_components(self, *, hours: float = 24.0, limit: int = 500) -> Any: ...
+
+    def isolation_status(self) -> Any: ...
+
     def models(self, device_id: str) -> Any: ...
 
     def command(self, command: ServiceCommand) -> Any: ...
@@ -201,6 +211,21 @@ class NullFacade:
         return self._unavailable()
 
     def diagnostics(self) -> Any:
+        return self._unavailable()
+
+    def circuits(self) -> Any:
+        return self._unavailable()
+
+    def relations(self, kind: str | None = None) -> Any:
+        return self._unavailable()
+
+    def inference_records(self, device_id: str, *, limit: int = 200) -> Any:
+        return self._unavailable()
+
+    def residual_components(self, *, hours: float = 24.0, limit: int = 500) -> Any:
+        return self._unavailable()
+
+    def isolation_status(self) -> Any:
         return self._unavailable()
 
     def models(self, device_id: str) -> Any:
@@ -356,6 +381,25 @@ class StubFacade(NullFacade):
 
     def diagnostics(self) -> dict[str, Any]:
         return {"generated_at": "2026-01-01T00:00:00+00:00", "facade": "stub", "ok": True}
+
+    def circuits(self) -> list[dict[str, Any]]:
+        return []
+
+    def relations(self, kind: str | None = None) -> dict[str, Any]:
+        return {"kinds": {}, "counts": {}, "requires_confirmation": []}
+
+    def inference_records(self, device_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
+        return []
+
+    def residual_components(self, *, hours: float = 24.0, limit: int = 500) -> dict[str, Any]:
+        return {"window_hours": float(hours), "count": 0, "components": []}
+
+    def isolation_status(self) -> dict[str, Any]:
+        return {
+            "source": "stub",
+            "counts": {"analysed": 0, "isolated": 0, "contaminated": 0, "insufficient_data": 0},
+            "verdicts": [],
+        }
 
     def models(self, device_id: str) -> dict[str, Any]:
         return {"device_id": device_id, "active": None, "versions": []}

@@ -232,3 +232,86 @@ def test_empty_table_returns_empty_set(tmp_path) -> None:
         assert loaded.devices == []
     finally:
         db.close()
+
+
+# --------------------------------------------------------------------------- #
+# Contract 1.6.0 — typed entity bindings survive the round trip
+# --------------------------------------------------------------------------- #
+
+
+def test_entity_bindings_round_trip_through_storage(tmp_path) -> None:
+    """A typed role must survive persistence, or WP4 cannot dedup on it.
+
+    ``DeviceConfiguration.entity_bindings`` is what lets "many HA entities, one
+    appliance" be a contract rather than a convention.  It is stored inside the
+    configuration payload, so the round-trip guard has to live here.
+    """
+    from wattmosaic_engine.contracts import HaEntityBinding, HaEntityRole
+
+    db = Database(tmp_path / "bindings.db")
+    try:
+        config = _rich_config()
+        config.entity_bindings = [
+            HaEntityBinding(
+                entity_id="sensor.kitchen_power",
+                device_id=config.device_id,
+                role=HaEntityRole.POWER_MEASUREMENT,
+                is_load_evidence=True,
+                contributes_power=True,
+                attributes_key="current_power_w",
+            ),
+            HaEntityBinding(
+                entity_id="light.kitchen",
+                device_id=config.device_id,
+                role=HaEntityRole.LOAD_STATE,
+                is_load_evidence=True,
+            ),
+            HaEntityBinding(
+                entity_id="sensor.kitchen_energy",
+                device_id=config.device_id,
+                role=HaEntityRole.ENERGY_COUNTER,
+            ),
+        ]
+        db.save_device_configurations(
+            DeviceConfigurationSet(version=8, devices=[config])
+        )
+
+        loaded = db.load_device_configurations().by_device()["kitchen_lights"]
+        assert len(loaded.entity_bindings) == 3
+        power = [b for b in loaded.entity_bindings if b.contributes_power]
+        assert len(power) == 1
+        assert power[0].entity_id == "sensor.kitchen_power"
+        assert power[0].role == HaEntityRole.POWER_MEASUREMENT
+        assert power[0].attributes_key == "current_power_w"
+        assert {b.role for b in loaded.entity_bindings} == {
+            HaEntityRole.POWER_MEASUREMENT,
+            HaEntityRole.LOAD_STATE,
+            HaEntityRole.ENERGY_COUNTER,
+        }
+    finally:
+        db.close()
+
+
+def test_latest_schema_includes_the_audit_tables(tmp_path) -> None:
+    """Migrations 9 and 10 are additive audit state; config is unaffected."""
+    db = Database(tmp_path / "audit_schema.db")
+    try:
+        assert LATEST_VERSION == 10
+        assert db.schema_version == LATEST_VERSION
+        tables = {
+            row["name"]
+            for row in db._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        assert {
+            "circuits",
+            "topology_relations",
+            "inference_records",
+            "ct_measurement_factors",
+            "ha_entity_bindings",
+            "residual_power",
+            "isolation_verdicts",
+        } <= tables
+        # And the migration is idempotent on reopen.
+        assert apply_migrations(db._conn) == LATEST_VERSION
+    finally:
+        db.close()

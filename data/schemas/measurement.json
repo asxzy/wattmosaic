@@ -1,5 +1,17 @@
 {
   "$defs": {
+    "MeasurementBasis": {
+      "description": "What produced the watt value, independent of how much we trust it.\n\n``Source`` answers *\"how was the value obtained\"*; this answers *\"what kind\nof instrument produced the watts\"*.  A ``DIRECT_MEASURED`` result can be\n``FACTOR_ADJUSTED``, and a ``MODEL_ESTIMATED`` result can never be\n``CT_MEASURED``.",
+      "enum": [
+        "ct_measured",
+        "monitor_reported",
+        "factor_adjusted",
+        "estimated_appliance_total",
+        "unknown"
+      ],
+      "title": "MeasurementBasis",
+      "type": "string"
+    },
     "Polarity": {
       "enum": [
         "normal",
@@ -98,6 +110,15 @@
       "default": 0,
       "title": "Sequence",
       "type": "integer"
+    },
+    "measurement_basis": {
+      "$ref": "#/$defs/MeasurementBasis",
+      "default": "unknown"
+    },
+    "multiplier_applied": {
+      "default": 1.0,
+      "title": "Multiplier Applied",
+      "type": "number"
     }
   },
   "required": [
@@ -109,5 +130,5 @@
   "title": "Measurement",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/measurement.json",
-  "x-contract-version": "1.5.0"
+  "x-contract-version": "1.6.0"
 }

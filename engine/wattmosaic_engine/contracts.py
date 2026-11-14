@@ -20,6 +20,7 @@ Design notes
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Literal
@@ -28,7 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from . import __version__ as ENGINE_VERSION
 
-CONTRACT_VERSION = "1.5.0"
+CONTRACT_VERSION = "1.6.0"
 
 
 def utcnow() -> datetime:
@@ -124,6 +125,206 @@ class StageStatus(str, Enum):
     IDENTIFIED = "identified"
     PROBABLE = "probable"
     UNKNOWN = "unknown"
+
+
+# --------------------------------------------------------------------------- #
+# Domain-scope enums (contract 1.6.0)
+# --------------------------------------------------------------------------- #
+#
+# The four axes below are deliberately *separate*.  The existing taxonomy
+# (``Source``, ``ConfidenceTier``, ``MonitoringLevel``, ``CTType``) answers
+# different questions and must not be overloaded:
+#
+# * ``MeasurementBasis`` -- what kind of instrument produced the watt value.
+# * ``CircuitClass``      -- the electrical scope of a circuit.
+# * ``RelationKind``      -- which of four edges an assertion is.
+# * ``IsolationStatus``   -- whether an event's power window is usable.
+#
+# Collapsing any of them into one enum is the failure mode these surface
+# exists to prevent.
+
+
+def _document(enum_cls: type[Enum], /, **docs: str) -> None:
+    """Attach a docstring to each enum member.
+
+    ``str, Enum`` keeps the class docstring on every *member* as well (a string
+    literal after an assignment is not retained at runtime), so without this the
+    per-member prose would exist only in the source.  The taxonomy is the
+    product surface, so each member's meaning must be readable at runtime.
+    """
+    for name, text in docs.items():
+        enum_cls[name].__doc__ = text
+
+
+class CircuitClass(str, Enum):
+    """Electrical scope of a circuit -- never the type of the sensor on it.
+
+    ``CTType`` describes a sensor and ``MonitoringLevel`` describes a device's
+    visibility.  Neither can say "this circuit carries two known devices" or
+    "it carries two known devices *and* load we cannot name", which are
+    materially different facts.  ``PARTIALLY_UNDERSTOOD`` exists for exactly
+    that distinction.
+    """
+
+    DEDICATED = "dedicated"
+    SHARED = "shared"
+    PARTIALLY_UNDERSTOOD = "partially_understood"
+    UNKNOWN = "unknown"
+
+
+_document(
+    CircuitClass,
+    DEDICATED="One device, and only that device, is electrically on this circuit.",
+    SHARED="At least two known devices share this circuit.",
+    PARTIALLY_UNDERSTOOD=(
+        "At least two known devices share this circuit and residual load remains "
+        "unattributable, so 'shared' would overstate what is understood."
+    ),
+    UNKNOWN="The scope has not been established; no claim is made either way.",
+)
+
+
+class MeasurementBasis(str, Enum):
+    """What produced the watt value, independent of how much we trust it.
+
+    ``Source`` answers *"how was the value obtained"*; this answers *"what kind
+    of instrument produced the watts"*.  A ``DIRECT_MEASURED`` result can be
+    ``FACTOR_ADJUSTED``, and a ``MODEL_ESTIMATED`` result can never be
+    ``CT_MEASURED``.
+    """
+
+    CT_MEASURED = "ct_measured"
+    MONITOR_REPORTED = "monitor_reported"
+    FACTOR_ADJUSTED = "factor_adjusted"
+    ESTIMATED_APPLIANCE_TOTAL = "estimated_appliance_total"
+    UNKNOWN = "unknown"
+
+
+_document(
+    MeasurementBasis,
+    CT_MEASURED="A physical CT reading of the conductor, used as reported.",
+    MONITOR_REPORTED="The monitor published the whole load itself (e.g. Refoss).",
+    FACTOR_ADJUSTED="A per-circuit scaling factor was applied to the reading.",
+    ESTIMATED_APPLIANCE_TOTAL=(
+        "An appliance total estimated from a model or a configured prior, not measured."
+    ),
+    UNKNOWN="The basis is not established; no scaling or interpretation is claimed.",
+)
+
+
+class ConfidenceDimension(str, Enum):
+    """The independent dimensions a confidence value may describe.
+
+    A single blended score is deliberately not offered (see
+    ``ConfidenceVector``): consumers must name the dimension they mean.
+    """
+
+    POWER = "power"
+    CT_ASSOCIATION = "ct_association"
+    TOPOLOGY = "topology"
+    CIRCUIT_CLASSIFICATION = "circuit_classification"
+    RESIDUAL = "residual"
+
+
+_document(
+    ConfidenceDimension,
+    POWER="Confidence in a device's watt value.",
+    CT_ASSOCIATION="Confidence that a device is observed by a particular CT.",
+    TOPOLOGY="Confidence in the electrical parent/child structure.",
+    CIRCUIT_CLASSIFICATION="Confidence in a circuit's dedicated/shared/partial class.",
+    RESIDUAL="Confidence in the unexplained-residual decomposition.",
+)
+
+
+class ResidualKind(str, Enum):
+    """The sign of a residual, derived from the value and never supplied."""
+
+    POSITIVE = "positive"
+    NEGATIVE = "negative"
+    NEAR_ZERO = "near_zero"
+
+
+_document(
+    ResidualKind,
+    POSITIVE="Measured total exceeds accounted power: load is unaccounted for.",
+    NEGATIVE="Accounted power exceeds the measured total; never clamped to zero.",
+    NEAR_ZERO="The residual is exactly zero, so nothing is unaccounted for.",
+)
+
+
+class RelationKind(str, Enum):
+    """The four electrical relations, which must never imply one another.
+
+    Storing them in one typed edge is what keeps them separate: nothing can set
+    a parent pointer and thereby assert membership, and "two CTs on one device"
+    stays a measurement overlap rather than becoming parenthood.
+    """
+
+    DEVICE_CT_ASSOCIATION = "device_ct_association"
+    CT_MEASUREMENT_OVERLAP = "ct_measurement_overlap"
+    CIRCUIT_MEMBERSHIP = "circuit_membership"
+    ELECTRICAL_PARENT_CHILD = "electrical_parent_child"
+
+
+_document(
+    RelationKind,
+    DEVICE_CT_ASSOCIATION="A device's power is (partly) observable through this CT.",
+    CT_MEASUREMENT_OVERLAP=(
+        "Two CTs measure overlapping conductors; a duplicate or subset, not parenthood."
+    ),
+    CIRCUIT_MEMBERSHIP="A device or CT belongs to a circuit.",
+    ELECTRICAL_PARENT_CHILD=(
+        "A confirmed wiring containment relation between two CTs."
+    ),
+)
+
+
+class HaEntityRole(str, Enum):
+    """What one Home Assistant entity means for a physical device.
+
+    A role makes "many entities, one appliance" a contract instead of a
+    convention, which is what makes double counting preventable.
+    """
+
+    LOAD_STATE = "load_state"
+    MODE_ONLY = "mode_only"
+    POWER_MEASUREMENT = "power_measurement"
+    ENERGY_COUNTER = "energy_counter"
+    AVAILABILITY = "availability"
+    UNKNOWN = "unknown"
+
+
+_document(
+    HaEntityRole,
+    LOAD_STATE="The entity's state proves the appliance is running (never watts).",
+    MODE_ONLY="Context only: a mode/thermostat signal that proves nothing about load.",
+    POWER_MEASUREMENT="The entity reports watts and may be the one power contributor.",
+    ENERGY_COUNTER="The entity reports cumulative energy, never instantaneous watts.",
+    AVAILABILITY="The entity only reports reachability.",
+    UNKNOWN="The role has not been established.",
+)
+
+
+class IsolationStatus(str, Enum):
+    """Whether an event's power window is clean enough to attribute power.
+
+    A number inside a blended score cannot answer "was this event isolated?".
+    This is the durable, named answer.
+    """
+
+    ISOLATED = "isolated"
+    CONTAMINATED = "contaminated"
+    INSUFFICIENT_DATA = "insufficient_data"
+
+
+_document(
+    IsolationStatus,
+    ISOLATED="The event's own transition is the only one in its power window.",
+    CONTAMINATED="Another event overlaps the window; the power change has >1 cause.",
+    INSUFFICIENT_DATA=(
+        "The window cannot be analysed (no samples, or the offset has not elapsed)."
+    ),
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -270,6 +471,595 @@ class Model(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
+# New first-class objects (contract 1.6.0)
+# --------------------------------------------------------------------------- #
+#
+# Everything below is additive: every model has a neutral default for every
+# field, so a 1.5.0 payload that omits the whole object still validates.
+
+
+class ConfidenceVector(Model):
+    """Independent confidence dimensions.
+
+    Deliberately has **no** aggregate field, no ``__float__`` and no arithmetic:
+    a consumer that wants one number must say which dimension it means.  Merging
+    the six components into one weighted blend is the defect this model exists
+    to stop repeating (see ``docs/assessment_gap_analysis.md`` G14).
+    """
+
+    power: float | None = Field(default=None, ge=0.0, le=1.0)
+    """Confidence in a device's watt value, or ``None`` when not assessed."""
+
+    ct_association: float | None = Field(default=None, ge=0.0, le=1.0)
+    """Confidence that a device is observed by a particular CT."""
+
+    topology: float | None = Field(default=None, ge=0.0, le=1.0)
+    """Confidence in the electrical parent/child structure."""
+
+    circuit_classification: float | None = Field(default=None, ge=0.0, le=1.0)
+    """Confidence in a circuit's dedicated/shared/partial classification."""
+
+    residual: float | None = Field(default=None, ge=0.0, le=1.0)
+    """Confidence in the residual decomposition."""
+
+    method: str = "unavailable"
+    """Name of the derivation (e.g. ``"blend_v1"``), not a score.
+
+    ``"unavailable"`` means no dimension was derived at all -- an honest
+    statement, distinct from a dimension that happens to be ``None``.
+    """
+
+    def dimensions(self) -> dict[str, float]:
+        """Only the dimensions that were actually assessed."""
+        return {
+            name: value
+            for name in ("power", "ct_association", "topology", "circuit_classification", "residual")
+            if (value := getattr(self, name)) is not None
+        }
+
+
+def derived_residual_kind(residual_w: float) -> ResidualKind:
+    """The sign of a residual, with no invented tolerance.
+
+    A residual of 1 W is genuinely positive; calling it "near zero" would hide a
+    real unexplained load.  Only an exactly-zero residual is ``NEAR_ZERO``.
+    """
+    if residual_w > 0.0:
+        return ResidualKind.POSITIVE
+    if residual_w < 0.0:
+        return ResidualKind.NEGATIVE
+    return ResidualKind.NEAR_ZERO
+
+
+class ResidualPower(Model):
+    """Residual power as a first-class value: signed, never clamped, may stay
+    unresolved forever.
+    """
+
+    residual_w: float = 0.0
+    """Signed residual in W.  Positive means unaccounted load; negative is
+    preserved as measured and never rewritten to zero."""
+
+    kind: ResidualKind = ResidualKind.NEAR_ZERO
+    """Derived from ``residual_w``.  Accepted on input only when it agrees with
+    the sign, so a stored kind can be checked rather than trusted."""
+
+    resolved: bool = False
+    """Whether the residual has been explained.  ``False`` may be permanent."""
+
+    unresolved_since: datetime | None = None
+    """When the residual first became unexplained, or ``None`` when unknown."""
+
+    explained_by_device_w: dict[str, float] = Field(default_factory=dict)
+    """The part of the residual each device already explains, in W."""
+
+    quality_status: QualityStatus = QualityStatus.GOOD
+    """Quality of the inputs the residual was computed from."""
+
+    basis: MeasurementBasis = MeasurementBasis.UNKNOWN
+    """Basis the residual was computed on; never mix incompatible bases."""
+
+    baseline_w: float | None = None
+    """Always-on part of the residual, when decomposition has been performed."""
+
+    dynamic_w: float | None = None
+    """Cycling part of the residual, when decomposition has been performed."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_kind(cls, data: Any) -> Any:
+        """Fill ``kind`` from the sign when the caller did not state it."""
+        if isinstance(data, dict) and "kind" not in data:
+            raw = data.get("residual_w", 0.0)
+            try:
+                data = {**data, "kind": derived_residual_kind(float(raw))}
+            except (TypeError, ValueError):  # pragma: no cover - pydantic reports it
+                return data
+        return data
+
+    @model_validator(mode="after")
+    def _kind_matches_sign(self) -> ResidualPower:
+        expected = derived_residual_kind(self.residual_w)
+        if ResidualKind(self.kind) is not expected:
+            raise ValueError(
+                f"residual kind {self.kind!r} contradicts residual_w={self.residual_w}"
+            )
+        return self
+
+
+class MeasurementFactor(Model):
+    """A per-circuit scaling factor with a validity interval.
+
+    A bare float on ``CTChannel`` cannot answer *"what factor was in force when
+    this reading was taken"*, so a changed factor makes history
+    unreconstructable.  A reading is resolved against the interval covering its
+    ``state_timestamp``; today's factor is never applied to a past sample.
+    """
+
+    ct_id: str
+    """The CT the factor belongs to."""
+
+    multiplier: float = Field(gt=0.0)
+    """Strictly positive scaling applied to the reading.  Zero would hide the
+    circuit and a negative value would look like export."""
+
+    effective_from: datetime
+    """Inclusive start of the interval."""
+
+    effective_to: datetime | None = None
+    """Exclusive end of the interval; ``None`` means "still in force"."""
+
+    applied_by: Literal["monitor", "user", "unknown"] = "unknown"
+    """Who applied the factor.  ``monitor`` means the reported power already
+    includes it and must never be multiplied again."""
+
+    declared_by: Literal["user", "import", "default"] = "user"
+    """Where the declaration came from, for audit."""
+
+    note: str | None = None
+    """Free-text reason, e.g. ``"Refoss publishes the whole load"``."""
+
+    @field_validator("multiplier")
+    @classmethod
+    def _positive_finite(cls, v: float) -> float:
+        value = float(v)
+        if value != value or value in (float("inf"), float("-inf")):
+            raise ValueError("multiplier must be finite")
+        if value <= 0.0:
+            raise ValueError("multiplier must be greater than zero")
+        return value
+
+    @model_validator(mode="after")
+    def _interval_is_forward(self) -> MeasurementFactor:
+        if self.effective_to is not None and self.effective_to <= self.effective_from:
+            raise ValueError(
+                "effective_to must be strictly after effective_from; an empty "
+                "interval covers no reading"
+            )
+        return self
+
+
+def validate_factor_intervals(factors: Iterable[MeasurementFactor]) -> None:
+    """Reject overlapping validity intervals for the same ``ct_id``.
+
+    Intervals are half-open (``[from, to)``), so a factor change at ``t`` is
+    expressible: the old interval ends exactly where the new one begins.
+    Different CTs may overlap freely.  Raises ``ValueError`` on the first
+    conflict; returns ``None`` when every interval is disjoint per channel.
+    """
+    by_ct: dict[str, list[MeasurementFactor]] = {}
+    for factor in factors:
+        by_ct.setdefault(str(factor.ct_id), []).append(factor)
+    for ct_id, items in by_ct.items():
+        ordered = sorted(items, key=lambda f: f.effective_from)
+        for earlier, later in zip(ordered, ordered[1:], strict=False):
+            if earlier.effective_to is None or later.effective_from < earlier.effective_to:
+                raise ValueError(
+                    f"overlapping measurement factors for ct_id={ct_id!r}: "
+                    f"{earlier.effective_from.isoformat()}.."
+                    f"{earlier.effective_to.isoformat() if earlier.effective_to else 'open'} "
+                    f"overlaps {later.effective_from.isoformat()}"
+                )
+
+
+class HaEntityBinding(Model):
+    """One Home Assistant entity's role for one physical device.
+
+    At most one binding per device may have ``contributes_power=True``: that is
+    the anti-double-count rule, enforced on ``DeviceConfiguration``.
+    """
+
+    entity_id: str
+    """The Home Assistant entity id."""
+
+    device_id: str
+    """The physical device the entity describes."""
+
+    role: HaEntityRole = HaEntityRole.UNKNOWN
+    """What the entity means for the device."""
+
+    is_load_evidence: bool = False
+    """Whether the entity may be used as evidence that the device is running."""
+
+    contributes_power: bool = False
+    """Whether this entity's watts may be counted.  Only one per device."""
+
+    attributes_key: str | None = None
+    """Optional attribute holding the numeric value, when it is not the state."""
+
+
+class Circuit(Model):
+    """A circuit: its electrical scope, with its own evidence and status.
+
+    ``CTType`` classifies a sensor and ``MonitoringLevel`` classifies a device's
+    visibility; neither classifies a circuit's scope.  A circuit can exist
+    before any device or CT names it (``circuit_id`` is the only anchor), which
+    is what lets ``CIRCUIT_MEMBERSHIP`` be a real relation.
+    """
+
+    circuit_id: str
+    """Stable identifier of the circuit."""
+
+    name: str | None = None
+    """Human label, never used to derive the classification."""
+
+    panel_id: str | None = None
+    """The distribution board the circuit sits in."""
+
+    classification: CircuitClass = CircuitClass.UNKNOWN
+    """Electrical scope.  ``PARTIALLY_UNDERSTOOD`` distinguishes "two known
+    devices" from "two known devices plus load we cannot name"."""
+
+    classification_status: TopologyStatus = TopologyStatus.CANDIDATE
+    """Whether the classification is a hypothesis or confirmed."""
+
+    parent_circuit_id: str | None = None
+    """Containing circuit, for a sub-panel."""
+
+    ct_ids: list[str] = Field(default_factory=list)
+    """CTs measuring this circuit."""
+
+    device_ids: list[str] = Field(default_factory=list)
+    """Known devices electrically on this circuit."""
+
+    measurement_basis: MeasurementBasis = MeasurementBasis.UNKNOWN
+    """Basis of the readings used to classify it."""
+
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    """Evidence and notes; ``unattributed_load_w``/``unattributed_note`` are
+    required for ``PARTIALLY_UNDERSTOOD``."""
+
+    @field_validator("circuit_id")
+    @classmethod
+    def _circuit_id_non_empty(cls, v: str) -> str:
+        text = str(v).strip()
+        if not text:
+            raise ValueError("circuit_id must not be empty")
+        return text
+
+    @model_validator(mode="after")
+    def _classification_evidence(self) -> Circuit:
+        klass = CircuitClass(self.classification)
+        if klass is CircuitClass.DEDICATED and len(set(self.device_ids)) != 1:
+            raise ValueError(
+                "a dedicated circuit must name exactly one device "
+                f"(got {len(set(self.device_ids))})"
+            )
+        if klass is CircuitClass.SHARED and len(set(self.device_ids)) < 2:
+            raise ValueError("a shared circuit must name at least two devices")
+        if klass is CircuitClass.PARTIALLY_UNDERSTOOD:
+            if len(set(self.device_ids)) < 2:
+                raise ValueError(
+                    "a partially understood circuit must name at least two "
+                    "known devices (otherwise it is simply unknown)"
+                )
+            unattributed = self.metadata.get("unattributed_load_w")
+            note = str(self.metadata.get("unattributed_note") or "").strip()
+            if unattributed is None and not note:
+                raise ValueError(
+                    "a partially understood circuit must state that "
+                    "unattributed load remains (metadata.unattributed_load_w or "
+                    "metadata.unattributed_note)"
+                )
+        return self
+
+
+class TopologyRelation(Model):
+    """One typed edge between two electrical objects.
+
+    Keeping the four kinds in one model is what stops them implying one another:
+    a ``DEVICE_CT_ASSOCIATION`` cannot assert parenthood, and a duplicate CT is
+    an overlap rather than a nested feed.
+    """
+
+    relation_id: str
+    """Stable identifier of this assertion."""
+
+    kind: RelationKind
+    """Which of the four relations this is."""
+
+    subject_id: str
+    """The asserting side (a device or CT, depending on ``kind``)."""
+
+    object_id: str
+    """The asserted-about side (a CT, circuit or parent CT)."""
+
+    status: TopologyStatus = TopologyStatus.CANDIDATE
+    """Whether the relation is proposed or confirmed.  Never auto-confirm."""
+
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    """Per-relation confidence -- deliberately not a device power score."""
+
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    """Supporting *and* conflicting evidence, in structured form."""
+
+    requires_confirmation: bool = True
+    """Whether a user must confirm this before it is presented as fact."""
+
+    declared_by: Literal["user", "inference", "discovery", "default"] = "user"
+    """Where the assertion came from."""
+
+    created_at: datetime = Field(default_factory=utcnow)
+    """When the assertion was first made."""
+
+    valid_from: datetime | None = None
+    """Start of the interval the assertion is claimed to hold over."""
+
+    valid_to: datetime | None = None
+    """End of that interval; ``None`` means still claimed."""
+
+    algorithm_version: str | None = None
+    """The inference version that produced it, when inferred."""
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _edge_is_possible(cls, data: Any, handler: Any, info: Any) -> TopologyRelation:
+        relation = handler(data)
+        if relation.subject_id == relation.object_id:
+            raise ValueError("a topology relation cannot relate an object to itself")
+        if RelationKind(relation.kind) is RelationKind.CIRCUIT_MEMBERSHIP:
+            circuit_id = relation.evidence.get("circuit_id")
+            if not circuit_id:
+                raise ValueError(
+                    "a circuit-membership relation must name the circuit in "
+                    "evidence['circuit_id']"
+                )
+        if RelationKind(relation.kind) is RelationKind.ELECTRICAL_PARENT_CHILD:
+            known_cts = (info.context or {}).get("ct_ids")
+            if known_cts is not None:
+                unknown = {
+                    relation.subject_id,
+                    relation.object_id,
+                } - {str(ct) for ct in known_cts}
+                if unknown:
+                    raise ValueError(
+                        "a parent/child relation must reference two known ct_ids; "
+                        f"unknown: {sorted(unknown)}"
+                    )
+            existing = (info.context or {}).get("relations") or ()
+            edges = {
+                (r.subject_id, r.object_id)
+                for r in existing
+                if RelationKind(r.kind) is RelationKind.ELECTRICAL_PARENT_CHILD
+            }
+            _reject_parent_cycle(
+                edges, (relation.subject_id, relation.object_id), relation.object_id
+            )
+        return relation
+
+
+def _reject_parent_cycle(
+    edges: set[tuple[str, str]], new_edge: tuple[str, str], start: str
+) -> None:
+    """Refuse a ``parent/child`` edge that would close a containment loop.
+
+    ``edges`` maps child -> parent.  Walking up from the new edge's parent must
+    never reach the new child again.
+    """
+    parent_of = dict(edges)
+    parent_of[new_edge[0]] = new_edge[1]
+    seen: set[str] = set()
+    node = start
+    while node in parent_of:
+        if node in seen:
+            return  # pre-existing cycle, not introduced here; reported elsewhere
+        seen.add(node)
+        node = parent_of[node]
+        if node == new_edge[0]:
+            raise ValueError(
+                f"parent/child relation {new_edge[0]!r} -> {new_edge[1]!r} would "
+                "create a containment cycle"
+            )
+
+
+class InferenceRecord(Model):
+    """A versioned, append-only inference record.
+
+    A revision never overwrites its predecessor: ``previous_record_id`` links
+    back, ``revision`` strictly increases, and the algorithm version travels with
+    the result so a stored value can be explained after an upgrade.
+    """
+
+    record_id: str
+    """Stable identifier of this record."""
+
+    device_id: str
+    """The device the record is about."""
+
+    timestamp: datetime
+    """When the inference was made."""
+
+    algorithm_version: str
+    """The algorithm that produced it, e.g. ``"disagg@2.1"``."""
+
+    contract_version: str = CONTRACT_VERSION
+    """The contract version the payload was written against."""
+
+    topology_version: int = 1
+    """The topology version the inference ran against."""
+
+    revision: int = Field(default=1, ge=1)
+    """Monotone revision number for this device."""
+
+    previous_record_id: str | None = None
+    """The record this revision supersedes; must be earlier and same device."""
+
+    previous_power_w: float | None = None
+    """The power of the superseded record, for a delta without a join."""
+
+    power_w: float
+    """The inferred device power in W."""
+
+    source: Source = Source.UNKNOWN
+    """How the value was obtained."""
+
+    measurement_basis: MeasurementBasis = MeasurementBasis.UNKNOWN
+    """What kind of instrument produced the watts."""
+
+    confidence: ConfidenceVector = Field(default_factory=ConfidenceVector)
+    """Per-dimension confidence.  No aggregate is available."""
+
+    previous_confidence: ConfidenceVector | None = None
+    """The superseded record's confidence vector, when there was one."""
+
+    confidence_delta: dict[str, float] = Field(default_factory=dict)
+    """``{dimension: delta}`` for the dimensions that moved."""
+
+    reason: str = ""
+    """Short machine code explaining the revision (e.g. ``"ct_step"``)."""
+
+    explanation: list[str] = Field(default_factory=list)
+    """Human-readable explanation lines."""
+
+    evidence_refs: list[str] = Field(default_factory=list)
+    """Stable references (sample/event/relation ids), never free text."""
+
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    """Structured supporting evidence."""
+
+    @field_validator("algorithm_version")
+    @classmethod
+    def _algorithm_version_non_empty(cls, v: str) -> str:
+        text = str(v).strip()
+        if not text:
+            raise ValueError("algorithm_version must not be empty")
+        return text
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _version_chain(
+        cls, data: Any, handler: Any, info: Any
+    ) -> InferenceRecord:
+        record = handler(data)
+        if Source(record.source) is not Source.UNKNOWN and not record.evidence_refs:
+            raise ValueError(
+                "a record whose source is not UNKNOWN must cite at least one "
+                "evidence_ref"
+            )
+        previous_id = record.previous_record_id
+        if previous_id is None:
+            return record
+        registry = (info.context or {}).get("records")
+        if registry is None:
+            # Without history the chain cannot be verified.  Accepting is
+            # honest; inventing a verdict would not be.
+            return record
+        previous = registry.get(previous_id)
+        if previous is None:
+            raise ValueError(
+                f"previous_record_id {previous_id!r} does not reference a "
+                "known record"
+            )
+        if previous.device_id != record.device_id:
+            raise ValueError(
+                "previous_record_id must reference a record of the same device "
+                f"({previous.device_id!r} != {record.device_id!r})"
+            )
+        if previous.timestamp > record.timestamp:
+            raise ValueError(
+                "previous_record_id must reference an earlier record; "
+                f"{previous_id!r} is at {previous.timestamp.isoformat()}, after "
+                f"{record.timestamp.isoformat()}"
+            )
+        if previous.revision >= record.revision:
+            raise ValueError(
+                "revision must strictly increase: previous revision "
+                f"{previous.revision} >= {record.revision}"
+            )
+        return record
+
+
+class EventIsolation(Model):
+    """Whether one device event's power window can be attributed.
+
+    The *original* ``occurred_at`` is carried unchanged: isolation analysis adds
+    an offset and a window, it never rewrites when the event happened.
+    """
+
+    status: IsolationStatus
+    """``ISOLATED`` / ``CONTAMINATED`` / ``INSUFFICIENT_DATA``."""
+
+    event_id: str
+    """The event being analysed."""
+
+    device_id: str
+    """The physical device the event belongs to."""
+
+    entity_id: str
+    """The entity that produced the event."""
+
+    occurred_at: datetime
+    """Original event time.  Never mutated by the analysis."""
+
+    received_at: datetime
+    """When the engine received the event."""
+
+    analysis_offset_s: float = 0.0
+    """Configured offset between the event and the analysis window."""
+
+    isolation_window_s: float = 0.0
+    """Configured width of the isolation window."""
+
+    window_start: datetime
+    """Inclusive start of the analysed window."""
+
+    window_end: datetime
+    """Exclusive end of the analysed window."""
+
+    competing_event_ids: list[str] = Field(default_factory=list)
+    """Other events inside the window."""
+
+    competing_device_ids: list[str] = Field(default_factory=list)
+    """Distinct physical devices those competing events belong to."""
+
+    power_window_contaminated: bool = False
+    """Whether any competing load change was seen in the window."""
+
+    reason: str = ""
+    """Short machine code for the status."""
+
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    """Structured evidence (concurrent count, sample coverage, ...)."""
+
+    @field_validator("analysis_offset_s", "isolation_window_s")
+    @classmethod
+    def _non_negative(cls, v: float) -> float:
+        if float(v) < 0.0:
+            raise ValueError("isolation timings must not be negative")
+        return v
+
+    @model_validator(mode="after")
+    def _window_is_forward(self) -> EventIsolation:
+        if self.window_end < self.window_start:
+            raise ValueError("window_end must not precede window_start")
+        if self.status == IsolationStatus.CONTAMINATED and not self.competing_event_ids:
+            raise ValueError(
+                "contaminated isolation must name at least one competing event"
+            )
+        return self
+
+
+# --------------------------------------------------------------------------- #
 # Measurement / CT contracts
 # --------------------------------------------------------------------------- #
 
@@ -295,6 +1085,22 @@ class Measurement(Model):
     repeated: bool = False
     polarization: Polarity = Polarity.NORMAL
     sequence: int = 0
+    #: What kind of instrument produced these watts (contract 1.6.0).  The basis
+    #: must travel with the reading, not only with the channel: a factor change
+    #: in the middle of a history makes per-channel state ambiguous.
+    measurement_basis: MeasurementBasis = MeasurementBasis.UNKNOWN
+    #: The scaling this specific reading actually received.  ``1.0`` means none.
+    multiplier_applied: float = 1.0
+
+    @field_validator("multiplier_applied")
+    @classmethod
+    def _multiplier_applied_positive(cls, v: float) -> float:
+        value = float(v)
+        if value != value or value in (float("inf"), float("-inf")):
+            raise ValueError("multiplier_applied must be finite")
+        if value <= 0.0:
+            raise ValueError("multiplier_applied must be greater than zero")
+        return value
 
     @field_validator("value")
     @classmethod
@@ -363,6 +1169,13 @@ class CTChannel(Model):
     panel_id: str | None = None
     #: Display name of that board, e.g. ``"Refoss - Main Panel"``.
     panel_name: str | None = None
+    #: What kind of instrument this channel is (contract 1.6.0).  ``UNKNOWN``
+    #: means no evidence established it -- it is never inferred from ``phase``
+    #: or ``ct_type``.
+    measurement_basis: MeasurementBasis = MeasurementBasis.UNKNOWN
+    #: The circuit this channel measures, when one is known.  Lets a circuit
+    #: exist before (or without) a device naming it.
+    circuit_id: str | None = None
 
     @field_validator("measurement_multiplier")
     @classmethod
@@ -413,6 +1226,13 @@ class Topology(Model):
     channels: list[CTChannel] = Field(default_factory=list)
     devices: list[DeviceTopology] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+    #: Circuit objects (contract 1.6.0).  Additive and defaulted: a 1.5.0
+    #: payload without them still validates.
+    circuits: list[Circuit] = Field(default_factory=list)
+    #: Typed relation edges.  Four kinds in one list, never implying each other.
+    relations: list[TopologyRelation] = Field(default_factory=list)
+    #: The topology-inference version that produced this structure.
+    algorithm_version: str | None = None
 
     def channel_map(self) -> dict[str, CTChannel]:
         return {c.ct_id: c for c in self.channels}
@@ -601,6 +1421,9 @@ class DeviceConfiguration(Model):
     #: without touching what the user wrote.
     configured_by: Literal["user", "import", "default", "auto"] = "user"
     notes: list[str] = Field(default_factory=list)
+    #: Typed entity roles for this device (contract 1.6.0).  At most one binding
+    #: may have ``contributes_power=True``: the anti-double-count rule.
+    entity_bindings: list[HaEntityBinding] = Field(default_factory=list)
 
     @property
     def is_user_asserted(self) -> bool:
@@ -650,6 +1473,35 @@ class DeviceConfiguration(Model):
         # rejected: declaring it is the natural mistake and it is reclassified as
         # mode context deterministically (``configuration._split_entities``)
         # rather than silently treated as runtime evidence (ADR-0012).
+        # Contract 1.6.0: typed entity roles.  Two power contributors on one
+        # device would double-count that appliance in every total, which is the
+        # exact defect ``HaEntityBinding.contributes_power`` exists to prevent.
+        contributors = [b for b in self.entity_bindings if b.contributes_power]
+        if len(contributors) > 1:
+            raise ValueError(
+                "at most one entity binding per device may set "
+                f"contributes_power=True (got {len(contributors)}: "
+                f"{sorted(b.entity_id for b in contributors)})"
+            )
+        for binding in self.entity_bindings:
+            if binding.device_id != self.device_id:
+                raise ValueError(
+                    f"entity binding {binding.entity_id!r} belongs to device "
+                    f"{binding.device_id!r}, not {self.device_id!r}"
+                )
+        # A role split must be consistent with the declaration: only a power
+        # measurement may contribute watts.  A power sensor may also be linked as
+        # a state entity (``main.py`` guards the state-write path), so co-listing
+        # is not itself a defect and is not rejected here.
+        for binding in self.entity_bindings:
+            if (
+                binding.role != HaEntityRole.POWER_MEASUREMENT
+                and binding.contributes_power
+            ):
+                raise ValueError(
+                    f"only a POWER_MEASUREMENT binding may contribute power "
+                    f"(entity {binding.entity_id!r} is {binding.role!r})"
+                )
         return self
 
     def load_entity_ids(self) -> list[str]:
@@ -821,6 +1673,19 @@ class InferenceResult(Model):
     tier_reasons: list[str] = Field(default_factory=list)
     # Not a calibrated probability. Engineering score only.
     confidence_is_calibrated: bool = False
+    # -- contract 1.6.0 additions (all optional, so 1.5.0 payloads validate) -- #
+    #: What kind of instrument produced ``power_w``.  This closes the gap
+    #: ``Source`` cannot: "factor-adjusted" is not "how obtained", it is "what
+    #: produced the watts".
+    measurement_basis: MeasurementBasis = MeasurementBasis.UNKNOWN
+    #: Per-dimension confidence.  ``None`` means no dimension was derived, which
+    #: is honest; a consumer must not read ``None`` as a low score.
+    confidence_dimensions: ConfidenceVector | None = None
+    #: The algorithm version that produced this value, so a stored result can be
+    #: reconstructed after an upgrade.
+    algorithm_version: str | None = None
+    #: Link to the versioned ``InferenceRecord`` that carries this result.
+    record_id: str | None = None
 
 
 class Reconciliation(Model):
@@ -880,6 +1745,10 @@ class Reconciliation(Model):
     #: still reported, but consumers must not present the split as verified.  The
     #: flag is additive (contract 1.3.0) so older readers keep working.
     topology_confirmed: bool = False
+    #: The residual as a first-class object (contract 1.6.0): sign, resolution
+    #: state, age and basis.  Additive; ``unknown_residual_w`` keeps its meaning
+    #: and remains the authoritative total for existing readers.
+    residual: ResidualPower | None = None
 
 
 class DataQualityReport(Model):

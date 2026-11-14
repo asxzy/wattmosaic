@@ -1,5 +1,17 @@
 {
   "$defs": {
+    "MeasurementBasis": {
+      "description": "What produced the watt value, independent of how much we trust it.\n\n``Source`` answers *\"how was the value obtained\"*; this answers *\"what kind\nof instrument produced the watts\"*.  A ``DIRECT_MEASURED`` result can be\n``FACTOR_ADJUSTED``, and a ``MODEL_ESTIMATED`` result can never be\n``CT_MEASURED``.",
+      "enum": [
+        "ct_measured",
+        "monitor_reported",
+        "factor_adjusted",
+        "estimated_appliance_total",
+        "unknown"
+      ],
+      "title": "MeasurementBasis",
+      "type": "string"
+    },
     "QualityStatus": {
       "enum": [
         "good",
@@ -10,6 +22,90 @@
       ],
       "title": "QualityStatus",
       "type": "string"
+    },
+    "ResidualKind": {
+      "description": "The sign of a residual, derived from the value and never supplied.",
+      "enum": [
+        "positive",
+        "negative",
+        "near_zero"
+      ],
+      "title": "ResidualKind",
+      "type": "string"
+    },
+    "ResidualPower": {
+      "additionalProperties": false,
+      "description": "Residual power as a first-class value: signed, never clamped, may stay\nunresolved forever.",
+      "properties": {
+        "residual_w": {
+          "default": 0.0,
+          "title": "Residual W",
+          "type": "number"
+        },
+        "kind": {
+          "$ref": "#/$defs/ResidualKind",
+          "default": "near_zero"
+        },
+        "resolved": {
+          "default": false,
+          "title": "Resolved",
+          "type": "boolean"
+        },
+        "unresolved_since": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unresolved Since"
+        },
+        "explained_by_device_w": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Explained By Device W",
+          "type": "object"
+        },
+        "quality_status": {
+          "$ref": "#/$defs/QualityStatus",
+          "default": "good"
+        },
+        "basis": {
+          "$ref": "#/$defs/MeasurementBasis",
+          "default": "unknown"
+        },
+        "baseline_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Baseline W"
+        },
+        "dynamic_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dynamic W"
+        }
+      },
+      "title": "ResidualPower",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -134,10 +230,21 @@
       "default": false,
       "title": "Topology Confirmed",
       "type": "boolean"
+    },
+    "residual": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResidualPower"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "title": "Reconciliation",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/reconciliation.json",
-  "x-contract-version": "1.5.0"
+  "x-contract-version": "1.6.0"
 }

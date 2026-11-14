@@ -77,6 +77,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="communication outage window in simulated seconds (repeatable)",
     )
     p.add_argument("--no-unknown-loads", action="store_true", help="exclude unmetered residual loads")
+    p.add_argument(
+        "--stratum",
+        default=None,
+        metavar="NAME",
+        help=(
+            "build a documented scenario stratum instead of the default household "
+            "(e.g. factor2, shared, motor_startup); see "
+            "`--list-strata`"
+        ),
+    )
+    p.add_argument(
+        "--list-strata",
+        action="store_true",
+        help="print the buildable stratum names and exit",
+    )
     p.add_argument("--summary", action="store_true", help="print a scenario summary to stderr")
     p.add_argument("--print-topology", action="store_true", help="print simulated topology and exit")
     return p
@@ -105,6 +120,16 @@ def _parse_outage(items: list[str]) -> dict[str, list[tuple[float, float]]]:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    if args.list_strata:
+        from .labhouse import available_strata
+
+        for name in available_strata():
+            print(name)
+        return 0
+
+    if args.stratum:
+        return _run_stratum(args)
 
     if args.print_topology:
         print(json.dumps(_clean({
@@ -209,6 +234,66 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.summary:
         print(json.dumps(scenario.summary(), indent=2), file=sys.stderr)
+    return 0
+
+
+def _run_stratum(args) -> int:
+    """Emit a documented scenario stratum using the pre-WP2 CLI output shape.
+
+    The record stream is unchanged — the stratum only decides which household is
+    built — so a consumer of this CLI needs no new code.  Impairment flags are
+    rejected rather than silently applied: a stratum already fixes its own
+    quality and wiring, and honouring a conflicting flag would make the output
+    not the stratum that was asked for.
+    """
+    from .labhouse import build_scenario
+
+    conflicting = [
+        flag for flag, given in (
+            ("--invert-ct", bool(args.invert_ct)),
+            ("--drift-ct", bool(args.drift_ct)),
+            ("--outage", bool(args.outage)),
+            ("--quality", args.quality != QualityLevel.GOOD.value),
+            ("--no-unknown-loads", bool(args.no_unknown_loads)),
+        ) if given
+    ]
+    if conflicting:
+        raise SystemExit(
+            f"--stratum {args.stratum} fixes its own impairments; "
+            f"drop {', '.join(conflicting)}"
+        )
+    try:
+        house = build_scenario(
+            args.stratum, args.seed, minutes=args.minutes, interval=args.interval
+        )
+    except KeyError as exc:
+        raise SystemExit(str(exc)) from None
+    records = house.to_list()
+    if args.out:
+        out_dir = Path(args.out)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / ("household.json" if args.format == "json" else "household.jsonl")
+        if args.format == "json":
+            doc = _clean({"scenario": records[0]["scenario"] if records else {},
+                          "records": records})
+            path.write_text(json.dumps(doc, indent=1, sort_keys=True), encoding="utf-8")
+        else:
+            with path.open("w", encoding="utf-8") as fh:
+                for record in records:
+                    fh.write(dumps(record) + "\n")
+        (out_dir / "README.txt").write_text(
+            f"stratum: {house.plan.name}\n{house.plan.description}\n"
+            f"seed: {house.seed}\nflags: {sorted(house.flags())}\n",
+            encoding="utf-8",
+        )
+        print(str(path))
+    elif args.format == "json":
+        print(json.dumps(_clean({"records": records}), indent=1, sort_keys=True))
+    else:
+        for record in records:
+            print(dumps(record))
+    if args.summary:
+        print(json.dumps(house.summary(), indent=2), file=sys.stderr)
     return 0
 
 

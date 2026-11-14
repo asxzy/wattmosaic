@@ -4,7 +4,7 @@ Reference for the HTTP surface exposed by `engine/wattmosaic_engine/api/`.
 This is the interface the Home Assistant integration and any operator tooling use.
 
 - **Base path:** `/api/v1`
-XX (`wattmosaic_engine.CONTRACT_VERSION`)
+- **Contract version:** `1.6.0` (`wattmosaic_engine.CONTRACT_VERSION`)
 - **Transport:** HTTP/1.1, JSON (`application/json`) except `/metrics`
   (`text/plain; charset=utf-8`)
 - **Bind:** `127.0.0.1:8787` by default (`WM_API_HOST` / `WM_API_PORT`); port `0`
@@ -29,7 +29,7 @@ loopback-only deployments). A missing or wrong token yields:
 
 ```http
 HTTP/1.1 401 Unauthorized
-X-WattMosaic-Contract-Version: 1.4.0
+X-WattMosaic-Contract-Version: 1.6.0
 Content-Type: application/json
 
 {"error": "unauthorized", "detail": "missing or invalid X-API-Token", "retryable": false}
@@ -72,7 +72,7 @@ curl -sS -X POST http://127.0.0.1:8787/api/v1/commands \
 
 ```http
 HTTP/1.1 400 Bad Request
-X-WattMosaic-Contract-Version: 1.4.0
+X-WattMosaic-Contract-Version: 1.6.0
 
 {"error": "bad_request", "detail": "[{\"type\":\"literal_error\",\"loc\":[\"command\"],...}]", "retryable": false}
 ```
@@ -89,7 +89,7 @@ Liveness/readiness without touching the inference path. `status` is one of
 ```json
 {
   "status": "ok",
-  "contract_version": "1.4.0",
+  "contract_version": "1.6.0",
   "engine_version": "<version>",
   "database": "ok",
   "ha_connected": true,
@@ -138,7 +138,7 @@ Operational summary: engine, database, ingestion and inference counters.
 ```json
 {
   "status": "ok",
-  "contract_version": "1.4.0",
+  "contract_version": "1.6.0",
   "engine_version": "<version>",
   "started_at": "2026-11-05T23:39:59.100000+00:00",
   "uptime_seconds": 128.4,
@@ -206,7 +206,7 @@ Latest inference results for every device plus the current reconciliation.
 ```
 
 `unknown_residual_w` is always reported and is **never** redistributed across
-devices. It is decomposed (contract 1.4.0, additive) into
+devices. It is decomposed (contract 1.5.0, additive) into
 `meter_disagreement_w` — the difference between a feed and its declared alias
 on the same conductors, i.e. instrument error — and `unmonitored_w`, the
 remainder that is genuinely unclamped load. `unmonitored_w +
@@ -806,7 +806,7 @@ wattmosaic_queue_depth 0
 wattmosaic_uptime_seconds 132.6
 # HELP wattmosaic_contract_info Contract version
 # TYPE wattmosaic_contract_info gauge
-wattmosaic_contract_info{version="1.4.0",engine="<version>"} 1
+wattmosaic_contract_info{version="1.6.0",engine="<version>"} 1
 ```
 
 Metrics must never fail a scrape: if the backend cannot produce them, a
@@ -814,9 +814,249 @@ fallback exposition built from `/health` is returned with status `200`.
 
 ---
 
+### 3.17 `GET /circuits`
+
+Stored circuit scopes derived by the analysis pass (`contracts.py:691`,
+`main.py:2052`). **Bare JSON array**, ordered by `circuit_id`
+(`database.py:1005`).
+
+A circuit is written only after a pass had the evidence to name a class, and
+`classification_status` stays `candidate` until a user confirms it
+(`api/server.py:543`). Nothing here classifies or writes.
+
+```json
+[
+  {
+    "circuit_id": "cir_4b1e…",
+    "name": null,
+    "panel_id": "panel_a",
+    "classification": "dedicated",
+    "classification_status": "candidate",
+    "parent_circuit_id": null,
+    "measurement_basis": "ct_measured",
+    "updated_at": "2026-11-13T12:00:00+00:00",
+    "ct_ids": ["br_fridge"],
+    "device_ids": ["dev_fridge"],
+    "metadata": {"classification_confidence": 0.82}
+  }
+]
+```
+
+- Empty database → **`[]`**. There is no fabricated placeholder circuit: "no
+  pass has run" and "no circuit exists" are the same honest answer here.
+- A read failure is also `[]` (`main.py:2061`), because inventing an error
+  payload would make a transient storage problem look like a topology fact.
+- `503` when the facade does not implement the method (`NullFacade`).
+
+### 3.18 `GET /relations?kind=`
+
+Stored typed edges, **grouped by kind** (`main.py:2065`). The four kinds are
+never merged: `DEVICE_CT_ASSOCIATION`, `CT_MEASUREMENT_OVERLAP`,
+`ELECTRICAL_PARENT_CHILD` and `CIRCUIT_MEMBERSHIP` answer different questions
+(`api/server.py:559`).
+
+Query parameter: `kind` (optional, exact enum value). Without it, every kind
+with at least one row is reported. With it, the requested kind is always present
+— as `[]` when empty — so a caller can distinguish "none of this kind" from
+"filter ignored".
+
+```json
+{
+  "kinds": {
+    "device_ct_association": [
+      {
+        "relation_id": "dca_7f2a…",
+        "kind": "device_ct_association",
+        "subject_id": "dev_fridge",
+        "object_id": "br_fridge",
+        "status": "candidate",
+        "confidence": 0.949375,
+        "requires_confirmation": true,
+        "declared_by": "inference",
+        "algorithm_version": "assoc:disagg@2.0",
+        "valid_from": "2026-11-13T11:40:00+00:00",
+        "valid_to": null,
+        "created_at": "2026-11-13T12:00:00+00:00",
+        "evidence": {"verdict": "supported", "stats": {"lag_s": 0.0}}
+      }
+    ]
+  },
+  "counts": {"device_ct_association": 1},
+  "requires_confirmation": ["dev_fridge"]
+}
+```
+
+| Key | Meaning |
+| --- | --- |
+| `kinds` | `{kind: [edges]}`; `evidence` is decoded JSON, `requires_confirmation` is a bool |
+| `counts` | `{kind: len(edges)}` for the kinds present |
+| `requires_confirmation` | sorted, de-duplicated `subject_id`s of edges still awaiting a user |
+
+The third key exists so a client does not have to re-derive "which of these is a
+proposal". Everything the pass emits is a proposal until confirmed
+(`docs/limitations_v2.md` §4).
+
+### 3.19 `GET /devices/{device_id}/records?limit=`
+
+The append-only `InferenceRecord` revision chain for one device, **oldest
+revision first** (`main.py:2100`). **Bare JSON array.**
+
+Query parameter: `limit` (numeric, default `200`, range `1`–`5000`). The bound
+keeps the *newest* rows, then the payload is re-sorted ascending so a caller can
+replay the chain in the order it happened (`database.py:671`, `api/server.py:570`).
+
+```json
+[
+  {
+    "record_id": "rec_3f9c…",
+    "device_id": "dev_fridge",
+    "timestamp": "2026-11-13T12:00:00+00:00",
+    "algorithm_version": "disagg@2.0",
+    "contract_version": "1.6.0",
+    "topology_version": 1,
+    "revision": 1,
+    "previous_record_id": null,
+    "previous_power_w": null,
+    "power_w": 91.487,
+    "source": "direct_measured",
+    "measurement_basis": "ct_measured",
+    "confidence": {
+      "power": 0.7,
+      "ct_association": null,
+      "topology": null,
+      "circuit_classification": null,
+      "residual": null,
+      "method": "audit:disagg@2.0"
+    },
+    "previous_confidence": null,
+    "confidence_delta": {},
+    "reason": "direct_measurement",
+    "explanation": ["source=direct_measured", "tier=tier_0_unknown"],
+    "evidence_refs": ["record:rec_3f9c…"],
+    "evidence": {"window_s": 30.0, "isolations": [], "association_ids": [], "circuit_ids": [], "audit": "disagg@2.0"}
+  }
+]
+```
+
+- **Unknown `device_id` → `200` + `[]`**, not `404` (`main.py:2104`). A device
+  with no record is not a missing resource; it is a device with no history.
+- A non-numeric `limit` → `400 bad_request` (`api/server.py:525`), and an
+  out-of-range value → `400` with the bound in `detail`.
+- Revisions are append-only: `revision` strictly increases, `previous_record_id`
+  cites the row it supersedes, and `record_id` is a deterministic hash of
+  `(device, algorithm_version, timestamp, revision)`
+  (`docs/inference_audit.md` §2.1).
+
+### 3.20 `GET /residuals?hours=&limit=`
+
+Recent residual observations, newest first (`main.py:2114`).
+
+| Parameter | Default | Range |
+| --- | --- | --- |
+| `hours` | `24` | `0`–`2160` |
+| `limit` | `500` | `1`–`5000` |
+
+```json
+{
+  "window_hours": 24.0,
+  "count": 1,
+  "components": [
+    {
+      "id": 41,
+      "timestamp": "2026-11-13T12:00:00+00:00",
+      "reconciliation_id": null,
+      "residual_w": -125.0,
+      "kind": "negative",
+      "resolved": false,
+      "unresolved_since": "2026-11-13T11:59:00+00:00",
+      "quality_status": "good",
+      "basis": "ct_measured",
+      "baseline_w": null,
+      "dynamic_w": null,
+      "explained_by_device_w": {}
+    }
+  ],
+  "note": "A residual is signed: …"
+}
+```
+
+A residual is **signed and never clamped**: a positive value is unaccounted
+load, a negative value is measured load no device explains
+(`main.py:2125-2128`). `resolved` is a stored boolean; `false` is a legitimate
+permanent state, not a queue item (`docs/residual_analysis.md`).
+
+Storage failure returns `{"window_hours": …, "count": 0, "components": []}`
+without the `note` (`main.py:2120`) — the count is a count, never an estimate.
+
+### 3.21 `GET /isolation`
+
+Isolation verdict counts from the last analysis pass, plus the individual
+verdicts (`main.py:2132`, `audit.py:979`).
+
+```json
+{
+  "at": "2026-11-13T12:00:00+00:00",
+  "mode": "incremental",
+  "source": "last_analysis_pass",
+  "scope": "retained_verdicts",
+  "algorithm_version": "disagg@2.0",
+  "counts": {"analysed": 3, "isolated": 2, "contaminated": 1, "insufficient_data": 0},
+  "verdicts": [
+    {
+      "event_id": "dev_fridge@2026-11-13T11:59:30+00:00",
+      "device_id": "dev_fridge",
+      "status": "isolated",
+      "reason": "isolated",
+      "occurred_at": "2026-11-13T11:59:30+00:00",
+      "window_start": "2026-11-13T11:59:30+00:00",
+      "window_end": "2026-11-13T12:00:30+00:00",
+      "competing_device_ids": [],
+      "power_window_contaminated": false
+    }
+  ]
+}
+```
+
+`source` is the honesty field, and its four values mean different things:
+
+| `source` | Meaning | Emitted by |
+| --- | --- | --- |
+| `last_analysis_pass` | a pass has run; counts cover the retained verdicts (`scope="retained_verdicts"`) | `audit.py:1011` |
+| `no_analysis_pass_yet` | the pass exists but has not run since start | `audit.py:992`, `integration.py:888` |
+| `no_analysis_pass` | the backend exposes no isolation status at all | `main.py:2137` |
+| `unavailable` | the pass raised while answering | `main.py:2150` |
+
+`analysed == 0` with `source="no_analysis_pass_yet"` is **not** an all-clear:
+nothing has been analysed. That distinction is the reason the endpoint exists in
+this shape (`api/server.py:596`).
+
+`event_id` is the source's own id when it has one; a transition bridged from
+`main.py` carries none, so the isolator synthesises a deterministic
+`device@timestamp` identity instead of a UUID (`isolation.py:356`).
+
+`verdicts` is sorted by `(occurred_at, device_id, event_id)`, so the payload is
+stable across calls. The retained set is bounded by
+`DEFAULT_VERDICT_HISTORY = 512` (`audit.py:93`) — this is the last few minutes of
+analysis, not all history.
+
+### 3.22 Read-only audit surface: shared rules
+
+The five routes above (`/circuits`, `/relations`, `/devices/{id}/records`,
+`/residuals`, `/isolation`) share three properties:
+
+1. **Read-only.** None triggers analysis or a write (`api/server.py:718`), so a
+   UI refresh cannot become an unbounded operation on the event loop.
+2. **`503` without a facade.** `NullFacade` has no audit methods, so each route
+   answers `503` rather than an empty `200` (`test_audit_api_e2e.py:328`).
+3. **Contract header preserved.** Every response, including these, carries
+   `X-WattMosaic-Contract-Version` (`test_audit_api_e2e.py:282`).
+
+Bad numeric query parameters are transported as `400` with
+`{"error": "bad_request", "detail": …}`; `422` is never exposed.
+
 ## 4. Versioning
 
-`CONTRACT_VERSION` (`1.4.0`) follows semantic versioning:
+`CONTRACT_VERSION` (`1.6.0`) follows semantic versioning:
 
 | Change | Version bump |
 | --- | --- |

@@ -13,17 +13,31 @@ from pathlib import Path
 import pytest
 from wattmosaic_engine import contracts
 from wattmosaic_engine.contracts import (
+    Circuit,
+    CircuitClass,
+    ConfidenceDimension,
+    ConfidenceVector,
     CTChannel,
     CTType,
+    DeviceConfiguration,
     DeviceTopology,
+    EventIsolation,
+    HaEntityBinding,
+    HaEntityRole,
     InferenceResult,
+    IsolationStatus,
     Measurement,
+    MeasurementBasis,
     Phase,
     Polarity,
     Reconciliation,
+    RelationKind,
+    ResidualKind,
+    ResidualPower,
     ServiceCommand,
     Source,
     Topology,
+    TopologyRelation,
     TopologyStatus,
 )
 from wattmosaic_engine.storage import LATEST_VERSION, Database
@@ -33,7 +47,11 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_contract_version_present() -> None:
-    assert contracts.CONTRACT_VERSION == "1.5.0"
+    # Deliberately pinned: 1.6.0 is the additive contract that introduces the
+    # circuit / relation / confidence-vector / versioned-inference surface.
+    # A 1.5.0 *payload* still validates (see the backward-compatibility tests
+    # below); only the advertised version moved.
+    assert contracts.CONTRACT_VERSION == "1.6.0"
 
 
 def test_schema_files_match_contract_version() -> None:
@@ -496,3 +514,417 @@ def test_no_secret_like_columns_in_schema(tmp_path: Path) -> None:
             assert not any("token" in c or "secret" in c for c in cols), (n, cols)
     finally:
         db.close()
+
+
+# --------------------------------------------------------------------------- #
+# Contract 1.6.0 — enums, models, validation rules (WP1)
+# --------------------------------------------------------------------------- #
+
+
+def test_new_enums_round_trip_through_the_models() -> None:
+    """Every new enum must survive ``model_dump`` -> ``model_validate``.
+
+    A ``str, Enum`` member is serialised as its value; re-validating that value
+    must produce an equal model.  This is the guard for "the enum exists but the
+    field accepts only the bare string" class of half-implemented addition.
+    """
+    circuit = Circuit(
+        circuit_id="c1",
+        classification=CircuitClass.PARTIALLY_UNDERSTOOD,
+        classification_status=TopologyStatus.CANDIDATE,
+        measurement_basis=MeasurementBasis.FACTOR_ADJUSTED,
+        device_ids=["d1", "d2"],
+        metadata={"unattributed_load_w": 42.0},
+    )
+    assert Circuit.model_validate(circuit.model_dump()) == circuit
+
+    relation = TopologyRelation(
+        relation_id="r1",
+        kind=RelationKind.DEVICE_CT_ASSOCIATION,
+        subject_id="d1",
+        object_id="ct1",
+        status=TopologyStatus.CONFIRMED,
+        confidence=0.8,
+        declared_by="inference",
+    )
+    assert TopologyRelation.model_validate(relation.model_dump()) == relation
+
+    binding = HaEntityBinding(
+        entity_id="sensor.power",
+        device_id="d1",
+        role=HaEntityRole.POWER_MEASUREMENT,
+        is_load_evidence=True,
+        contributes_power=True,
+    )
+    assert HaEntityBinding.model_validate(binding.model_dump()) == binding
+
+    now = datetime.now(UTC)
+    isolation = EventIsolation(
+        status=IsolationStatus.CONTAMINATED,
+        event_id="e1",
+        device_id="d1",
+        entity_id="switch.d1",
+        occurred_at=now,
+        received_at=now,
+        analysis_offset_s=5.0,
+        isolation_window_s=30.0,
+        window_start=now,
+        window_end=now,
+        competing_event_ids=["e2"],
+        competing_device_ids=["d2"],
+        power_window_contaminated=True,
+        reason="simultaneous_switching",
+        evidence={"competing": 1},
+    )
+    assert EventIsolation.model_validate(isolation.model_dump()) == isolation
+    # The original timestamp is never mutated by the isolation analysis.
+    assert isolation.occurred_at == now
+
+    assert {member.value for member in ConfidenceDimension} == {
+        "power",
+        "ct_association",
+        "topology",
+        "circuit_classification",
+        "residual",
+    }
+    assert {member.value for member in ResidualKind} == {
+        "positive",
+        "negative",
+        "near_zero",
+    }
+    assert {member.value for member in RelationKind} == {
+        "device_ct_association",
+        "ct_measurement_overlap",
+        "circuit_membership",
+        "electrical_parent_child",
+    }
+    assert {member.value for member in HaEntityRole} == {
+        "load_state",
+        "mode_only",
+        "power_measurement",
+        "energy_counter",
+        "availability",
+        "unknown",
+    }
+    assert {member.value for member in IsolationStatus} == {
+        "isolated",
+        "contaminated",
+        "insufficient_data",
+    }
+    assert {member.value for member in MeasurementBasis} == {
+        "ct_measured",
+        "monitor_reported",
+        "factor_adjusted",
+        "estimated_appliance_total",
+        "unknown",
+    }
+    assert {member.value for member in CircuitClass} == {
+        "dedicated",
+        "shared",
+        "partially_understood",
+        "unknown",
+    }
+
+
+def test_new_enums_are_documented_per_member() -> None:
+    """Each member must explain itself; the taxonomy is the product surface.
+
+    A bare string after an enum member is not retained at runtime, so the docs
+    are attached to ``member.__doc__`` explicitly -- otherwise "documented" would
+    mean "visible in the source and nowhere else".
+    """
+    for enum_cls in (
+        CircuitClass,
+        MeasurementBasis,
+        ConfidenceDimension,
+        ResidualKind,
+        RelationKind,
+        HaEntityRole,
+        IsolationStatus,
+    ):
+        assert enum_cls.__doc__, enum_cls
+        for member in enum_cls:
+            assert isinstance(member, str)
+            assert member.value, member
+            assert member.__doc__, f"{enum_cls.__name__}.{member.name} has no docstring"
+
+
+def test_confidence_vector_has_no_aggregate_and_no_float() -> None:
+    """A single blended score is exactly what §4.4 rule 7 forbids.
+
+    The vector must expose the dimensions and nothing that collapses them: no
+    aggregate field, no ``__float__``, no arithmetic.
+    """
+    cv = ConfidenceVector(
+        power=0.9,
+        ct_association=None,
+        topology=0.5,
+        circuit_classification=None,
+        residual=0.1,
+        method="blend_v1",
+    )
+    assert cv.power == pytest.approx(0.9)
+    assert cv.ct_association is None
+    with pytest.raises(TypeError):
+        float(cv)  # type: ignore[arg-type]
+    field_names = set(ConfidenceVector.model_fields)
+    assert not {"aggregate", "score", "overall", "total", "blended"} & field_names
+    # Guaranteeing the same via the public surface: no numeric dunder exists.
+    assert not hasattr(ConfidenceVector, "__float__")
+
+
+def test_confidence_vector_rejects_out_of_range_dimensions() -> None:
+    with pytest.raises(ValueError):
+        ConfidenceVector(power=1.5)
+
+
+def test_residual_power_derives_kind_from_the_sign() -> None:
+    negative = ResidualPower(residual_w=-42.0)
+    assert negative.kind == ResidualKind.NEGATIVE
+    assert negative.residual_w == pytest.approx(-42.0)  # never clamped
+
+    positive = ResidualPower(residual_w=42.0)
+    assert positive.kind == ResidualKind.POSITIVE
+
+    near_zero = ResidualPower(residual_w=0.0)
+    assert near_zero.kind == ResidualKind.NEAR_ZERO
+
+
+def test_residual_power_rejects_a_mismatched_stored_kind() -> None:
+    with pytest.raises(ValueError):
+        ResidualPower(residual_w=-42.0, kind=ResidualKind.POSITIVE)
+    with pytest.raises(ValueError):
+        ResidualPower(residual_w=0.0, kind=ResidualKind.NEGATIVE)
+
+
+def test_residual_power_unresolved_is_never_rendered_as_zero() -> None:
+    """An unresolved residual keeps its value; it is not rewritten to 0 W."""
+    rp = ResidualPower(residual_w=-12.0, resolved=False)
+    dump = rp.model_dump()
+    assert dump["residual_w"] == pytest.approx(-12.0)
+    assert dump["resolved"] is False
+
+
+def test_ha_entity_bindings_allow_at_most_one_power_contributor() -> None:
+    with pytest.raises(ValueError):
+        DeviceConfiguration(
+            device_id="d1",
+            entity_bindings=[
+                HaEntityBinding(
+                    entity_id="sensor.power_a",
+                    device_id="d1",
+                    role=HaEntityRole.POWER_MEASUREMENT,
+                    contributes_power=True,
+                ),
+                HaEntityBinding(
+                    entity_id="sensor.power_b",
+                    device_id="d1",
+                    role=HaEntityRole.POWER_MEASUREMENT,
+                    contributes_power=True,
+                ),
+            ],
+        )
+
+
+def test_ha_entity_bindings_allow_one_power_contributor_plus_a_state_entity() -> None:
+    config = DeviceConfiguration(
+        device_id="d1",
+        connectivity="connected",
+        state_entity_ids=["binary_sensor.running"],
+        entity_bindings=[
+            HaEntityBinding(
+                entity_id="sensor.power",
+                device_id="d1",
+                role=HaEntityRole.POWER_MEASUREMENT,
+                is_load_evidence=True,
+                contributes_power=True,
+            ),
+            HaEntityBinding(
+                entity_id="binary_sensor.running",
+                device_id="d1",
+                role=HaEntityRole.LOAD_STATE,
+                is_load_evidence=True,
+            ),
+        ],
+    )
+    assert sum(b.contributes_power for b in config.entity_bindings) == 1
+
+
+def test_ha_entity_binding_must_belong_to_its_device() -> None:
+    with pytest.raises(ValueError):
+        DeviceConfiguration(
+            device_id="d1",
+            entity_bindings=[
+                HaEntityBinding(
+                    entity_id="sensor.power",
+                    device_id="d2",
+                    role=HaEntityRole.POWER_MEASUREMENT,
+                    contributes_power=True,
+                )
+            ],
+        )
+
+
+def test_topology_relation_rejects_self_edge() -> None:
+    with pytest.raises(ValueError):
+        TopologyRelation(
+            relation_id="r1",
+            kind=RelationKind.ELECTRICAL_PARENT_CHILD,
+            subject_id="ct1",
+            object_id="ct1",
+        )
+
+
+def test_topology_relation_circuit_membership_requires_a_circuit() -> None:
+    with pytest.raises(ValueError):
+        TopologyRelation(
+            relation_id="r1",
+            kind=RelationKind.CIRCUIT_MEMBERSHIP,
+            subject_id="d1",
+            object_id="ct1",
+            evidence={},
+        )
+    ok = TopologyRelation(
+        relation_id="r2",
+        kind=RelationKind.CIRCUIT_MEMBERSHIP,
+        subject_id="d1",
+        object_id="ct1",
+        evidence={"circuit_id": "c1"},
+    )
+    assert ok.kind == RelationKind.CIRCUIT_MEMBERSHIP
+
+
+def test_parent_child_relation_must_reference_two_known_cts() -> None:
+    payload = {
+        "relation_id": "r1",
+        "kind": "electrical_parent_child",
+        "subject_id": "sub_l1",
+        "object_id": "service_l1",
+    }
+    ok = TopologyRelation.model_validate(payload, context={"ct_ids": ["sub_l1", "service_l1"]})
+    assert ok.kind == RelationKind.ELECTRICAL_PARENT_CHILD
+    with pytest.raises(ValueError):
+        TopologyRelation.model_validate(payload, context={"ct_ids": ["sub_l1"]})
+
+
+def test_parent_child_relation_rejects_a_containment_cycle() -> None:
+    """Rule 2: a parent/child edge must not close a loop."""
+    existing = TopologyRelation(
+        relation_id="r0",
+        kind=RelationKind.ELECTRICAL_PARENT_CHILD,
+        subject_id="service_l1",
+        object_id="sub_l1",
+    )
+    cycle = TopologyRelation(
+        relation_id="r1",
+        kind=RelationKind.ELECTRICAL_PARENT_CHILD,
+        subject_id="sub_l1",
+        object_id="service_l1",
+    )
+    with pytest.raises(ValueError):
+        TopologyRelation.model_validate(
+            cycle.model_dump(), context={"relations": [existing]}
+        )
+
+
+def test_partially_understood_circuit_needs_two_devices_and_a_note() -> None:
+    with pytest.raises(ValueError):
+        Circuit(
+            circuit_id="c1",
+            classification=CircuitClass.PARTIALLY_UNDERSTOOD,
+            device_ids=["d1"],
+            metadata={"unattributed_load_w": 5.0},
+        )
+    with pytest.raises(ValueError):
+        Circuit(
+            circuit_id="c1",
+            classification=CircuitClass.PARTIALLY_UNDERSTOOD,
+            device_ids=["d1", "d2"],
+            metadata={},
+        )
+    ok = Circuit(
+        circuit_id="c1",
+        classification=CircuitClass.PARTIALLY_UNDERSTOOD,
+        device_ids=["d1", "d2"],
+        metadata={"unattributed_load_w": 5.0},
+    )
+    assert ok.classification == CircuitClass.PARTIALLY_UNDERSTOOD
+
+
+def test_dedicated_circuit_needs_exactly_one_device() -> None:
+    with pytest.raises(ValueError):
+        Circuit(
+            circuit_id="c1",
+            classification=CircuitClass.DEDICATED,
+            device_ids=["d1", "d2"],
+        )
+    ok = Circuit(circuit_id="c1", classification=CircuitClass.DEDICATED, device_ids=["d1"])
+    assert ok.device_ids == ["d1"]
+
+
+# --------------------------------------------------------------------------- #
+# Backward compatibility: a 1.5.0 payload (no new keys) must still validate
+# --------------------------------------------------------------------------- #
+
+
+def test_a_1_5_0_ct_channel_payload_still_validates() -> None:
+    payload = {
+        "ct_id": "br1",
+        "entity_id": "sensor.br1",
+        "ct_type": "branch",
+        "phase": "l1",
+        "measurement_multiplier": 1.0,
+        "panel_id": "main",
+    }
+    channel = CTChannel.model_validate(payload)
+    assert channel.measurement_basis == MeasurementBasis.UNKNOWN
+    assert channel.circuit_id is None
+
+
+def test_a_1_5_0_measurement_payload_still_validates() -> None:
+    payload = {
+        "entity_id": "sensor.br1",
+        "ct_id": "br1",
+        "value": 120.0,
+        "state_timestamp": "2026-11-13T12:00:00+00:00",
+    }
+    m = Measurement.model_validate(payload)
+    assert m.measurement_basis == MeasurementBasis.UNKNOWN
+    assert m.multiplier_applied == 1.0
+
+
+def test_a_1_5_0_inference_result_payload_still_validates() -> None:
+    payload = {
+        "device_id": "d1",
+        "timestamp": "2026-11-13T12:00:00+00:00",
+        "power_w": 120.0,
+        "source": "inferred",
+        "confidence": 0.5,
+        "confidence_tier": "tier_2_inferred",
+    }
+    r = InferenceResult.model_validate(payload)
+    assert r.measurement_basis == MeasurementBasis.UNKNOWN
+    assert r.confidence_dimensions is None
+    assert r.algorithm_version is None
+    assert r.record_id is None
+
+
+def test_a_1_5_0_topology_payload_still_validates() -> None:
+    payload = {
+        "version": 3,
+        "status": "candidate",
+        "channels": [
+            {"ct_id": "main_l1", "entity_id": "sensor.main_l1", "ct_type": "main", "phase": "l1"}
+        ],
+        "devices": [{"device_id": "d1", "dedicated_ct_ids": ["main_l1"]}],
+    }
+    t = Topology.model_validate(payload)
+    assert t.circuits == []
+    assert t.relations == []
+    assert t.algorithm_version is None
+
+
+def test_a_1_5_0_reconciliation_payload_still_validates() -> None:
+    payload = {"main_power_w": 1000.0, "unknown_residual_w": 400.0}
+    rec = Reconciliation.model_validate(payload)
+    assert rec.residual is None

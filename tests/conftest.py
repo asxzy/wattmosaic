@@ -13,6 +13,10 @@ Fixtures provided:
 * ``sample_topology`` — minimal two-panel topology built from the simulator.
 * ``fast_scenario`` — small deterministic ``HouseholdScenario`` (10 min).
 * ``household_scenario`` — factory for parameterised scenarios.
+* ``lab_house`` / ``lab_houses`` / ``hot_tub_fixture`` — WP2 reusable builders
+  (see ``tests/fixtures/labhouse.py`` and ``tools/simulator/hot_tub.py``).  These
+  are thin wrappers over plain functions so a test can also call the functions
+  directly, e.g. inside a parametrisation list.
 """
 
 from __future__ import annotations
@@ -89,5 +93,67 @@ def household_scenario():
 
     def _make(seed: int = 42, minutes: float = 20.0, interval: float = 15.0, **kwargs):
         return HouseholdScenario(seed=seed, minutes=minutes, interval=interval, **kwargs)
+
+    return _make
+
+
+# --------------------------------------------------------------------------- #
+# WP2 reusable fixtures
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture()
+def lab_house():
+    """Factory for a named scenario stratum.
+
+    Returns ``(name, seed, minutes, interval) -> LabHouse``.  A ``LabHouse``
+    exposes ``observations()`` (what an algorithm may see) and
+    ``ground_truth()`` (what a test asserts against); the two never mix.
+
+    Example::
+
+        def test_two_loads_one_breaker(lab_house):
+            house = lab_house("shared", seed=7)
+            assert len(house.observations()) == len(house.ground_truth())
+    """
+    from tools.simulator.labhouse import build_scenario
+
+    def _make(
+        name: str,
+        seed: int = 42,
+        minutes: float = 20.0,
+        interval: float = 15.0,
+    ):
+        return build_scenario(name, seed, minutes=minutes, interval=interval)
+
+    return _make
+
+
+@pytest.fixture()
+def lab_houses():
+    """Factory that builds several strata at once, keyed by name."""
+    from tools.simulator.labhouse import build_scenario
+
+    def _make(
+        names,
+        seed: int = 42,
+        minutes: float = 20.0,
+        interval: float = 15.0,
+    ):
+        return {
+            name: build_scenario(name, seed, minutes=minutes, interval=interval)
+            for name in names
+        }
+
+    return _make
+
+
+@pytest.fixture()
+def hot_tub_fixture():
+    """Factory for a Hot Tub factor variant by name (``factor_two``, …)."""
+    from tools.simulator.hot_tub import hot_tub
+
+    def _make(name: str = "factor_two", seed: int = 42):
+        return hot_tub(name, seed=seed)
 
     return _make

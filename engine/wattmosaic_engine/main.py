@@ -38,6 +38,7 @@ from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from enum import Enum
 from typing import Any
 
 from .api.facade import (
@@ -60,6 +61,7 @@ from .contracts import (
     InferenceResult,
     Measurement,
     Reconciliation,
+    RelationKind,
     ServiceCommand,
     ServiceResult,
     SnapshotResponse,
@@ -1785,8 +1787,20 @@ class EngineCore:
         }
 
     def _device_history(self, device_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        """Recent inference results for one device, newest first.
+
+        ``Database.inference_history`` filters with ``timestamp >= since``.  The
+        pre-1.6.0 call passed ``since=utcnow()``, which excludes every row that
+        has already been written -- and a stored result is always in the past.
+        The endpoint therefore always reported ``history: []`` while the table
+        held rows (``docs/assessment_gap_analysis.md`` G17).  The lower bound is
+        now an explicit, configured lookback.
+        """
         try:
-            rows = self.db.inference_history(device_id, since=utcnow(), limit=limit)
+            since = utcnow() - timedelta(
+                seconds=max(1.0, float(self.config.history_lookback_s))
+            )
+            rows = self.db.inference_history(device_id, since=since, limit=limit)
         except Exception:  # noqa: BLE001
             return []
         return [_safe_history_row(r) for r in rows]
@@ -2033,6 +2047,120 @@ class EngineCore:
 
     def quality(self) -> DataQualityReport:
         return self.quality_report()
+
+    # -- facade: audit artifacts (read-only) -------------------------------- #
+    def circuits(self) -> list[dict[str, Any]]:
+        """Stored circuit scopes, derived by the analysis pass.
+
+        Read-only: nothing here classifies or writes.  A circuit only appears
+        after a pass has had the evidence to name a class, and its
+        ``classification_status`` stays ``candidate`` until a user confirms it.
+        """
+        try:
+            rows = self.db.circuits_all()
+        except Exception:  # noqa: BLE001 - a read failure is an empty answer
+            return []
+        return [self._jsonable(row) for row in rows]
+
+    def relations(self, kind: str | None = None) -> dict[str, Any]:
+        """Stored typed edges, grouped by kind.
+
+        ``kind`` filters to one relation kind; without it every kind is
+        reported separately, because ``DEVICE_CT_ASSOCIATION``,
+        ``CT_MEASUREMENT_OVERLAP`` and ``ELECTRICAL_PARENT_CHILD`` answer
+        different questions and must never be merged into one list.
+        """
+        out: dict[str, list[dict[str, Any]]] = {}
+        for relation_kind in RelationKind:
+            if kind is not None and str(getattr(relation_kind, "value", relation_kind)) != str(
+                kind
+            ):
+                continue
+            try:
+                rows = self.db.relations_of_kind(relation_kind)
+            except Exception:  # noqa: BLE001
+                rows = []
+            if rows or kind is not None:
+                out[str(getattr(relation_kind, "value", relation_kind))] = [
+                    self._jsonable(r) for r in rows
+                ]
+        return {
+            "kinds": out,
+            "counts": {name: len(rows) for name, rows in out.items()},
+            "requires_confirmation": sorted(
+                {
+                    str(row.get("subject_id"))
+                    for rows in out.values()
+                    for row in rows
+                    if row.get("requires_confirmation")
+                }
+            ),
+        }
+
+    def inference_records(
+        self, device_id: str, *, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        """The append-only revision chain for one device, oldest first."""
+        if not device_id:
+            return []
+        try:
+            rows = self.db.inference_records_for_device(
+                device_id, limit=max(1, int(limit))
+            )
+        except Exception:  # noqa: BLE001
+            return []
+        return [self._jsonable(row) for row in rows]
+
+    def residual_components(self, *, hours: float = 24.0, limit: int = 500) -> dict[str, Any]:
+        """Recent residual observations, never re-signed or zeroed."""
+        since = utcnow() - timedelta(hours=max(0.0, float(hours)))
+        try:
+            rows = self.db.residual_history(since=since, limit=max(1, int(limit)))
+        except Exception:  # noqa: BLE001
+            return {"window_hours": float(hours), "count": 0, "components": []}
+        return {
+            "window_hours": float(hours),
+            "count": len(rows),
+            "components": [self._jsonable(row) for row in rows],
+            "note": (
+                "A residual is signed: a positive value is unaccounted load, a "
+                "negative value is measured load that no device explains. "
+                "Neither is clamped to zero."
+            ),
+        }
+
+    def isolation_status(self) -> dict[str, Any]:
+        """Isolation verdict counts from the last analysis pass."""
+        backend = self.inference_backend
+        method = getattr(backend, "isolation_status", None)
+        if method is None:
+            return {
+                "source": "no_analysis_pass",
+                "counts": {
+                    "analysed": 0,
+                    "isolated": 0,
+                    "contaminated": 0,
+                    "insufficient_data": 0,
+                },
+                "verdicts": [],
+            }
+        try:
+            return method()
+        except Exception:  # noqa: BLE001
+            return {"source": "unavailable", "counts": {}, "verdicts": []}
+
+    @staticmethod
+    def _jsonable(value: Any) -> Any:
+        """JSON-safe copy of a stored row (enums/datetimes to plain values)."""
+        if isinstance(value, dict):
+            return {str(k): EngineCore._jsonable(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [EngineCore._jsonable(item) for item in value]
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, Enum):
+            return value.value
+        return value
 
     def diagnostics(self) -> dict[str, Any]:
         report = run_diagnostics(
