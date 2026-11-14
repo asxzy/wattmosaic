@@ -54,6 +54,7 @@ It never talks to Home Assistant, never reads a name, and never writes.
 
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -759,18 +760,34 @@ def observations_from_history(
         entity_id: sorted(levels, key=lambda item: item[0])
         for entity_id, levels in (entity_levels or {}).items()
     }
+    # Index every row on its timestamps so the pair around a transition is a
+    # binary search instead of a scan.  The scan made this pass
+    # ``transitions x rows x readings``: at production volume (180 entities, 32
+    # rows, 72 h) that was 25 s, and 139 s at 168 h -- all of it on the event
+    # loop, so the engine could not answer ``/health``.  The gateway's 4 s
+    # liveness budget then reported 504 ``upstream_timeout``, and a long
+    # discovery was cut off by the proxy in front of it.  Byte-for-byte identical
+    # output, different cost: the timestamps are already sorted above, so the
+    # index is just a parallel list.
+    row_stamps = {
+        ct_id: [stamp for stamp, _value in series]
+        for ct_id, series in ordered_rows.items()
+    }
+    level_stamps = {
+        entity_id: [stamp for stamp, _fraction in series]
+        for entity_id, series in ordered_levels.items()
+    }
 
     def _level_at_or_before(entity_id: str, at: datetime) -> float | None:
         values = ordered_levels.get(entity_id)
         if not values:
             return None
-        found = None
-        for stamp, fraction in values:
-            if stamp <= at:
-                found = fraction
-            else:
-                break
-        return found
+        # ``bisect_right`` puts the insertion point after every stamp <= ``at``,
+        # so the element before it is the last one at or before the transition.
+        index = bisect_right(level_stamps[entity_id], at)
+        if index == 0:
+            return None
+        return values[index - 1][1]
 
     out: list[EntityObservation] = []
     for entity_id, states in entity_states.items():
@@ -800,28 +817,23 @@ def observations_from_history(
             before: dict[str, float] = {}
             after: dict[str, float] = {}
             for ct_id, readings in ordered_rows.items():
-                prior_at = None
-                prior_value = None
-                next_at = None
-                next_value = None
-                for stamp, value in readings:
-                    # Strictly before / at-or-after.  A reading stamped at the
-                    # transition instant is the *new* value, so treating it as
-                    # the baseline would invert the step: the row would appear to
-                    # have fallen when the light came on.
-                    if stamp < at:
-                        prior_at, prior_value = stamp, value
-                    else:
-                        next_at, next_value = stamp, value
-                        break
-                if prior_at is None or next_at is None:
+                stamps = row_stamps[ct_id]
+                # ``bisect_left`` is the first stamp >= ``at``.  The element
+                # before it is the last stamp < ``at``.  A reading stamped at the
+                # transition instant is the *new* value, so treating it as the
+                # baseline would invert the step: the row would appear to have
+                # fallen when the light came on.
+                split = bisect_left(stamps, at)
+                if split == 0 or split >= len(stamps):
                     continue
+                prior_at = stamps[split - 1]
+                next_at = stamps[split]
                 if (at - prior_at).total_seconds() > window_s:
                     continue
                 if (next_at - at).total_seconds() > window_s:
                     continue
-                before[ct_id] = float(prior_value)
-                after[ct_id] = float(next_value)
+                before[ct_id] = float(readings[split - 1][1])
+                after[ct_id] = float(readings[split][1])
             # A row that did not report around this transition is *absent* from
             # the observation, not a row that failed to move.  Discarding the
             # whole observation because one row was quiet would throw away every

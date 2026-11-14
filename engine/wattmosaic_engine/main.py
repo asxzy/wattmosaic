@@ -2717,217 +2717,264 @@ class EngineCore:
                 {"reason": "no recorded history", "lookback_hours": lookback_hours},
             )
 
-        state_history, readings, levels = parse_history_payload(payload)
-        # Readings are keyed by entity id in the payload; remap to ct_id so the
-        # correlation (and the placement) speak the topology's vocabulary.
-        by_entity = {
-            str(ch.entity_id): ch.ct_id for ch in topology.channels if ch.entity_id
-        }
-        row_readings = {
-            by_entity[entity]: rows for entity, rows in readings.items() if entity in by_entity
-        }
-        row_noise = estimate_row_noise(row_readings)
-        observations = observations_from_history(
-            entity_states={e: rows for e, rows in state_history.items() if e in entity_ids},
-            row_readings=row_readings,
-            # Levels are deliberately *not* re-filtered here.  A level is only
-            # ever read for an entity that ``entity_states`` yielded, so the
-            # filter above already decides which entities can contribute one;
-            # a second filter would be unprovable protection against a refactor
-            # rather than a guard that any test can distinguish.
-            entity_levels=levels,
-        )
-        stats["observations"] = len(observations)
-        report = correlate(observations, now=end, row_noise_w=row_noise)
-
-        configurations = self.db.load_device_configurations()
-        # Contract §3.1: a write needs **both** the request's consent and the
-        # stored opt-in.  ``apply`` defaults to false, so ``None`` is read-only;
-        # an explicit ``apply=True`` cannot override a disabled opt-in, because
-        # that switch is the user's standing decision.
-        allow_apply = apply is True and bool(self.config.auto_placement)
-        channels = topology.channel_map()
-        labels = {candidate.entity_id: candidate.friendly_name for candidate in candidates}
-        plan = plan_placements(
-            report=report, topology=topology, configurations=configurations, labels=labels
-        )
-
-        def _channel_label(ct_id: str) -> tuple[str, str | None]:
-            channel = channels.get(ct_id)
-            if channel is None:
-                return ct_id, None
-            return channel.name or ct_id, channel.panel_name
-
-        groups: list[dict[str, Any]] = []
-        withheld: dict[str, str] = {}
-        # Entities tier A is about to place.  Computed before the group fit so the
-        # advisory pass can exclude them: the same fixture must not appear with
-        # both a measured wattage (Placed) and a fitted one (Group).
-        placed_entity_ids = {
-            placement.configuration.state_entity_ids[0]
-            for placement in plan.accepted
-            if placement.configuration.state_entity_ids
-        }
-        if include_groups and fit_shared_rows is not None:
-            # Contract §4 forbids a group on a main or dedicated-device row, and
-            # keeps those rows out of the fit entirely: a main aggregate contains
-            # every downstream fixture, so fitting it would "identify" wattages
-            # that were never separately measured.  The exclusion is applied
-            # here, to the *inputs*, so the call itself stays exactly the frozen
-            # §4 signature (no extra keyword for the other workstream to honour).
-            #
-            # CT rows are filtered to *numeric* states first.  A recorder really
-            # does return ``unavailable`` for a CT row (a Refoss bridge restart
-            # during the 7-day window on the reference install does exactly
-            # that), and a non-numeric state is not a measurement -- the same
-            # rule ``parse_history_payload`` already applies when building
-            # ``readings`` above, which is why correlation never saw this.  The
-            # fit's numeric parser raises ``ValueError`` on such a row instead of
-            # skipping it, and that only became reachable once 168 h started
-            # returning at all: the old code dropped the connection first.  The
-            # real fix belongs in ``group_fit``'s row parser; filtering here keeps
-            # discovery from handing a wattage fit a row that has no wattage.
-            fitted = fit_shared_rows(
-                row_readings={
-                    channel.ct_id: [
-                        dict(row)
-                        for row in payload.get(channel.entity_id, ())
-                        if isinstance(row, Mapping) and _is_numeric_state(row)
-                    ]
-                    for channel in row_channels.values()
-                    if channel.ct_id not in excluded_ct_ids and channel.entity_id
-                },
-                entity_states={
-                    entity: [dict(row) for row in rows if isinstance(row, Mapping)]
-                    for entity, rows in payload.items()
-                    if entity in entity_ids
-                },
-                entity_levels={
-                    entity: {stamp: float(fraction) for stamp, fraction in rows}
-                    for entity, rows in levels.items()
-                    if entity in entity_ids
-                },
-                row_noise_w=row_noise,
+        # Everything from here to the result dict is pure computation over the
+        # recorder payload: parsing it, pairing transitions with row readings,
+        # correlating, planning placements and fitting groups.  It is all
+        # synchronous, and at production volume it is expensive -- 72 h of
+        # history is ~200k rows and took 25 s before the pairing index, 12 s
+        # after it.  Running that on the event loop starved every other
+        # request: measured during a 120 h discovery, ``GET /health`` degraded
+        # from 0.03 s to 4.1 s and ``GET /healthz`` -- the Supervisor's watchdog
+        # probe -- answered 503, which restarts the App mid-analysis.  The
+        # gateway's 4 s liveness budget then surfaced as a 504 to the panel.
+        # A worker thread keeps the loop free to answer health while it works.
+        def _analyse() -> tuple[
+            Any,
+            Any,
+            list[dict[str, Any]],
+            dict[str, str],
+            Any,
+            list[dict[str, Any]],
+            dict[str, Any],
+            bool,
+            Any,
+        ]:
+            """The CPU-bound half of discovery, run off the event loop."""
+            state_history, readings, levels = parse_history_payload(payload)
+            # Readings are keyed by entity id in the payload; remap to ct_id so the
+            # correlation (and the placement) speak the topology's vocabulary.
+            by_entity = {
+                str(ch.entity_id): ch.ct_id for ch in topology.channels if ch.entity_id
+            }
+            row_readings = {
+                by_entity[entity]: rows for entity, rows in readings.items() if entity in by_entity
+            }
+            row_noise = estimate_row_noise(row_readings)
+            observations = observations_from_history(
+                entity_states={e: rows for e, rows in state_history.items() if e in entity_ids},
+                row_readings=row_readings,
+                # Levels are deliberately *not* re-filtered here.  A level is only
+                # ever read for an entity that ``entity_states`` yielded, so the
+                # filter above already decides which entities can contribute one;
+                # a second filter would be unprovable protection against a refactor
+                # rather than a guard that any test can distinguish.
+                entity_levels=levels,
             )
-            for group in fitted:
-                ct_label, panel_name = _channel_label(group.ct_id)
-                # A fixture that tier A placed already owns a device with a
-                # measured wattage.  Leaving it in a group as well would report
-                # the same watts twice (once measured, once fitted) and would
-                # make the advisory card contradict the Placed card.  The
-                # aggregate fit is the weaker claim, so it yields.
-                members = [
-                    {
-                        "entity_id": member.entity_id,
-                        "name": labels.get(member.entity_id, member.entity_id),
-                        "estimated_w": member.estimated_w,
-                    }
-                    for member in group.members
-                    if member.entity_id not in placed_entity_ids
-                ]
-                if not members:
-                    continue
-                kept = [m for m in group.members if m.entity_id not in placed_entity_ids]
-                for member in kept:
-                    # A single-fixture group is *identified* by the aggregate
-                    # fit, so "it co-toggles with another fixture" would be
-                    # false.  The honest reason is that the aggregate fit found
-                    # it while transition-pair correlation did not: that is a
-                    # weaker claim, so it still does not become a device.
-                    #
-                    # The test is the *original* group size, not the surviving
-                    # members: a two-fixture group whose other member was placed
-                    # solo still co-toggles, and saying otherwise would invent a
-                    # reason the evidence does not support.
-                    withheld[member.entity_id] = (
-                        f"identified_by_aggregate_fit_on_{group.ct_id}"
-                        if len(group.members) == 1
-                        else f"co_toggles_with_another_fixture_on_{group.ct_id}"
+            stats["observations"] = len(observations)
+            report = correlate(observations, now=end, row_noise_w=row_noise)
+
+            configurations = self.db.load_device_configurations()
+            # Contract §3.1: a write needs **both** the request's consent and the
+            # stored opt-in.  ``apply`` defaults to false, so ``None`` is read-only;
+            # an explicit ``apply=True`` cannot override a disabled opt-in, because
+            # that switch is the user's standing decision.
+            allow_apply = apply is True and bool(self.config.auto_placement)
+            channels = topology.channel_map()
+            labels = {candidate.entity_id: candidate.friendly_name for candidate in candidates}
+            plan = plan_placements(
+                report=report, topology=topology, configurations=configurations, labels=labels
+            )
+
+            def _channel_label(ct_id: str) -> tuple[str, str | None]:
+                channel = channels.get(ct_id)
+                if channel is None:
+                    return ct_id, None
+                return channel.name or ct_id, channel.panel_name
+
+            groups: list[dict[str, Any]] = []
+            withheld: dict[str, str] = {}
+            # Entities tier A is about to place.  Computed before the group fit so the
+            # advisory pass can exclude them: the same fixture must not appear with
+            # both a measured wattage (Placed) and a fitted one (Group).
+            placed_entity_ids = {
+                placement.configuration.state_entity_ids[0]
+                for placement in plan.accepted
+                if placement.configuration.state_entity_ids
+            }
+            if include_groups and fit_shared_rows is not None:
+                # Contract §4 forbids a group on a main or dedicated-device row, and
+                # keeps those rows out of the fit entirely: a main aggregate contains
+                # every downstream fixture, so fitting it would "identify" wattages
+                # that were never separately measured.  The exclusion is applied
+                # here, to the *inputs*, so the call itself stays exactly the frozen
+                # §4 signature (no extra keyword for the other workstream to honour).
+                #
+                # CT rows are filtered to *numeric* states first.  A recorder really
+                # does return ``unavailable`` for a CT row (a Refoss bridge restart
+                # during the 7-day window on the reference install does exactly
+                # that), and a non-numeric state is not a measurement -- the same
+                # rule ``parse_history_payload`` already applies when building
+                # ``readings`` above, which is why correlation never saw this.  The
+                # fit's numeric parser raises ``ValueError`` on such a row instead of
+                # skipping it, and that only became reachable once 168 h started
+                # returning at all: the old code dropped the connection first.  The
+                # real fix belongs in ``group_fit``'s row parser; filtering here keeps
+                # discovery from handing a wattage fit a row that has no wattage.
+                fitted = fit_shared_rows(
+                    row_readings={
+                        channel.ct_id: [
+                            dict(row)
+                            for row in payload.get(channel.entity_id, ())
+                            if isinstance(row, Mapping) and _is_numeric_state(row)
+                        ]
+                        for channel in row_channels.values()
+                        if channel.ct_id not in excluded_ct_ids and channel.entity_id
+                    },
+                    entity_states={
+                        entity: [dict(row) for row in rows if isinstance(row, Mapping)]
+                        for entity, rows in payload.items()
+                        if entity in entity_ids
+                    },
+                    entity_levels={
+                        entity: {stamp: float(fraction) for stamp, fraction in rows}
+                        for entity, rows in levels.items()
+                        if entity in entity_ids
+                    },
+                    row_noise_w=row_noise,
+                )
+                for group in fitted:
+                    ct_label, panel_name = _channel_label(group.ct_id)
+                    # A fixture that tier A placed already owns a device with a
+                    # measured wattage.  Leaving it in a group as well would report
+                    # the same watts twice (once measured, once fitted) and would
+                    # make the advisory card contradict the Placed card.  The
+                    # aggregate fit is the weaker claim, so it yields.
+                    members = [
+                        {
+                            "entity_id": member.entity_id,
+                            "name": labels.get(member.entity_id, member.entity_id),
+                            "estimated_w": member.estimated_w,
+                        }
+                        for member in group.members
+                        if member.entity_id not in placed_entity_ids
+                    ]
+                    if not members:
+                        continue
+                    kept = [m for m in group.members if m.entity_id not in placed_entity_ids]
+                    for member in kept:
+                        # A single-fixture group is *identified* by the aggregate
+                        # fit, so "it co-toggles with another fixture" would be
+                        # false.  The honest reason is that the aggregate fit found
+                        # it while transition-pair correlation did not: that is a
+                        # weaker claim, so it still does not become a device.
+                        #
+                        # The test is the *original* group size, not the surviving
+                        # members: a two-fixture group whose other member was placed
+                        # solo still co-toggles, and saying otherwise would invent a
+                        # reason the evidence does not support.
+                        withheld[member.entity_id] = (
+                            f"identified_by_aggregate_fit_on_{group.ct_id}"
+                            if len(group.members) == 1
+                            else f"co_toggles_with_another_fixture_on_{group.ct_id}"
+                        )
+                    groups.append(
+                        {
+                            "ct_id": group.ct_id,
+                            "ct_label": ct_label,
+                            "panel_name": panel_name,
+                            "total_w": group.total_w,
+                            "r2": group.r2,
+                            "r2_null_p95": group.r2_null_p95,
+                            "r2_margin": group.r2_margin,
+                            # Truthful, not a constant: ``GroupFit`` derives this from
+                            # whether any member carries a coefficient the fit
+                            # identified.  Measured on the production install at 72 h
+                            # of history, 16 of 20 groups have a single member and 14
+                            # of those 20 carry an identified coefficient, so they
+                            # *do* have a measured wattage; reporting them all as "not
+                            # individually identifiable" would understate evidence
+                            # the engine actually holds, and would make the UI warn
+                            # about numbers that are sound.
+                            "individually_identifiable": group.individually_identifiable,
+                            "members": members,
+                            "evidence": list(group.evidence),
+                        }
                     )
-                groups.append(
+            elif include_groups:
+                notes.append(
+                    "group fitting is not installed; fixtures that co-toggle cannot be "
+                    "reported even as advisory groups"
+                )
+
+            accepted: list[dict[str, Any]] = []
+            for placement in plan.accepted:
+                configuration = placement.configuration
+                ct_id = configuration.monitored_by_ct_ids[0]
+                entity_id = configuration.state_entity_ids[0]
+                ct_label, panel_name = _channel_label(ct_id)
+                candidate = next(
+                    (c for c in report.candidates if c.entity_id == entity_id), None
+                )
+                accepted.append(
                     {
-                        "ct_id": group.ct_id,
+                        "device_id": placement.device_id,
+                        "entity_id": entity_id,
+                        "name": labels.get(entity_id, entity_id),
+                        "ct_id": ct_id,
                         "ct_label": ct_label,
                         "panel_name": panel_name,
-                        "total_w": group.total_w,
-                        "r2": group.r2,
-                        "r2_null_p95": group.r2_null_p95,
-                        "r2_margin": group.r2_margin,
-                        # Truthful, not a constant: ``GroupFit`` derives this from
-                        # whether any member carries a coefficient the fit
-                        # identified.  Measured on the production install at 72 h
-                        # of history, 16 of 20 groups have a single member and 14
-                        # of those 20 carry an identified coefficient, so they
-                        # *do* have a measured wattage; reporting them all as "not
-                        # individually identifiable" would understate evidence
-                        # the engine actually holds, and would make the UI warn
-                        # about numbers that are sound.
-                        "individually_identifiable": group.individually_identifiable,
-                        "members": members,
-                        "evidence": list(group.evidence),
+                        "on_w": (
+                            getattr(candidate, "typical_on_w", None)
+                            if candidate is not None
+                            else None
+                        )
+                        or configuration.expected.on_w,
+                        "off_w": getattr(candidate, "typical_off_w", None)
+                        if candidate is not None
+                        else None,
+                        "symmetry": getattr(candidate, "symmetry", None),
+                        "agreement": getattr(candidate, "agreement", None),
+                        "corroborations": getattr(candidate, "corroborations", None),
+                        "specificity_z": getattr(candidate, "specificity_z", None),
+                        "dimmable": bool(
+                            configuration.light is not None
+                            and configuration.light.dimming_curve
+                        ),
+                        "evidence": list(placement.evidence),
+                        "applied": False,
                     }
                 )
-        elif include_groups:
-            notes.append(
-                "group fitting is not installed; fixtures that co-toggle cannot be "
-                "reported even as advisory groups"
+
+            stats["accepted"] = len(accepted)
+            stats["groups"] = len(groups)
+            stats["withheld"] = len(withheld)
+
+            # Candidate-level refusals ("this entity can never prove runtime") and
+            # placement-level refusals ("this evidence may not become a device") are
+            # both reported.
+            refused: dict[str, Any] = dict(plan.refused)
+            for entity_id, reason in _named_refusals().items():
+                refused.setdefault(entity_id, reason)
+            accepted_ids = {item["entity_id"] for item in accepted}
+            withheld = {
+                key: value
+                for key, value in withheld.items()
+                if key not in refused and key not in accepted_ids
+            }
+            stats["withheld"] = len(withheld)
+            return (
+                report,
+                plan,
+                groups,
+                withheld,
+                row_noise,
+                accepted,
+                refused,
+                allow_apply,
+                configurations,
             )
 
-        accepted: list[dict[str, Any]] = []
-        for placement in plan.accepted:
-            configuration = placement.configuration
-            ct_id = configuration.monitored_by_ct_ids[0]
-            entity_id = configuration.state_entity_ids[0]
-            ct_label, panel_name = _channel_label(ct_id)
-            candidate = next(
-                (c for c in report.candidates if c.entity_id == entity_id), None
-            )
-            accepted.append(
-                {
-                    "device_id": placement.device_id,
-                    "entity_id": entity_id,
-                    "name": labels.get(entity_id, entity_id),
-                    "ct_id": ct_id,
-                    "ct_label": ct_label,
-                    "panel_name": panel_name,
-                    "on_w": (
-                        getattr(candidate, "typical_on_w", None)
-                        if candidate is not None
-                        else None
-                    )
-                    or configuration.expected.on_w,
-                    "off_w": getattr(candidate, "typical_off_w", None)
-                    if candidate is not None
-                    else None,
-                    "symmetry": getattr(candidate, "symmetry", None),
-                    "agreement": getattr(candidate, "agreement", None),
-                    "corroborations": getattr(candidate, "corroborations", None),
-                    "specificity_z": getattr(candidate, "specificity_z", None),
-                    "dimmable": bool(
-                        configuration.light is not None
-                        and configuration.light.dimming_curve
-                    ),
-                    "evidence": list(placement.evidence),
-                    "applied": False,
-                }
-            )
-
-        stats["accepted"] = len(accepted)
-        stats["groups"] = len(groups)
-        stats["withheld"] = len(withheld)
-
-        # Candidate-level refusals ("this entity can never prove runtime") and
-        # placement-level refusals ("this evidence may not become a device") are
-        # both reported.
-        refused: dict[str, Any] = dict(plan.refused)
-        for entity_id, reason in _named_refusals().items():
-            refused.setdefault(entity_id, reason)
-        accepted_ids = {item["entity_id"] for item in accepted}
-        withheld = {
-            key: value
-            for key, value in withheld.items()
-            if key not in refused and key not in accepted_ids
-        }
+        (
+            report,
+            plan,
+            groups,
+            withheld,
+            row_noise,
+            accepted,
+            refused,
+            allow_apply,
+            configurations,
+        ) = await asyncio.to_thread(_analyse)
         stats["withheld"] = len(withheld)
 
         notes.extend(

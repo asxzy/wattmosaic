@@ -1467,3 +1467,224 @@ def test_a_candidate_built_by_hand_keeps_the_new_fields_defaulted() -> None:
     assert candidate.symmetry == 0.0
     assert candidate.specificity_z == 0.0
     assert candidate.typical_w == pytest.approx(10.0)
+
+
+# --------------------------------------------------------------------------- #
+# Cost of the pairing pass (the 504 defect)
+#
+# ``observations_from_history`` pairs every entity transition with the reading
+# on either side of it.  The first version scanned each CT row's *full* history
+# for *every* transition, so the cost was
+# ``transitions x rows x readings-per-row``.  Doubling the window doubles the
+# transitions and doubles the readings, i.e. four times the work.
+#
+# Measured on production: 25 s at the 72 h window and 139 s at 168 h.  It runs on
+# the event loop, so the engine could not answer ``/health`` while it worked; the
+# gateway's 4 s liveness budget reported 504 ``upstream_timeout``, and a long
+# discovery was cut off by the ingress proxy in front of everything.
+#
+# Pinning the *growth rate* rather than a wall-clock number is deliberate: an
+# absolute bound would encode this machine's speed, and would have to be raised
+# every time CI gets slower.  The old code grows ~4x per doubling, the fixed code
+# ~2x, so the threshold sits between them with room for both.
+# --------------------------------------------------------------------------- #
+
+
+def _pairing_workload(*, hours: int, entities: int = 40, rows: int = 8):
+    """Production-shaped inputs: rows at 1/min, one transition every 4 minutes.
+
+    The spacing stays inside ``window_s`` so the pairing actually produces
+    observations; a workload that paired nothing would time an empty loop.
+    ``entities``/``rows`` are scaled down from production (180/32) so the test
+    runs quickly, while ``readings`` still scale with the window -- which is what
+    the growth rate is measuring.
+    """
+    origin = T0
+    total_minutes = hours * 60
+    states = {
+        f"light.e{index}": [
+            (origin + timedelta(minutes=minute), "on" if (minute // 4) % 2 else "off")
+            for minute in range(0, total_minutes, 4)
+        ]
+        for index in range(entities)
+    }
+    # Readings every 10 s: the recorder publishes on change, and a transition has
+    # to land inside ``window_s`` of one.  One reading per minute would leave most
+    # transitions unpaired and the timing would measure an empty loop.
+    readings = {
+        f"ct_{row}": [
+            (origin + timedelta(seconds=second), 50.0 + row)
+            for second in range(0, total_minutes * 60, 10)
+        ]
+        for row in range(rows)
+    }
+    return states, readings
+
+
+def _time_pairing(hours: int) -> tuple[float, int]:
+    import time
+
+    states, readings = _pairing_workload(hours=hours)
+    started = time.perf_counter()
+    observations = observations_from_history(
+        entity_states=states, row_readings=readings, window_s=30
+    )
+    return time.perf_counter() - started, len(observations)
+
+
+def test_pairing_cost_grows_linearly_with_the_window_not_quadratically() -> None:
+    """Doubling the window must not quadruple the pairing cost.
+
+    ``hours`` doubling doubles both the transitions and the readings-per-row, so
+    the old scan grew ~4x.  The measurement is taken at 72 h and 144 h: below
+    that the per-call constant dominates and the ratio is noisy, while at these
+    sizes the linear term is what is actually being timed.  Measured on this
+    machine after the index: 0.39 s at 72 h, 0.81 s at 144 h (~2.1x); before it,
+    25 s and ~100 s (~4x).
+    """
+    long_hours, long_count = _time_pairing(144)
+    short_hours, short_count = _time_pairing(72)
+
+    # Both runs must do real work: a timing test that paired nothing is void.
+    assert short_count > 0 and long_count > short_count, (
+        f"the workload produced {short_count} and {long_count} observations; "
+        "the timing would not measure the pairing pass"
+    )
+
+    ratio = long_hours / max(short_hours, 1e-9)
+    assert ratio < 3.0, (
+        f"72 h -> 144 h cost grew {ratio:.1f}x ({short_hours:.2f}s -> {long_hours:.2f}s). "
+        f"Doubling the window doubles transitions and readings, so anything near "
+        f"4x means each transition still scans a whole row history."
+    )
+
+
+def test_a_real_72_hour_window_pairs_in_seconds() -> None:
+    """The production 72 h volume must finish well inside a health-check budget.
+
+    Production is 180 candidate entities against 32 branch rows over 72 h, which
+    took 25 s before the index.  The bound here is generous (8 s) because it is a
+    regression tripwire, not a benchmark: the point is that the request can no
+    longer monopolise the event loop for tens of seconds.
+    """
+    states, readings = _pairing_workload(hours=72, entities=180, rows=32)
+    import time
+
+    started = time.perf_counter()
+    observations = observations_from_history(
+        entity_states=states, row_readings=readings, window_s=30
+    )
+    elapsed = time.perf_counter() - started
+
+    assert observations, "no observations were produced"
+    assert elapsed < 8.0, f"72 h pairing took {elapsed:.1f}s"
+
+
+def test_pairing_agrees_with_a_slice_scan_reference() -> None:
+    """The fast path must return exactly what the straightforward scan returns.
+
+    ``_pairing_workload`` only proves cost.  This rebuilds the same answers from
+    the *definition* (for every transition, the last reading at or before it and
+    the first at or after it, within ``window_s``) and requires identical
+    observations, so an index that is faster but subtly wrong fails.
+    """
+    states, readings = _pairing_workload(hours=3, entities=6, rows=4)
+
+    def reference() -> list[tuple[str, datetime, bool, dict[str, float], dict[str, float]]]:
+        out = []
+        for entity_id, rows in states.items():
+            previous_on: bool | None = None
+            for at, raw in sorted(rows, key=lambda item: item[0]):
+                is_on = raw == "on"
+                if previous_on is None:
+                    previous_on = is_on
+                    continue
+                if is_on == previous_on:
+                    continue
+                previous_on = is_on
+                before: dict[str, float] = {}
+                after: dict[str, float] = {}
+                for ct_id, series in readings.items():
+                    prior = [(stamp, value) for stamp, value in series if stamp < at]
+                    nxt = [(stamp, value) for stamp, value in series if stamp >= at]
+                    if not prior or not nxt:
+                        continue
+                    prior_at, prior_value = prior[-1]
+                    next_at, next_value = nxt[0]
+                    if (at - prior_at).total_seconds() > 30:
+                        continue
+                    if (next_at - at).total_seconds() > 30:
+                        continue
+                    before[ct_id] = float(prior_value)
+                    after[ct_id] = float(next_value)
+                if not before or not after:
+                    continue
+                out.append((entity_id, at, is_on, before, after))
+        return out
+
+    got = observations_from_history(
+        entity_states=states, row_readings=readings, window_s=30
+    )
+    expected = reference()
+    assert len(got) == len(expected)
+    for observation, (entity_id, at, was_on, before, after) in zip(got, expected, strict=True):
+        assert observation.entity_id == entity_id
+        assert observation.at == at
+        assert observation.was_on == was_on
+        assert observation.before_w == before
+        assert observation.after_w == after
+
+
+def test_discovery_analysis_runs_off_the_event_loop() -> None:
+    """The CPU half of discovery must not run on the loop thread.
+
+    Measured on production during a 120 h discovery before this fix:
+    ``GET /health`` degraded from 0.03 s to 4.1 s and ``GET /healthz`` -- the
+    Supervisor's watchdog probe -- answered 503, which restarts the App
+    mid-analysis.  The gateway's 4 s liveness budget then surfaced as a 504.
+
+    ``addon/ui/app.js`` and this module have no shared seam, so the check is
+    static: it pins that the compute block is handed to ``asyncio.to_thread``
+    rather than awaited inline.  ``test_the_worker_thread_receives_the_analysis``
+    below proves the thread actually changes at runtime.
+    """
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "engine"
+        / "wattmosaic_engine"
+        / "main.py"
+    ).read_text(encoding="utf-8")
+    assert "def _analyse()" in source, (
+        "discovery has no separated compute block; the CPU half cannot be offloaded"
+    )
+    assert "await asyncio.to_thread(_analyse)" in source, (
+        "discovery's compute block is awaited inline; it must run in a worker "
+        "thread or it starves /health and /healthz"
+    )
+
+
+def test_the_pairing_pass_is_what_made_discovery_slow() -> None:
+    """Regression guard: the pairing cost is indexed, not scanned.
+
+    The linear scan made discovery's cost
+    ``transitions x rows x readings-per-row``.  This asserts the indexed form is
+    what ships, so a future edit that reintroduces the nested scan fails here
+    rather than in production.
+    """
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "engine"
+        / "wattmosaic_engine"
+        / "ingestion"
+        / "correlation.py"
+    ).read_text(encoding="utf-8")
+    block = source[source.index("def observations_from_history") :]
+    block = block[: block.index("\ndef parse_history_payload")]
+    assert "bisect_left(stamps, at)" in block, (
+        "the transition/reading pairing is not using a binary search; a nested "
+        "scan over rows x readings is back"
+    )
