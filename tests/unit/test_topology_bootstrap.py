@@ -181,7 +181,7 @@ def test_every_non_main_channel_is_owned_by_a_device() -> None:
     owned = {
         ct_id
         for device in topology.devices
-        for ct_id in (*device.dedicated_ct_ids, *device.branch_ct_ids)
+        for ct_id in (*device.branch_ct_ids, *device.branch_ct_ids)
     }
     load_channels = {
         c.ct_id for c in topology.channels if c.ct_type != CTType.MAIN
@@ -326,11 +326,11 @@ def test_a_single_channel_circuit_is_not_declared_a_private_measurement() -> Non
             "a shared branch row must not name one device as its owner"
         )
     owners = {d.device_id: d for d in topology.devices}
+    branch_rows = {
+        c.ct_id for c in topology.channels if CTType(c.ct_type) is CTType.BRANCH
+    }
     for device in owners.values():
-        assert not device.dedicated_ct_ids or all(
-            ct in {c.ct_id for c in topology.channels if CTType(c.ct_type) is CTType.DEDICATED_DEVICE}
-            for ct in device.dedicated_ct_ids
-        )
+        assert all(ct in branch_rows for ct in device.branch_ct_ids)
 
 
 def test_discovery_ignores_an_isolated_smart_plug() -> None:

@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 from wattmosaic_engine import contracts
 from wattmosaic_engine.contracts import (
     Circuit,
@@ -46,12 +47,9 @@ from wattmosaic_engine.storage.migrations import MIGRATIONS, apply_migrations, c
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_contract_version_present() -> None:
-    # Deliberately pinned: 1.6.0 is the additive contract that introduces the
-    # circuit / relation / confidence-vector / versioned-inference surface.
-    # A 1.5.0 *payload* still validates (see the backward-compatibility tests
-    # below); only the advertised version moved.
-    assert contracts.CONTRACT_VERSION == "1.6.0"
+def test_contract_version_is_2_0_0() -> None:
+    """Removing contract enum values is a breaking change, so the major moves."""
+    assert contracts.CONTRACT_VERSION == "2.0.0"
 
 
 def test_schema_files_match_contract_version() -> None:
@@ -137,7 +135,7 @@ def test_service_command_enum_rejects_unknown() -> None:
 def test_topology_helpers() -> None:
     t = Topology(
         channels=[CTChannel(ct_id="a", entity_id="sensor.a", ct_type=CTType.MAIN, phase=Phase.L1)],
-        devices=[DeviceTopology(device_id="d1", dedicated_ct_ids=["a"])],
+        devices=[DeviceTopology(device_id="d1", branch_ct_ids=["a"])],
     )
     assert t.channel_map()["a"].entity_id == "sensor.a"
     assert t.device_map()["d1"].device_id == "d1"
@@ -194,7 +192,7 @@ def _topology() -> Topology:
                 alias_of_ct_id="main_l1", measurement_multiplier=2.5,
             ),
         ],
-        devices=[DeviceTopology(device_id="dev1", dedicated_ct_ids=["br1"])],
+        devices=[DeviceTopology(device_id="dev1", branch_ct_ids=["br1"])],
     )
 
 
@@ -319,7 +317,7 @@ def test_topology_roundtrip(tmp_path: Path) -> None:
         loaded = db.load_topology()
         assert loaded is not None
         assert {c.ct_id for c in loaded.channels} == {"main_l1", "br1", "panel_l1"}
-        assert loaded.device_map()["dev1"].dedicated_ct_ids == ["br1"]
+        assert loaded.device_map()["dev1"].branch_ct_ids == ["br1"]
     finally:
         db.close()
 
@@ -916,12 +914,29 @@ def test_a_1_5_0_topology_payload_still_validates() -> None:
         "channels": [
             {"ct_id": "main_l1", "entity_id": "sensor.main_l1", "ct_type": "main", "phase": "l1"}
         ],
-        "devices": [{"device_id": "d1", "dedicated_ct_ids": ["main_l1"]}],
+        "devices": [{"device_id": "d1", "branch_ct_ids": ["main_l1"]}],
     }
     t = Topology.model_validate(payload)
     assert t.circuits == []
     assert t.relations == []
     assert t.algorithm_version is None
+
+
+def test_the_retired_dedicated_ct_ids_key_is_rejected() -> None:
+    """2.0.0 is a major precisely because this key is gone.
+
+    A 1.5.0 payload that carries ``dedicated_ct_ids`` names a role the contract
+    no longer defines, so it must fail loudly rather than be silently ignored:
+    a mute drop would tell the caller its declaration was accepted.
+    """
+    payload = {
+        "version": 3,
+        "status": "candidate",
+        "channels": [],
+        "devices": [{"device_id": "d1", "dedicated_ct_ids": ["main_l1"]}],
+    }
+    with pytest.raises(ValidationError):
+        Topology.model_validate(payload)
 
 
 def test_a_1_5_0_reconciliation_payload_still_validates() -> None:

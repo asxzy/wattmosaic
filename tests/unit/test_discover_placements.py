@@ -554,7 +554,7 @@ def test_a_row_owned_by_a_dedicated_measurement_is_refused_with_the_remedy(
                     device_id="dev_lights",
                     name="lights",
                     phase=Phase.L1,
-                    dedicated_ct_ids=["ct1"],
+                    branch_ct_ids=["ct1"],
                 ),
             ]
         }
@@ -566,7 +566,8 @@ def test_a_row_owned_by_a_dedicated_measurement_is_refused_with_the_remedy(
     assert result["accepted"] == []
     assert result["refused"], "the refusal reason was not reported"
     assert all(
-        "dedicated" in reason.lower() for reason in result["refused"].values()
+        "already owned by device" in reason.lower()
+        for reason in result["refused"].values()
     )
     assert db.load_device_configurations().devices == []
 

@@ -223,8 +223,14 @@ def test_a_load_row_declared_normal_but_negative_is_reported() -> None:
     assert any("negative" in i for i in issues)
 
 
-@pytest.mark.parametrize("ct_type", [CTType.BRANCH, CTType.DEDICATED_DEVICE])
+@pytest.mark.parametrize("ct_type", [CTType.BRANCH])
 def test_every_load_row_type_is_checked(ct_type: CTType) -> None:
+    """A negative reading on a load row is a defect, whatever the load role.
+
+    The single-device role is retired, so ``branch`` is the only role a load row
+    can carry; the parametrisation is kept so a future load role is covered the
+    moment it is added.
+    """
     aligner = _healthy_aligner({"row": [-50.0, -50.0, -50.0]})
     topology = Topology(
         channels=[

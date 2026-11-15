@@ -124,7 +124,6 @@ def test_topology_round_trip_is_lossless(tmp_db_path) -> None:
         by_dev = {d.device_id: d for d in topology.devices}
         for device in loaded.devices:
             original = by_dev[device.device_id]
-            assert device.dedicated_ct_ids == original.dedicated_ct_ids
             assert device.branch_ct_ids == original.branch_ct_ids
             assert device.double_pole == original.double_pole
             assert device.phase == original.phase

@@ -356,9 +356,9 @@ def test_analysis_offset_never_moves_the_original_event_time(database) -> None:
     at = dt.datetime(2026, 1, 1, 12, 0, tzinfo=dt.UTC)
     topology = _topology()
     device = topology.devices[0]
-    entity = device.dedicated_ct_ids[0] if device.dedicated_ct_ids else None
+    entity = device.branch_ct_ids[0] if device.branch_ct_ids else None
     if entity is None:  # pragma: no cover - the reference topology has channels
-        pytest.skip("reference topology has no dedicated channel")
+        pytest.skip("reference topology has no branch channel")
     event = {
         "device_id": device.device_id,
         "entity_id": entity,
@@ -977,9 +977,9 @@ def test_every_ref_resolves_when_records_and_verdicts_are_both_written(database)
     # One metered device per channel: a device with no CT cannot be associated,
     # and this test is about references, not about attribution coverage.
     paired = [
-        (device, channels[device.dedicated_ct_ids[0]])
+        (device, channels[device.branch_ct_ids[0]])
         for device in topology.devices
-        if device.dedicated_ct_ids and device.dedicated_ct_ids[0] in channels
+        if device.branch_ct_ids and device.branch_ct_ids[0] in channels
     ][:3]
     assert paired, "the reference topology has metered devices"
     now = at + dt.timedelta(minutes=30)

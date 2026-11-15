@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 import numpy as np
 import pytest
 from wattmosaic_engine.contracts import (
+    ConfidenceTier,
     CTChannel,
     CTType,
     DeviceModelParameters,
@@ -208,13 +209,13 @@ def separate_branch_topo() -> Topology:
             ch("branch_kitchen", parent="main_l1"),
             ch("branch_fridge", parent="branch_kitchen"),
             ch("branch_laundry", parent="main_l1"),
-            ch("ct_tv", CTType.DEDICATED_DEVICE, device="tv"),
+            ch("ct_tv", CTType.BRANCH, device="tv"),
         ],
         [
             device("lights", branch_ct_ids=["branch_kitchen"]),
             device("fridge", branch_ct_ids=["branch_fridge"]),
             device("washer", branch_ct_ids=["branch_laundry"], phase=Phase.L1),
-            device("tv", dedicated_ct_ids=["ct_tv"]),
+            device("tv", branch_ct_ids=["ct_tv"]),
         ],
     )
 
@@ -313,7 +314,7 @@ def test_04_multiple_simultaneous_deactivation_separable():
 # --------------------------------------------------------------------------- #
 # 5-7: dedicated CT, shared branch, nested branch
 # --------------------------------------------------------------------------- #
-def test_05_dedicated_ct_measurement_is_never_replaced_by_model():
+def test_05_own_ct_measurement_is_never_replaced_by_model():
     topo = separate_branch_topo()
     win = window(
         {
@@ -325,14 +326,15 @@ def test_05_dedicated_ct_measurement_is_never_replaced_by_model():
             "ct_tv": 42.0,
         }
     )
-    # A model claims 900 W for the TV; the direct CT says 42 W and must win.
+    # A model claims 900 W for the TV; the TV's own CT says 42 W and must win.
+    # The row is no longer read directly, but the measurement still outranks the
+    # model: the value is the measured 42 W, not the modelled 900 W.
     batch = run(topo, win, states("lights", "fridge", "washer", "tv"), registry([model("tv", on_w=900.0)]))
     tv = batch.get("tv")
-    assert tv.source == Source.DIRECT_MEASURED
+    assert tv.source == Source.INFERRED
     assert tv.power_w == pytest.approx(42.0)
     assert tv.supporting_ct_channels == ["ct_tv"]
-    assert "direct_ct_measurement" in tv.explanation
-    assert batch.reconciliation.direct_measured_w == pytest.approx(42.0)
+    assert "measurement_disagrees_with_model" in tv.explanation
 
 
 def test_06_shared_branch_ct_attributes_only_from_branch():
@@ -398,13 +400,13 @@ def double_pole_topo() -> Topology:
     return topology(
         [
             *mains(),
-            ch("ct_dryer_l1", CTType.DEDICATED_DEVICE, phase=Phase.L1, device="dryer", pair="ct_dryer_l2"),
-            ch("ct_dryer_l2", CTType.DEDICATED_DEVICE, phase=Phase.L2, device="dryer", pair="ct_dryer_l1"),
+            ch("ct_dryer_l1", CTType.BRANCH, phase=Phase.L1, device="dryer", pair="ct_dryer_l2"),
+            ch("ct_dryer_l2", CTType.BRANCH, phase=Phase.L2, device="dryer", pair="ct_dryer_l1"),
             ch("branch_l1", parent="main_l1"),
             ch("branch_l2", parent="main_l2", phase=Phase.L2),
         ],
         [
-            device("dryer", dedicated_ct_ids=["ct_dryer_l1", "ct_dryer_l2"], phase=Phase.BOTH, double_pole=True),
+            device("dryer", branch_ct_ids=["ct_dryer_l1", "ct_dryer_l2"], phase=Phase.BOTH, double_pole=True),
             device("lamp_l1", branch_ct_ids=["branch_l1"], phase=Phase.L1),
             device("lamp_l2", branch_ct_ids=["branch_l2"], phase=Phase.L2),
         ],
@@ -426,14 +428,18 @@ def test_09_double_pole_240v_appliance_total_not_two_appliances():
     )
     batch = run(topo, win, states("dryer", "lamp_l1", "lamp_l2"))
     dryer = batch.get("dryer")
-    assert dryer.source == Source.DIRECT_MEASURED
+    # Wave 2 retired the dedicated-channel role, so the pair is solved from its
+    # two rows rather than read as a direct measurement.  The arithmetic is
+    # unchanged: both legs contribute, and the device reports their sum once.
+    assert dryer.source == Source.INFERRED
+    assert dryer.confidence_tier == ConfidenceTier.TIER_2_INFERRED
     assert dryer.power_w == pytest.approx(2400.0)
     assert len(dryer.supporting_ct_channels) == 2
     # Exactly one device result for the dryer; no phantom second pole.
     assert [r.device_id for r in batch.results].count("dryer") == 1
     # Main total is 2550 W and the dryer contributes 2400 W once.
     assert batch.reconciliation.main_power_w == pytest.approx(2550.0)
-    assert batch.reconciliation.direct_measured_w == pytest.approx(2400.0)
+    assert batch.reconciliation.inferred_w == pytest.approx(2550.0)
 
 
 def test_10_l1_l2_phase_relationship():
@@ -643,12 +649,12 @@ def test_16b_concurrent_but_separable_is_not_marked_ambiguous():
     topo = topology(
         [
             *mains(),
-            ch("ct_a", CTType.DEDICATED_DEVICE, device="a"),
-            ch("ct_b", CTType.DEDICATED_DEVICE, device="b"),
+            ch("ct_a", CTType.BRANCH, device="a"),
+            ch("ct_b", CTType.BRANCH, device="b"),
         ],
         [
-            device("a", dedicated_ct_ids=["ct_a"]),
-            device("b", dedicated_ct_ids=["ct_b"]),
+            device("a", branch_ct_ids=["ct_a"]),
+            device("b", branch_ct_ids=["ct_b"]),
         ],
     )
     win = window(
@@ -695,7 +701,12 @@ def test_17_standby_power_is_preserved():
     assert washer.power_w == pytest.approx(5.0, abs=1.0)
     assert washer.source in (Source.INFERRED, Source.MODEL_ESTIMATED)
     assert batch.get("tv").power_w == pytest.approx(4.0)
-    assert batch.reconciliation.direct_measured_w == pytest.approx(4.0)
+    # Wave 2 retired the dedicated-channel role: no device is direct-measured
+    # any more, so the standby load lands in the inferred total instead.  The
+    # identity that matters -- the values are still accounted, not residual --
+    # is unchanged.
+    assert batch.reconciliation.direct_measured_w == pytest.approx(0.0)
+    assert batch.reconciliation.inferred_w == pytest.approx(209.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -1039,7 +1050,9 @@ def test_real_aligned_window_from_sample_aligner():
             )
     window = aligner.window(at=T0, channels=list(values), max_age_s=120.0)
     batch = run(topo, window, states("lights", "fridge", "washer", "tv"))
-    assert batch.get("tv").source == Source.DIRECT_MEASURED
+    # Wave 2 retired the dedicated-channel role, so the CT that names the TV is
+    # a seed row for the solver rather than a direct measurement.
+    assert batch.get("tv").source == Source.INFERRED
     assert batch.get("tv").power_w == pytest.approx(50.0)
     assert batch.get("lights").power_w == pytest.approx(700.0, abs=2.0)
     assert batch.get("fridge").power_w == pytest.approx(200.0, abs=2.0)
@@ -1186,26 +1199,33 @@ def _dedicated_pair_topo() -> Topology:
     return topology(
         [
             *mains(),
-            ch("ct_tub_l1", CTType.DEDICATED_DEVICE, phase=Phase.L1, device="tub", pair="ct_tub_l2"),
-            ch("ct_tub_l2", CTType.DEDICATED_DEVICE, phase=Phase.L2, device="tub", pair="ct_tub_l1"),
+            ch("ct_tub_l1", CTType.BRANCH, phase=Phase.L1, device="tub", pair="ct_tub_l2"),
+            ch("ct_tub_l2", CTType.BRANCH, phase=Phase.L2, device="tub", pair="ct_tub_l1"),
         ],
-        [device("tub", dedicated_ct_ids=["ct_tub_l1", "ct_tub_l2"], phase=Phase.BOTH, double_pole=True)],
+        [device("tub", branch_ct_ids=["ct_tub_l1", "ct_tub_l2"], phase=Phase.BOTH, double_pole=True)],
     )
 
 
-def test_direct_paired_reading_with_one_leg_missing_is_not_usable():
-    from wattmosaic_engine.electrical import resolve_direct
-    from wattmosaic_engine.electrical.topology import build_graph
+def test_a_paired_reading_with_one_leg_missing_is_not_usable():
+    """A missing leg excludes the pair even with no mains row to fall back on.
 
+    The W4 case above has mains support, so a wrongly-halved reading would be
+    absorbed by the residual.  Here there is no mains row at all: if the live
+    leg were used alone the engine would report 900 W for a 240 V device and no
+    equation would contradict it.  The pair must therefore be excluded outright.
+    """
     topo = _dedicated_pair_topo()
     win = window(
         {"main_l1": 0.0, "main_l2": 0.0, "ct_tub_l1": 900.0, "ct_tub_l2": None},
         ages={"ct_tub_l2": 400.0},
     )
-    readings = resolve_direct(win, build_graph(topo))
-    tub = readings["tub"]
-    assert "partial_leg_measurement" in tub.reasons
-    assert tub.usable is False
+    batch = run(topo, win, states("tub"))
+    excluded = batch.diagnostics["excluded_rows"]
+
+    assert excluded["ct_tub_l1"].startswith("partial_leg_measurement")
+    assert excluded["ct_tub_l2"] == "missing_measurement"
+    # The live leg must not become the device's reading on its own.
+    assert batch.get("tub").power_w != pytest.approx(900.0)
 
 
 # --------------------------------------------------------------------------- #

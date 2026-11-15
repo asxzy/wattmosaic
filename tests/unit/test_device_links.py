@@ -36,14 +36,14 @@ def _topology(*, confirmed: bool = True, ambiguous: bool = False) -> Topology:
         DeviceTopology(
             device_id="dev_sauna",
             name="Sauna",
-            dedicated_ct_ids=["ct_sauna"],
+            branch_ct_ids=["ct_sauna"],
             phase=Phase.L1,
             metadata={STATE_ENTITIES_KEY: ["switch.sauna"]},
         ),
         DeviceTopology(
             device_id="dev_fridge",
             name="Fridge",
-            dedicated_ct_ids=["ct_fridge"],
+            branch_ct_ids=["ct_fridge"],
             phase=Phase.L2,
             metadata={STATE_ENTITIES_KEY: ["switch.fridge", "binary_sensor.fridge_door"]},
         ),
@@ -53,7 +53,7 @@ def _topology(*, confirmed: bool = True, ambiguous: bool = False) -> Topology:
             DeviceTopology(
                 device_id="dev_other",
                 name="Other",
-                dedicated_ct_ids=[],
+                branch_ct_ids=[],
                 phase=Phase.L1,
                 metadata={STATE_ENTITIES_KEY: ["switch.fridge"]},
             )
@@ -64,13 +64,13 @@ def _topology(*, confirmed: bool = True, ambiguous: bool = False) -> Topology:
             CTChannel(
                 ct_id="ct_sauna",
                 entity_id="sensor.sauna_power",
-                ct_type=CTType.DEDICATED_DEVICE,
+                ct_type=CTType.BRANCH,
                 phase=Phase.L1,
             ),
             CTChannel(
                 ct_id="ct_fridge",
                 entity_id="sensor.fridge_power",
-                ct_type=CTType.DEDICATED_DEVICE,
+                ct_type=CTType.BRANCH,
                 phase=Phase.L2,
             ),
         ],

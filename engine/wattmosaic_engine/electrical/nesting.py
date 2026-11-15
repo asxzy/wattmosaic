@@ -21,7 +21,7 @@ rather than pretending it away:
   by every panel in the house at 1.000, because both are near idle most of the
   time.  Every containment-, coverage-, closure- and step-response-based rule
   tried on real data left all 32 loads ambiguous or placed them wrong.  So this
-  module never proposes a parent for a ``branch`` or ``dedicated_device`` CT.
+  module never proposes a parent for a ``branch`` CT.
   The wizard asks the user instead.
 
 The unit of inference is a **measurement node**, not a single CT.  One meter
@@ -493,10 +493,13 @@ def _node_own_loads(
 ) -> list[float | None] | None:
     """Sum a node's members' own directly-measured loads.
 
-    ``direct_loads`` is keyed by container *channel*, because that is how the
-    engine groups dedicated CTs.  A node may have two channels, and each may
-    hold a different subset of the loads; the node's own-load total is their
-    union, which is the sum.
+    ``direct_loads`` is keyed by container *channel*.  A node may have two
+    channels, and each may hold a different subset of the loads; the node's
+    own-load total is their union, which is the sum.
+
+    The mapping is empty now that the engineering no longer groups a
+    per-container own-load series, so this returns ``None`` (unknown) and
+    closure rests on the parent's measured series alone.
     """
     contributing = [direct_loads[m] for m in node.members if m in direct_loads]
     if not contributing:

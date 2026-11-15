@@ -40,7 +40,7 @@ def _topology() -> Topology:
             CTChannel(ct_id="br_fridge", entity_id="sensor.br1", ct_type=CTType.BRANCH,
                       phase=Phase.L1, parent_ct_id="main_l1"),
         ],
-        devices=[DeviceTopology(device_id="dev_fridge", name="Fridge", dedicated_ct_ids=["br_fridge"])],
+        devices=[DeviceTopology(device_id="dev_fridge", name="Fridge", branch_ct_ids=["br_fridge"])],
     )
 
 

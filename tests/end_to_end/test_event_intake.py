@@ -453,7 +453,7 @@ def test_linked_event_produces_an_acceptable_sample_shape(tmp_path) -> None:
 
         device = core.topology_cache.devices[0]
         entity_id = _declared_entity(core, device.device_id)
-        ct_id = (device.dedicated_ct_ids or device.branch_ct_ids)[0]
+        ct_id = device.branch_ct_ids[0]
         channel = next(c for c in core.topology_cache.channels if c.ct_id == ct_id)
 
         base = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
@@ -562,7 +562,7 @@ def test_a_power_entity_cannot_overwrite_the_device_runtime_state(tmp_path) -> N
         channels = core.topology_cache.channel_map()
         power_entities = [
             channels[cid].entity_id
-            for cid in [*device.dedicated_ct_ids, *device.branch_ct_ids]
+            for cid in device.branch_ct_ids
             if cid in channels and channels[cid].ct_type != CTType.MAIN
         ]
         assert power_entities, "fixture device must have its own CT"

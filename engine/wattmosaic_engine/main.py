@@ -69,8 +69,6 @@ from .contracts import (
     TopologyStatus,
     utcnow,
 )
-from .deprecations import collect as collect_deprecations
-from .deprecations import declares_dedicated, warn_once
 from .device_links import (
     device_for_entity,
     state_entity_for_device,
@@ -384,47 +382,13 @@ def _forward_fill(
 def _direct_load_series(
     topology: Topology, aligned: Mapping[str, list[float]]
 ) -> dict[str, list[float | None]]:
-    """Per-container series of its *own* dedicated loads' sum, for closure.
+    """Per-container series of its *own* loads, for closure.
 
-    A container's "own loads" are the dedicated CTs whose canonical parent chain
-    reaches it without passing through another feed, plus those dedicated CTs
-    that declare no parent.  Feeds are deliberately excluded: closure asks
-    whether *this child* is explained by the parent, so other feeds inside it
-    would double count.
+    Retired: the container grouping was driven by the dedicated-device channel
+    role, which the contract no longer defines, so no channel can be grouped
+    here.  Closure therefore relies on the parent's measured series alone.
     """
-    by_id = {ch.ct_id: ch for ch in topology.channels}
-    groups: dict[str, list[str]] = {}
-    for ch in topology.channels:
-        if str(ch.ct_type) != "dedicated_device" or not ch.enabled:
-            continue
-        parent = ch.parent_ct_id
-        if parent is None:
-            continue
-        # Walk up to the nearest container that is a feed; a dedicated load may
-        # hang directly off a branch or off a main.
-        seen: set[str] = set()
-        current = parent
-        while current is not None and current not in seen and current in by_id:
-            seen.add(current)
-            kind = str(by_id[current].ct_type)
-            if kind in ("main", "branch"):
-                groups.setdefault(current, []).append(ch.ct_id)
-                break
-            current = by_id[current].parent_ct_id
-
-    out: dict[str, list[float | None]] = {}
-    length = len(next(iter(aligned.values()))) if aligned else 0
-    for container, loads in groups.items():
-        total: list[float | None] = []
-        for i in range(length):
-            values = [
-                aligned[cid][i]
-                for cid in loads
-                if cid in aligned and math.isfinite(aligned[cid][i])
-            ]
-            total.append(sum(values) if values else None)
-        out[container] = total
-    return out
+    return {}
 
 
 def _event_time(event: Any) -> datetime | None:
@@ -645,11 +609,6 @@ class EngineCore:
         #: Bounded by the number of declared devices, not by HA's event rate.
         self._pending_transitions: deque[dict[str, Any]] = deque(maxlen=4096)
         self.topology_cache: Topology | None = None
-        #: Deprecated-declaration payload (ADR-0029), recomputed only when the
-        #: topology or a device configuration changes.  ``/health`` is polled
-        #: every few seconds on the event loop, so it must read this cache and
-        #: never the configuration table (see ``test_health_probe_cost.py``).
-        self._deprecations_cache: list[dict[str, Any]] = []
         #: Why startup discovery produced no topology (``None`` = no problem).
         #: Surfaced by ``/health`` so a fresh install cannot look healthy while
         #: having nothing to infer, which is how the original defect hid.
@@ -672,9 +631,6 @@ class EngineCore:
         self.events_persisted = 0
         self.persistence_errors = 0
         self.cycles = 0
-        # Prime the deprecated-declaration cache so the very first ``health()``
-        # call is already cheap (ADR-0029).
-        self._refresh_deprecations()
 
     # -- lifecycle -------------------------------------------------------- #
     async def start(self, *, start_loops: bool = True) -> None:
@@ -705,10 +661,6 @@ class EngineCore:
         # waiting a bounded time here is what makes discovery see real entities
         # instead of an empty cache on a genuine fresh install.
         await self.bootstrap_topology(wait_connected_s=TOPOLOGY_BOOTSTRAP_WAIT_S)
-        # One notice per deprecated CT, at the one place a topology becomes
-        # active.  Never in the inference loop: ``warn_once`` deduplicates, but a
-        # per-sample call would still walk the topology every cycle (ADR-0029).
-        self._announce_deprecations()
         if start_loops:
             self._tasks = [
                 asyncio.create_task(self._writer_loop(), name="wm-writer"),
@@ -804,9 +756,6 @@ class EngineCore:
 
         self.topology_cache = self.db.load_topology()
         self.topology_bootstrap_error = None
-        # Populate the deprecated-declaration cache once, here, rather than on
-        # the probe path (ADR-0029).
-        self._refresh_deprecations()
         self.db.log_system_event(
             "info",
             "topology",
@@ -844,73 +793,6 @@ class EngineCore:
             return None
         self._last_topology_attempt = now
         return await self.bootstrap_topology()
-
-    def _deprecations_payload(self) -> list[dict[str, Any]]:
-        """Deprecated manual declarations from the active topology (ADR-0029).
-
-        Additive diagnostics only: ``warn_once`` is *not* called here, because
-        ``/health`` is polled every few seconds.  The one warning per CT is
-        emitted where a topology is installed (see ``_announce_deprecations``).
-
-        The list is **cached**, not recomputed: computing it reads
-        ``device_configurations``, and ``health()`` runs on the event loop while
-        the container ``HEALTHCHECK`` and Supervisor watchdog poll it every five
-        seconds.  A table read here would block ingestion on every poll — the
-        exact defect ``test_health_probe_cost.py`` exists to prevent.  The cache
-        is refreshed by :meth:`_refresh_deprecations` at every point that can
-        change the answer.
-        """
-        if not self.config.deprecate_dedicated_declaration:
-            return []
-        return list(self._deprecations_cache)
-
-    def _refresh_deprecations(self) -> list[Any]:
-        """Recompute the deprecated-declaration cache; return the notices.
-
-        Called wherever the topology or a device configuration changes, never
-        from a probe or a sample loop.  Walks the three storage locations that
-        can describe the same declaration and deduplicates by ``ct_id``.
-        """
-        self._deprecations_cache = []
-        if not self.config.deprecate_dedicated_declaration:
-            return []
-        topology = self.topology_cache
-        if topology is None:
-            # Read without populating ``topology_cache``: this runs during
-            # ``__init__``, and an eager cache would pre-empt startup discovery.
-            try:
-                topology = self.db.load_topology()
-            except Exception:  # noqa: BLE001 - diagnostics must never fail
-                return []
-        if not declares_dedicated(topology):
-            # Cheap negative on the in-memory topology: do not read the
-            # configuration table just to prove there is nothing to say.
-            return []
-        try:
-            configurations = self.db.load_device_configurations()
-        except Exception:  # noqa: BLE001 - a read failure must not break health
-            configurations = None
-        try:
-            notices = list(collect_deprecations(topology, configurations))
-        except Exception:  # noqa: BLE001 - diagnostics must never fail
-            return []
-        self._deprecations_cache = [notice.as_dict() for notice in notices]
-        return notices
-
-    def _announce_deprecations(self) -> None:
-        """Log one ``WARNING`` per deprecated CT for the current topology.
-
-        Called from topology installation only.  ``warn_once`` deduplicates across
-        calls for the life of the process, so repeated installations (and the
-        per-cycle inference path, which never calls this) cannot flood the log.
-
-        Also refreshes the cached ``/health`` payload, so a change is reflected
-        in diagnostics without ever putting the scan on a probe path.
-        """
-        notices = self._refresh_deprecations()
-        if not notices:
-            return
-        warn_once(notices, log)
 
     def _topology_health(self) -> dict[str, Any]:
         """Topology presence for ``/health``; a missing topology is not healthy."""
@@ -1534,12 +1416,6 @@ class EngineCore:
                 # new top-level field so an older HA integration keeps parsing
                 # the response unchanged.
                 "learning_status": self._learning_status_payload(),
-                # Deprecated manual ``dedicated_device`` declarations (ADR-0029).
-                # Additive and schema-free, like ``learning_status`` above: the
-                # objects themselves match the frozen schema.  The direct
-                # measurement path is untouched, so this list is information
-                # only and never a refusal.
-                "deprecations": self._deprecations_payload(),
                 "samples_ingested": self.samples_ingested,
                 "events_ingested": self.events_ingested,
                 "queue": self.persist_queue.stats(),
@@ -1812,7 +1688,6 @@ class EngineCore:
                     "phase": dev.phase,
                     "double_pole": dev.double_pole,
                     "topology_status": dev.topology_status,
-                    "dedicated_ct_ids": list(dev.dedicated_ct_ids),
                     "branch_ct_ids": list(dev.branch_ct_ids),
                     "latest_result": (
                         recorded.model_dump(mode="json") if recorded is not None else None
@@ -1915,7 +1790,6 @@ class EngineCore:
             pass
         self.db.save_topology(topology, note="api: replace topology")
         self.topology_cache = self.db.load_topology()
-        self._announce_deprecations()
         self.db.log_system_event(
             "info",
             "topology",
@@ -1939,7 +1813,6 @@ class EngineCore:
         )
         self.db.save_topology(confirmed, note="api: confirm topology")
         self.topology_cache = self.db.load_topology()
-        self._announce_deprecations()
         self.db.log_system_event("info", "topology", "topology confirmed via API")
         return self.topology_cache or confirmed
 
@@ -2434,7 +2307,6 @@ class EngineCore:
             projected = project_configuration(topology, new_set)
             self.db.save_topology(projected, note=f"api: remove configuration {device_id}")
             self.topology_cache = projected
-            self._announce_deprecations()
             self.db.log_system_event(
                 "info", "configuration", f"set_device_configuration {device_id} (removed)"
             )
@@ -2465,7 +2337,6 @@ class EngineCore:
         projected = project_configuration(topology, new_set)
         self.db.save_topology(projected, note=f"api: set configuration {device_id}")
         self.topology_cache = projected
-        self._announce_deprecations()
         self.db.log_system_event("info", "configuration", f"set_device_configuration {device_id}")
         return ServiceResult(
             ok=True,
@@ -2518,7 +2389,7 @@ class EngineCore:
           already declared and WattMosaic's own output.  Names, areas and
           manufacturers are never used to decide membership (contract §2);
         * **read-only history** -- the recorder is queried, no service is called;
-        * **branch rows only** -- a main row or a dedicated measurement refuses
+        * **branch rows only** -- a main row refuses
           the placement with a reason instead of double counting the circuit;
         * **user declarations win** -- an entity a person configured is never
           rewritten;
@@ -2597,16 +2468,16 @@ class EngineCore:
         row_channels = {
             channel.ct_id: channel
             for channel in topology.channels
-            if channel.enabled and channel.ct_type in (CTType.BRANCH, CTType.DEDICATED_DEVICE)
+            if channel.enabled and channel.ct_type == CTType.BRANCH
         }
-        # Contract §4: a group is never emitted for a main row or a
-        # dedicated-device row.  A main aggregate contains every downstream
-        # fixture, so fitting it would "identify" wattages that were never
-        # separately measured -- exactly the fabrication tier B must not do.
+        # Contract §4: a group is never emitted for a main row.  A main aggregate
+        # contains every downstream fixture, so fitting it would "identify"
+        # wattages that were never separately measured -- exactly the fabrication
+        # tier B must not do.
         excluded_ct_ids = frozenset(
             channel.ct_id
             for channel in topology.channels
-            if channel.ct_type in (CTType.MAIN, CTType.DEDICATED_DEVICE)
+            if channel.ct_type == CTType.MAIN
         )
         notes: list[str] = []
         stats: dict[str, Any] = {
@@ -2792,7 +2663,7 @@ class EngineCore:
                 if placement.configuration.state_entity_ids
             }
             if include_groups and fit_shared_rows is not None:
-                # Contract §4 forbids a group on a main or dedicated-device row, and
+                # Contract §4 forbids a group on a main row, and
                 # keeps those rows out of the fit entirely: a main aggregate contains
                 # every downstream fixture, so fitting it would "identify" wattages
                 # that were never separately measured.  The exclusion is applied
@@ -3034,7 +2905,6 @@ class EngineCore:
         self.db.save_device_configurations(merged)
         self.db.save_topology(projected, note="auto placement from observed co-movement")
         self.topology_cache = projected
-        self._announce_deprecations()
         self.db.log_system_event(
             "info",
             "configuration",

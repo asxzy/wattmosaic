@@ -131,10 +131,9 @@ class EffectiveConfig:
     #: True when the user asserted a shared circuit we cannot fully separate.
     shared_unmodelled: bool = False
     #: True when this device is the only topology device on its attribution
-    #: rows, yet those rows are **not** a ``DEDICATED_DEVICE`` CT.  A sole
-    #: occupant of a branch CT looks dedicated in fact, but the Level-1 direct
-    #: path only ever reads a dedicated channel, so the label must stay
-    #: ``shared`` and this flag records why the direct path is not available.
+    #: rows.  A sole occupant of a branch CT is monitored alone in practice, but
+    #: no direct-measurement capability exists, so the label stays ``shared``
+    #: and this flag records that nothing else draws on the circuit.
     sole_occupant: bool = False
     #: Reasons surfaced in ``InferenceResult.tier_reasons``.
     notes: tuple[str, ...] = ()
@@ -143,7 +142,6 @@ class EffectiveConfig:
     def allows_direct_measurement(self) -> bool:
         """A shared/home-total/absent CT must never be read as this device's power."""
         return self.monitoring in (
-            MonitoringLevel.DEDICATED,
             MonitoringLevel.UNKNOWN,
         )
 
@@ -164,18 +162,10 @@ def derive_monitoring(
 ) -> MonitoringLevel:
     """Monitoring level, honouring an explicit declaration over the CT graph.
 
-    ``DEDICATED`` means one thing and one thing only: the topology graph yields
-    a **``DEDICATED_DEVICE`` channel** for the device (``dedicated_channel_for``).
-    That is the same gate the Level-1 direct path uses, so the label and the
-    capability cannot disagree.
-
-    A device that is the *sole occupant* of a branch CT used to be labelled
-    ``DEDICATED`` as well.  It is monitored alone in practice, but the direct
-    path can never produce a reading for it, so the label overstated the
-    evidence and fed the tiers/confidence with a capability the engine did not
-    have.  Such a device stays ``SHARED`` and is flagged separately
-    (``EffectiveConfig.sole_occupant``), which narrows a label without changing
-    any watts.
+    A device is ``SHARED`` when the topology graph yields attribution rows for
+    it: whatever CT observes it also carries the possibility of other loads, so
+    its power has to be separated.  With no attribution row there is nothing
+    that observes it alone and it is ``HOME_TOTAL_ONLY``.
     """
     if declared != MonitoringLevel.UNKNOWN:
         return declared
@@ -183,13 +173,11 @@ def derive_monitoring(
         return MonitoringLevel.UNKNOWN
     if graph is None:  # pragma: no cover - graph is always supplied in production
         return MonitoringLevel.UNKNOWN
-    if graph.dedicated_channel_for(device.device_id) is not None:
-        return MonitoringLevel.DEDICATED
     rows = set(graph.attribution_ct_ids(device.device_id))
     if not rows:
         return MonitoringLevel.HOME_TOTAL_ONLY
-    # Attribution rows without a dedicated channel are a shared/branch circuit
-    # as far as measurement capability goes — including the sole-occupant case.
+    # Attribution rows are always a shared/branch circuit as far as measurement
+    # capability goes — including the sole-occupant case.
     return MonitoringLevel.SHARED
 
 
@@ -202,10 +190,9 @@ def is_sole_occupant(
     """True when no other topology device shares this device's attribution rows.
 
     Purely informational: it explains why a device is labelled ``SHARED`` even
-    though nothing else draws on its circuit, and why the direct path still
-    produced 0 W.  It never grants a measurement.
+    though nothing else draws on its circuit.  It never grants a measurement.
     """
-    if device is None or graph is None or graph.dedicated_channel_for(device.device_id) is not None:
+    if device is None or graph is None:
         return False
     topology = topology if topology is not None else graph.topology
     rows = set(graph.attribution_ct_ids(device.device_id))
@@ -214,7 +201,7 @@ def is_sole_occupant(
     for other in topology.devices:
         if other.device_id == device.device_id:
             continue
-        if rows & (set(other.dedicated_ct_ids) | set(other.branch_ct_ids)):
+        if rows & set(other.branch_ct_ids):
             return False
     return True
 
@@ -412,11 +399,10 @@ def effective_config(
             notes.append("no_confirmed_controller_watt_map")
 
     shared_unmodelled = False
-    # A device that used to be labelled ``DEDICATED`` only because it was the
-    # sole occupant of a *branch* CT is now ``SHARED``.  That relabel must not
-    # change the solver: the row was already treated as fully attributable
-    # (no unknown slack) when the label was ``DEDICATED``, and it must stay
-    # that way.  Only the *label* narrows; the watts are untouched.
+    # A device that is the sole occupant of a *branch* CT is labelled
+    # ``SHARED``.  That label must not change the solver: the row is treated as
+    # fully attributable (no unknown slack), because nothing else draws on it.
+    # Only the *label* is conservative; the watts are untouched.
     derived_dedicated_downgrade = (
         declared == MonitoringLevel.UNKNOWN
         and monitoring == MonitoringLevel.SHARED
@@ -425,13 +411,13 @@ def effective_config(
     if monitoring == MonitoringLevel.SHARED and not derived_dedicated_downgrade:
         observed = set(declared_cts)
         if not observed and device is not None:
-            observed = set(device.dedicated_ct_ids) | set(device.branch_ct_ids)
+            observed = set(device.branch_ct_ids)
         if topology is not None:
             siblings = [
                 other.device_id
                 for other in topology.devices
                 if other.device_id != device_id
-                and observed.intersection([*other.dedicated_ct_ids, *other.branch_ct_ids])
+                and observed.intersection(other.branch_ct_ids)
             ]
             # A circuit row may carry fixtures nobody declared, so a claimant may
             # only be credited the whole row when its draw is bounded.
@@ -551,24 +537,23 @@ def cts_claimed_by_dedicated(
 ) -> tuple[str, str] | None:
     """``(device_id, ct_id)`` of a device that already owns one of these rows.
 
-    A ``dedicated_device`` CT is a *direct measurement* of exactly one device:
-    the whole row is that device's power.  Placing a second device on the same
-    row and inferring its share would count the row twice -- the direct reading
-    plus the inferred slice -- which is the double counting the electrical model
-    exists to prevent.  So the caller must convert the row to a branch (or
-    shared circuit) before another device may be placed on it, and this function
-    is what detects the conflict.
+    A row claimed by exactly one device is that device's whole measurement:
+    placing a second device on the same row and inferring its share would count
+    the row twice — the single claimant's attribution plus the inferred slice —
+    which is the double counting the electrical model exists to prevent.  So the
+    caller must convert the row to a shared circuit before another device may be
+    placed on it, and this function is what detects the conflict.
 
-    Both the device's declared list and the channel's own role are consulted:
-    the two are normally consistent, but a half-applied edit can leave one
-    saying ``dedicated`` and the other not, and trusting only one side would
-    miss the conflict.
+    Both the device's declared branch list and the channel's own ``device_id``
+    are consulted: the two are normally consistent, but a half-applied edit can
+    leave one naming the device and the other not, and trusting only one side
+    would miss the conflict.
     """
     wanted = {str(cid) for cid in ct_ids}
     if not wanted:
         return None
     for device in topology.devices:
-        for cid in device.dedicated_ct_ids:
+        for cid in device.branch_ct_ids:
             if cid in wanted:
                 return device.device_id, cid
     channels = topology.channel_map()
@@ -576,7 +561,7 @@ def cts_claimed_by_dedicated(
         channel = channels.get(cid)
         if channel is None:
             continue
-        if channel.ct_type == CTType.DEDICATED_DEVICE and channel.device_id:
+        if channel.device_id:
             return str(channel.device_id), cid
     return None
 
@@ -718,7 +703,6 @@ def project_configuration(
     for device in [*topology.devices, *extra]:
         config = by_id.get(device.device_id)
         metadata = dict(device.metadata or {})
-        dedicated = list(device.dedicated_ct_ids)
         branch = list(device.branch_ct_ids)
         # A caller that knows the display name for this row supplies it; an
         # existing row otherwise keeps the name it already carries.  Never derive
@@ -726,12 +710,11 @@ def project_configuration(
         updated_name = names.get(device.device_id) or device.name
         # Retract CTs a previous projection added for this device.  Only ids this
         # module put there are removed, so a CT the user assigned through the
-        # channel wizard (``build_topology_update`` mirrors dedicated CTs itself)
+        # channel wizard (``build_topology_update`` mirrors CTs itself)
         # survives untouched.
         previously = metadata.get(PROJECTED_CTS_KEY)
         if isinstance(previously, list):
             added = {str(c) for c in previously}
-            dedicated = [c for c in dedicated if c not in added]
             branch = [c for c in branch if c not in added]
             metadata.pop(PROJECTED_CTS_KEY, None)
         if config is None:
@@ -776,27 +759,20 @@ def project_configuration(
             else:
                 metadata.pop("monitored_by_ct_ids", None)
             # A declaration is not just metadata: the measurement matrix reads
-            # ``DeviceTopology.dedicated_ct_ids`` / ``branch_ct_ids`` and
-            # ``TopologyGraph`` derives every attribution row from them.  Writing
-            # only ``metadata["monitored_by_ct_ids"]`` left the graph unchanged,
-            # so declaring "this CT measures that device" produced no direct
-            # measurement at all -- the exact case a user configures by hand.
+            # ``DeviceTopology.branch_ct_ids`` and ``TopologyGraph`` derives
+            # every attribution row from them.  Writing only
+            # ``metadata["monitored_by_ct_ids"]`` left the graph unchanged, so
+            # declaring "this CT measures that device" produced no attribution
+            # at all -- the exact case a user configures by hand.
             for cid in config.monitored_by_ct_ids:
                 channel = channels.get(cid)
                 if channel is None or not channel.enabled:
                     # Unknown or disabled channels are dropped by
                     # ``effective_config`` as well; never invent an attribution.
                     continue
-                if channel.ct_type == CTType.DEDICATED_DEVICE:
-                    # A dedicated CT may only name its own device.  A dedicated CT
-                    # assigned elsewhere is a conflict, not an attribution.
-                    if channel.device_id not in (None, device.device_id):
-                        continue
-                    if cid not in dedicated:
-                        dedicated.append(cid)
-                elif channel.ct_type != CTType.MAIN:
-                    # A branch role (or an unclassified channel the user declared)
-                    # becomes a branch attribution row for this device.
+                if channel.ct_type != CTType.MAIN:
+                    # Every non-feed role (or an unclassified channel the user
+                    # declared) becomes a branch attribution row for this device.
                     if cid not in branch:
                         branch.append(cid)
                 else:
@@ -809,7 +785,6 @@ def project_configuration(
             device.model_copy(
                 update={
                     "metadata": metadata,
-                    "dedicated_ct_ids": dedicated,
                     "branch_ct_ids": branch,
                     "name": updated_name,
                 }

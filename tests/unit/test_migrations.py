@@ -425,7 +425,6 @@ def test_pre_change_database_loads_after_upgrade(schema8_db: Path) -> None:
         assert channels["tub_l1"].ct_type == CTType.BRANCH.value
         assert channels["main_l1"].ct_type == CTType.MAIN.value
         devices = {d.device_id: d for d in topology.devices}
-        assert devices["hot_tub"].dedicated_ct_ids == []
         assert sorted(devices["hot_tub"].branch_ct_ids) == ["tub_l1", "tub_l2"]
         # The configuration set must not have lost the row.
         configurations = db.load_device_configurations()

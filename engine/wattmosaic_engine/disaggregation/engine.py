@@ -314,7 +314,7 @@ def _device_step(
     def rank(step: StepChange) -> tuple[int, float]:
         t = graph.channels.get(step.channel_id)
         kind = str(t.ct_type) if t else "unknown"
-        specificity = 0 if kind == "dedicated_device" else (1 if kind == "branch" else 2)
+        specificity = 1 if kind == "branch" else 2
         return (specificity, -abs(step.delta_w))
 
     return sorted(candidates, key=rank)[0]
@@ -352,7 +352,7 @@ def _row_siblings(graph: TopologyGraph, device_id: str) -> tuple[str, ...]:
         other.device_id
         for other in topology.devices
         if other.device_id != device_id
-        and rows.intersection([*other.dedicated_ct_ids, *other.branch_ct_ids])
+        and rows.intersection(other.branch_ct_ids)
     ]
     return tuple(out)
 

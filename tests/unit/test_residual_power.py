@@ -432,7 +432,7 @@ def test_contribution_measured_by_an_enclosing_ct_is_not_added_again():
             CTChannel(
                 ct_id="ct_fridge",
                 entity_id="sensor.ct_fridge",
-                ct_type=CTType.DEDICATED_DEVICE,
+                ct_type=CTType.BRANCH,
                 phase=Phase.L1,
                 parent_ct_id="branch_kitchen",
                 device_id="fridge",
@@ -710,7 +710,7 @@ def _aliased_engine_topology() -> Topology:
             CTChannel(
                 ct_id="ct_heater",
                 entity_id="sensor.ct_heater",
-                ct_type=CTType.DEDICATED_DEVICE,
+                ct_type=CTType.BRANCH,
                 phase=Phase.L1,
                 parent_ct_id="load_manager_l1",
                 device_id="heater",
@@ -720,7 +720,7 @@ def _aliased_engine_topology() -> Topology:
         devices=[
             DeviceTopology(
                 device_id="heater",
-                dedicated_ct_ids=["ct_heater"],
+                branch_ct_ids=["ct_heater"],
                 phase=Phase.L1,
                 topology_status=TopologyStatus.CONFIRMED,
             )
@@ -750,7 +750,7 @@ def test_the_reconciliation_invariant_is_unchanged_by_the_new_path():
         _scope(
             scope_id="whole_home",
             ct_id="load_manager_l1",
-            device_contributions={"heater": reconciliation.direct_measured_w},
+            device_contributions={"heater": reconciliation.inferred_w},
         ),
         reconciliation.main_power_w,
         now=reconciliation.timestamp,

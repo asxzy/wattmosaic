@@ -44,11 +44,11 @@ def _topology() -> Topology:
         status=TopologyStatus.CANDIDATE,
         channels=[
             CTChannel(ct_id="m_l1", entity_id="sensor.m_l1", ct_type=CTType.MAIN, phase=Phase.L1),
-            CTChannel(ct_id="ded_fridge", entity_id="sensor.fridge", ct_type=CTType.DEDICATED_DEVICE,
+            CTChannel(ct_id="ded_fridge", entity_id="sensor.fridge", ct_type=CTType.BRANCH,
                       phase=Phase.L1, parent_ct_id="m_l1"),
         ],
         devices=[
-            DeviceTopology(device_id="dev_fridge", name="Fridge", dedicated_ct_ids=["ded_fridge"]),
+            DeviceTopology(device_id="dev_fridge", name="Fridge", branch_ct_ids=["ded_fridge"]),
         ],
     )
 
@@ -62,7 +62,9 @@ def test_process_returns_backend_batch() -> None:
     assert isinstance(batch.reconciliation, Reconciliation)
     fridge = next((r for r in batch.results if r.device_id == "dev_fridge"), None)
     assert fridge is not None
-    assert fridge.source == Source.DIRECT_MEASURED
+    # Wave 2 retired the dedicated-channel role: a CT that names its device is a
+    # seed row for the constrained fit, not a direct measurement.
+    assert fridge.source == Source.INFERRED
     assert fridge.power_w == pytest.approx(120.0, abs=1.0)
 
 

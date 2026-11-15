@@ -29,7 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from . import __version__ as ENGINE_VERSION
 
-CONTRACT_VERSION = "1.6.0"
+CONTRACT_VERSION = "2.0.0"
 
 
 def utcnow() -> datetime:
@@ -44,7 +44,6 @@ def utcnow() -> datetime:
 class CTType(str, Enum):
     MAIN = "main"
     BRANCH = "branch"
-    DEDICATED_DEVICE = "dedicated_device"
     UNKNOWN = "unknown"
 
 
@@ -332,7 +331,7 @@ _document(
 # --------------------------------------------------------------------------- #
 #
 # A device is described simultaneously by all three axes.  They are independent:
-# a non-smart garage opener can still sit on a dedicated CT and behave as a
+# a non-smart garage opener can still sit on one circuit CT and behave as a
 # fixed-watt load, while a smart dimmable light can be visible only through the
 # home total.  Do not collapse them into one enum.
 
@@ -351,9 +350,6 @@ class HaConnectivity(str, Enum):
 
 class MonitoringLevel(str, Enum):
     """Axis 2 — how closely does the electrical tree observe the device?"""
-
-    DEDICATED = "dedicated"
-    """A CT measures this device and nothing else (``CTType.DEDICATED_DEVICE``)."""
 
     SHARED = "shared"
     """A sub-meter CT carries this device plus others (e.g. one light on a
@@ -443,8 +439,7 @@ class ConfidenceTier(str, Enum):
     """Separated from shared/bulk CT rows, but no independent corroboration."""
 
     TIER_3_MEASURED = "tier_3_measured"
-    """A dedicated CT measured it, or a declared load signal corroborates a
-    shared-channel estimate."""
+    """A private measurement or corroborated share supports it."""
 
     TIER_4_VERIFIED = "tier_4_verified"
     """Measured *and* independently corroborated by a declared load signal or a
@@ -1210,7 +1205,6 @@ class DeviceTopology(Model):
 
     device_id: str
     name: str | None = None
-    dedicated_ct_ids: list[str] = Field(default_factory=list)
     branch_ct_ids: list[str] = Field(default_factory=list)
     phase: Phase = Phase.UNKNOWN
     double_pole: bool = False

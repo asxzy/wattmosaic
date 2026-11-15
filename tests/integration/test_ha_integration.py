@@ -320,15 +320,24 @@ class TestApiClient:
             run(client.health())
 
     def test_contract_mismatch_raises(self) -> None:
+        # A *major* mismatch is what breaks the wire format.  Pinned against the
+        # current major+1 so the test survives a minor/local bump.
+        local_major = const.CONTRACT_VERSION.split(".", 1)[0]
+        remote = f"{int(local_major) + 1}.0.0"
         client, _ = self._client(
-            json_response({"status": "ok"}, headers={"X-WattMosaic-Contract-Version": "2.0.0"})
+            json_response({"status": "ok"}, headers={"X-WattMosaic-Contract-Version": remote})
         )
         with pytest.raises(api.EngineContractMismatch):
             run(client.health())
 
     def test_minor_contract_difference_tolerated(self) -> None:
+        # Same major, different minor: tolerated.
+        local_major = const.CONTRACT_VERSION.split(".", 1)[0]
         client, _ = self._client(
-            json_response({"status": "ok"}, headers={"X-WattMosaic-Contract-Version": "1.7.3"})
+            json_response(
+                {"status": "ok"},
+                headers={"X-WattMosaic-Contract-Version": f"{local_major}.7.3"},
+            )
         )
         assert run(client.health())["status"] == "ok"
 

@@ -114,24 +114,24 @@ def _topology() -> Topology:
             CTChannel(
                 ct_id="ct_a",
                 entity_id="sensor.a_power",
-                ct_type=CTType.DEDICATED_DEVICE,
+                ct_type=CTType.BRANCH,
                 device_id="a",
                 topology_status=status,
             ),
             CTChannel(
                 ct_id="ct_b",
                 entity_id="sensor.b_power",
-                ct_type=CTType.DEDICATED_DEVICE,
+                ct_type=CTType.BRANCH,
                 device_id="b",
                 topology_status=status,
             ),
         ],
         devices=[
             DeviceTopology(
-                device_id="a", dedicated_ct_ids=["ct_a"], topology_status=status
+                device_id="a", branch_ct_ids=["ct_a"], topology_status=status
             ),
             DeviceTopology(
-                device_id="b", dedicated_ct_ids=["ct_b"], topology_status=status
+                device_id="b", branch_ct_ids=["ct_b"], topology_status=status
             ),
         ],
     )

@@ -15,7 +15,7 @@ every inference and learning contract is keyed by WattMosaic's
 
 The link is **declarative, never inferred**.  A device owns:
 
-1. its CT channels (``dedicated_ct_ids`` + ``branch_ct_ids``) — the entity id
+1. its CT channels (``branch_ct_ids``) — the entity id
    on each :class:`~wattmosaic_engine.contracts.CTChannel` is a *power* entity;
 2. zero or more state entities listed in
    ``DeviceTopology.metadata["state_entity_ids"]`` — the ``switch``/``climate``/
@@ -162,11 +162,8 @@ def runtime_state_entities(device: DeviceTopology | Mapping[str, Any]) -> list[s
 
 def _ct_ids(device: DeviceTopology | Mapping[str, Any]) -> list[str]:
     if isinstance(device, Mapping):
-        return [
-            *_as_sequence(device.get("dedicated_ct_ids")),
-            *_as_sequence(device.get("branch_ct_ids")),
-        ]
-    return [*device.dedicated_ct_ids, *device.branch_ct_ids]
+        return [*_as_sequence(device.get("branch_ct_ids"))]
+    return [*device.branch_ct_ids]
 
 
 def entity_links(topology: Topology | None) -> dict[str, tuple[str, tuple[str, ...]]]:

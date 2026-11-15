@@ -292,7 +292,6 @@ class StubFacade(NullFacade):
                 {
                     "device_id": "stub_device",
                     "name": "Stub load",
-                    "dedicated_ct_ids": [],
                     "branch_ct_ids": ["ct_l1"],
                     "topology_status": "candidate",
                 }

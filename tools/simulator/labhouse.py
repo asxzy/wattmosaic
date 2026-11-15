@@ -300,7 +300,7 @@ def _factor2_topology() -> tuple[HouseholdTopology, dict[str, RefossFactorChanne
     device.metadata = {**device.metadata, "simulated_factor": "x2", "metered_leg": "l1"}
     channel = topology.channel_map()["ct_main_water_heater_ct1"]
     channel.paired_ct_id = None
-    channel.ct_type = CTType.DEDICATED_DEVICE
+    channel.ct_type = CTType.BRANCH
     # Drop the unmetered second leg so no phantom channel can be read.
     topology.channels = [
         c for c in topology.channels if c.ct_id != "ct_main_water_heater_ct2"
@@ -694,7 +694,7 @@ def _motor_startup(seed: int, minutes: float, interval: float) -> LabHouse:
             ct_id="ct_main_pump",
             entity_id="sensor.panel_a_pump_power",
             name="Panel A Pump",
-            ct_type=CTType.DEDICATED_DEVICE,
+            ct_type=CTType.BRANCH,
             phase=Phase.L1,
             parent_ct_id="ct_main_l1",
             panel="main",

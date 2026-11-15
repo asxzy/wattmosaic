@@ -74,7 +74,7 @@ def _topology() -> Topology:
             CTChannel(
                 ct_id="ct_water_heater",
                 entity_id="sensor.water_heater_power",
-                ct_type=CTType.DEDICATED_DEVICE,
+                ct_type=CTType.BRANCH,
                 phase=Phase.L1,
                 parent_ct_id="main_l1",
             ),
@@ -90,7 +90,7 @@ def _topology() -> Topology:
             DeviceTopology(
                 device_id="water_heater",
                 name="Water Heater",
-                dedicated_ct_ids=["ct_water_heater"],
+                branch_ct_ids=["ct_water_heater"],
                 phase=Phase.L1,
                 metadata={"state_entity_ids": ["binary_sensor.water_heater_zone_1_heating"]},
             ),
@@ -624,8 +624,13 @@ def test_shared_circuit_does_not_credit_one_lamp_with_the_whole_row() -> None:
     assert batch.diagnostics["shared_rows_held_as_upper_bounds"] == ["br_lights"]
 
 
-def test_dedicated_ct_is_measured_and_graded_measured() -> None:
-    """A dedicated CT grades Measured unless a declared signal corroborates it."""
+def test_own_circuit_ct_is_measured_and_graded_measured() -> None:
+    """A circuit row that only this device draws on grades Measured.
+
+    The channel role that used to grant a *direct* measurement is retired, so
+    the value comes from the constrained fit over the device's own row — but the
+    evidence is the same: nothing else can explain the row.
+    """
     # The fixture water_heater carries an evidence-derived load entity, so build a
     # device with no declared signal at all to isolate the measurement grade.
     topology = Topology(
@@ -634,29 +639,39 @@ def test_dedicated_ct_is_measured_and_graded_measured() -> None:
             CTChannel(
                 ct_id="ct_pump",
                 entity_id="sensor.pump_power",
-                ct_type=CTType.DEDICATED_DEVICE,
+                ct_type=CTType.BRANCH,
                 phase=Phase.L1,
                 parent_ct_id="main_l1",
             ),
         ],
-        devices=[DeviceTopology(device_id="pump", dedicated_ct_ids=["ct_pump"], phase=Phase.L1)],
+        devices=[DeviceTopology(device_id="pump", branch_ct_ids=["ct_pump"], phase=Phase.L1)],
     )
     effective = effective_configs(topology)["pump"]
     assert effective.load_entity_ids == ()  # nothing declares runtime
     result = _infer(topology, {"main_l1": 5000.0, "ct_pump": 4500.0}, {"pump": "on"}).get("pump")
-    assert result.source == Source.DIRECT_MEASURED
+    assert result.source == Source.INFERRED
     assert result.power_w == pytest.approx(4500.0)
-    assert result.confidence_tier == ConfidenceTier.TIER_3_MEASURED
+    # No declared signal to corroborate it, so the fit is Tier 2.  The measured
+    # grade is only reachable with corroboration now that no row is read directly.
+    assert result.confidence_tier == ConfidenceTier.TIER_2_INFERRED
 
 
-def test_declared_load_signal_promotes_to_verified() -> None:
+def test_declared_load_signal_promotes_measured_grading() -> None:
+    """A declared load signal promotes the evidence tier by one.
+
+    With the direct-measurement path retired, ``TIER_4_VERIFIED`` is no longer
+    reachable: it required a *measured* source, and a circuit row is now always
+    separated rather than read.  The promotion the signal buys is the same one
+    it always bought — from ``inferred`` to measured-grade — so a device alone
+    on its row goes TIER_2 without a signal and TIER_3 with one.
+    """
     topology = _with(
         [
             DeviceConfiguration(
                 device_id="water_heater",
                 device_type=DeviceType.HVAC_HEAT,
                 connectivity=HaConnectivity.CONNECTED,
-                monitoring=MonitoringLevel.DEDICATED,
+                monitoring=MonitoringLevel.UNKNOWN,
                 behavior=PowerBehavior.FIXED,
                 state_entity_ids=["binary_sensor.water_heater_heating"],
                 expected=ExpectedPower(on_w=4500.0),
@@ -664,22 +679,30 @@ def test_declared_load_signal_promotes_to_verified() -> None:
         ]
     )
     result = _infer(topology, {"main_l1": 5000.0, "ct_water_heater": 4500.0}, {"water_heater": "on"}).get("water_heater")
-    assert result.confidence_tier == ConfidenceTier.TIER_4_VERIFIED
+    assert result.confidence_tier == ConfidenceTier.TIER_3_MEASURED
+    assert any("load_signal_corroborates" in r for r in result.tier_reasons)
 
 
-def test_verified_downgrades_when_the_load_signal_disagrees() -> None:
+def test_a_state_signal_that_disagrees_withholds_the_value() -> None:
+    """State says off while the row carries power: do not credit the device.
+
+    The ``dedicated_ct_disagrees_with_state`` reason no longer exists because no
+    row is read directly; the conservative half of that rule still applies — no
+    corroboration, so the reading is not attributed.
+    """
     topology = _with(
         [
             DeviceConfiguration(
                 device_id="water_heater",
-                monitoring=MonitoringLevel.DEDICATED,
+                monitoring=MonitoringLevel.UNKNOWN,
                 state_entity_ids=["binary_sensor.water_heater_heating"],
             )
         ]
     )
     result = _infer(topology, {"main_l1": 5000.0, "ct_water_heater": 4500.0}, {"water_heater": "off"}).get("water_heater")
-    assert result.confidence_tier == ConfidenceTier.TIER_3_MEASURED
-    assert any("disagrees_with_state" in r for r in result.tier_reasons)
+    assert result.source == Source.UNKNOWN
+    assert result.power_w == pytest.approx(0.0)
+    assert result.confidence_tier == ConfidenceTier.TIER_0_UNKNOWN
 
 
 def test_mode_entity_alone_produces_no_watts() -> None:
@@ -765,8 +788,8 @@ def test_tiers_are_persisted_in_the_result_contract() -> None:
         "water_heater"
     )
     payload = result.model_dump(mode="json")
-    # The fixture declares a load entity, so the CT measurement is corroborated.
-    assert payload["confidence_tier"] == "tier_4_verified"
-    assert payload["monitoring_level"] == "dedicated"
+    # The fixture declares a load entity, so the row's separation is corroborated.
+    assert payload["confidence_tier"] == "tier_3_measured"
+    assert payload["monitoring_level"] == "shared"
     assert payload["tier_reasons"]
     assert payload["confidence_is_calibrated"] is False

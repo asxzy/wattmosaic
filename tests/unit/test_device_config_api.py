@@ -33,7 +33,7 @@ HEADERS = {"X-API-Token": TOKEN}
 
 
 def _topology() -> Topology:
-    """One main CT, one dedicated CT, one shared branch CT."""
+    """One circuit CT owned by a device, one shared branch CT."""
     return Topology(
         status=TopologyStatus.CANDIDATE,
         channels=[
@@ -46,7 +46,7 @@ def _topology() -> Topology:
             CTChannel(
                 ct_id="ct_hot_tub",
                 entity_id="sensor.hot_tub_power",
-                ct_type=CTType.DEDICATED_DEVICE,
+                ct_type=CTType.BRANCH,
                 phase=Phase.L1,
                 parent_ct_id="main_l1",
                 device_id="hot_tub",
@@ -63,7 +63,7 @@ def _topology() -> Topology:
             DeviceTopology(
                 device_id="hot_tub",
                 name="Hot tub",
-                dedicated_ct_ids=["ct_hot_tub"],
+                branch_ct_ids=["ct_hot_tub"],
                 phase=Phase.L1,
             ),
             DeviceTopology(
@@ -189,7 +189,9 @@ def test_device_endpoint_carries_the_same_configuration(core) -> None:
         async with session.get(f"{base}/devices/hot_tub") as resp:
             assert resp.status == 200
             one = await resp.json()
-        assert one["configuration"]["monitoring"] == "dedicated"
+        # A device alone on its own circuit row is monitored through that row;
+        # with the single-device role retired the label is ``shared``.
+        assert one["configuration"]["monitoring"] == "shared"
         assert one["confidence_tier"] is None
         return True
 
@@ -220,8 +222,8 @@ def test_configuration_reflects_a_projected_device_configuration(core) -> None:
         assert config["load_entity_ids"] == ["light.kitchen"]
         assert config["expected_on_w"] == 45.0
         assert config["expected_standby_w"] == 0.0
-        # The dedicated device keeps the graph-derived level.
-        assert devices["hot_tub"]["configuration"]["monitoring"] == "dedicated"
+        # The own-circuit device keeps the graph-derived level.
+        assert devices["hot_tub"]["configuration"]["monitoring"] == "shared"
         return True
 
     assert run(_with_server(core, fn))
@@ -279,9 +281,9 @@ def test_unconfigured_device_monitoring_comes_from_the_ct_graph(core) -> None:
     async def fn(session, base):
         async with session.get(f"{base}/devices") as resp:
             devices = {d["device_id"]: d for d in await resp.json()}
-        # A dedicated CT is a dedicated measurement, not "unknown".
-        assert devices["hot_tub"]["configuration"]["monitoring"] == "dedicated"
-        # A shared branch with an unrelated sibling is not dedicated.
+        # A device with its own circuit row is attributed through it, not "unknown".
+        assert devices["hot_tub"]["configuration"]["monitoring"] == "shared"
+        # A shared branch with an unrelated sibling is attributed the same way.
         assert devices["hot_tub"]["configuration"]["device_type"] == "unknown"
         assert devices["hot_tub"]["configuration"]["behavior"] == "unknown"
         return True

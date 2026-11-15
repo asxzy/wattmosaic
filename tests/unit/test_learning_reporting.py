@@ -515,7 +515,7 @@ def _topology(*, confirmed: bool):
             CTChannel(
                 ct_id="ded_fridge",
                 entity_id="sensor.fridge",
-                ct_type=CTType.DEDICATED_DEVICE,
+                ct_type=CTType.BRANCH,
                 phase=Phase.L1,
                 parent_ct_id="m_l1",
             ),
@@ -524,7 +524,7 @@ def _topology(*, confirmed: bool):
             DeviceTopology(
                 device_id="dev_fridge",
                 name="Fridge",
-                dedicated_ct_ids=["ded_fridge"],
+                branch_ct_ids=["ded_fridge"],
                 topology_status=status,
             ),
         ],
