@@ -26,6 +26,7 @@ from .api_client import EngineAuthError, EngineClient, EngineError, EngineUnavai
 from .const import (
     CONF_API_TOKEN,
     CONF_BASE_URL,
+    CONF_CT_ASSIGNMENTS,
     DOMAIN,
     PLATFORMS,
     RESPONSE_SERVICES,
@@ -65,6 +66,49 @@ SERVICE_SCHEMA = vol.Schema(
 # --------------------------------------------------------------------------- #
 # Setup / teardown
 # --------------------------------------------------------------------------- #
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Upgrade a config entry written before the CT role vocabulary changed.
+
+    Version 1 stored ``ct_assignments`` roles as ``dedicated_device``.  That role
+    is retired, and leaving it in place does not merely look stale: the replay
+    compares the stored role against the engine's channel, decides the two
+    disagree, and PUTs the old value straight back -- which the engine rejects
+    with ``400`` once the enum member is gone.  Every subsequent poll retries, so
+    the install can never re-sync.
+
+    ``ct_assignments`` is a dict keyed by ``ct_id`` (not a list), and it may live
+    in ``entry.data`` or ``entry.options`` -- ``async_setup_entry`` merges both --
+    so both mappings are examined.  Every other key on an assignment is
+    preserved: ``device_id``/``phase``/``polarity``/``paired_ct_id``/
+    ``parent_ct_id``/``alias_of_ct_id``/``enabled`` are independent declarations
+    and rewriting only the role must not disturb them.
+
+    The new version is persisted through ``async_update_entry``; assigning
+    ``entry.version`` alone does not survive a restart.
+    """
+    if entry.version == 1:
+        data = dict(entry.data)
+        options = dict(entry.options)
+        changed = False
+        for store in (data, options):
+            assignments = store.get(CONF_CT_ASSIGNMENTS)
+            if not isinstance(assignments, dict):
+                continue
+            for assignment in assignments.values():
+                if isinstance(assignment, dict) and assignment.get("role") == "dedicated_device":
+                    # Mutated in place, then written back through the entry
+                    # below, so the surrounding declaration is untouched.
+                    assignment["role"] = "branch"
+                    changed = True
+        if changed:
+            hass.config_entries.async_update_entry(
+                entry, data=data, options=options, version=2,
+            )
+        else:
+            hass.config_entries.async_update_entry(entry, version=2)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

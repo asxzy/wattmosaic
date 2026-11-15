@@ -8,6 +8,7 @@ Never edit an already-released migration; add a new one.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -131,6 +132,129 @@ AUDIT_TABLES: tuple[str, ...] = (
     # that is impossible if the verdict only lives in process memory.
     "isolation_verdicts",
 )
+
+
+def _parse_json(raw: str | None) -> object:
+    """Parse a JSON column; ``None`` when it is absent or unreadable.
+
+    A migration runs over whatever a user's database happens to contain, so one
+    hand-edited or truncated cell must not abort the transaction and leave the
+    install unable to start.
+    """
+    if raw is None:
+        return None
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _json_object(raw: str | None) -> dict[str, object]:
+    """A JSON column as an object, or an empty one."""
+    value = _parse_json(raw)
+    return value if isinstance(value, dict) else {}
+
+
+def _ids(raw: str | None) -> list[str]:
+    """A JSON id list as strings, dropping anything that is not an id."""
+    value = _parse_json(raw)
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if isinstance(item, str) and item]
+
+
+def _retire_dedicated_rows(conn: sqlite3.Connection) -> None:
+    """Make every stored surface survivable once ``dedicated_device`` is gone.
+
+    ``CTType.DEDICATED_DEVICE`` and ``MonitoringLevel.DEDICATED`` are removed by
+    later waves.  Three independent load paths read the old vocabulary straight
+    out of the database and have no tolerant fallback:
+
+    * ``load_topology`` validates ``ct_channels.ct_type`` through Pydantic, so a
+      surviving ``dedicated_device`` row makes every startup raise;
+    * ``load_device_configurations`` wraps validation in ``try/except: continue``,
+      so a stored ``"monitoring": "dedicated"`` makes the **whole configuration
+      row** disappear -- state entity ids, expected watts, light and controller
+      maps included;
+    * ``InferenceResult.monitoring_level`` is an enum, so historical inference
+      rows carrying ``"dedicated"`` fail to validate when they are read back.
+
+    Device ids move rather than disappear.  ``attribution_ct_ids`` only consults
+    ``dedicated_ct_ids`` through ``dedicated_channel_for``; once the channel type
+    is ``branch`` that lookup finds nothing and attribution falls through to
+    ``most_specific_branch_group``, which reads ``branch_ct_ids`` only.  An id
+    left behind in the dedicated list would therefore strip the device's
+    attribution entirely, so the two lists are unioned into the branch list.
+
+    ``projected_ct_ids`` is retracted by ``project_configuration`` before it
+    re-adds anything, so a demoted id left there is corrected on the next
+    projection -- unless a surviving configuration still names it in
+    ``monitored_by_ct_ids``, in which case removing it would drop a live
+    declaration.  The channel wizard never writes ``projected_ct_ids``, so this
+    rule cannot strip a user declaration made there.
+
+    Idempotent: the dedicated list is emptied, so a second pass unions nothing
+    new and strips nothing; the remaining steps are assignments of an already
+    migrated value.
+    """
+    # The ids a surviving configuration still claims.  Read before the payloads
+    # are rewritten, so the rule is evaluated against what the user declared.
+    kept_by_configuration: set[str] = set()
+    for row in conn.execute("SELECT payload_json FROM device_configurations").fetchall():
+        claimed = _json_object(row[0]).get("monitored_by_ct_ids")
+        if isinstance(claimed, list):
+            kept_by_configuration.update(
+                str(item) for item in claimed if isinstance(item, str) and item
+            )
+
+    for row in conn.execute(
+        "SELECT device_id, dedicated_ct_ids_json, branch_ct_ids_json, metadata_json "
+        "FROM devices"
+    ).fetchall():
+        device_id, dedicated_raw, branch_raw, metadata_raw = row
+        dedicated = _ids(dedicated_raw)
+        branch = _ids(branch_raw)
+        union = sorted(set(dedicated) | set(branch))
+        original_metadata = _json_object(metadata_raw)
+        metadata = dict(original_metadata)
+
+        if union != branch:
+            conn.execute(
+                "UPDATE devices SET branch_ct_ids_json = ? WHERE device_id = ?",
+                (json.dumps(union), device_id),
+            )
+        if dedicated:
+            conn.execute(
+                "UPDATE devices SET dedicated_ct_ids_json = '[]' WHERE device_id = ?",
+                (device_id,),
+            )
+
+        projected = metadata.get("projected_ct_ids")
+        if dedicated and isinstance(projected, list):
+            demoted = {cid for cid in dedicated if cid not in kept_by_configuration}
+            retained = [cid for cid in projected if str(cid) not in demoted]
+            if len(retained) != len(projected):
+                metadata["projected_ct_ids"] = retained
+        if metadata != original_metadata:
+            conn.execute(
+                "UPDATE devices SET metadata_json = ? WHERE device_id = ?",
+                (json.dumps(metadata), device_id),
+            )
+
+    for row in conn.execute(
+        "SELECT device_id, payload_json FROM device_configurations"
+    ).fetchall():
+        device_id, raw = row
+        payload = _parse_json(raw)
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("monitoring") != "dedicated":
+            continue
+        payload["monitoring"] = "shared"
+        conn.execute(
+            "UPDATE device_configurations SET payload_json = ? WHERE device_id = ?",
+            (json.dumps(payload), device_id),
+        )
 
 
 MIGRATIONS: tuple[Migration, ...] = (
@@ -640,6 +764,28 @@ MIGRATIONS: tuple[Migration, ...] = (
             "CREATE INDEX IF NOT EXISTS idx_isolation_time ON isolation_verdicts(occurred_at)",
             "CREATE INDEX IF NOT EXISTS idx_isolation_device ON isolation_verdicts(device_id, occurred_at)",
         ),
+    ),
+    Migration(
+        version=11,
+        name="retire_dedicated_device_role",
+        statements=(
+            # Unconstrained by design: ``ct_channels.ct_type`` is a plain TEXT
+            # column with no CHECK constraint, so demoting the role is a data
+            # change, not a schema change.  A channel that measured one load
+            # measures the same circuit afterwards -- it simply stops being the
+            # key to the Level-1 direct path.
+            "UPDATE ct_channels SET ct_type = 'branch' WHERE ct_type = 'dedicated_device'",
+            # Historical inference rows must still validate once
+            # ``MonitoringLevel.DEDICATED`` is removed: ``row_to_inference_result``
+            # passes the stored string straight into the enum.  ``shared`` is the
+            # honest replacement -- the CT now sits on a circuit rather than
+            # being declared the device's own.
+            "UPDATE inference_results SET monitoring_level = 'shared' "
+            "WHERE monitoring_level = 'dedicated'",
+        ),
+        # The remaining four surfaces live in JSON columns, which SQL cannot
+        # rewrite portably, and the union must be idempotent per device.
+        apply=_retire_dedicated_rows,
     ),
 )
 

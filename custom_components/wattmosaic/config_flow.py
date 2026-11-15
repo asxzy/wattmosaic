@@ -777,7 +777,7 @@ class _AssignmentWizard:
 class WattMosaicConfigFlow(_AssignmentWizard, ConfigFlow, domain=DOMAIN):
     """Full setup: connection, polling settings, CT assignment, confirmation."""
 
-    VERSION = 1
+    VERSION = 2
 
     @staticmethod
     @callback

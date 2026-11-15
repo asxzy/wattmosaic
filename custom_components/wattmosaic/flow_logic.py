@@ -587,6 +587,15 @@ def normalise_assignment(
     role = str(submitted.get("role") or channel.get("ct_type") or CT_ROLE_UNKNOWN).lower()
     phase = str(submitted.get("phase") or channel.get("phase") or PHASE_UNKNOWN).lower()
     polarity = str(submitted.get("polarity") or channel.get("polarity") or POLARITY_NORMAL).lower()
+    # TEMPORARY (task-02): a config entry written before the role was retired
+    # still stores ``dedicated_device``.  Coercing it to ``unknown`` here would
+    # silently strip the CT's attribution, so it is mapped to the role that now
+    # carries the same measurement.  ``async_migrate_entry`` rewrites the stored
+    # entry, but an entry upgraded outside that path, or a payload replayed from
+    # a backup, can still arrive with the legacy value.  Remove this alias in
+    # task-13, once no un-migrated entry can exist.
+    if role == "dedicated_device":
+        role = "branch"
     if role not in CT_ROLES:
         role = CT_ROLE_UNKNOWN
     if phase not in PHASES:
