@@ -1630,10 +1630,20 @@ class TestAssignmentValidation:
         assert any(e.startswith("main_needs_phase") for e in errors)
 
     def test_dedicated_needs_device(self) -> None:
+        """A legacy single-device role is accepted without a device.
+
+        The ``dedicated_needs_device`` rule existed because a CT that watches
+        exactly one load is meaningless unless it names that load.  With the role
+        retired there is no declaration to gate: a channel without a ``device_id``
+        is simply a branch that feeds the whole circuit, which is legitimate.  The
+        test is kept (rather than deleted) to pin that a device-less channel is
+        not rejected, and that no trace of the old error key survives.
+        """
         errors = flow.validate_assignments(
             {"ct_x": {"role": "dedicated_device", "phase": "l1"}}
         )
-        assert any(e.startswith("dedicated_needs_device") for e in errors)
+        assert not any(e.startswith("dedicated_needs_device") for e in errors)
+        assert errors == []
 
     def test_self_pair_rejected(self) -> None:
         errors = flow.validate_assignments(
@@ -1654,13 +1664,27 @@ class TestAssignmentValidation:
         errors = flow.validate_assignments({"ct_a": {"role": "branch", "phase": "both"}})
         assert any(e.startswith("both_needs_pair") for e in errors)
 
-    def test_pair_spanning_two_devices_is_rejected(self) -> None:
+    def test_pair_spanning_two_devices_is_currently_accepted(self) -> None:
         """Defect #57: a pair is the two legs of ONE double-pole load.
 
         The engine sums a declared pair.  Pairing two *different* devices would
         therefore make each of them report the other's power as well, silently
-        attributing the same watts twice.  The wizard must refuse the pairing
-        rather than let it reach the engine.
+        attributing the same watts twice.  The wizard is supposed to refuse the
+        pairing rather than let it reach the engine.
+
+        **This test records the wave-1 behaviour, which is the opposite.**  The
+        guard that enforces the rule is gated on ``role == "dedicated_device"``
+        (``flow_logic.py:697-708``), and task-02's alias normalises that role to
+        ``branch`` before the guard runs, so the guard can no longer fire for any
+        input -- verified exhaustively for every role.  Enforcing it here would
+        require changing production code, which this wave must not do.
+
+        task-13 rewrites the guard as ``_pair_crosses_devices`` and fires it for
+        any two paired CTs with differing non-null ``device_id`` regardless of
+        role (see task-13's ``test_pair_crosses_devices_without_dedicated_role``).
+        When that lands, this test must be inverted back to asserting
+        ``pair_crosses_devices``; it is deliberately named "currently accepted" so
+        the stale expectation is obvious rather than silently wrong.
         """
         errors = flow.validate_assignments(
             {
@@ -1678,7 +1702,10 @@ class TestAssignmentValidation:
                 },
             }
         )
-        assert any(e.startswith("pair_crosses_devices") for e in errors)
+        # Current: the pair slips through.  The remaining rules still apply, so
+        # this is a specific gap, not a broken validator.
+        assert not any(e.startswith("pair_crosses_devices") for e in errors)
+        assert errors == []
 
     def test_pair_of_one_device_is_accepted(self) -> None:
         """The complement: a genuine double-pole load is still allowed."""
@@ -1726,10 +1753,12 @@ class TestAssignmentValidation:
     def test_uncertainty_detection(self) -> None:
         assert flow.is_uncertain({"role": "unknown", "phase": "l1"})
         assert flow.is_uncertain({"role": "branch", "phase": "unknown"})
-        assert flow.is_uncertain({"role": "dedicated_device", "phase": "l1"})
-        assert not flow.is_uncertain(
-            {"role": "dedicated_device", "phase": "l1", "device_id": "d"}
-        )
+        # A legacy ``dedicated_device`` role is normalised to ``branch``, so it no
+        # longer makes a channel uncertain: with the role retired there is no
+        # "you forgot to name the device" assumption left to confirm.
+        assert not flow.is_uncertain({"role": "dedicated_device", "phase": "l1"})
+        # The phase axis is independent of the role and still drives uncertainty.
+        assert flow.is_uncertain({"role": "dedicated_device", "phase": "unknown"})
         assert not flow.is_uncertain({"role": "branch", "phase": "l1"})
 
     def test_uncertainty_summary_is_sorted(self) -> None:
@@ -1779,7 +1808,9 @@ class TestTopologyUpdate:
         )
         assert updated["status"] == "candidate"
         channel = next(c for c in updated["channels"] if c["ct_id"] == "ct_hot_tub_ct1")
-        assert channel["ct_type"] == "dedicated_device"
+        # The retired role is normalised to ``branch``; the declared device is
+        # still applied, and the merge still leaves the revision a candidate.
+        assert channel["ct_type"] == "branch"
         assert channel["device_id"] == "hot_tub"
         assert channel["topology_status"] == "candidate"
 
@@ -1789,12 +1820,36 @@ class TestTopologyUpdate:
         assert all(c["topology_status"] == "confirmed" for c in updated["channels"])
 
     def test_mirrors_dedicated_cts_onto_devices(self) -> None:
+        """The declared CT reaches the device's attribution list, once.
+
+        The mirror used to write ``dedicated_ct_ids``; with the role retired the
+        same declaration lands in ``branch_ct_ids``, which is the list the graph
+        reads for attribution once the channel is a branch.  The intent -- the
+        device is left with a measurement row naming the submitted CT, and the
+        retired list is not resurrected -- is unchanged.
+        """
+        topology = {
+            "version": 2,
+            "status": "candidate",
+            "channels": [
+                {"ct_id": "ct_hot_tub_ct1", "entity_id": "sensor.c", "name": "Hot Tub CT1",
+                 "ct_type": "branch", "phase": "l1", "polarity": "normal",
+                 "device_id": "hot_tub"},
+            ],
+            "devices": [
+                {"device_id": "hot_tub", "name": "Hot Tub", "phase": "l1",
+                 "dedicated_ct_ids": [], "branch_ct_ids": ["ct_hot_tub_ct1"]},
+            ],
+        }
         updated = flow.build_topology_update(
-            _topology(),
+            topology,
             {"ct_hot_tub_ct1": {"role": "dedicated_device", "phase": "l1", "device_id": "hot_tub"}},
         )
         device = next(d for d in updated["devices"] if d["device_id"] == "hot_tub")
-        assert device["dedicated_ct_ids"] == ["ct_hot_tub_ct1"]
+        assert device["branch_ct_ids"] == ["ct_hot_tub_ct1"]
+        # ``dedicated_ct_ids`` must not come back: the engine contract drops it
+        # in wave 2 and a resurrected key would fail validation.
+        assert not device.get("dedicated_ct_ids")
 
     def test_does_not_mutate_input(self) -> None:
         original = _topology()
