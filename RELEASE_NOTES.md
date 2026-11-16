@@ -1,5 +1,13 @@
 # Release Notes
 
+## v0.2.1-dev.35 — 2026-11-16 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- docs: add the dedicated-CT retirement specification set
+
 ## v0.2.1-dev.34 — 2026-11-16 (development channel)
 
 Automatic development build.
