@@ -171,6 +171,8 @@ Validation rules (enforced on the confirmation step):
 
 - a `main` CT must have a concrete phase (`l1`/`l2`/`both`);
 - pairing must be reciprocal and cannot be self-referential;
+- paired CTs cannot name two *different* devices: a pair is the two legs of one
+  load, so the engine would sum it and attribute the same watts to both;
 - phase `both` requires a paired CT;
 - every `ct_id` must exist in the engine topology;
 - a parent must exist, must be a container (`main`/`branch`), and must not form
@@ -178,17 +180,7 @@ Validation rules (enforced on the confirmation step):
 - a duplicate-of target must exist, must not be self, and must not form a cycle;
 - a multiplier must be positive and finite.
 
-### Step 4 — Device mapping (candidates)
-
-For each circuit CT without a device, the flow shows **ranked
-candidates** derived from token overlap between the CT name/ID and
-`GET /devices` names. Each candidate label includes the matched words, e.g.
-`Panel A Water Heater (dev_panel_a_water_heater) — match: water, heater`.
-
-You can pick a candidate, type a device ID manually, or skip. **No candidate is
-ever applied automatically.**
-
-### Step 5 — Confirm
+### Step 4 — Confirm
 
 A summary lists every channel plus the list of *uncertain* entries (unknown
 role, unknown phase, or a circuit CT without a device).
@@ -208,8 +200,8 @@ wizard.
 
 ### Options / reconfigure
 
-- **Configure → Options**: polling settings, then the same channel/mapping/
-  confirm wizard. Stored assignments are the starting point.
+- **Configure → Options**: polling settings, then the same channel/confirm
+  wizard. Stored assignments are the starting point.
 - **Reconfigure** (entry menu): change the engine URL/token only.
 
 Changing options triggers a clean config-entry reload.

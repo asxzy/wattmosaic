@@ -635,11 +635,20 @@ def test_legacy_entry_migration_does_not_run_twice() -> None:
     assert hass.config_entries.calls == []
 
 
-def test_normalise_assignment_maps_legacy_role() -> None:
-    """A legacy role must never be coerced to ``unknown`` (it would lose attribution)."""
+def test_normalise_assignment_no_longer_aliases_the_legacy_role() -> None:
+    """The temporary migration-window alias is gone (task-13).
+
+    ``normalise_assignment`` used to map ``dedicated_device`` to ``branch`` so a
+    stored entry that had escaped ``async_migrate_entry`` kept its attribution.
+    That shim outlived its window and made the retired role reachable through the
+    wizard, so it is removed: the migration is now the *only* thing that rewrites
+    a legacy role (``test_legacy_entry_migrates_roles`` pins that end), and an
+    un-migrated payload falls through to ``unknown`` -- an honest "not assigned"
+    rather than an invented branch claim.
+    """
     flow = _flow_logic()
     normalised = flow.normalise_assignment({"role": "dedicated_device", "phase": "l1"})
-    assert normalised["role"] == "branch"
+    assert normalised["role"] == "unknown"
     # An actually-unknown role is still normalised to ``unknown``.
     assert flow.normalise_assignment({"role": "not_a_role"})["role"] == "unknown"
 

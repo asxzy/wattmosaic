@@ -100,10 +100,9 @@ MAX_UNAVAILABLE_AFTER = 86400
 # Enumerations mirrored from the contract (kept as plain strings)
 # --------------------------------------------------------------------------- #
 
-CT_ROLES: tuple[str, ...] = ("main", "branch", "dedicated_device", "unknown")
+CT_ROLES: tuple[str, ...] = ("main", "branch", "unknown")
 CT_ROLE_MAIN = "main"
 CT_ROLE_BRANCH = "branch"
-CT_ROLE_DEDICATED = "dedicated_device"
 CT_ROLE_UNKNOWN = "unknown"
 
 PHASES: tuple[str, ...] = ("l1", "l2", "both", "unknown")
@@ -142,7 +141,6 @@ DEVICE_TYPES: tuple[str, ...] = (
 CONNECTIVITY_LEVELS: tuple[str, ...] = ("connected", "not_connected", "unknown")
 
 MONITORING_LEVELS: tuple[str, ...] = (
-    "dedicated",
     "shared",
     "home_total_only",
     "unmonitored",

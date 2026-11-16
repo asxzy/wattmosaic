@@ -21,7 +21,6 @@ from .const import (
     CONF_AUTO_PLACEMENT,
     CONNECTIVITY_LEVELS,
     CT_ROLE_BRANCH,
-    CT_ROLE_DEDICATED,
     CT_ROLE_MAIN,
     CT_ROLE_UNKNOWN,
     CT_ROLES,
@@ -571,9 +570,8 @@ def assignment_defaults(
     }
 
 
-#: Roles that may contain another CT.  A ``dedicated_device`` CT watches one
-#: load, so nothing can sit behind it; an ``unknown`` role is likewise not a
-#: container.  ``main`` may nest to any depth (service -> panel -> sub-panel).
+#: Roles that may contain another CT.  An ``unknown`` role is not a container;
+#: ``main`` may nest to any depth (service -> panel -> sub-panel).
 CONTAINER_ROLES: tuple[str, ...] = (CT_ROLE_MAIN, "branch")
 
 
@@ -587,15 +585,6 @@ def normalise_assignment(
     role = str(submitted.get("role") or channel.get("ct_type") or CT_ROLE_UNKNOWN).lower()
     phase = str(submitted.get("phase") or channel.get("phase") or PHASE_UNKNOWN).lower()
     polarity = str(submitted.get("polarity") or channel.get("polarity") or POLARITY_NORMAL).lower()
-    # TEMPORARY (task-02): a config entry written before the role was retired
-    # still stores ``dedicated_device``.  Coercing it to ``unknown`` here would
-    # silently strip the CT's attribution, so it is mapped to the role that now
-    # carries the same measurement.  ``async_migrate_entry`` rewrites the stored
-    # entry, but an entry upgraded outside that path, or a payload replayed from
-    # a backup, can still arrive with the legacy value.  Remove this alias in
-    # task-13, once no un-migrated entry can exist.
-    if role == "dedicated_device":
-        role = "branch"
     if role not in CT_ROLES:
         role = CT_ROLE_UNKNOWN
     if phase not in PHASES:
@@ -647,6 +636,46 @@ def _alias_cycle(ct_id: str, aliases: Mapping[str, str | None]) -> bool:
     return False
 
 
+def _pair_crosses_devices(
+    assignments: Mapping[str, Mapping[str, Any]],
+) -> list[str]:
+    """Error keys for a pair that joins two *different* devices.
+
+    A pair is the two legs of ONE double-pole load: the engine sums a declared
+    pair, so pairing two different devices would make each report the other's
+    power as well and attribute the same watts twice.
+
+    The rule is role-independent on purpose.  It used to be gated on the retired
+    ``dedicated_device`` role, which meant that once the role was expressed as
+    ``branch`` no input could ever reach it, and a cross-device pair slipped
+    through.  A branch CT may name the device on its circuit just as a former
+    dedicated CT did, so the only thing that matters is that both halves carry a
+    ``device_id`` and the ids differ.
+
+    ``assignments`` is the submitted mapping; each entry is normalised here so a
+    caller may pass the raw payload.  A pair whose other half is missing, or is
+    not reciprocal, is left to the structural pairing rules in
+    :func:`validate_assignments` so the user sees that error rather than a
+    consequence of it.
+    """
+    normalised = {
+        str(ct_id): normalise_assignment(raw) for ct_id, raw in assignments.items()
+    }
+    errors: list[str] = []
+    for ct_id, assignment in normalised.items():
+        pair = assignment["paired_ct_id"]
+        if not pair:
+            continue
+        other = normalised.get(str(pair))
+        if other is None or other["paired_ct_id"] != ct_id:
+            continue
+        device = assignment["device_id"]
+        other_device = other["device_id"]
+        if device and other_device and other_device != device:
+            errors.append(f"pair_crosses_devices:{ct_id}:{pair}")
+    return errors
+
+
 def validate_assignments(
     assignments: Mapping[str, Mapping[str, Any]],
     channels: Sequence[Mapping[str, Any]] | None = None,
@@ -657,8 +686,9 @@ def validate_assignments(
 
     * a CT cannot pair with itself
     * a ``main`` CT needs a concrete phase (l1/l2/both)
-    * a ``dedicated_device`` CT needs a device
     * pairing is reciprocal
+    * a pair joins the two legs of one load, so two paired CTs naming different
+      devices are rejected
     * ``both`` phase requires a paired CT (double-pole halves)
     * a parent CT must exist, must be a container, and must not form a cycle
     * an ``alias_of_ct_id`` must exist, must not be self, and must not cycle
@@ -684,15 +714,12 @@ def validate_assignments(
         role = assignment["role"]
         phase = assignment["phase"]
         pair = assignment["paired_ct_id"]
-        device = assignment["device_id"]
 
         if known is not None and ct_id not in known:
             errors.append(f"unknown_channel:{ct_id}")
             continue
         if role == CT_ROLE_MAIN and phase == PHASE_UNKNOWN:
             errors.append(f"main_needs_phase:{ct_id}")
-        if role == CT_ROLE_DEDICATED and not device:
-            errors.append(f"dedicated_needs_device:{ct_id}")
         if pair and pair == ct_id:
             errors.append(f"self_pair:{ct_id}")
         if pair:
@@ -703,18 +730,6 @@ def validate_assignments(
                 other_assignment = normalise_assignment(other)
                 if other_assignment["paired_ct_id"] != ct_id:
                     errors.append(f"pair_not_reciprocal:{ct_id}:{pair}")
-                elif (
-                    role == CT_ROLE_DEDICATED
-                    and other_assignment["role"] == CT_ROLE_DEDICATED
-                    and device
-                    and other_assignment["device_id"]
-                    and other_assignment["device_id"] != device
-                ):
-                    # A pair is the two legs of ONE double-pole load.  Pairing
-                    # two different devices would make each report the other's
-                    # power as well: the engine sums a declared pair, so the
-                    # same watts would be attributed to both.
-                    errors.append(f"pair_crosses_devices:{ct_id}:{pair}")
         if phase == "both" and not pair:
             errors.append(f"both_needs_pair:{ct_id}")
 
@@ -745,6 +760,8 @@ def validate_assignments(
             MIN_MULTIPLIER <= float(multiplier) <= MAX_MULTIPLIER
         ):
             errors.append(f"multiplier_out_of_range:{ct_id}")
+
+    errors.extend(_pair_crosses_devices(assignments))
 
     return errors
 
@@ -789,11 +806,7 @@ def resolve_confirmation(
 def is_uncertain(assignment: Mapping[str, Any]) -> bool:
     """Whether an assignment needs explicit user confirmation."""
     normalised = normalise_assignment(assignment)
-    return (
-        normalised["role"] == CT_ROLE_UNKNOWN
-        or normalised["phase"] == PHASE_UNKNOWN
-        or (normalised["role"] == CT_ROLE_DEDICATED and not normalised["device_id"])
-    )
+    return normalised["role"] == CT_ROLE_UNKNOWN or normalised["phase"] == PHASE_UNKNOWN
 
 
 def uncertainty_summary(assignments: Mapping[str, Mapping[str, Any]]) -> list[str]:
@@ -807,8 +820,6 @@ def uncertainty_summary(assignments: Mapping[str, Mapping[str, Any]]) -> list[st
                 reasons.append("role unknown")
             if normalised["phase"] == PHASE_UNKNOWN:
                 reasons.append("phase unknown")
-            if normalised["role"] == CT_ROLE_DEDICATED and not normalised["device_id"]:
-                reasons.append("no device")
             uncertain.append(f"{ct_id}: " + ", ".join(reasons))
     return uncertain
 
@@ -854,15 +865,17 @@ def build_topology_update(
             channels.append(channel)
     topology["channels"] = channels
 
-    # Mirror dedicated CTs onto device topology entries (engine contract:
-    # DeviceTopology.dedicated_ct_ids).
+    # Mirror each device's measurement rows onto ``branch_ct_ids``, the only
+    # attribution list the contract still has (ADR-0029).  A channel's
+    # ``device_id`` is how the user says "this row measures that device", which
+    # is the same declaration the retired role used to carry.
     #
-    # This is a *mirror*, not an append-only note.  A CT the user demotes from
-    # ``dedicated_device`` to ``branch`` no longer belongs to the device that used
-    # to own it, and leaving the id behind makes the graph reject it
-    # ("dedicated CT ... has type BRANCH, not dedicated_device") while the device
-    # silently keeps zero attribution.  So every device's mirrored list is
-    # rebuilt from the assignment that is being submitted, not merged into.
+    # This is a *mirror*, not an append-only note.  A CT the user reassigns to
+    # another device, or turns into a feed, no longer attributes this device, and
+    # leaving the id behind makes the device claim a row it does not measure
+    # while the other device silently keeps zero attribution.  So every device's
+    # list is rebuilt from the assignment being submitted, not merged into: an
+    # untouched channel is the only id carried over.
     raw_devices = topology.get("devices")
     if isinstance(raw_devices, list):
         devices: list[dict[str, Any]] = []
@@ -871,52 +884,25 @@ def build_topology_update(
                 continue
             device = dict(item)
             device_id = device.get("device_id")
-            # Snapshot before the dedicated mirror rewrites it: a CT that this
-            # submission demotes must still be visible afterwards so it can move
-            # to ``branch_ct_ids`` rather than vanishing.
+            # A topology stored before ADR-0029 may still name rows here.  They
+            # are read once so a channel this submission keeps measuring the
+            # device is not dropped, then the retired key is removed: the
+            # contract no longer defines it.
             previous_dedicated = [str(c) for c in (device.get("dedicated_ct_ids") or [])]
-            dedicated = [
-                ct_id
-                for ct_id, raw in assignments.items()
-                if normalise_assignment(raw)["role"] == CT_ROLE_DEDICATED
-                and normalise_assignment(raw)["device_id"] == device_id
-            ]
-            # Channels this wizard step did not touch keep whatever they had, so
-            # a partial submission cannot drop a mapping the user made earlier.
-            if dedicated:
-                device["dedicated_ct_ids"] = dedicated
-                if str(device.get("topology_status") or "candidate") == "candidate":
-                    device.setdefault("metadata", {})
-            else:
-                # The device may still have a dedicated CT from an untouched
-                # channel; drop only ids this submission demoted.
-                existing = [
-                    str(c)
-                    for c in (device.get("dedicated_ct_ids") or [])
-                    if assignments.get(str(c)) is None
-                    or normalise_assignment(assignments[str(c)])["role"]
-                    == CT_ROLE_DEDICATED
-                ]
-                if existing:
-                    device["dedicated_ct_ids"] = existing
-                else:
-                    device.pop("dedicated_ct_ids", None)
+            device.pop("dedicated_ct_ids", None)
 
-            # A CT demoted from ``dedicated_device`` to ``branch`` still measures
-            # the same circuit, so the device must keep that row as a *branch*
-            # attribution.  Dropping it from ``dedicated_ct_ids`` without adding
-            # it to ``branch_ct_ids`` leaves the device with no row at all: the
-            # graph resolves zero attribution and the fixture silently reports
-            # nothing forever.  ``branch_ct_ids`` is the mirror discovery writes
-            # for a shared circuit, so the demotion lands on that same shape.
             branch = [str(c) for c in (device.get("branch_ct_ids") or [])]
-            for cid in previous_dedicated:
-                raw = assignments.get(cid)
-                if raw is None:
-                    continue
+            for ct_id, raw in assignments.items():
                 normalised = normalise_assignment(raw)
-                if normalised["role"] == CT_ROLE_BRANCH and cid not in branch:
-                    branch.append(cid)
+                if normalised["role"] != CT_ROLE_BRANCH:
+                    continue
+                # A demoted row names no device, so its existing attribution --
+                # not a fresh ``device_id`` -- is what keeps it here.
+                if (
+                    normalised["device_id"] == device_id
+                    or str(ct_id) in previous_dedicated
+                ) and str(ct_id) not in branch:
+                    branch.append(str(ct_id))
             # A row this submission reassigned elsewhere, or turned into a feed,
             # no longer attributes this device.
             retained: list[str] = []
@@ -926,8 +912,7 @@ def build_topology_update(
                 if normalised is not None and (
                     normalised["role"] in (CT_ROLE_MAIN, CT_ROLE_UNKNOWN)
                     or (
-                        normalised["role"] == CT_ROLE_DEDICATED
-                        and normalised["device_id"] is not None
+                        normalised["device_id"] is not None
                         and normalised["device_id"] != device_id
                     )
                 ):

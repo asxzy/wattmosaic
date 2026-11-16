@@ -25,6 +25,7 @@ import asyncio
 import importlib
 import importlib.util
 import json
+import re
 import sys
 import types
 from datetime import UTC, datetime, timedelta
@@ -1673,27 +1674,19 @@ class TestAssignmentValidation:
         errors = flow.validate_assignments({"ct_a": {"role": "branch", "phase": "both"}})
         assert any(e.startswith("both_needs_pair") for e in errors)
 
-    def test_pair_spanning_two_devices_is_currently_accepted(self) -> None:
+    def test_pair_spanning_two_devices_is_refused(self) -> None:
         """Defect #57: a pair is the two legs of ONE double-pole load.
 
         The engine sums a declared pair.  Pairing two *different* devices would
         therefore make each of them report the other's power as well, silently
-        attributing the same watts twice.  The wizard is supposed to refuse the
-        pairing rather than let it reach the engine.
+        attributing the same watts twice, so the wizard must refuse the pairing
+        rather than let it reach the engine.
 
-        **This test records the wave-1 behaviour, which is the opposite.**  The
-        guard that enforces the rule is gated on ``role == "dedicated_device"``
-        (``flow_logic.py:697-708``), and task-02's alias normalises that role to
-        ``branch`` before the guard runs, so the guard can no longer fire for any
-        input -- verified exhaustively for every role.  Enforcing it here would
-        require changing production code, which this wave must not do.
-
-        task-13 rewrites the guard as ``_pair_crosses_devices`` and fires it for
-        any two paired CTs with differing non-null ``device_id`` regardless of
-        role (see task-13's ``test_pair_crosses_devices_without_dedicated_role``).
-        When that lands, this test must be inverted back to asserting
-        ``pair_crosses_devices``; it is deliberately named "currently accepted" so
-        the stale expectation is obvious rather than silently wrong.
+        The guard used to be gated on the retired ``dedicated_device`` role, and
+        the role's temporary legacy alias then normalised every input to
+        ``branch`` before the guard ran -- making it unreachable.  The extracted
+        :func:`_pair_crosses_devices` is role-independent: two paired CTs each
+        naming a non-null, *different* device are refused whatever their roles.
         """
         errors = flow.validate_assignments(
             {
@@ -1711,10 +1704,10 @@ class TestAssignmentValidation:
                 },
             }
         )
-        # Current: the pair slips through.  The remaining rules still apply, so
-        # this is a specific gap, not a broken validator.
-        assert not any(e.startswith("pair_crosses_devices") for e in errors)
-        assert errors == []
+        assert any(e.startswith("pair_crosses_devices") for e in errors)
+        # The gap was specific, not a broken validator: nothing else fires.
+        assert errors == ["pair_crosses_devices:lights_ct1:lights_ct2",
+                          "pair_crosses_devices:lights_ct2:lights_ct1"]
 
     def test_pair_of_one_device_is_accepted(self) -> None:
         """The complement: a genuine double-pole load is still allowed."""
@@ -1734,6 +1727,84 @@ class TestAssignmentValidation:
                 },
             }
         )
+        assert errors == []
+
+    def test_pair_crosses_devices_without_dedicated_role(self) -> None:
+        """The guard must not depend on the retired role (task-13, AC-1).
+
+        Two **branch** channels paired with different non-null ``device_id``s are
+        the ordinary way a user describes two single-load circuits.  Pairing them
+        claims they are the two legs of one 240 V load, which the engine would
+        then sum, so the error must still fire now that no role can gate it.
+        """
+        assignments = {
+            "lights_ct1": {
+                "role": "branch",
+                "phase": "l1",
+                "device_id": "lights_1",
+                "paired_ct_id": "lights_ct2",
+            },
+            "lights_ct2": {
+                "role": "branch",
+                "phase": "l2",
+                "device_id": "lights_2",
+                "paired_ct_id": "lights_ct1",
+            },
+        }
+        errors = flow.validate_assignments(assignments)
+        assert any(e.startswith("pair_crosses_devices") for e in errors)
+        assert errors == [
+            "pair_crosses_devices:lights_ct1:lights_ct2",
+            "pair_crosses_devices:lights_ct2:lights_ct1",
+        ]
+        # The helper is reusable on its own, which is what made the rule testable.
+        assert flow._pair_crosses_devices(assignments) == errors
+
+    def test_cross_device_pair_is_refused_for_every_role_combination(self) -> None:
+        """Role-independence, checked exhaustively over the surviving roles.
+
+        A pair that names two different devices is wrong whatever the roles say,
+        so no combination may slip through.  Before the rewrite the guard was
+        gated on ``dedicated_device``, which made it unreachable for all of them.
+        """
+        roles = ("main", "branch", "unknown")
+        for role in roles:
+            for other_role in roles:
+                errors = flow.validate_assignments(
+                    {
+                        "ct_a": {
+                            "role": role,
+                            "phase": "l1",
+                            "device_id": "device_a",
+                            "paired_ct_id": "ct_b",
+                        },
+                        "ct_b": {
+                            "role": other_role,
+                            "phase": "l2",
+                            "device_id": "device_b",
+                            "paired_ct_id": "ct_a",
+                        },
+                    }
+                )
+                assert any(e.startswith("pair_crosses_devices") for e in errors), (
+                    role,
+                    other_role,
+                )
+
+    def test_pair_with_a_missing_device_id_is_not_a_cross_device_pair(self) -> None:
+        """Only two *stated* devices can conflict; a blank one stakes no claim."""
+        errors = flow.validate_assignments(
+            {
+                "ct_a": {
+                    "role": "branch",
+                    "phase": "l1",
+                    "device_id": "hot_tub",
+                    "paired_ct_id": "ct_b",
+                },
+                "ct_b": {"role": "branch", "phase": "l2", "paired_ct_id": "ct_a"},
+            }
+        )
+        assert not any(e.startswith("pair_crosses_devices") for e in errors)
         assert errors == []
 
     def test_unknown_channel_rejected(self) -> None:
@@ -1762,10 +1833,12 @@ class TestAssignmentValidation:
     def test_uncertainty_detection(self) -> None:
         assert flow.is_uncertain({"role": "unknown", "phase": "l1"})
         assert flow.is_uncertain({"role": "branch", "phase": "unknown"})
-        # A legacy ``dedicated_device`` role is normalised to ``branch``, so it no
-        # longer makes a channel uncertain: with the role retired there is no
-        # "you forgot to name the device" assumption left to confirm.
-        assert not flow.is_uncertain({"role": "dedicated_device", "phase": "l1"})
+        # The retired ``dedicated_device`` role is no longer aliased to anything:
+        # an un-migrated payload falls through to ``unknown``, which *is* an
+        # assumption and must still be confirmed.  Silently reading it as
+        # ``branch`` would claim electrical knowledge the payload never carried.
+        assert flow.normalise_assignment({"role": "dedicated_device"})["role"] == "unknown"
+        assert flow.is_uncertain({"role": "dedicated_device", "phase": "l1"})
         # The phase axis is independent of the role and still drives uncertainty.
         assert flow.is_uncertain({"role": "dedicated_device", "phase": "unknown"})
         assert not flow.is_uncertain({"role": "branch", "phase": "l1"})
@@ -1813,12 +1886,12 @@ class TestTopologyUpdate:
     def test_applies_assignments_and_keeps_candidate(self) -> None:
         updated = flow.build_topology_update(
             _topology(),
-            {"ct_hot_tub_ct1": {"role": "dedicated_device", "phase": "l1", "device_id": "hot_tub"}},
+            {"ct_hot_tub_ct1": {"role": "branch", "phase": "l1", "device_id": "hot_tub"}},
         )
         assert updated["status"] == "candidate"
         channel = next(c for c in updated["channels"] if c["ct_id"] == "ct_hot_tub_ct1")
-        # The retired role is normalised to ``branch``; the declared device is
-        # still applied, and the merge still leaves the revision a candidate.
+        # The declared role and device are applied, and the merge still leaves
+        # the revision a candidate.
         assert channel["ct_type"] == "branch"
         assert channel["device_id"] == "hot_tub"
         assert channel["topology_status"] == "candidate"
@@ -1831,11 +1904,11 @@ class TestTopologyUpdate:
     def test_mirrors_dedicated_cts_onto_devices(self) -> None:
         """The declared CT reaches the device's attribution list, once.
 
-        The mirror used to write ``dedicated_ct_ids``; with the role retired the
-        same declaration lands in ``branch_ct_ids``, which is the list the graph
-        reads for attribution once the channel is a branch.  The intent -- the
-        device is left with a measurement row naming the submitted CT, and the
-        retired list is not resurrected -- is unchanged.
+        The mirror used to write ``dedicated_ct_ids``; the contract's only
+        attribution list is now ``branch_ct_ids``, so a channel whose ``device_id``
+        names the device lands there.  The intent -- the device is left with a
+        measurement row naming the submitted CT, and the retired list is not
+        resurrected -- is unchanged.
         """
         topology = {
             "version": 2,
@@ -1852,13 +1925,14 @@ class TestTopologyUpdate:
         }
         updated = flow.build_topology_update(
             topology,
-            {"ct_hot_tub_ct1": {"role": "dedicated_device", "phase": "l1", "device_id": "hot_tub"}},
+            {"ct_hot_tub_ct1": {"role": "branch", "phase": "l1", "device_id": "hot_tub"}},
         )
         device = next(d for d in updated["devices"] if d["device_id"] == "hot_tub")
         assert device["branch_ct_ids"] == ["ct_hot_tub_ct1"]
         # ``dedicated_ct_ids`` must not come back: the engine contract drops it
         # in wave 2 and a resurrected key would fail validation.
         assert not device.get("dedicated_ct_ids")
+        assert "dedicated_ct_ids" not in device
 
     def test_does_not_mutate_input(self) -> None:
         original = _topology()
@@ -1877,22 +1951,21 @@ class TestTopologyUpdate:
         assert updated["status"] == "candidate"
 
     def test_demoting_a_dedicated_ct_keeps_the_device_on_its_row(self) -> None:
-        """A demoted CT still measures the circuit, so the row must move, not vanish.
+        """A CT that stops naming its device still measures the circuit.
 
-        Demoting ``dedicated_device`` to ``branch`` is how a user says "this
-        circuit feeds more than one fixture".  The channel loses its
-        ``device_id`` and the device loses the CT from ``dedicated_ct_ids`` --
-        but the CT still *observes* that device.  Dropping it from both lists
-        left the device with no attribution row at all: the graph resolved zero,
-        and the fixture reported nothing forever while the wizard reported
-        success.
+        Clearing ``device_id`` is how a user says "this circuit feeds more than
+        one fixture".  The channel loses its device and the device loses the CT
+        from its attribution list -- but the CT still *observes* that device.
+        Dropping it from both places left the device with no attribution row at
+        all: the graph resolved zero, and the fixture reported nothing forever
+        while the wizard reported success.
         """
         topology = {
             "version": 3,
             "status": "candidate",
             "channels": [
                 {"ct_id": "ct_lights", "entity_id": "sensor.lights", "name": "Lights",
-                 "ct_type": "dedicated_device", "phase": "l1", "polarity": "normal",
+                 "ct_type": "branch", "phase": "l1", "polarity": "normal",
                  "device_id": "lights"},
             ],
             "devices": [
@@ -1919,7 +1992,7 @@ class TestTopologyUpdate:
             "status": "candidate",
             "channels": [
                 {"ct_id": "ct_lights", "entity_id": "sensor.lights", "name": "Lights",
-                 "ct_type": "dedicated_device", "phase": "l1", "polarity": "normal",
+                 "ct_type": "branch", "phase": "l1", "polarity": "normal",
                  "device_id": "lights"},
             ],
             "devices": [
@@ -2577,11 +2650,14 @@ class TestPackaging:
             "user",
             "settings",
             "channels",
-            "mapping",
             "confirm",
             "reconfigure",
         }
-        assert set(en["options"]["step"]) >= {"init", "channels", "mapping", "confirm"}
+        assert set(en["options"]["step"]) >= {"init", "channels", "confirm"}
+        # The device-mapping step went with the retired role: a channel names its
+        # device on the channels form, so a separate step would re-ask it.
+        assert "mapping" not in en["config"]["step"]
+        assert "mapping" not in en["options"]["step"]
 
 
 # --------------------------------------------------------------------------- #
@@ -2837,6 +2913,88 @@ class TestOptionsFlowRegistration:
         body = source[class_start:class_end]
         assert "@staticmethod" in body
         assert "return WattMosaicOptionsFlow(config_entry)" in body
+
+
+class TestRetiredAssignmentVocabulary:
+    """The retired role and monitoring level must not reappear in the flow.
+
+    ``homeassistant`` is not installed here, so the selectors cannot be
+    constructed.  These tests therefore assert the *source* that builds them,
+    against the enumerations the contract now defines: a selector offering a
+    value the engine rejects would be a form the user cannot submit.
+    """
+
+    def _source(self) -> str:
+        return (PACKAGE_DIR / "config_flow.py").read_text()
+
+    def _block(self, header: str) -> str:
+        """Source from ``header`` up to the next top-level definition."""
+        source = self._source()
+        start = source.index(header)
+        rest = source[start:]
+        end = len(rest)
+        for marker in ("\ndef ", "\n_"):
+            found = rest.find(marker, len(header))
+            if found != -1:
+                end = min(end, found + 1)
+        return rest[:end]
+
+    def _selector_values(self, body: str) -> list[str]:
+        return re.findall(r'SelectOptionDict\(value="([^"]*)"', body)
+
+    def test_role_options_exclude_dedicated(self) -> None:
+        """The rendered role selector offers exactly main / branch / unknown."""
+        values = self._selector_values(self._block("def _role_select("))
+        assert values == ["main", "branch", "unknown"]
+        assert set(values) == set(const.CT_ROLES)
+        assert "dedicated_device" not in values
+
+    def test_monitoring_options_exclude_dedicated(self) -> None:
+        """The monitoring select is built from ``MONITORING_LEVELS`` only."""
+        assert "dedicated" not in const.MONITORING_LEVELS
+        assert set(const.MONITORING_LEVELS) == {
+            "shared",
+            "home_total_only",
+            "unmonitored",
+            "unknown",
+        }
+        labels = self._block("_MONITORING_LABELS = {")
+        assert '"dedicated"' not in labels
+        # The label map must cover exactly the surviving levels, or a legitimate
+        # choice renders without a label.
+        assert set(const.MONITORING_LEVELS) <= set(
+            re.findall(r'^\s*"([^"]+)":', labels, re.MULTILINE)
+        )
+
+    def test_role_constants_have_no_retired_member(self) -> None:
+        assert const.CT_ROLES == ("main", "branch", "unknown")
+        assert not hasattr(const, "CT_ROLE_DEDICATED")
+        assert "dedicated_device" not in const.CT_ROLES
+
+    def test_mapping_step_and_its_helpers_are_gone(self) -> None:
+        """The dead step went with the role; the channel form asks for the device.
+
+        Grepping for the step name is deliberate: a leftover ``async_step_mapping``
+        would be unreachable *and* would keep an untranslated step reachable via
+        Home Assistant's URL-based flow routing.
+        """
+        source = self._source()
+        for name in (
+            "async_step_mapping",
+            "_unmapped_channels",
+            "_mapping_schema",
+            "_mapping_placeholders",
+            "_candidate_choices",
+        ):
+            assert name not in source, name
+        assert 'step_id="mapping"' not in source
+        assert "async_step_confirm()" in source
+
+    def test_channel_form_still_offers_the_device_dropdown(self) -> None:
+        """Removing the step loses no capability: the channel form owns ``device_id``."""
+        source = self._source()
+        assert 'vol.Optional("device_id"' in source
+        assert "_device_options(" in source
 
 
 # --------------------------------------------------------------------------- #
