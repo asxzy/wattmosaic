@@ -30,7 +30,7 @@ python tools/dev/verify.py
 ## Dependency DAG
 
 ```
-W1 Migration seam (engine v9 + HA entry migration)
+W1 Migration seam (engine v11 + HA entry migration)
    │
    ├──► W2 Contract narrowing (CTType / MonitoringLevel / dedicated_ct_ids)
    │        │
@@ -61,11 +61,11 @@ Hard constraints:
 
 | Task | Objective | Files owned |
 | --- | --- | ---|
-| task-01 | Engine schema v9: demote `ct_type`, move ids, strip `projected_ct_ids`; **plus** migrate `device_configurations.payload_json` and historical `inference_results.monitoring_level` | `storage/migrations.py` (only) |
+| task-01 | Engine schema v11: demote `ct_type`, move ids, strip `projected_ct_ids`; **plus** migrate `device_configurations.payload_json` and historical `inference_results.monitoring_level` | `storage/migrations.py` (only) |
 | task-02 | HA config-entry migration: rewrite stored `ct_assignments` roles; add the temporary `normalise_assignment` alias | `custom_components/wattmosaic/__init__.py`, `config_flow.py` (VERSION only), `flow_logic.py` (`:587-591` only) |
 | task-03 | Tests for both migrations | `tests/unit/test_migrations.py` (new) |
 
-Exit criteria: a database written at schema 8 with `dedicated_device` rows opens, migrates, and yields a topology where every device has ≥1 attribution row; stored configurations and historical inference rows survive; a legacy HA config entry upgrades without a replay error.
+Exit criteria: a database written at schema 10 with `dedicated_device` rows opens, migrates, and yields a topology where every device has ≥1 attribution row; stored configurations and historical inference rows survive; a legacy HA config entry upgrades without a replay error.
 
 `storage/database.py` is **deliberately not owned by task-01**: its `DeviceTopology` references are removed in Wave 2 (task-05b). Editing them in Wave 1 would be contract work before the migration seam is proven.
 
@@ -181,7 +181,7 @@ Overlaps are sequential: task-05a repoints `configuration.py`; task-07 then simp
 
 **Test-first requirement:** for each wave, write or update the failing test before the implementation change.
 
-- **Migration tests (W1):** build a schema-8 database **with raw `sqlite3`** (constructing `Database` runs migrations in `__init__`, so it cannot produce a pre-migration DB). Then: assert load + migrate + replay; assert stored configurations and historical inference rows survive; assert idempotency by invoking the v9 `apply=` callback directly twice on one connection (the version guard at `migrations.py:484-485` makes a second full run a no-op, so a naive "run twice" test cannot detect a double-add).
+- **Migration tests (W1):** build a schema-10 database **with raw `sqlite3`** (constructing `Database` runs migrations in `__init__`, so it cannot produce a pre-migration DB). Then: assert load + migrate + replay; assert stored configurations and historical inference rows survive; assert idempotency by invoking the v11 `apply=` callback directly twice on one connection (the version guard at `migrations.py:484-485` makes a second full run a no-op, so a naive "run twice" test cannot detect a double-add).
 - **Contract tests (W2):** assert `PUT /topology` with `ct_type = "dedicated_device"` returns 400; assert `DeviceTopology(dedicated_ct_ids=[...])` is rejected; assert `CONTRACT_VERSION == "2.0.0"`; assert the engine's header constant (`custom_components/wattmosaic/const.py:31`) matches.
 - **Solver tests (W3):** a fixture with a single-device branch row still produces a positive reading via `_is_solo_row`; a shared row still uses the ADR-0026 step rule; no result has `source = direct_measured`.
 - **Integration tests (W7):** legacy entry migration; options flow renders without the role; the cross-device pairing guard fires for two different non-null `device_id`s regardless of role.

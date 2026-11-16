@@ -163,9 +163,9 @@ Tier/confidence code keeps its `Source.DIRECT_MEASURED` branches (`tiers.py:158-
 
 ## 6. Storage and migration contracts
 
-### 6.1 Schema v9 (`storage/migrations.py`)
+### 6.1 Schema v11 (`storage/migrations.py`)
 
-`LATEST_VERSION` 8 → 9. One SQL statement plus an `apply=` callback covering five surfaces:
+`LATEST_VERSION` 10 → 11. One SQL statement plus an `apply=` callback covering five surfaces:
 
 1. `UPDATE ct_channels SET ct_type = 'branch' WHERE ct_type = 'dedicated_device';`
 2. Device rows: union `dedicated_ct_ids_json` into `branch_ct_ids_json`, empty the former.
