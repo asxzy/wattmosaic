@@ -179,7 +179,7 @@ a particular measured delta* is a narrower question answered by
 The result is recorded as `evidence["ct_separated_device_ids"]` and
 **does not change the status**. A competitor on a different meter is still a
 competitor for the purpose of the verdict; the learning guard uses that finding
-so a dedicated-CT device is not discarded during an automation scene
+so a device on a separated meter is not discarded during an automation scene
 (`isolation.py:60-66`).
 
 ---

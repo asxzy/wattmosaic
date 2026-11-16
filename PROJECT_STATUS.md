@@ -4391,3 +4391,83 @@ The lesson recorded in §2 stands: a green suite proves the tests agree with the
 code, not that the code agrees with reality. Every defect above was found by
 running the engine against realistic topologies and reading the numbers, not by
 reading a test report.
+
+---
+
+## 10. Contract 2.0.0 — the dedicated-device concept is retired (ADR-0034)
+
+The third CT channel role is gone. `CTType` is `main` / `branch` / `unknown`,
+`MonitoringLevel` has no `dedicated`, and `DeviceTopology.dedicated_ct_ids` no
+longer exists. A circuit that feeds exactly one appliance is a `branch` row with
+exactly one declaring device — a structural fact the solver already detects via
+`_is_solo_row`, not a declaration.
+
+**ADR number.** The authorising specification calls this decision "ADR-0027".
+It is recorded as **ADR-0034**: ADR-0027 (the App panel), ADR-0028 (device
+links), ADR-0029 (deprecating the declaration), and ADR-0030 through ADR-0033
+landed first and are cited in §2 and §3. Renumbering accepted records to free
+the slot would rewrite history, so the new record takes the next free id and
+states this in its own body. The banners on ADR-0025 and ADR-0026 point at
+ADR-0034.
+
+### What was removed
+
+| Surface | Before | After |
+| --- | --- | --- |
+| `CTType` | `main` / `branch` / `dedicated_device` / `unknown` | `main` / `branch` / `unknown` |
+| `MonitoringLevel` | `dedicated` / `shared` / … | `shared` / `home_total_only` / `unmonitored` / `unknown` |
+| `DeviceTopology` | emitted `dedicated_ct_ids` | attribution lives in `branch_ct_ids` only |
+| Engine | Level-1 direct path produced `Source.DIRECT_MEASURED` | path deleted; results are inferred or modelled |
+| Contract | `CONTRACT_VERSION` 1.5.0 | **2.0.0** |
+| Schemas | 20 files at 1.5.0 | regenerated at 2.0.0, 19 schemas, drift-free |
+
+`Source.DIRECT_MEASURED` is **retained** as an enum member so historical rows in
+an existing database stay readable. Nothing new produces it.
+
+### Accepted consequence
+
+Devices that were read directly now report `inferred`, at the tier their
+evidence supports and **without** the former direct-measurement confidence
+floor. A device alone on its row still receives a whole-row fit through
+`_is_solo_row`; what it loses is the claim that its circuit measures nothing
+else. An OFF device on a solo row can therefore report
+`unexplained_load_on_device_circuit` and become `unknown` — under ADR-0026's
+"attribute the measured step" rule, that is the honest answer.
+
+**No device count is stated here.** Earlier sections record 21/0/22/26 dedicated
+rows across successive snapshots, and a 2026-11-10 reset may have destroyed the
+underlying data. That figure is uncorroborated and must be re-counted from the
+live database before any live apply — it is not a migration total.
+
+### Migrations
+
+Two data-preserving moves precede the enum narrowing, and neither is optional:
+
+- **Engine schema v9** demotes stored `ct_type` values to `branch`, moves
+  `dedicated_ct_ids` into `branch_ct_ids`, strips `projected_ct_ids`, and
+  rewrites stored device-configuration payloads and historical inference
+  `monitoring_level` values.
+- **HA config-entry migration** rewrites stored `ct_assignments` roles so a
+  legacy entry replays without a validation error.
+
+Verified by `tests/unit/test_migrations.py`: a schema-8 database with
+`dedicated_device` rows opens, migrates and loads; every device keeps at least
+one attribution row; the v9 callback is idempotent; a legacy entry replays.
+
+### Documentation
+
+Every shipped product doc states the two-role vocabulary. `docs/decisions/README.md`
+carries ADR-0034 and supersession banners on ADR-0025/0026, whose bodies remain as
+the historical record. `docs/WATTMOSAIC_MASTER_INSTRUCTIONS.md` keeps the original
+requirement quote verbatim, marked as historical. A scan test
+(`tests/unit/test_docs_vocabulary.py`) fails if the retired concept reappears in
+shipped prose.
+
+### Still open
+
+Waves 6–8 of the retirement remain: the App panel strings and its static gate
+(task-12), the HA options flow, `CT_ROLES`, `strings.json` and
+`translations/en.json` (task-13), and the final test-suite sweep (task-14).
+`custom_components/wattmosaic/const.py` still lists the retired role until
+task-13; the config-entry migration in Wave 1 is what keeps a legacy entry
+working in the meantime.

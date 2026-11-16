@@ -1,5 +1,76 @@
 # Release Notes
 
+## v0.2.1-dev.34 — 2026-11-15 (development channel)
+
+**This release breaks the API contract: `CONTRACT_VERSION` 1.5.0 → 2.0.0.** The
+"dedicated device" CT concept is removed in full, including the direct
+measurement capability it gated. Read the migration section before upgrading.
+
+### What changed
+
+A CT channel is now `main`, `branch` or `unknown`. There is no fourth role, and
+no declaration creates one. A circuit that feeds exactly one appliance is a
+`branch` row with exactly one declaring device — the solver already detects that
+shape structurally, so the product no longer needs a distinction that only a
+person could assert.
+
+`MonitoringLevel` loses `dedicated`. A stored `"dedicated"` declaration resolves
+to `unknown` and is then derived from the graph, which yields `shared` for any
+device with attribution rows.
+
+`DeviceTopology.dedicated_ct_ids` is gone; attribution lives entirely in
+`branch_ct_ids`.
+
+### What you lose, stated plainly
+
+Devices that were previously read directly now report `inferred`. They are still
+solved — a device alone on its row gets a whole-row fit — but at the tier their
+evidence supports and **without** the former 0.55 direct-measurement confidence
+floor. An OFF device on a solo row can now report `unexplained_load_on_device_circuit`
+and become `unknown`. That is the honest answer under ADR-0026, and it was
+accepted deliberately (ADR-0034).
+
+### Migration
+
+Both migrations run automatically; neither is optional.
+
+1. **Engine database schema v9** demotes stored channel roles to `branch`, moves
+   `dedicated_ct_ids` into `branch_ct_ids`, and rewrites stored device
+   configurations and historical inference rows so they still validate.
+2. **Home Assistant config entry** has its stored CT assignments rewritten on
+   upgrade, so a legacy entry does not fail validation.
+
+Existing database rows with `source = "direct_measured"` remain readable: the
+enum member is retained, and such rows keep the grade they were given.
+
+### If you have an API client
+
+- `dedicated_ct_ids` in a device payload is gone. Read `branch_ct_ids`.
+- `PUT /topology` rejects `ct_type: "dedicated_device"` with a 400.
+- `monitoring` never returns `"dedicated"`.
+- `GET /health` reports `contract_version: "2.0.0"`.
+
+The generated schemas under `data/schemas/` are regenerated at 2.0.0. If you
+validate against them, re-vendor them.
+
+### A note on the decision record's number
+
+The specification authorising this work calls the decision "ADR-0027". It ships
+as **ADR-0034**. ADR-0027 (the App panel), ADR-0028 (device links), ADR-0029
+(deprecating the declaration), and ADR-0030 through ADR-0033 were accepted first
+and are cited elsewhere in `PROJECT_STATUS.md`, so renumbering them to free the
+slot would rewrite accepted history. The retirement record takes the next free id
+and says so in its own body; ADR-0025 and ADR-0026 carry supersession banners
+pointing at it. Nothing about the decision itself depends on the number.
+
+### Not in this release
+
+The App panel still prints the old wording, and the Home Assistant options flow
+still offers the old role; both are removed in the immediately following work,
+with the config-entry migration above keeping existing entries valid until then.
+
+---
+
 ## v0.2.1-dev.33 — 2026-11-14 (development channel)
 
 Automatic development build.
@@ -98,6 +169,8 @@ Automatic development build.
 - Add simulator factor channels, the Hot Tub regression fixture and 21 household strata with enforced ground-truth separation
 
 Contract version advances to `1.6.0`; schema to migration 10. All changes are additive.
+
+---
 
 ## v0.2.1-dev.24 — 2026-11-12 (development channel)
 

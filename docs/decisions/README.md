@@ -1109,7 +1109,13 @@ refusal is the ownership guard doing its job, not a defect.
 
 ## ADR-0025 — A single-channel CT is a branch circuit, and a declared wattage bounds what that row may credit
 
-**Status:** Accepted · 2026-11-09 · Extends ADR-0023 and ADR-0024 · **Amended by ADR-0026** (the ceiling now also caps a measured step)
+> **Partially superseded by [ADR-0034](#adr-0034--every-ct-is-a-circuit-direct-measurement-is-removed-with-the-role).**
+> Discovery's half stands: a single-channel CT is a branch, never a declared
+> private measurement. The retained `dedicated_device` *declaration* — and the
+> direct measurement it gated — is removed. Read this body as the record of why
+> the role existed, not as current behaviour.
+
+**Status:** Accepted · 2026-11-09 · Extends ADR-0023 and ADR-0024 · **Amended by ADR-0026** (the ceiling now also caps a measured step) · **Retention of the declaration superseded by ADR-0034**
 
 **Context.** Discovery classified every single-channel load as
 `CTType.DEDICATED_DEVICE`. The only discriminator was "this channel was not part
@@ -1196,6 +1202,12 @@ number. Discovery no longer asserts a fact only a person can supply.
 ---
 
 ## ADR-0026 — A CT is a circuit; attribute the measured step, not the whole row
+
+> **Referenced by [ADR-0034](#adr-0034--every-ct-is-a-circuit-direct-measurement-is-removed-with-the-role),
+> which leaves this decision unchanged.** The shared/solo attribution rules stand
+> and become the only attribution path once the private-measurement path is
+> removed. The `dedicated_device` role named in the evidence below no longer
+> exists; read it as a description of the topology as measured at the time.
 
 **Status:** Accepted · 2026-11-10 · Supersedes ADR-0023's whole-row credit and amends ADR-0025
 
