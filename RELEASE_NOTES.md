@@ -1,5 +1,13 @@
 # Release Notes
 
+## v0.2.1-dev.36 — 2026-11-16 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- docs: align the retirement spec with migration v11
+
 ## v0.2.1-dev.35 — 2026-11-16 (development channel)
 
 Automatic development build.
