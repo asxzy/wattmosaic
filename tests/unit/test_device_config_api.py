@@ -9,6 +9,7 @@ required: the configuration surface is derived from the topology alone.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import aiohttp
 import pytest
@@ -19,6 +20,7 @@ from wattmosaic_engine.contracts import (
     CTType,
     DeviceConfiguration,
     DeviceTopology,
+    MonitoringLevel,
     Phase,
     Source,
     Topology,
@@ -33,7 +35,7 @@ HEADERS = {"X-API-Token": TOKEN}
 
 
 def _topology() -> Topology:
-    """One main CT, one dedicated CT, one shared branch CT."""
+    """One circuit CT owned by a device, one shared branch CT."""
     return Topology(
         status=TopologyStatus.CANDIDATE,
         channels=[
@@ -46,7 +48,7 @@ def _topology() -> Topology:
             CTChannel(
                 ct_id="ct_hot_tub",
                 entity_id="sensor.hot_tub_power",
-                ct_type=CTType.DEDICATED_DEVICE,
+                ct_type=CTType.BRANCH,
                 phase=Phase.L1,
                 parent_ct_id="main_l1",
                 device_id="hot_tub",
@@ -63,7 +65,7 @@ def _topology() -> Topology:
             DeviceTopology(
                 device_id="hot_tub",
                 name="Hot tub",
-                dedicated_ct_ids=["ct_hot_tub"],
+                branch_ct_ids=["ct_hot_tub"],
                 phase=Phase.L1,
             ),
             DeviceTopology(
@@ -189,7 +191,9 @@ def test_device_endpoint_carries_the_same_configuration(core) -> None:
         async with session.get(f"{base}/devices/hot_tub") as resp:
             assert resp.status == 200
             one = await resp.json()
-        assert one["configuration"]["monitoring"] == "dedicated"
+        # A device alone on its own circuit row is monitored through that row;
+        # with the single-device role retired the label is ``shared``.
+        assert one["configuration"]["monitoring"] == "shared"
         assert one["confidence_tier"] is None
         return True
 
@@ -220,8 +224,8 @@ def test_configuration_reflects_a_projected_device_configuration(core) -> None:
         assert config["load_entity_ids"] == ["light.kitchen"]
         assert config["expected_on_w"] == 45.0
         assert config["expected_standby_w"] == 0.0
-        # The dedicated device keeps the graph-derived level.
-        assert devices["hot_tub"]["configuration"]["monitoring"] == "dedicated"
+        # The own-circuit device keeps the graph-derived level.
+        assert devices["hot_tub"]["configuration"]["monitoring"] == "shared"
         return True
 
     assert run(_with_server(core, fn))
@@ -279,11 +283,80 @@ def test_unconfigured_device_monitoring_comes_from_the_ct_graph(core) -> None:
     async def fn(session, base):
         async with session.get(f"{base}/devices") as resp:
             devices = {d["device_id"]: d for d in await resp.json()}
-        # A dedicated CT is a dedicated measurement, not "unknown".
-        assert devices["hot_tub"]["configuration"]["monitoring"] == "dedicated"
-        # A shared branch with an unrelated sibling is not dedicated.
+        # A device with its own circuit row is attributed through it, not "unknown".
+        assert devices["hot_tub"]["configuration"]["monitoring"] == "shared"
+        # A shared branch with an unrelated sibling is attributed the same way.
         assert devices["hot_tub"]["configuration"]["device_type"] == "unknown"
         assert devices["hot_tub"]["configuration"]["behavior"] == "unknown"
+        return True
+
+    assert run(_with_server(core, fn))
+
+
+def test_devices_payload_has_no_dedicated_key(core) -> None:
+    """The device payload is pinned by key set, not by spot checks.
+
+    ``DeviceTopology.dedicated_ct_ids`` is gone from the contract, so no
+    ``/devices`` element may grow the key back from a stale attribute.
+    """
+    expected = {
+        "device_id",
+        "name",
+        "phase",
+        "double_pole",
+        "topology_status",
+        "branch_ct_ids",
+        "latest_result",
+        "confidence_tier",
+        "configuration",
+        "model",
+    }
+
+    async def fn(session, base):
+        async with session.get(f"{base}/devices") as resp:
+            devices = await resp.json()
+        assert devices
+        for device in devices:
+            assert set(device) == expected, device["device_id"]
+        async with session.get(f"{base}/devices/hot_tub") as resp:
+            one = await resp.json()
+        assert not {"dedicated_ct_ids"} & set(one)
+        assert one["topology"] is not None
+        assert not {"dedicated_ct_ids"} & set(one["topology"])
+        return True
+
+    assert run(_with_server(core, fn))
+
+
+def test_configuration_monitoring_is_a_surviving_contract_value(core) -> None:
+    """``monitoring`` is published only as a value ``MonitoringLevel`` defines.
+
+    Retiring ``MonitoringLevel.DEDICATED`` makes the value unreachable through
+    ``derive_monitoring``, but a stored declaration can still carry the old
+    string in device metadata, so the payload builder must not pass an
+    unrecognised value through verbatim.
+    """
+    allowed = {"shared", "home_total_only", "unmonitored", "unknown"}
+    assert {level.value for level in MonitoringLevel} == allowed
+    # The retired value is not merely unlikely: it no longer exists.
+    assert "dedicated" not in allowed
+    with pytest.raises(ValueError):
+        MonitoringLevel("dedicated")
+
+    payload = EngineCore._configuration_payload(
+        SimpleNamespace(monitoring="dedicated")
+    )
+    assert payload["monitoring"] == "unknown"
+    for level in MonitoringLevel:
+        assert EngineCore._configuration_payload(
+            SimpleNamespace(monitoring=level)
+        )["monitoring"] == level.value
+
+    async def fn(session, base):
+        async with session.get(f"{base}/devices") as resp:
+            devices = await resp.json()
+        for device in devices:
+            assert device["configuration"]["monitoring"] in allowed
         return True
 
     assert run(_with_server(core, fn))

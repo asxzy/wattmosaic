@@ -296,7 +296,7 @@ def test_latest_schema_includes_the_audit_tables(tmp_path) -> None:
     """Migrations 9 and 10 are additive audit state; config is unaffected."""
     db = Database(tmp_path / "audit_schema.db")
     try:
-        assert LATEST_VERSION == 10
+        assert LATEST_VERSION == 11
         assert db.schema_version == LATEST_VERSION
         tables = {
             row["name"]

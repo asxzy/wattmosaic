@@ -16,7 +16,7 @@ This module computes one authoritative tree from declared data only:
 * ``CTChannel.parent_ct_id`` — a declared wiring fact, never invented here;
 * ``CTChannel.alias_of_ct_id`` — "this CT measures the same conductor as that
   one", i.e. a duplicate, which is an **alias, not a child**;
-* ``DeviceTopology.dedicated_ct_ids`` / ``branch_ct_ids`` — attribution.
+* ``DeviceTopology.branch_ct_ids`` — attribution.
 
 Nothing here writes to the topology.  ``parent_ct_id`` is only read.
 
@@ -656,7 +656,9 @@ class _TreeBuilder:
 
     # -- device attribution ------------------------------------------------- #
     def _device_ct_ids(self, device: DeviceTopology) -> list[str]:
-        referenced = list(device.dedicated_ct_ids) + list(device.branch_ct_ids)
+        # A channel that names this device is an attribution row too: a demoted
+        # row keeps its ``device_id``, and that is what preserves tree placement.
+        referenced = list(device.branch_ct_ids)
         referenced.extend(
             ct_id for ct_id, channel in self.channels.items() if channel.device_id == device.device_id
         )

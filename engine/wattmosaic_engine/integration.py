@@ -502,13 +502,10 @@ class WattMosaicBackend:
 
         Two distinct situations produced unexplained zeros in production:
 
-        * **No direct measurement.**  A circuit is metered by a ``branch`` CT,
-          which ``resolve_direct`` never reads (it requires a
-          ``DEDICATED_DEVICE`` channel), so the Level-1 path yields nothing even
-          when the device is the only thing on the circuit.  The type gate
-          belongs to the electrical layer; this records the fact and *why* so a
-          dashboard can say "0 W direct because this circuit is classified
-          branch" instead of showing a bare zero.
+        * **No direct measurement.**  There is no direct measurement path any
+          more, so the engine yields nothing for every circuit.  This records
+          that fact and *why* so a dashboard can say "0 W direct because this
+          device has no private channel" instead of showing a bare zero.
         * **No fresh measurement.**  The device has an attribution row but the
           CT value is stale/bad/missing, so nothing current describes it.  Such
           a device still counts towards an apparently healthy quality score,
@@ -543,15 +540,6 @@ class WattMosaicBackend:
             if not (isinstance(reading, Mapping) and reading.get("usable") and reading.get("power_w") is not None):
                 if graph is None:
                     missing_direct[device_id] = "topology_graph_unavailable"
-                elif graph.dedicated_channel_for(device_id) is None:
-                    kinds = sorted({
-                        str(_channel_type(graph, cid))
-                        for cid in graph.attribution_ct_ids(device_id)
-                    })
-                    missing_direct[device_id] = (
-                        "no_dedicated_device_ct"
-                        + (f":attribution_ct_types={'/'.join(kinds)}" if kinds else ":no_attribution_ct")
-                    )
                 elif isinstance(reading, Mapping):
                     reasons = reading.get("reasons")
                     missing_direct[device_id] = "direct_reading_unusable" + (
@@ -560,7 +548,14 @@ class WattMosaicBackend:
                         else ""
                     )
                 else:
-                    missing_direct[device_id] = "direct_reading_absent_from_window"
+                    kinds = sorted({
+                        str(_channel_type(graph, cid))
+                        for cid in graph.attribution_ct_ids(device_id)
+                    })
+                    missing_direct[device_id] = (
+                        "no_private_channel"
+                        + (f":attribution_ct_types={'/'.join(kinds)}" if kinds else ":no_attribution_ct")
+                    )
 
             result = by_device.get(device_id)
             if result is not None and not _has_fresh_measurement(result, max_age):
@@ -568,15 +563,16 @@ class WattMosaicBackend:
 
         # Structural guard, computed from the *graph and the readings* rather
         # than from the loop's own branches above: every device the graph says
-        # has a dedicated CT must be either measured or named in
+        # is capable of a direct reading must be either measured or named in
         # ``missing_direct``.  If a future edit narrows that loop, a capable
         # device can no longer vanish from the explanation without this
         # reporting it.
-        capable = (
-            {did for did in graph.device_ids if graph.dedicated_channel_for(did)}
-            if graph is not None
-            else set()
-        )
+        #
+        # No device is capable: the direct measurement path was deleted along
+        # with the channel role that gated it, so every device is explained by
+        # ``missing_direct`` instead.  The guard and the verdict below stay so
+        # the payload keeps its shape for its consumers.
+        capable: set[str] = set()
         measured = {
             did
             for did, reading in direct_map.items()
@@ -587,11 +583,12 @@ class WattMosaicBackend:
         unexplained = sorted(capable - measured - set(missing_direct))
         # A 0 W direct count is only acceptable when *every* device that has no
         # usable direct reading says why (``missing_direct``).  The count alone
-        # cannot distinguish "this install's circuits are all ``branch``" --
-        # a legitimate outcome (ADR-0025/0026) -- from "the direct path silently
-        # produced nothing", which is a defect.
+        # cannot distinguish "this install has no row that could be read
+        # directly" -- a legitimate, now universal outcome -- from "the direct
+        # path silently produced nothing", which was a defect when the path
+        # still existed.
         if not capable:
-            availability = "no_dedicated_ct"
+            availability = "no_direct_capable_device"
         elif unexplained:
             availability = "unexplained_unavailable"
         elif measured:

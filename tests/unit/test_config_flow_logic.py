@@ -224,7 +224,7 @@ def test_validate_minimal_form_is_clean() -> None:
         {
             "device_type": "appliance",
             "connectivity": "not_connected",
-            "monitoring": "dedicated",
+            "monitoring": "shared",
             "behavior": "fixed",
         }
     ) == {}

@@ -1,6 +1,6 @@
 # Interface Contracts (authoritative)
 
-**Contract version: `1.5.0`** — mirrors `engine/wattmosaic_engine/contracts.py`.
+**Contract version: `2.0.0`** — mirrors `engine/wattmosaic_engine/contracts.py`.
 
 `contracts.py` is the single source of truth. JSON schemas are exported from it to
 `data/schemas/` by `tools/dev/export_schemas.py`. No component may define a
@@ -146,7 +146,6 @@ class InferenceBatch:
 ```
 
 Guarantees:
-- `direct_measured` devices use their dedicated CT.
 - `unknown` sources carry `power_w` for residual accounting only in
   `Reconciliation.unknown_residual_w`, never as a fabricated device value.
 - Sum of attributed power is never forced to equal main power.

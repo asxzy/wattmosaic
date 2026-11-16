@@ -308,8 +308,8 @@ def test_the_container_filter_runs_before_the_scan(monkeypatch) -> None:
     load_b = [rng.uniform(1000.0, 1200.0) for _ in range(60)]
     nesting.infer_nesting(
         {
-            "load_a": {"ct_type": "dedicated_device"},
-            "load_b": {"ct_type": "dedicated_device"},
+            "load_a": {"ct_type": "branch"},
+            "load_b": {"ct_type": "branch"},
         },
         {"load_a": load_a, "load_b": load_b},
         # No containers declared, so neither node can be one and the pair is
@@ -361,7 +361,7 @@ def test_the_resampled_grid_keeps_the_candidate_pair_set() -> None:
     modelled = {
         "wire_a": {"ct_type": "main"},
         "wire_b": {"ct_type": "main"},
-        "load_c": {"ct_type": "dedicated_device"},
+        "load_c": {"ct_type": "branch"},
     }
 
     def pairs(grid: list[datetime]) -> list[tuple[str, str, str]]:

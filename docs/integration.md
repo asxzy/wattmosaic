@@ -114,30 +114,27 @@ One dialog per channel, with:
 
 | Field | Values |
 | --- | --- |
-| Role | `main`, `branch`, `dedicated_device`, `unknown` |
+| Role | `main`, `branch`, `unknown` |
 | Phase | `l1`, `l2`, `both`, `unknown` |
 | Polarity | `normal`, `inverted` |
 | Parent CT | the CT (panel feed or branch) that physically feeds this one; empty for a top-level feed |
 | Circuit multiplier | scale applied to the reported reading, default `1.0` |
 | Paired CT | sibling CT for a double-pole load |
 | Duplicate of | another CT clamped on the *same* conductors (an alias) |
-| Device | device served by a `dedicated_device` CT |
+| Device | device fed by this `branch` circuit |
 | Enabled | whether the channel participates |
 
 Channels come from `GET /topology`. Where the engine already suggests a
 `ct1`/`ct2` sibling, that pair is **pre-selected as a suggestion** (visible in
 the dialog), not committed.
 
-**Demoting a `dedicated_device` CT to `branch` keeps the device on its row.**
-The two roles describe the same conductor; they differ only in what the user is
-willing to assert about it. A `dedicated_device` CT claims "exactly one
-appliance sits here", while `branch` says "this circuit may feed several". When
-you change the role, the channel stops carrying a `device_id` and the device's
-ownership moves from `dedicated_ct_ids` to `branch_ct_ids`, so the fixture is
-still measured on that circuit — as a shared row rather than a private reading.
-Turning the CT into a `main` feed, or reassigning it to a different device, does
-remove it from this device's attribution, because a feed is a containment
-constraint rather than a measurement.
+**A circuit CT stays the device's attribution row whatever the device does.**
+A `branch` CT may carry a `device_id` and remain the device's attribution row;
+that is how a circuit feeding a single appliance is expressed. Ownership is
+`branch_ct_ids`, and nothing about the role changes it. Turning the CT into a
+`main` feed, or reassigning it to a different device, does remove it from this
+device's attribution, because a feed is a containment constraint rather than a
+measurement.
 
 **Nesting is supported to any depth.** A `main` CT may name another `main` CT as
 its parent (utility → panel → sub-panel), and a branch may sit under any feed.
@@ -173,8 +170,9 @@ suppresses the alias suggestion rather than competing with it.
 Validation rules (enforced on the confirmation step):
 
 - a `main` CT must have a concrete phase (`l1`/`l2`/`both`);
-- a `dedicated_device` CT must name a device;
 - pairing must be reciprocal and cannot be self-referential;
+- paired CTs cannot name two *different* devices: a pair is the two legs of one
+  load, so the engine would sum it and attribute the same watts to both;
 - phase `both` requires a paired CT;
 - every `ct_id` must exist in the engine topology;
 - a parent must exist, must be a container (`main`/`branch`), and must not form
@@ -182,20 +180,10 @@ Validation rules (enforced on the confirmation step):
 - a duplicate-of target must exist, must not be self, and must not form a cycle;
 - a multiplier must be positive and finite.
 
-### Step 4 — Device mapping (candidates)
-
-For each `dedicated_device` CT without a device, the flow shows **ranked
-candidates** derived from token overlap between the CT name/ID and
-`GET /devices` names. Each candidate label includes the matched words, e.g.
-`Panel A Water Heater (dev_panel_a_water_heater) — match: water, heater`.
-
-You can pick a candidate, type a device ID manually, or skip. **No candidate is
-ever applied automatically.**
-
-### Step 5 — Confirm
+### Step 4 — Confirm
 
 A summary lists every channel plus the list of *uncertain* entries (unknown
-role, unknown phase, or a dedicated CT without a device).
+role, unknown phase, or a circuit CT without a device).
 
 - Submitting PUTs the merged topology to the engine (`PUT /topology`).
 - Without the box ticked the entry is created and everything stays `candidate`.
@@ -212,8 +200,8 @@ wizard.
 
 ### Options / reconfigure
 
-- **Configure → Options**: polling settings, then the same channel/mapping/
-  confirm wizard. Stored assignments are the starting point.
+- **Configure → Options**: polling settings, then the same channel/confirm
+  wizard. Stored assignments are the starting point.
 - **Reconfigure** (entry menu): change the engine URL/token only.
 
 Changing options triggers a clean config-entry reload.

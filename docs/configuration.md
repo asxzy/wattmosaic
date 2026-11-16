@@ -54,7 +54,6 @@ touches `device_model_versions` or `learning_samples`, so model history survives
 | `WM_QUEUE_MAX_SIZE` | `5000` | Bounded ingestion queue. On overflow the oldest items are dropped and a metric incremented; memory never grows unbounded. |
 | `WM_AUTO_PLACEMENT` | `false` | Exposed as the App option `auto_placement`. Allows `POST /api/v1/discover/placements` to **write device configurations** when the request also sends `apply: true`. Off by default because a write must be something the user asked for (ADR-0024 item 8). With it off, the endpoint still analyses and reports what it would place, and writes nothing. |
 | `WM_TOPOLOGY_BOOTSTRAP` | `true` | Discover a candidate topology from Home Assistant at startup when the database has none. Disabling it leaves a fresh install with nothing to infer; `/health` then reports `degraded` with `details.topology.configured = false`. |
-| `WM_DEPRECATE_DEDICATED_DECLARATION` | `true` | Emit the deprecation notices for a manual `dedicated_device` declaration (ADR-0029). One `WARNING` per `ct_id` per process, and `health["deprecations"]` in diagnostics. **Diagnostics only:** setting it to `false` silences the notice and empties that list; watts, `source`, confidence tier and `confidence` are byte-identical either way, and the direct measurement path keeps working. Nothing is auto-converted. |
 | `WM_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
 | `WM_LOG_JSON` | `true` | Structured JSON logs for the App; set `false` for human-readable local logs. |
 
@@ -114,7 +113,7 @@ discovery card.
 | Scan interval | `30` s | Snapshot poll period. Does not affect engine inference cadence. |
 | Stale after | `120` s | Result age at which entities become unavailable. |
 | Unavailable after | `120` s | Engine unreachable duration before entities become unavailable. |
-| CT role | from topology | `main`, `branch`, `dedicated_device`, `unknown`. |
+| CT role | from topology | `main`, `branch`, `unknown`. |
 | CT phase | from topology | `l1`, `l2`, `both`, `unknown`. |
 | CT polarity | `normal` | Set `inverted` if a CT is installed backwards. |
 | Paired CT | from topology | Second leg of a double-pole load. |
@@ -133,7 +132,7 @@ silently defaulted.
   "device_id": "dev_panel_a_lighting_3",   // set from the command, not the payload
   "device_type": "light",
   "connectivity": "connected",        // connected | not_connected | unknown
-  "monitoring": "shared",             // dedicated | shared | home_total_only | unmonitored | unknown
+  "monitoring": "shared",             // shared | home_total_only | unmonitored | unknown
   "behavior": "variable",             // fixed | variable | complex | unknown
 
   "state_entity_ids": ["light.panel_a_lighting_3"],
@@ -202,7 +201,7 @@ curl -X POST http://localhost:8787/api/v1/commands \
         "parameters": {
           "device_type": "hvac_heat",
           "connectivity": "connected",
-          "monitoring": "dedicated",
+          "monitoring": "shared",
           "behavior": "complex",
           "expected": {"on_w": 4500.0},
           "controller": {

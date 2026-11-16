@@ -4,15 +4,14 @@ Terminology
 -----------
 * **Main CT** – an incoming line CT (utility service or a panel feed).
 * **Branch CT** – measures a circuit that contains other loads/CTs.
-* **Dedicated CT** – measures exactly one logical device and nothing else.
 * **Containment** – ``child.parent_ct_id == parent``.  A parent's measurement
   physically includes every descendant.  That is *not* double counting as long
   as totals are never produced by adding a parent row and a child row together.
 
 Double-counting rule implemented here
 -------------------------------------
-A device is *attributed* using exactly one **most specific** CT: its dedicated
-CT when verified, otherwise its deepest enclosing branch CT.  Ancestor branch
+A device is *attributed* using exactly one **most specific** CT: its deepest
+enclosing branch CT.  Ancestor branch
 rows do not receive a second copy of the device's power; instead they carry the
 child CT in :attr:`TopologyGraph.nested_channel_ids` and the child's measured
 value is subtracted explicitly at solve time (:meth:`MeasurementMatrix.residualise`).
@@ -47,15 +46,10 @@ class Discipline:
     device_id: str
     phase: Phase
     double_pole: bool
-    dedicated_ct_id: str | None
     most_specific_ct_id: str | None
     enclosing_branch_ct_ids: tuple[str, ...]
     enclosing_main_ct_ids: tuple[str, ...]
     topology_status: TopologyStatus
-
-    @property
-    def has_dedicated_ct(self) -> bool:
-        return self.dedicated_ct_id is not None
 
     @property
     def is_confirmed(self) -> bool:
@@ -217,22 +211,6 @@ class TopologyGraph:
 
     def _validate_channels(self) -> None:
         for cid, ch in self._channels.items():
-            if ch.ct_type == CTType.DEDICATED_DEVICE:
-                if not ch.device_id:
-                    self.problems.append(
-                        f"dedicated CT {cid} has no device_id; it cannot be attributed"
-                    )
-                elif ch.device_id not in self._devices:
-                    self.problems.append(
-                        f"dedicated CT {cid} references unknown device {ch.device_id}"
-                    )
-                else:
-                    dev = self._devices[ch.device_id]
-                    if dev.dedicated_ct_ids and cid not in dev.dedicated_ct_ids:
-                        self.problems.append(
-                            f"dedicated CT {cid} for device {ch.device_id} is missing from "
-                            "DeviceTopology.dedicated_ct_ids"
-                        )
             if ch.phase == Phase.UNKNOWN:
                 self.problems.append(
                     f"CT {cid} has unknown phase; phase-dependent rows are treated as BOTH"
@@ -252,21 +230,6 @@ class TopologyGraph:
 
     def _validate_devices(self) -> None:
         for did, dev in self._devices.items():
-            for cid in dev.dedicated_ct_ids:
-                ch = self._channels.get(cid)
-                if ch is None:
-                    self.problems.append(f"device {did} references unknown dedicated CT {cid}")
-                    continue
-                if ch.ct_type != CTType.DEDICATED_DEVICE:
-                    self.problems.append(
-                        f"device {did} dedicated CT {cid} has type {ch.ct_type}, "
-                        "not dedicated_device"
-                    )
-                if ch.device_id and ch.device_id != did:
-                    self.problems.append(
-                        f"dedicated CT {cid} is assigned to device {ch.device_id}, "
-                        f"not {did}"
-                    )
             for cid in dev.branch_ct_ids:
                 ch = self._channels.get(cid)
                 if ch is None:
@@ -275,11 +238,6 @@ class TopologyGraph:
                 if ch.ct_type == CTType.MAIN:
                     self.problems.append(
                         f"device {did} lists main CT {cid} as a branch CT"
-                    )
-                if ch.ct_type == CTType.DEDICATED_DEVICE and cid not in dev.dedicated_ct_ids:
-                    self.problems.append(
-                        f"device {did} lists dedicated CT {cid} as a branch CT but "
-                        "does not declare it dedicated"
                     )
             if dev.double_pole and dev.phase in (Phase.L1, Phase.L2):
                 self.problems.append(
@@ -337,24 +295,6 @@ class TopologyGraph:
     def branch_channels(self) -> list[CTChannel]:
         return [c for c in self._channels.values() if c.ct_type == CTType.BRANCH and c.enabled]
 
-    def dedicated_channel_for(self, device_id: str) -> CTChannel | None:
-        dev = self._devices.get(device_id)
-        if dev is None:
-            return None
-        for cid in dev.dedicated_ct_ids:
-            ch = self._channels.get(cid)
-            if ch and ch.enabled and ch.ct_type == CTType.DEDICATED_DEVICE:
-                return ch
-        # Reverse lookup: a dedicated CT may point at the device.
-        for ch in self._channels.values():
-            if (
-                ch.enabled
-                and ch.ct_type == CTType.DEDICATED_DEVICE
-                and ch.device_id == device_id
-            ):
-                return ch
-        return None
-
     def most_specific_branch_group(self, device_id: str) -> tuple[str, ...]:
         """The deepest set of branch CTs that observe the device.
 
@@ -396,6 +336,27 @@ class TopologyGraph:
         group = self.most_specific_branch_group(device_id)
         return group[0] if group else None
 
+    def complete_leg_pair(self, device_id: str) -> tuple[str, ...]:
+        """Both legs of a verified pair that together observe the whole device.
+
+        Empty unless the device is a double-pole (``BOTH``) load whose
+        attribution group is exactly two CTs that are each other's
+        ``paired_ct_id`` partner *and* both belong to this device
+        (:meth:`double_pole_leg` already enforces ownership and enablement).
+        In that case the device is fully measured: whatever the physical split,
+        ``y_leg1 + y_leg2`` is its total, so no row may be scaled by a *declared*
+        split -- see :meth:`phase_coefficient`.
+        """
+        if self.device_phase(device_id) != Phase.BOTH:
+            return ()
+        group = self.attribution_ct_ids(device_id)
+        if len(group) != 2:
+            return ()
+        first, second = group
+        if self.double_pole_leg(first) != second or self.double_pole_leg(second) != first:
+            return ()
+        return group
+
     def double_pole_leg(self, ct_id: str) -> str | None:
         """The other leg of *this same device*, or ``None``.
 
@@ -423,13 +384,6 @@ class TopologyGraph:
 
     def attribution_ct_ids(self, device_id: str) -> tuple[str, ...]:
         """CTs that carry this device's power *once* (its measurement rows)."""
-        dedicated = self.dedicated_channel_for(device_id)
-        if dedicated is not None:
-            out = [dedicated.ct_id]
-            partner = self.double_pole_leg(dedicated.ct_id)
-            if partner is not None:
-                out.append(partner)
-            return tuple(out)
         return self.most_specific_branch_group(device_id)
 
     def resolve(self, device_id: str) -> Discipline:
@@ -440,13 +394,11 @@ class TopologyGraph:
                 device_id=device_id,
                 phase=Phase.UNKNOWN,
                 double_pole=False,
-                dedicated_ct_id=None,
                 most_specific_ct_id=None,
                 enclosing_branch_ct_ids=(),
                 enclosing_main_ct_ids=(),
                 topology_status=TopologyStatus.REJECTED,
             )
-        dedicated = self.dedicated_channel_for(device_id)
         group = self.attribution_ct_ids(device_id)
         most_specific = group[0] if group else None
         branch_group = self.most_specific_branch_group(device_id)
@@ -470,7 +422,6 @@ class TopologyGraph:
             device_id=device_id,
             phase=Phase(dev.phase),
             double_pole=bool(dev.double_pole),
-            dedicated_ct_id=dedicated.ct_id if dedicated else None,
             most_specific_ct_id=most_specific,
             enclosing_branch_ct_ids=tuple(enclosing_branch),
             enclosing_main_ct_ids=tuple(enclosing_main),
@@ -533,6 +484,28 @@ class TopologyGraph:
             return Phase.BOTH
         return Phase.UNKNOWN
 
+    def leg_coefficient(self, device_id: str, row_phase: Phase | str) -> float:
+        """Share of a ``BOTH`` device's power on one side of a leg pair.
+
+        A *complete* pair is fully observed: each leg row sees its own real
+        share, so the two equations ``y_L1 = ½x`` and ``y_L2 = ½x`` sum to
+        ``x = y_L1 + y_L2`` exactly, whatever the physical asymmetry.  That is
+        why the complete case returns ``0.5`` and never the declared split -- a
+        declared ``α`` there would scale two readings that are already complete
+        (least squares would report ``P·(αs+(1-α)(1-s))/(α²+(1-α)²)``, e.g.
+        ``0.862P`` at ``α=0.7`` on a 0.5/0.5 pair, instead of ``P``).
+
+        Only when the device is *not* fully observed -- one leg of a pair, or a
+        single-line row -- does the declared split have to apportion it, because
+        the row then measures a fraction nobody stated.
+        """
+        row = Phase(row_phase)
+        if self.complete_leg_pair(device_id):
+            return 1.0 if row == Phase.BOTH else 0.5
+        if row == Phase.L1:
+            return self.phase_split_l1
+        return 1.0 - self.phase_split_l1
+
     def phase_coefficient(
         self, device_id: str, row_phase: Phase | str, *, solo: bool = False
     ) -> float:
@@ -541,8 +514,15 @@ class TopologyGraph:
         * single-phase device on its own line -> ``1.0``
         * single-phase device on a ``BOTH`` (sum) row -> ``1.0``
         * double-pole device on a ``BOTH`` row -> ``1.0`` (total power)
-        * double-pole device on a single line -> ``phase_split_l1`` for L1 and
-          ``1 - phase_split_l1`` for L2 (default 0.5/0.5, configurable)
+        * double-pole device whose two legs are both measured (a complete,
+          verified pair) -> ``0.5`` per leg, independent of
+          ``phase_split_l1``: the pair is already a complete observation, so
+          summing the rows recovers the total exactly and the declared split
+          must not perturb them
+        * double-pole device only partly observed (one leg, or a single line)
+          -> ``phase_split_l1`` for L1 and ``1 - phase_split_l1`` for L2
+          (default 0.5/0.5, configurable); there the split is the only way to
+          recover the unmeasured part
         * a device whose phase nobody declared: ``1.0`` when the row is *its own*
           measurement (``solo``), because there the CT is an observation of the
           whole device and halving it would invent a missing leg; otherwise the
@@ -559,10 +539,8 @@ class TopologyGraph:
         if dev_phase == Phase.BOTH:
             if row == Phase.BOTH:
                 return 1.0
-            if row == Phase.L1:
-                return self.phase_split_l1
-            if row == Phase.L2:
-                return 1.0 - self.phase_split_l1
+            if row in (Phase.L1, Phase.L2):
+                return self.leg_coefficient(device_id, row)
             return 0.0
         if dev_phase == Phase.UNKNOWN:
             # Nobody stated the placement.  On the device's own row the CT is a
@@ -578,11 +556,9 @@ class TopologyGraph:
         return 1.0 if row == dev_phase else 0.0
 
     def device_channels(self, device_id: str) -> tuple[str, ...]:
-        """All CTs that physically observe the device (dedicated + enclosing)."""
+        """All CTs that physically observe the device (enclosing)."""
         d = self.resolve(device_id)
         out: list[str] = []
-        if d.dedicated_ct_id:
-            out.append(d.dedicated_ct_id)
         out.extend(d.enclosing_branch_ct_ids)
         out.extend(d.enclosing_main_ct_ids)
         return tuple(dict.fromkeys(out))
@@ -597,7 +573,7 @@ class TopologyGraph:
         return not self.problems
 
     def unresolved_devices(self) -> list[str]:
-        """Devices with no dedicated CT and no enclosing branch/main CT."""
+        """Devices with no enclosing branch/main CT."""
         out = []
         for did in self.device_ids:
             d = self.resolve(did)

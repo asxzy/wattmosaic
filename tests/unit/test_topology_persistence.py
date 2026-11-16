@@ -69,7 +69,6 @@ def _topology() -> Topology:
             DeviceTopology(
                 device_id="dev_upper_humidifier",
                 name="Upper Humidifier",
-                dedicated_ct_ids=["upper_humidifier_ct"],
                 branch_ct_ids=["upper_humidifier_ct"],
             )
         ],
@@ -117,7 +116,7 @@ def test_topology_without_panels_still_round_trips(tmp_path):
     legacy = Topology(
         status=TopologyStatus.CANDIDATE,
         channels=[_channel("only_ct")],
-        devices=[DeviceTopology(device_id="d1", dedicated_ct_ids=["only_ct"])],
+        devices=[DeviceTopology(device_id="d1", branch_ct_ids=["only_ct"])],
     )
     db = Database(tmp_path / "wm.db")
     db.save_topology(legacy)

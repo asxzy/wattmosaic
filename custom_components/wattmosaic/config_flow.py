@@ -10,10 +10,13 @@ Wizard order (identical for setup and options):
 1. ``user`` / ``init``   – engine URL + token (setup) or polling settings (options)
 2. ``settings``          – polling and freshness thresholds (setup only)
 3. ``channels``          – per-CT role / phase / polarity / pairing / device
-4. ``mapping``           – device suggestions for still-unmapped dedicated CTs
-5. ``confirm``           – explicit confirmation before anything is committed
+4. ``confirm``           – explicit confirmation before anything is committed
 
-Nothing is written to the engine until step 5, and uncertain assignments stay
+A channel's ``device_id`` is chosen on the ``channels`` form itself, so there is
+no separate device-mapping step: it would only ever re-ask a question the
+channel form already answers.
+
+Nothing is written to the engine until step 4, and uncertain assignments stay
 ``candidate`` unless the user ticks the confirmation box.
 """
 
@@ -57,7 +60,6 @@ from .const import (
     CONF_TOPOLOGY_VERSION,
     CONF_UNAVAILABLE_AFTER,
     CONNECTIVITY_LEVELS,
-    CT_ROLE_DEDICATED,
     DEVICE_TYPES,
     DOMAIN,
     LIGHT_TYPES,
@@ -83,10 +85,8 @@ from .flow_logic import (
     assignment_store,
     auto_placement_enabled,
     build_topology_update,
-    candidate_labels,
     connection_defaults,
     descendant_ids,
-    device_candidates,
     device_configuration_command,
     device_link_choice,
     discovered_base_url,
@@ -98,7 +98,6 @@ from .flow_logic import (
     normalise_device_configuration,
     normalise_device_list,
     normalise_settings,
-    panel_shared_tokens,
     resolve_confirmation,
     settings_defaults,
     stored_energy_choice,
@@ -127,7 +126,6 @@ def _role_select() -> SelectSelector:
             options=[
                 SelectOptionDict(value="main", label="Main incoming feed"),
                 SelectOptionDict(value="branch", label="Branch circuit"),
-                SelectOptionDict(value="dedicated_device", label="Dedicated device"),
                 SelectOptionDict(value="unknown", label="Unknown / unassigned"),
             ],
             mode=SelectSelectorMode.DROPDOWN,
@@ -229,7 +227,6 @@ _CONNECTIVITY_LABELS = {
 }
 
 _MONITORING_LABELS = {
-    "dedicated": "Dedicated CT",
     "shared": "Shared circuit",
     "home_total_only": "Home total only",
     "unmonitored": "Unmonitored",
@@ -451,7 +448,7 @@ async def _probe_engine(
 
 
 class _AssignmentWizard:
-    """Channels -> mapping -> confirm, shared by setup and options.
+    """Channels -> confirm, shared by setup and options.
 
     Subclasses provide ``_wizard_client()`` and ``_wizard_finish(...)``.
     """
@@ -461,7 +458,6 @@ class _AssignmentWizard:
     _devices: list[dict[str, Any]]
     _assignments: dict[str, dict[str, Any]]
     _channel_index: int
-    _skipped: set[str]
     _errors: dict[str, str]
 
     # -- hooks ------------------------------------------------------------- #
@@ -485,7 +481,6 @@ class _AssignmentWizard:
         self._devices = devices or []
         self._assignments = assignments
         self._channel_index = 0
-        self._skipped = set()
         self._errors = {}
 
     # -- step: channels ---------------------------------------------------- #
@@ -500,7 +495,7 @@ class _AssignmentWizard:
     ) -> ConfigFlowResult:
         channel = self._current_channel()
         if channel is None:
-            return await self.async_step_mapping()
+            return await self.async_step_confirm()
 
         ct_id = str(channel["ct_id"])
 
@@ -527,8 +522,8 @@ class _AssignmentWizard:
             self._channel_index += 1
             next_channel = self._current_channel()
             if next_channel is None:
-                # All channels assigned: move on to mapping/confirmation.
-                return await self.async_step_mapping()
+                # All channels assigned: move on to confirmation.
+                return await self.async_step_confirm()
             channel = next_channel
             ct_id = str(channel["ct_id"])
 
@@ -615,102 +610,6 @@ class _AssignmentWizard:
             },
         )
 
-    # -- step: mapping ----------------------------------------------------- #
-
-    def _unmapped_channels(self) -> list[dict[str, Any]]:
-        """Only dedicated CTs without a device need a mapping prompt."""
-        unmapped: list[dict[str, Any]] = []
-        for channel in self._channels:
-            ct_id = str(channel["ct_id"])
-            if ct_id in self._skipped:
-                continue
-            current = normalise_assignment(
-                self._assignments.get(ct_id) or assignment_defaults(channel), channel
-            )
-            if current["role"] != CT_ROLE_DEDICATED:
-                continue
-            if current["device_id"] is None:
-                unmapped.append(channel)
-        return unmapped
-
-    def _mapping_schema(self, labels: list[tuple[str, str]]) -> vol.Schema:
-        options = [SelectOptionDict(value="", label="— no automatic candidate —")]
-        options.extend(SelectOptionDict(value=value, label=label) for value, label in labels)
-        return vol.Schema(
-            {
-                vol.Optional("candidate", default=""): SelectSelector(
-                    SelectSelectorConfig(options=options, mode=SelectSelectorMode.DROPDOWN)
-                ),
-                vol.Optional("manual_override", default=""): TextSelector(),
-                vol.Optional("skip", default=False): BooleanSelector(),
-            }
-        )
-
-    def _mapping_placeholders(
-        self, channel: dict[str, Any], labels: list[tuple[str, str]]
-    ) -> dict[str, str]:
-        ct_id = str(channel.get("ct_id"))
-        return {
-            "channel_name": str(channel.get("name") or ct_id),
-            "channel_id": ct_id,
-            "candidate_count": str(len(labels)),
-            "candidates": "\n".join(f"- {label}" for _, label in labels)
-            or "No candidates found.",
-        }
-
-    def _candidate_choices(
-        self, channel: dict[str, Any]
-    ) -> tuple[list[tuple[str, str]], list[dict[str, Any]]]:
-        # Filter the panel/monitor prefix, which every channel shares.  Matching
-        # on it would suggest the monitor itself for every circuit, and it is
-        # derived from the channels so it works for any hardware.
-        candidates = device_candidates(
-            self._devices, channel, shared_tokens=panel_shared_tokens(self._channels)
-        )
-        return candidate_labels(candidates), candidates
-
-    async def async_step_mapping(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        unmapped = self._unmapped_channels()
-        if not unmapped:
-            return await self.async_step_confirm()
-
-        channel = unmapped[0]
-        ct_id = str(channel["ct_id"])
-        labels, _ = self._candidate_choices(channel)
-
-        if user_input is not None:
-            if user_input.get("skip"):
-                self._skipped.add(ct_id)
-                return await self.async_step_mapping()
-
-            chosen = (user_input.get("manual_override") or "").strip() or (
-                user_input.get("candidate") or ""
-            )
-            if not chosen:
-                # Never invent a mapping; re-ask with an explanation.
-                self._errors = {"base": "invalid_mapping"}
-                return self.async_show_form(
-                    step_id="mapping",
-                    data_schema=self._mapping_schema(labels),
-                    errors=self._errors,
-                    description_placeholders=self._mapping_placeholders(channel, labels),
-                )
-
-            current = self._assignments.get(ct_id) or assignment_defaults(channel)
-            self._assignments[ct_id] = normalise_assignment(
-                {**current, "device_id": chosen}, channel
-            )
-            return await self.async_step_mapping()
-
-        return self.async_show_form(
-            step_id="mapping",
-            data_schema=self._mapping_schema(labels),
-            errors=self._errors,
-            description_placeholders=self._mapping_placeholders(channel, labels),
-        )
-
     # -- step: confirm ----------------------------------------------------- #
 
     async def async_step_confirm(
@@ -777,7 +676,7 @@ class _AssignmentWizard:
 class WattMosaicConfigFlow(_AssignmentWizard, ConfigFlow, domain=DOMAIN):
     """Full setup: connection, polling settings, CT assignment, confirmation."""
 
-    VERSION = 1
+    VERSION = 2
 
     @staticmethod
     @callback
@@ -1296,8 +1195,8 @@ class WattMosaicOptionsFlow(_AssignmentWizard, OptionsFlow):
 
         Only CTs that could actually meter a load are offered: a main feed is
         not a load row, and offering it would invite a declaration the engine
-        drops silently.  Branch, dedicated and unclassified channels are all
-        legitimate rows for a shared circuit.
+        drops silently.  Branch and unclassified channels are both legitimate
+        rows for a shared circuit.
         """
         options: list[SelectOptionDict] = []
         for channel in self._channels:

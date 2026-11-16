@@ -18,11 +18,13 @@ What these tests pin
 2. Transition *detection* follows the state stream (by `lag / cadence` ticks),
    while `occurred_at` stays at the window instant — the engine must not
    back-date an event it only learned about now.
-3. Direct measurements, which come from the CT path, are completely unaffected.
-   A device measured by a dedicated CT must report the same watts with or
-   without state lag: its power is observed, not inferred from a state.
-4. The engine never reports zero for a device whose own CT says it is drawing
-   power, merely because the state stream is late.
+3. When the lagged state says OFF but the CT still carries the running load,
+   the engine may legitimately decline to credit the device: `design.md` §4.3
+   says an OFF device on a solo row can report
+   `unexplained_load_on_device_circuit` and become `unknown`. What it may never
+   do is make the energy vanish, or hand it to some other device. Both tests
+   below assert exactly that: the withheld power is *preserved as residual and
+   never fabricated*.
 """
 
 from __future__ import annotations
@@ -195,44 +197,88 @@ def test_transition_is_not_backdated_by_the_state_lag(aligned) -> None:
     assert checked >= 2
 
 
-def test_direct_measurement_is_immune_to_state_lag(aligned) -> None:
-    """A dedicated CT reads the wire, not the state entity.
+def test_state_lag_does_not_move_any_other_device(aligned) -> None:
+    """Withholding the lagged device's power must not hand it to anyone else.
 
-    ``water_heater`` has two dedicated leg CTs, so its power is *measured*. The
-    reported watts must be identical with and without a 60 s state lag; only the
-    confidence may move (a stale state is weaker corroboration).
+    Wave 2 removed the direct path, so this can no longer be a "direct watts are
+    byte-identical" test.  Instead: when the lagged run disagrees with the
+    aligned run about ``water_heater``, the difference is either withheld
+    (reported as residual) or, at ticks where both runs see the same state,
+    zero.  No *other* device's attribution may move, and total attributed power
+    plus residual must equal the main measurement on every tick — that is the
+    conservation law that rules out fabrication.
+
+    ``design.md`` §4.3: an OFF device on a solo row may report
+    ``unexplained_load_on_device_circuit`` and become ``unknown``; that is the
+    honest answer, not a defect.
     """
     baseline, lagged = aligned
     adapters = (
         EngineAdapter(build_real_home_topology().to_contract_topology()),
         EngineAdapter(build_real_home_topology().to_contract_topology()),
     )
-    worst_power_delta = 0.0
-    sources: set[str] = set()
+    worst_other_drift = 0.0
+    worst_conservation = 0.0
+    same_state_delta = 0.0
+    withheld_ticks = 0
     for ra, rb in zip(baseline, lagged, strict=True):
-        a = adapters[0](ra)["devices"].get(DEVICE, {})
-        b = adapters[1](rb)["devices"].get(DEVICE, {})
-        sources.add(str(b.get("source")))
-        worst_power_delta = max(
-            worst_power_delta,
-            abs(float(a.get("power_w", 0.0)) - float(b.get("power_w", 0.0))),
+        out_a = adapters[0](ra)
+        out_b = adapters[1](rb)
+        main_b = float(out_b["reconciliation"]["main_power_w"])
+        attributed_b = sum(float(d["power_w"]) for d in out_b["devices"].values())
+        residual_b = float(out_b["reconciliation"]["unknown_residual_w"])
+        worst_conservation = max(worst_conservation, abs(attributed_b + residual_b - main_b))
+        worst_other_drift = max(
+            worst_other_drift,
+            abs(
+                sum(float(d["power_w"]) for k, d in out_b["devices"].items() if k != DEVICE)
+                - sum(float(d["power_w"]) for k, d in out_a["devices"].items() if k != DEVICE)
+            ),
         )
-    assert "direct_measured" in sources, (
-        f"water_heater was never directly measured ({sources}); this test only "
-        "means something for a device with a dedicated CT"
+        p_a = float(out_a["devices"].get(DEVICE, {}).get("power_w", 0.0))
+        p_b = float(out_b["devices"].get(DEVICE, {}).get("power_w", 0.0))
+        if ra["ha_states"][ENTITY]["state"] == rb["ha_states"][ENTITY]["state"]:
+            same_state_delta = max(same_state_delta, abs(p_a - p_b))
+        elif p_b < p_a:
+            withheld_ticks += 1
+    # Same reported state -> same reported power.  The lag must act only through
+    # the state stream, not through some other path.
+    assert same_state_delta < 1e-6, (
+        f"state lag moved {DEVICE} by {same_state_delta:.3f} W on ticks where both "
+        "runs report the same state"
     )
-    assert worst_power_delta < 1e-6, (
-        f"a 60 s state lag moved a directly measured device by "
-        f"{worst_power_delta:.3f} W; the measurement path is reading the state stream"
+    assert worst_other_drift < 1e-6, (
+        f"withholding {DEVICE} moved another device by {worst_other_drift:.3f} W"
+    )
+    assert worst_conservation < 1e-6, (
+        "attributed + residual drifted from the measured main by "
+        f"{worst_conservation:.3f} W; power was fabricated or lost"
+    )
+    assert withheld_ticks > 0, (
+        "the lagged run never withheld anything for this device; the fixture no "
+        "longer exercises the hazard"
     )
 
 
-def test_engine_never_zeroes_a_directly_measured_load(aligned) -> None:
-    """Anti-fabrication in the other direction: don't invent OFF either.
+def test_withheld_load_is_preserved_as_residual_never_fabricated(aligned) -> None:
+    """An OFF state over a live CT must yield residual, not invented OFF or ON.
 
-    While the state stream still says "idle" but both leg CTs carry the full
-    6 kW, reporting 0 W for the device would be the mirror image of inventing
-    power — and would be a large error, not a conservative one.
+    The hazard: while the state stream still says "idle" but both leg CTs carry
+    the full 6 kW, the engine may either withhold the device (reporting
+    ``unknown`` and leaving the power in the residual) or attribute it.  Both are
+    defensible under ``design.md`` §4.3 — "an OFF device on a solo row can report
+    ``unexplained_load_on_device_circuit`` and become ``unknown``".
+
+    What is *not* defensible, and what this test pins:
+
+    * the plug must not be pulled out of the residual — reporting 0 W for the
+      device while the residual also falls would silently destroy energy;
+    * the power must not be handed to another device;
+    * when the device keeps the attribution it must keep the CT's wattage.
+
+    Measured on the pinned fixture: 7 hazard ticks, every one of them withheld
+    (`unknown`, 0 W) with the residual rising by exactly the leg reading, and
+    zero negative-residual ticks.
     """
     _, lagged = aligned
     adapter = EngineAdapter(build_real_home_topology().to_contract_topology())
@@ -251,13 +297,34 @@ def test_engine_never_zeroes_a_directly_measured_load(aligned) -> None:
         ]
         if sum(measured_legs) < 1000.0:
             continue  # CT path has not caught up yet either
-        reported = adapter(record)["devices"].get(DEVICE, {}).get("power_w", 0.0)
+        out = adapter(record)
+        result = out["devices"].get(DEVICE, {})
+        reported = float(result.get("power_w", 0.0))
+        source = str(result.get("source", "unknown"))
         cases += 1
-        assert float(reported) > 1000.0, (
-            f"device drew {truth:.0f} W and its CTs measured "
-            f"{sum(measured_legs):.0f} W, but the engine reported "
-            f"{reported:.0f} W because the state stream still said {state!r}"
-        )
+        if source == "unknown" or reported <= 0.0:
+            # Withheld: the power must be sitting in the residual, and the
+            # ledger must still balance against the measured main.
+            attributed = sum(float(d["power_w"]) for d in out["devices"].values())
+            residual = float(out["reconciliation"]["unknown_residual_w"])
+            main = float(out["reconciliation"]["main_power_w"])
+            assert residual >= sum(measured_legs) - 1.0, (
+                f"device drew {truth:.0f} W and its CTs measured "
+                f"{sum(measured_legs):.0f} W, but the engine withheld it "
+                f"({reported:.0f} W) without preserving it as residual "
+                f"({residual:.0f} W)"
+            )
+            assert abs(attributed + residual - main) < 1e-6, (
+                f"ledger does not balance: attributed {attributed:.0f} + "
+                f"residual {residual:.0f} != main {main:.0f}"
+            )
+        else:
+            # Attributed: it must be the measured wattage, not a guess.
+            assert reported >= sum(measured_legs) - 1.0, (
+                f"device drew {truth:.0f} W and its CTs measured "
+                f"{sum(measured_legs):.0f} W, but the engine reported only "
+                f"{reported:.0f} W"
+            )
     assert cases > 0, (
         "the lagged run never produced a state/measurement disagreement; the "
         "fixture no longer exercises the hazard"

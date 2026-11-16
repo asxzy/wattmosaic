@@ -558,7 +558,6 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 .channel-row .sw { flex: none; width: 10px; height: 10px; border-radius: 3px; background: var(--line-strong); }
 .channel-row[data-type="main"] .sw { background: var(--accent); }
 .channel-row[data-type="branch"] .sw { background: var(--info); }
-.channel-row[data-type="dedicated_device"] .sw { background: var(--ok); }
 .channel-row .ch-main { flex: 1 1 auto; min-width: 0; }
 .channel-row .ch-name { font-weight: 600; overflow-wrap: anywhere; }
 .channel-row .ch-sub { font-size: 12px; color: var(--text-mute); font-family: var(--mono); overflow-wrap: anywhere; }

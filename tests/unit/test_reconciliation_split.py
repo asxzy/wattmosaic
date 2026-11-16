@@ -96,7 +96,7 @@ def _aliased_topology() -> Topology:
             _chan("main_panel_l2", CTType.MAIN, Phase.L2, alias="load_manager_l2"),
             _chan(
                 "ct_heater",
-                CTType.DEDICATED_DEVICE,
+                CTType.BRANCH,
                 Phase.L1,
                 parent="load_manager_l1",
                 device="heater",
@@ -105,7 +105,7 @@ def _aliased_topology() -> Topology:
         devices=[
             DeviceTopology(
                 device_id="heater",
-                dedicated_ct_ids=["ct_heater"],
+                branch_ct_ids=["ct_heater"],
                 phase=Phase.L1,
                 topology_status=TopologyStatus.CONFIRMED,
             )
@@ -231,6 +231,10 @@ def test_normal_case_spread_fits_inside_the_residual():
     * ``meter_disagreement_w == 100`` (all of it fits inside the residual);
     * ``unmonitored == 200`` (not attributable to any device);
     * the parts add exactly and the flag is False.
+
+    The single-load circuit was formerly *directly measured*, so it contributed
+    to ``direct_measured_w``.  With that path retired the device is solved from
+    its own row instead: same 700 W, booked as ``inferred``.
     """
     topo = _aliased_topology()
     win = _window(
@@ -245,7 +249,8 @@ def test_normal_case_spread_fits_inside_the_residual():
     rec = _infer(topo, win).reconciliation
 
     assert rec.main_power_w == pytest.approx(1000.0)
-    assert rec.direct_measured_w == pytest.approx(700.0)
+    assert rec.direct_measured_w == pytest.approx(0.0)
+    assert rec.inferred_w == pytest.approx(700.0)
     assert rec.unknown_residual_w == pytest.approx(300.0)
     assert rec.meter_spread_w == pytest.approx(100.0)
     assert rec.meter_disagreement_w == pytest.approx(100.0)
@@ -258,10 +263,15 @@ def test_normal_case_spread_fits_inside_the_residual():
 # Zero residual: a total gap of zero cannot contain anything
 # --------------------------------------------------------------------------- #
 def test_zero_residual_contains_no_disagreement_but_still_reports_the_spread():
-    """Residual 0 W, spread 250 W.
+    """Residual ~0 W, spread 250 W.
 
     The spread is real and reported; its contribution to a zero residual is 0,
     and the flag says the residual cannot possibly explain the disagreement.
+
+    The tolerance is a watt, not an epsilon: the single-load circuit is now
+    *solved* from its own row rather than read directly, so the fit lands within
+    a few microwatts of the feed instead of exactly on it.  That is numerical
+    noise on a 1000 W scale, not a residual.
     """
     topo = _aliased_topology()
     win = _window(
@@ -275,10 +285,10 @@ def test_zero_residual_contains_no_disagreement_but_still_reports_the_spread():
     )
     rec = _infer(topo, win).reconciliation
 
-    assert rec.unknown_residual_w == pytest.approx(0.0, abs=1e-9)
+    assert rec.unknown_residual_w == pytest.approx(0.0, abs=0.01)
     assert rec.meter_spread_w == pytest.approx(250.0)
-    assert rec.meter_disagreement_w == pytest.approx(0.0, abs=1e-9)
-    assert rec.unmonitored_w == pytest.approx(0.0, abs=1e-9)
+    assert rec.meter_disagreement_w == pytest.approx(0.0, abs=0.01)
+    assert rec.unmonitored_w == pytest.approx(0.0, abs=0.01)
     assert rec.meter_spread_exceeds_residual is True
     _assert_additive(rec)
 
@@ -294,7 +304,7 @@ def test_split_does_not_change_any_power_value():
     }
     topo = _aliased_topology()
     rec = _infer(topo, _window(values)).reconciliation
-    # The device value is the dedicated CT reading, unchanged.
+    # The device value comes from its own branch CT row, unchanged.
     batch = _infer(topo, _window(values))
     assert batch.get("heater").power_w == pytest.approx(700.0)
     # And the total is the canonical feed, not the alias and not their sum.
@@ -451,6 +461,11 @@ def test_a_negative_residual_contains_no_disagreement_either():
     contribution is 0 and ``unmonitored_w`` keeps the (negative) residual
     unchanged -- never clamped, because hiding it would hide a data-quality
     problem.  The spread is still reported honestly.
+
+    The residual is -50 W rather than -100 W because the single-load circuit is
+    now solved from its own row instead of read directly: the constrained fit
+    pulls it toward the feed.  The point of the test -- a negative remainder is
+    preserved and holds no disagreement -- is unchanged.
     """
     topo = _aliased_topology()
     win = _window(
@@ -464,10 +479,10 @@ def test_a_negative_residual_contains_no_disagreement_either():
     )
     rec = _infer(topo, win).reconciliation
 
-    assert rec.unknown_residual_w == pytest.approx(-100.0)
+    assert rec.unknown_residual_w == pytest.approx(-50.0)
     assert rec.meter_spread_w == pytest.approx(100.0)
     assert rec.meter_disagreement_w == pytest.approx(0.0, abs=1e-9)
-    assert rec.unmonitored_w == pytest.approx(-100.0)
+    assert rec.unmonitored_w == pytest.approx(-50.0)
     assert rec.meter_spread_exceeds_residual is True
     _assert_additive(rec)
 
@@ -523,7 +538,7 @@ def test_reconciliation_fields_are_additive_with_zero_defaults():
     assert rec.unknown_residual_w == 0.0
 
 
-def test_contract_version_is_1_6_0():
+def test_contract_version_is_2_0_0():
     from wattmosaic_engine import contracts
 
-    assert contracts.CONTRACT_VERSION == "1.6.0"
+    assert contracts.CONTRACT_VERSION == "2.0.0"

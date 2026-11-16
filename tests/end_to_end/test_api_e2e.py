@@ -280,8 +280,8 @@ def test_inference_results_reach_the_api(core) -> None:
                 by_id = {d["device_id"]: d for d in devices}
                 assert by_id["vehicle_charger"]["double_pole"] is True
                 assert by_id["water_heater"]["double_pole"] is True
-                # Dedicated channels are attached to their owner.
-                assert by_id["water_heater"]["dedicated_ct_ids"]
+                # Branch channels are attached to the device they monitor.
+                assert by_id["water_heater"]["branch_ct_ids"]
 
                 status, one, _ = await _get(session, server, "/devices/vehicle_charger")
                 assert status == 200

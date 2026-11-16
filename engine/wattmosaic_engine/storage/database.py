@@ -247,7 +247,7 @@ class Database:
                         phase, double_pole, parent_device_id, topology_status, enabled, metadata_json, updated_at)
                         VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                         (
-                            dev.device_id, dev.name, json.dumps(dev.dedicated_ct_ids),
+                            dev.device_id, dev.name, json.dumps([]),
                             json.dumps(dev.branch_ct_ids), dev.phase, int(dev.double_pole),
                             dev.parent_device_id, dev.topology_status, 1,
                             json.dumps(dev.metadata), now,
@@ -328,7 +328,6 @@ class Database:
             devices=[
                 DeviceTopology(
                     device_id=r["device_id"], name=r["name"],
-                    dedicated_ct_ids=json.loads(r["dedicated_ct_ids_json"]),
                     branch_ct_ids=json.loads(r["branch_ct_ids_json"]), phase=r["phase"],
                     double_pole=bool(r["double_pole"]), parent_device_id=r["parent_device_id"],
                     topology_status=r["topology_status"], metadata=json.loads(r["metadata_json"]),

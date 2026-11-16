@@ -195,7 +195,6 @@
       "enum": [
         "main",
         "branch",
-        "dedicated_device",
         "unknown"
       ],
       "title": "CTType",
@@ -313,13 +312,6 @@
           ],
           "default": null,
           "title": "Name"
-        },
-        "dedicated_ct_ids": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Dedicated Ct Ids",
-          "type": "array"
         },
         "branch_ct_ids": {
           "items": {
@@ -594,5 +586,5 @@
   "title": "Topology",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/topology.json",
-  "x-contract-version": "1.6.0"
+  "x-contract-version": "2.0.0"
 }

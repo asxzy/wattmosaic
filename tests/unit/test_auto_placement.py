@@ -6,7 +6,7 @@ things that make creating it safe:
 
 * it is placed on the row it declares, with a phase inherited from that row, and
   it disappears when the declaration is removed;
-* it is **never** placed on a row another device already owns as a dedicated
+* it is **never** placed on a row another device already owns as its whole
   measurement, because that would count the same circuit twice.
 
 The dimmer cases pin the other half of the requirement: a measured
@@ -62,7 +62,7 @@ def _topology(*, branch: bool = True) -> Topology:
             CTChannel(
                 ct_id="ct1",
                 entity_id="sensor.lights_ct1_power",
-                ct_type=CTType.BRANCH if branch else CTType.DEDICATED_DEVICE,
+                ct_type=CTType.BRANCH,
                 phase=Phase.L1,
                 device_id=None if branch else "dev_lights",
             ),
@@ -72,7 +72,7 @@ def _topology(*, branch: bool = True) -> Topology:
                 device_id="dev_lights",
                 name="lights",
                 phase=Phase.L1,
-                dedicated_ct_ids=["ct1"],
+                branch_ct_ids=["ct1"],
             )
         ],
     )
@@ -137,11 +137,11 @@ def test_a_branch_row_has_no_claimant() -> None:
     assert cts_claimed_by_dedicated(_topology(), ["ct1"]) is None
 
 
-def test_a_device_owning_its_own_dedicated_row_is_not_a_conflict() -> None:
-    """The direct-measurement path must keep working for the device that owns it."""
+def test_a_device_owning_its_own_row_is_not_a_conflict() -> None:
+    """A device declaring its own attribution row must not refuse itself."""
     config = DeviceConfiguration(
         device_id="dev_lights",
-        monitoring=MonitoringLevel.DEDICATED,
+        monitoring=MonitoringLevel.SHARED,
         monitored_by_ct_ids=["ct1"],
     )
     assert materialisation_blockers(_topology(branch=False), [config]) == {}
@@ -174,7 +174,9 @@ def test_the_owned_row_is_still_credited_exactly_once() -> None:
 
     assert "bar" not in by_id
     assert by_id["dev_lights"].power_w == pytest.approx(28.0)
-    assert by_id["dev_lights"].source == Source.DIRECT_MEASURED.value
+    # The row is one device's whole measurement, so it is solved whole rather
+    # than claimed as a direct reading — but it is still credited exactly once.
+    assert by_id["dev_lights"].source == Source.INFERRED.value
 
 
 def test_converting_the_row_to_a_branch_unblocks_the_placement() -> None:

@@ -94,7 +94,17 @@ WattMosaic is an intelligent home electrical load monitoring and disaggregation 
 
 Its primary purpose is:
 
+<!-- vocabulary-exempt: the project's original requirement, quoted verbatim; editing it would falsify the record -->
 **Use incoming electrical power measurements, all available branch-circuit CT measurements, dedicated device CT measurements, Home Assistant device states and historical learned models to estimate the real-time power consumption of as many individual Home Assistant devices as mathematically and technically possible.**
+
+> *Historical requirement, preserved verbatim.* This was the project's original
+> statement of purpose. "Dedicated device CT measurements" referred to a
+> channel role that has since been retired (ADR-0034): every circuit CT is a
+> `branch` row, and a circuit feeding one appliance is expressed by that row
+> alone. The requirement it served — estimate every device the measurements
+> support — is unchanged; only the vocabulary and the private-measurement path
+> are gone.
+<!-- /vocabulary-exempt -->
 
 The system should continuously learn how the home consumes electricity.
 
@@ -141,7 +151,8 @@ Known configuration:
 
 - CT1 measures incoming L1.
 - CT2 measures incoming L2.
-- Additional CT channels may measure branch circuits or dedicated appliances.
+- Additional CT channels may measure branch circuits or a single appliance on its
+  own circuit.
 - Each available CT can expose instantaneous power in watts.
 - Each available CT can expose accumulated energy in kWh.
 
@@ -191,7 +202,7 @@ The initial system should discover and evaluate all relevant Home Assistant devi
 
 The home contains a mixture of:
 
-- Devices with dedicated CT measurements.
+- Devices measured by a circuit CT of their own.
 - Devices sharing branch-circuit CT measurements.
 - Devices with no direct power measurement.
 - Devices with rich Home Assistant state information.
@@ -807,7 +818,6 @@ Support at least:
 
 - `main`
 - `branch`
-- `dedicated_device`
 - `unknown`
 
 Each channel should include:
@@ -837,9 +847,11 @@ Handle signed power and reverse-flow conditions correctly.
 
 Do not silently clamp negative measurements to zero.
 
-## 8.3 Branch and dedicated CTs
+## 8.3 Branch CTs
 
-Branch CTs and dedicated device CTs provide additional constraints.
+Branch CTs provide additional constraints. A circuit that feeds a single
+appliance is still a `branch` row; there is no separate channel role for it
+(ADR-0034).
 
 They may be nested within other CT measurements.
 
@@ -909,7 +921,7 @@ The primary objective is to infer individual device power from:
 
 1. Incoming L1 and L2 CT measurements.
 2. Available branch CT measurements.
-3. Dedicated device CT measurements.
+3. Branch CT measurements of a circuit that feeds one appliance.
 4. HA state transitions.
 5. Historical device behavior.
 6. Previously learned power models.
@@ -920,18 +932,17 @@ The primary objective is to infer individual device power from:
 
 Use the following hierarchy.
 
-### Level 1 — Direct measurement
+### Level 1 — Direct measurement (retired)
 
-If a device has a verified dedicated CT:
-
-- Use the direct measured power.
-- Mark the result `direct_measured`.
-- Use measurement quality to determine confidence.
-- Do not replace direct measurements with a less reliable model estimate.
+This level no longer exists. A private measurement path keyed on the retired
+channel role was removed together with that role (ADR-0034); a circuit feeding
+one appliance is fitted at Level 2. Historical results that carry
+`direct_measured` keep the grade they were stored with, but nothing new
+produces it.
 
 ### Level 2 — Constrained inference
 
-If a device does not have a dedicated CT:
+If a device has no direct measurement:
 
 - Use incoming CT measurements.
 - Use branch CT measurements.
@@ -992,8 +1003,7 @@ Do not assign the entire aggregate power difference to one device.
 
 Use:
 
-- Dedicated CT constraints.
-- Branch CT constraints.
+- Branch CT constraints (including a circuit that feeds one appliance).
 - Historical device models.
 - Device state information.
 - Phase relationships.
@@ -1150,7 +1160,7 @@ Collect candidate training samples from:
 - HA state transitions.
 - CT power transitions.
 - Stable operating periods.
-- Dedicated CT measurements.
+- Single-load circuit measurements.
 - Isolated device operation.
 - Repeated operating patterns.
 - Appliance cycle stages.
@@ -1243,7 +1253,8 @@ For appliances such as washing machines:
 - Calculate energy consumption.
 - Preserve full power curves.
 
-Where a device has a dedicated CT, use its direct measurement.
+Where a device is measured by a circuit CT of its own, use that row's
+measurement.
 
 Where it does not, use multi-CT constraints and historical stage models.
 
@@ -1560,7 +1571,7 @@ It must simulate:
 
 - L1 and L2 incoming power.
 - Branch CTs.
-- Dedicated device CTs.
+- Branch CTs, including a circuit that feeds a single appliance.
 - Nested CT topology.
 - Device ON/OFF transitions.
 - Standby power.
@@ -1965,7 +1976,7 @@ Explain:
 
 - Main CTs.
 - Branch CTs.
-- Dedicated CTs.
+- Branch CTs, including a circuit that feeds a single appliance.
 - Phase handling.
 - Double-pole appliances.
 - Measurement matrix.

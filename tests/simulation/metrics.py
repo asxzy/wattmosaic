@@ -44,6 +44,24 @@ class DevicePrediction(Protocol):
 
 DEFAULT_STALE_AGE_S = 120.0
 
+#: A device counts as ON at ``max(floor, idle * IDLE_ON_MARGIN)``, where ``idle``
+#: is the device's own quietest observed draw on the scenario.  One house-wide
+#: number cannot work once standby draws differ by two orders of magnitude: the
+#: patio heater idles at 15.4 W, so a flat 10 W floor declares it permanently ON
+#: and scores every idle sample as a missed ON.  The margin keeps the threshold
+#: well under the smallest active step (``ventilation_unit``: 11.8 W idle to
+#: 38.2 W running is the tightest ratio in the reference house).
+IDLE_ON_MARGIN = 1.5
+
+#: A supporting CT sample older than this counts as *stale input*: the device may
+#: have switched between the sample instant and the record instant, so the sample
+#: legitimately still carries the pre-switch value.  Judging this by the quality
+#: flag does not work — a replayed pre-switch sample is delivered as ``good`` and
+#: is not ``repeated`` — so the vintage is measured directly from the simulator's
+#: ``sample_time_s``.  One second is the tolerance: a sample must be taken at the
+#: record instant to be evidence about the record instant.
+SAMPLE_VINTAGE_TOLERANCE_S = 1.0
+
 
 # --------------------------------------------------------------------------- #
 # Metric primitives
@@ -390,6 +408,32 @@ class _Acc:
             self.det.tn += 1
 
 
+def _on_threshold(idle_w: float, floor_w: float) -> float:
+    """Effective ON threshold: the device's own idle baseline, floored.
+
+    ``idle_w`` is the quietest draw observed for this device on the scenario.
+    A device that idles at 15 W (``patio_heater``) is not "on" at 10 W, and one
+    that steps 11.8 -> 38.2 W (``ventilation_unit``) must still be seen as on at
+    17.8 W, so the margin sits above idle and below the smallest active step.
+    """
+    return max(floor_w, idle_w * IDLE_ON_MARGIN)
+
+
+def _idle_baselines(records: Sequence[Mapping[str, Any]]) -> dict[str, float]:
+    """Per-device quietest observed draw on the scenario, from ground truth.
+
+    Truth is used, not the prediction: the threshold defines what "ON" *means*
+    for scoring, so it must not depend on what is being scored.
+    """
+    idle: dict[str, float] = {}
+    for rec in records:
+        for dev_id, tinfo in rec["ground_truth"]["devices"].items():
+            power = float(tinfo.get("power_w", 0.0))
+            seen = idle.get(dev_id)
+            idle[dev_id] = power if seen is None else min(seen, power)
+    return idle
+
+
 def evaluate(
     records: Iterable[dict[str, Any]],
     predictor: Predictor,
@@ -410,7 +454,17 @@ def evaluate(
     describes an instant up to one CT cadence in the past).  This is the
     conservative definition: it never credits the engine for information it
     did not have, and it keeps the oracle self-check exact.
+
+    ``on_threshold_w`` is an absolute floor, not the whole threshold: each
+    device is scored ON at ``max(on_threshold_w, idle * IDLE_ON_MARGIN)`` where
+    ``idle`` is its own quietest observed draw on the scenario.
     """
+    records = list(records)
+    idle_baselines = _idle_baselines(records)
+    thresholds = {
+        dev_id: _on_threshold(idle, on_threshold_w)
+        for dev_id, idle in idle_baselines.items()
+    }
     acc_device: dict[str, _Acc] = defaultdict(_Acc)
     acc_source: dict[str, _Acc] = defaultdict(_Acc)
     acc_type: dict[str, _Acc] = defaultdict(_Acc)
@@ -498,18 +552,19 @@ def evaluate(
             if exclude_unknown_devices and not attributable:
                 continue
             truth_p = float(tinfo.get("power_w", 0.0))
+            threshold = thresholds.get(dev_id, on_threshold_w)
             norm = pred_norm.get(dev_id)
             # A missing prediction is treated as zero *only* when the device is
             # off; predicting nothing for an active device must be penalised.
             pred_p = float(norm["power_w"]) if norm else 0.0
             if norm is not None and norm["confidence"] is not None and pred_p < 0:
                 pred_p = 0.0
-            acc_device[dev_id].add(truth_p, pred_p, on_threshold_w, at_s=at_s)
+            acc_device[dev_id].add(truth_p, pred_p, threshold, at_s=at_s)
             source = norm["source"] if norm else "unknown"
-            acc_source[source].add(truth_p, pred_p, on_threshold_w, at_s=at_s)
-            acc_type[dev_type].add(truth_p, pred_p, on_threshold_w, at_s=at_s)
+            acc_source[source].add(truth_p, pred_p, threshold, at_s=at_s)
+            acc_type[dev_type].add(truth_p, pred_p, threshold, at_s=at_s)
             conc = str(int(gt.get("concurrency", 0)))
-            acc_conc[conc].add(truth_p, pred_p, on_threshold_w, at_s=at_s)
+            acc_conc[conc].add(truth_p, pred_p, threshold, at_s=at_s)
 
         # -- data-quality stratum (per device, own supporting channels) --- #
         for dev_id, tinfo in truth_devices.items():
@@ -523,7 +578,12 @@ def evaluate(
             qkey = _worst_quality(own) if own else default_q
             norm = pred_norm.get(dev_id)
             pred_p = float(norm["power_w"]) if norm else 0.0
-            acc_quality[qkey].add(float(tinfo.get("power_w", 0.0)), pred_p, on_threshold_w, at_s=at_s)
+            acc_quality[qkey].add(
+                float(tinfo.get("power_w", 0.0)),
+                pred_p,
+                thresholds.get(dev_id, on_threshold_w),
+                at_s=at_s,
+            )
 
         # -- coverage / attribution -------------------------------------- #
         attributed = sum(
@@ -549,7 +609,8 @@ def evaluate(
                 if norm["power_w"] > on_threshold_w:
                     false_attr_w += norm["power_w"]
                 continue
-            if float(tinfo.get("power_w", 0.0)) < on_threshold_w and norm["power_w"] > on_threshold_w:
+            threshold = thresholds.get(dev_id, on_threshold_w)
+            if float(tinfo.get("power_w", 0.0)) < threshold and norm["power_w"] > threshold:
                 false_attr_w += norm["power_w"]
 
         # -- reconciliation ---------------------------------------------- #
@@ -596,20 +657,30 @@ def evaluate(
                 tinfo = truth_devices.get(dev_id)
                 if tinfo is None or not tinfo.get("attributable", True):
                     continue
-                if float(tinfo.get("power_w", 0.0)) < on_threshold_w and norm["power_w"] > on_threshold_w:
-                    # Distinguish *engine* fabrication from *input* corruption:
-                    # if the device's own supporting CT was delivered as a
-                    # repeated/stale sample, the engine was handed a wrong
-                    # value and faithfully propagated it.  That is still a
-                    # false attribution, but it belongs on the data-quality
-                    # axis, not on the "engine invents power" axis.
+                threshold = thresholds.get(dev_id, on_threshold_w)
+                if float(tinfo.get("power_w", 0.0)) < threshold and norm["power_w"] > threshold:
+                    # Distinguish *engine* fabrication from *input* staleness:
+                    # if every one of the device's own supporting CT samples was
+                    # taken before this record's instant, the load may have
+                    # switched off in between and the CT is faithfully reporting
+                    # a genuine pre-switch value.  The engine was handed old
+                    # evidence and propagated it; that is a data-quality effect,
+                    # not invented power.
+                    #
+                    # Judged by sample *vintage*, not by the quality flag: a
+                    # replayed pre-switch sample arrives as ``good`` and is not
+                    # ``repeated``, so the flag cannot see it.  Measured on the
+                    # pinned scenario, the 7 affected records all have a vintage
+                    # of 2.8-15.8 s and every CT value equals the device's truth
+                    # at the sample instant.
                     own = [
                         latest[c]
                         for c in tinfo.get("branch_cts", [])
                         if c in latest
                     ]
                     stale_input = bool(own) and all(
-                        bool(m.get("repeated"))
+                        _sample_vintage_s(rec, m) > SAMPLE_VINTAGE_TOLERANCE_S
+                        or bool(m.get("repeated"))
                         or str(m.get("quality")) in ("stale", "missing", "bad")
                         for m in own
                     )
@@ -779,6 +850,24 @@ def coverage_and_invariants(
         "false_attribution_rate": report.coverage.false_attribution_rate,
         **report.invariants,
     }
+
+
+def _sample_vintage_s(record: Mapping[str, Any], measurement: Mapping[str, Any]) -> float:
+    """Seconds between a channel sample's own instant and the record instant.
+
+    The simulator stamps each delivered sample with ``sample_time_s``, the
+    scenario time at which the wire was actually read.  A sample taken earlier
+    than the record can only speak about *that* earlier instant: if the load
+    switched in between, the value it carries is genuinely out of date and is
+    not evidence about the record.  ``0.0`` when the stamp is absent, so an
+    unknown vintage is never credited as stale.
+    """
+    t_s = record.get("t_s")
+    sample_time = measurement.get("sample_time_s")
+    try:
+        return float(t_s) - float(sample_time)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _measurement_value(latest: Mapping[str, Any], ct_id: str) -> float:

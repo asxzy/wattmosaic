@@ -7,6 +7,7 @@ in-memory ``StubFacade``/``NullFacade``; the inference engine is never imported.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,8 @@ from wattmosaic_engine.api.facade import (
 from wattmosaic_engine.api.server import APIServer, create_app
 from wattmosaic_engine.contracts import (
     CONTRACT_VERSION,
+    CTType,
+    DeviceTopology,
     ErrorResponse,
     HealthResponse,
     ServiceCommand,
@@ -165,6 +168,27 @@ def test_devices_returns_list() -> None:
         return True
 
     assert run(_with_server(StubFacade(), fn))
+
+
+def test_stub_facade_matches_contract() -> None:
+    """The stub's fixed device row must still be a ``DeviceTopology``.
+
+    ``jsonschema`` is not a dependency of this project, so conformance against
+    ``data/schemas/device_topology.json`` is asserted structurally: the payload
+    names only declared properties, carries every required one, and validates
+    as the contract model it claims to be.  The stub is the fixture every
+    ``/devices`` and ``/topology`` test reads, so a field that outlives the
+    contract there would keep the retired vocabulary alive in the test suite.
+    """
+    schema = json.loads((REPO_ROOT / "data" / "schemas" / "device_topology.json").read_text())
+    device = StubFacade().topology()["devices"][0]
+
+    assert set(device) <= set(schema["properties"]), set(device) - set(schema["properties"])
+    assert set(schema["required"]) <= set(device), set(schema["required"]) - set(device)
+    # The contract model accepts it unchanged, and defines no dedicated field.
+    assert "dedicated_ct_ids" not in DeviceTopology.model_fields
+    assert not {"dedicated_ct_ids"} & set(device)
+    DeviceTopology.model_validate(device)
 
 
 def test_unknown_device_returns_structured_404() -> None:
@@ -346,6 +370,59 @@ def test_topology_put_without_devices_is_400() -> None:
             body = await resp.json()
             assert body["error"] == "bad_request"
             assert "device" in body["detail"]
+        return True
+
+    assert run(_with_server(StubFacade(), fn))
+
+
+def test_topology_put_rejects_the_retired_dedicated_role() -> None:
+    """AC-6: no new write can reintroduce the removed role.
+
+    ``CTType.DEDICATED_DEVICE`` no longer exists, so ``ct_type`` is constrained
+    to the three surviving members.  The payload is otherwise valid, and the
+    same body with ``ct_type="branch"`` is accepted in the control below — so
+    the 400 is attributable to the role alone, not to some unrelated defect in
+    the fixture.
+    """
+
+    def payload(ct_type: str) -> dict[str, Any]:
+        return {
+            "channels": [
+                {"ct_id": "main_l1", "entity_id": "sensor.m1", "ct_type": "main",
+                 "phase": "l1"},
+                {"ct_id": "br_hot_tub", "entity_id": "sensor.tub", "phase": "l1",
+                 "parent_ct_id": "main_l1", "ct_type": ct_type},
+            ],
+            "devices": [{"device_id": "hot_tub", "branch_ct_ids": ["br_hot_tub"]}],
+        }
+
+    async def fn(session, base):
+        # Control: the identical body with a surviving role must be accepted,
+        # or the rejection below would prove nothing about the retired value.
+        async with session.put(
+            f"{base}/topology", json=payload("branch"), headers=HEADERS
+        ) as resp:
+            assert resp.status == 200, await resp.text()
+
+        async with session.put(
+            f"{base}/topology", json=payload("dedicated_device"), headers=HEADERS
+        ) as resp:
+            assert resp.status == 400, await resp.text()
+            body = await resp.json()
+            ErrorResponse.model_validate(body)
+            assert body["error"] == "bad_request"
+            assert "ct_type" in body["detail"]
+            # The detail echoes the rejected input verbatim, so the retired
+            # word appears there by design.  What must not appear is the role
+            # among the *expected* values: a message still offering it would
+            # send the user straight back to the removed concept.
+            error = next(
+                e for e in json.loads(body["detail"]) if "ct_type" in e.get("loc", ())
+            )
+            expected = error["ctx"]["expected"]
+            assert "dedicated" not in expected
+            for member in CTType:
+                assert member.value in expected
         return True
 
     assert run(_with_server(StubFacade(), fn))

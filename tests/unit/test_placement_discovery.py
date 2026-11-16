@@ -638,11 +638,11 @@ def test_group_fit_is_called_with_main_rows_excluded(
 ) -> None:
     """Tier-B groups are evidence only, and mains are never group targets.
 
-    Contract §4 freezes the keyword set of ``fit_shared_rows`` and forbids a
-    group on a ``main``/``dedicated_device`` row.  The engine therefore filters
-    the *inputs* rather than passing an extra keyword: a strict implementation
-    of the frozen signature must not have to accept anything new, and a main row
-    must be absent from ``row_readings`` rather than merely ignored downstream.
+    Contract §4 freezes the keyword set of ``fit_shared_rows``, and a main feed
+    must never be a group target.  The engine therefore filters the *inputs*
+    rather than passing an extra keyword: a strict implementation of the frozen
+    signature must not have to accept anything new, and a main row must be
+    absent from ``row_readings`` rather than merely ignored downstream.
     """
     recorded: dict[str, Any] = {}
 

@@ -39,13 +39,6 @@
       "default": null,
       "title": "Name"
     },
-    "dedicated_ct_ids": {
-      "items": {
-        "type": "string"
-      },
-      "title": "Dedicated Ct Ids",
-      "type": "array"
-    },
     "branch_ct_ids": {
       "items": {
         "type": "string"
@@ -90,5 +83,5 @@
   "title": "DeviceTopology",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/device_topology.json",
-  "x-contract-version": "1.6.0"
+  "x-contract-version": "2.0.0"
 }

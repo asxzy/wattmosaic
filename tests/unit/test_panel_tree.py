@@ -358,7 +358,6 @@ def _two_panel_topology() -> Topology:
             DeviceTopology(
                 device_id="Upper_Humidifier",
                 name="Upper_Humidifier",
-                dedicated_ct_ids=["Upper_Humidifier_CT"],
                 branch_ct_ids=["Upper_Humidifier_CT"],
             ),
         ],

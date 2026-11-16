@@ -469,9 +469,13 @@ def _attribution_coefficient(
     """Coefficient of ``device_id`` in its own attribution row ``ct_id``.
 
     For a symmetric double-pole pair of branch/dedicated CTs each leg carries
-    its own share of the total.  For any other CT the standard phase
-    coefficient applies, with ``solo=True``: this row is the device's own
-    measurement, so an undeclared device phase must not halve it.
+    half of the total *by construction*: the two rows are a complete
+    observation, their sum is the device power, and the declared ``α`` must not
+    scale them (that would perturb a measurement that is already whole).  Every
+    other case uses :meth:`TopologyGraph.leg_coefficient`, which keeps ``α`` for
+    a partially observed double-pole load, and ``phase_coefficient(...,
+    solo=True)`` for everything else: this row is the device's own measurement,
+    so an undeclared device phase must not halve it.
     """
     ch = graph.channels[ct_id]
     if ch.paired_ct_id and len(attribution) >= 2 and graph.device(device_id) is not None:
@@ -479,10 +483,8 @@ def _attribution_coefficient(
         if dev_phase == Phase.BOTH:
             if row_phase == Phase.BOTH:
                 return 1.0
-            if row_phase == Phase.L1:
-                return graph.phase_split_l1
-            if row_phase == Phase.L2:
-                return 1.0 - graph.phase_split_l1
+            if row_phase in (Phase.L1, Phase.L2):
+                return graph.leg_coefficient(device_id, row_phase)
             return 0.0
     return graph.phase_coefficient(device_id, row_phase, solo=True)
 

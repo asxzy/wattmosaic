@@ -388,14 +388,14 @@ def _contract_topology():
             CTChannel(
                 ct_id="ct_hot_tub",
                 entity_id=POWER_ENTITY,
-                ct_type=CTType.DEDICATED_DEVICE,
+                ct_type=CTType.BRANCH,
                 phase=Phase.L1,
                 parent_ct_id="ct_main",
                 device_id="dev_hot_tub",
             ),
         ],
         devices=[
-            DeviceTopology(device_id="dev_hot_tub", name="Hot tub", dedicated_ct_ids=["ct_hot_tub"]),
+            DeviceTopology(device_id="dev_hot_tub", name="Hot tub", branch_ct_ids=["ct_hot_tub"]),
         ],
     )
 
@@ -404,7 +404,7 @@ def _ct_entities_by_device(topology) -> dict[str, list[str]]:
     channels = topology.channel_map()
     out: dict[str, list[str]] = {}
     for device in topology.devices:
-        for ct_id in [*device.dedicated_ct_ids, *device.branch_ct_ids]:
+        for ct_id in [*device.branch_ct_ids, *device.branch_ct_ids]:
             channel = channels.get(ct_id)
             if channel is not None and channel.entity_id:
                 out.setdefault(device.device_id, []).append(channel.entity_id)
@@ -621,7 +621,7 @@ def _link_payload() -> dict[str, Any]:
             },
         ],
         "devices": [
-            {"device_id": "dev_hot_tub", "dedicated_ct_ids": ["ct_hot_tub"]},
+            {"device_id": "dev_hot_tub", "branch_ct_ids": ["ct_hot_tub"]},
         ],
     }
 

@@ -189,8 +189,9 @@ class HouseholdTopology:
 
         Modelling decisions required by the contract's validation rules:
 
-        * A **dedicated** CT is typed ``dedicated_device`` and carries the
-          owning ``device_id``; it is listed in ``dedicated_ct_ids`` only.
+        * A single-device circuit CT is a ``branch`` row that carries the owning
+          ``device_id`` and is listed in the device's ``branch_ct_ids``.  Every
+          CT is a circuit; there is no single-device role in the contract.
         * A sub-panel feed is a ``branch`` CT whose parent is the main-panel
           line.  Nested ``main`` CTs are illegal because mains are summed.
         * 240 V loads are ``double_pole=True`` with ``phase=both``.
@@ -236,8 +237,7 @@ class HouseholdTopology:
             DeviceTopology(
                 device_id=d.device_id,
                 name=d.name,
-                dedicated_ct_ids=sorted(d.circuits) if d.dedicated_ct else [],
-                branch_ct_ids=[] if d.dedicated_ct else sorted(d.circuits),
+                branch_ct_ids=sorted(d.circuits),
                 phase=d.phase,
                 double_pole=d.double_pole,
                 topology_status=status,
@@ -306,20 +306,20 @@ def build_real_home_topology(*, inverted_channels: tuple[str, ...] = ()) -> Hous
         _ch("ct_main_l2", MP + "ct2_power", "Panel A CT2 (L2)", CTType.MAIN, Phase.L2),
         _ch(
             "ct_main_underfloor_loop", MP + "underfloor_loop_power",
-            "Panel A Underfloor Loop", CTType.DEDICATED_DEVICE, Phase.L1, "ct_main_l1",
+            "Panel A Underfloor Loop", CTType.BRANCH, Phase.L1, "ct_main_l1",
         ),
         _ch(
             "ct_main_vehicle_charger", MP + "vehicle_charger_power",
-            "Panel A Vehicle Charger", CTType.DEDICATED_DEVICE, Phase.BOTH, "ct_main_l1",
+            "Panel A Vehicle Charger", CTType.BRANCH, Phase.BOTH, "ct_main_l1",
         ),
         _ch(
             "ct_main_water_heater_ct1", MP + "water_heater_ct1_power",
-            "Panel A Water Heater CT1", CTType.DEDICATED_DEVICE, Phase.L1, "ct_main_l1",
+            "Panel A Water Heater CT1", CTType.BRANCH, Phase.L1, "ct_main_l1",
             paired="ct_main_water_heater_ct2",
         ),
         _ch(
             "ct_main_water_heater_ct2", MP + "water_heater_ct2_power",
-            "Panel A Water Heater CT2", CTType.DEDICATED_DEVICE, Phase.L2, "ct_main_l2",
+            "Panel A Water Heater CT2", CTType.BRANCH, Phase.L2, "ct_main_l2",
             paired="ct_main_water_heater_ct1",
         ),
         _ch(
@@ -333,30 +333,30 @@ def build_real_home_topology(*, inverted_channels: tuple[str, ...] = ()) -> Hous
             paired="ct_main_utility_plug_ct1",
         ),
         _ch("ct_main_lighting_ct1", MP + "lighting_ct1_power", "Panel A Lighting Bank 1",
-            CTType.DEDICATED_DEVICE, Phase.L1, "ct_main_l1"),
+            CTType.BRANCH, Phase.L1, "ct_main_l1"),
         _ch("ct_main_lighting_ct2", MP + "lighting_ct2_power", "Panel A Lighting Bank 2",
-            CTType.DEDICATED_DEVICE, Phase.L2, "ct_main_l2"),
+            CTType.BRANCH, Phase.L2, "ct_main_l2"),
         _ch("ct_main_lighting_ct3", MP + "lighting_ct3_power", "Panel A Lighting Bank 3",
-            CTType.DEDICATED_DEVICE, Phase.L1, "ct_main_l1"),
+            CTType.BRANCH, Phase.L1, "ct_main_l1"),
         _ch("ct_main_air_conditioner", MP + "air_conditioner_power", "Panel A Air Conditioner",
-            CTType.DEDICATED_DEVICE, Phase.BOTH, "ct_main_l1"),
+            CTType.BRANCH, Phase.BOTH, "ct_main_l1"),
         _ch("ct_main_central_hvac", MP + "central_hvac_power", "Panel A Central HVAC",
-            CTType.DEDICATED_DEVICE, Phase.L1, "ct_main_l1"),
-        _ch("ct_main_space_heater", MP + "space_heater_power", "Panel A Space Heater", CTType.DEDICATED_DEVICE, Phase.BOTH, "ct_main_l2"),
+            CTType.BRANCH, Phase.L1, "ct_main_l1"),
+        _ch("ct_main_space_heater", MP + "space_heater_power", "Panel A Space Heater", CTType.BRANCH, Phase.BOTH, "ct_main_l2"),
         _ch(
             "ct_main_patio_heater_ct1", MP + "patio_heater_ct1_power",
-            "Panel A Patio Heater CT1", CTType.DEDICATED_DEVICE, Phase.L1, "ct_main_l1",
+            "Panel A Patio Heater CT1", CTType.BRANCH, Phase.L1, "ct_main_l1",
             paired="ct_main_patio_heater_ct2",
         ),
         _ch(
             "ct_main_patio_heater_ct2", MP + "patio_heater_ct2_power",
-            "Panel A Patio Heater CT2", CTType.DEDICATED_DEVICE, Phase.L2, "ct_main_l2",
+            "Panel A Patio Heater CT2", CTType.BRANCH, Phase.L2, "ct_main_l2",
             paired="ct_main_patio_heater_ct1",
         ),
         _ch("ct_main_upper_ac", MP + "upper_ac_power", "Panel A Upper AC",
-            CTType.DEDICATED_DEVICE, Phase.BOTH, "ct_main_l1"),
+            CTType.BRANCH, Phase.BOTH, "ct_main_l1"),
         _ch("ct_main_upper_central_hvac", MP + "upper_central_hvac_power",
-            "Panel A Upper HVAC", CTType.DEDICATED_DEVICE, Phase.L1, "ct_main_l1"),
+            "Panel A Upper HVAC", CTType.BRANCH, Phase.L1, "ct_main_l1"),
 
         # --- Panel B (sub-feed of the main panel) ---------------------- #
         _ch("ct_sub_l1", SP + "ct1_power", "Panel B CT1 (L1) [sub-feed]", CTType.BRANCH, Phase.L1,
@@ -364,33 +364,33 @@ def build_real_home_topology(*, inverted_channels: tuple[str, ...] = ()) -> Hous
         _ch("ct_sub_l2", SP + "ct2_power", "Panel B CT2 (L2) [sub-feed]", CTType.BRANCH, Phase.L2,
             "ct_main_l2", panel="sub"),
         _ch("ct_sub_refrigerator_1", SP + "refrigerator_1_power", "Panel B Refrigerator 1",
-            CTType.DEDICATED_DEVICE, Phase.L1, "ct_sub_l1", panel="sub"),
+            CTType.BRANCH, Phase.L1, "ct_sub_l1", panel="sub"),
         _ch("ct_sub_refrigerator_2", SP + "refrigerator_2_power", "Panel B Refrigerator 2",
-            CTType.DEDICATED_DEVICE, Phase.L2, "ct_sub_l2", panel="sub"),
+            CTType.BRANCH, Phase.L2, "ct_sub_l2", panel="sub"),
         _ch("ct_sub_hot_water_tank", SP + "hot_water_tank_power", "Panel B Hot Water Tank",
-            CTType.DEDICATED_DEVICE, Phase.L1, "ct_sub_l1", panel="sub"),
+            CTType.BRANCH, Phase.L1, "ct_sub_l1", panel="sub"),
         _ch("ct_sub_utility_sink", SP + "utility_sink_power", "Panel B Utility Sink",
-            CTType.DEDICATED_DEVICE, Phase.L1, "ct_sub_l1", panel="sub"),
+            CTType.BRANCH, Phase.L1, "ct_sub_l1", panel="sub"),
         _ch("ct_sub_workshop_outlet", SP + "workshop_outlet_power", "Panel B Workshop Outlet",
             CTType.BRANCH, Phase.L1, "ct_sub_l1", panel="sub"),
         _ch("ct_sub_guest_bath_unit", SP + "guest_bath_unit_power", "Panel B Guest Bath Unit",
-            CTType.DEDICATED_DEVICE, Phase.L1, "ct_sub_l1", panel="sub"),
+            CTType.BRANCH, Phase.L1, "ct_sub_l1", panel="sub"),
         _ch("ct_sub_humidifier_1", SP + "humidifier_1_power",
-            "Panel B Humidifier 1", CTType.DEDICATED_DEVICE, Phase.L1, "ct_sub_l1", panel="sub"),
+            "Panel B Humidifier 1", CTType.BRANCH, Phase.L1, "ct_sub_l1", panel="sub"),
         _ch("ct_sub_office_outlet", SP + "office_outlet_power", "Panel B Office Outlet",
             CTType.BRANCH, Phase.L2, "ct_sub_l2", panel="sub"),
         _ch("ct_sub_garden_outlet", SP + "garden_outlet_power", "Panel B Garden Outlet",
-            CTType.DEDICATED_DEVICE, Phase.L1, "ct_sub_l1", panel="sub"),
+            CTType.BRANCH, Phase.L1, "ct_sub_l1", panel="sub"),
         _ch("ct_sub_display_panel", SP + "display_panel_power", "Panel B Wall Display",
-            CTType.DEDICATED_DEVICE, Phase.L2, "ct_sub_l2", panel="sub"),
+            CTType.BRANCH, Phase.L2, "ct_sub_l2", panel="sub"),
         _ch("ct_sub_network_cabinet", SP + "network_cabinet_power", "Panel B Network Cabinet",
-            CTType.DEDICATED_DEVICE, Phase.L2, "ct_sub_l2", panel="sub"),
+            CTType.BRANCH, Phase.L2, "ct_sub_l2", panel="sub"),
         _ch("ct_sub_eave_outlet", SP + "eave_outlet_power", "Panel B Eave Outlet",
-            CTType.DEDICATED_DEVICE, Phase.L1, "ct_sub_l1", panel="sub"),
+            CTType.BRANCH, Phase.L1, "ct_sub_l1", panel="sub"),
         _ch("ct_sub_ventilation_unit", SP + "ventilation_unit_power", "Panel B Ventilation Unit",
-            CTType.DEDICATED_DEVICE, Phase.L1, "ct_sub_l1", panel="sub"),
+            CTType.BRANCH, Phase.L1, "ct_sub_l1", panel="sub"),
         _ch("ct_sub_humidifier_2", SP + "humidifier_2_power",
-            "Panel B Humidifier 2", CTType.DEDICATED_DEVICE, Phase.L2, "ct_sub_l2", panel="sub"),
+            "Panel B Humidifier 2", CTType.BRANCH, Phase.L2, "ct_sub_l2", panel="sub"),
         _ch(
             "ct_sub_upper_plug_ct1", SP + "upper_plug_ct1_power",
             "Panel B Upper Floor Plug CT1", CTType.BRANCH, Phase.L1, "ct_sub_l1",

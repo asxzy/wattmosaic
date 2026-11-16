@@ -9,7 +9,7 @@ reasons:
    its verdict without a database.  Placement is a write, so it stays behind an
    explicit call the facade makes only when the user opted in.
 2. **Conflicts must be reportable, not silently dropped.**  A row already owned
-   by a dedicated measurement cannot hold a second device (the circuit would be
+   by a declared device cannot hold a second device (the circuit would be
    counted twice).  Returning the reason lets the UI tell the user exactly which
    channel to convert instead of pretending nothing happened.
 3. **User knowledge always wins.**  An entity a person already configured is
@@ -168,10 +168,9 @@ def plan_placements(
 
     A candidate is placed only when all of these hold:
 
-    * its row is a **branch** CT.  A ``main`` row sees the whole installation and
-      a ``dedicated_device`` row is already one device's direct measurement;
-      placing a fixture on either would misattribute power;
-    * the row is **not already claimed** by a dedicated measurement
+    * its row is a **branch** CT.  A ``main`` row sees the whole installation;
+      placing a fixture on it would misattribute power;
+    * the row is **not already claimed** by a declared device
       (``assume_owned`` bypasses this for a caller that has just converted the
       channel and deliberately re-runs -- it never invents the conversion);
     * the entity is **not already configured**.  A person's declaration always
@@ -207,20 +206,19 @@ def plan_placements(
                 "a fixture cannot be placed on a main row"
             )
             continue
-        if channel.ct_type == CTType.DEDICATED_DEVICE and not assume_owned:
-            refused[entity_id] = (
-                f"CT row {candidate.ct_id!r} is a dedicated measurement of another "
-                "device; convert that channel to a shared circuit first"
-            )
-            continue
-        if channel.ct_type not in (CTType.BRANCH, CTType.DEDICATED_DEVICE):
+        if channel.ct_type != CTType.BRANCH:
             refused[entity_id] = f"CT row {candidate.ct_id!r} is not a load row"
             continue
         if not assume_owned:
+            # A row another *declared* device already owns is that device's whole
+            # measurement.  Placing a fixture on it too would count the circuit
+            # twice, so it is refused with the reason.  ``assume_owned`` bypasses
+            # this for a caller that has just converted the channel and
+            # deliberately re-runs -- it never invents the conversion.
             owner = cts_claimed_by_dedicated(topology, [candidate.ct_id])
             if owner is not None:
                 refused[entity_id] = (
-                    f"CT row {candidate.ct_id!r} is a dedicated measurement of "
+                    f"CT row {candidate.ct_id!r} is already owned by device "
                     f"{owner[0]!r}; convert that channel to a shared circuit first"
                 )
                 continue

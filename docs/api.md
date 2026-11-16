@@ -227,7 +227,6 @@ model state:
     "phase": "l1",
     "double_pole": false,
     "topology_status": "candidate",
-    "dedicated_ct_ids": [],
     "branch_ct_ids": ["br_fridge"],
     "latest_result": {"power_w": 91.487, "confidence": 0.6062, "quality_status": "good"},
     "model": {"model_type": "binary", "version": 2, "status": "active"}
@@ -272,7 +271,7 @@ The active `Topology`:
     }
   ],
   "devices": [
-    {"device_id": "dev_fridge", "name": "Fridge", "dedicated_ct_ids": [], "branch_ct_ids": ["br_fridge"]}
+    {"device_id": "dev_fridge", "name": "Fridge", "branch_ct_ids": ["br_fridge"]}
   ],
   "notes": []
 }

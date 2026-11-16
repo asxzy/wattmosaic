@@ -4,7 +4,7 @@ Why tiers exist
 ---------------
 The numeric ``confidence`` score blends six components into a continuous
 heuristic.  That is good for ranking two devices but a poor *label*: ``0.62``
-does not tell a user whether the number came from a dedicated CT or from an
+does not tell a user whether the number came from a CT or from an
 unvalidated model.  The tier answers exactly that question, and it is
 deliberately **coarse** — five ordered grades.
 
@@ -27,9 +27,9 @@ tier                             evidence
 ===============================  ============================================
 
 It does **not** restate the score, and the score is never rewritten to fit the
-tier.  The two disagree in one specific, intended case: a *stale* dedicated CT
-keeps its evidence grade (a CT did measure it) while its score collapses,
-because the number is old.  That is not a contradiction — the tier says *how*
+tier.  The two disagree in one specific, intended case: a *stale* direct CT
+reading keeps its evidence grade (a CT did measure it) while its score
+collapses, because the number is old.  That is not a contradiction — the tier says *how*
 the value was obtained, the score says *how much to trust the number right now*.
 When the two diverge, a ``tier_score_divergence`` reason is attached so the
 disagreement is visible rather than hidden.  Do not read the tier as a bucket of
@@ -155,14 +155,17 @@ def evidence_tier(inp: TierInputs) -> tuple[ConfidenceTier, list[str]]:
 
     # ---- Tier 3/4: a CT actually measured this device -------------------
     if inp.source == Source.DIRECT_MEASURED:
-        reasons.append("dedicated_ct_measurement")
+        # Historical rows only: nothing produces this source any more, but a
+        # stored result must still grade the way it was stored.  The reasons
+        # name the *measurement*, never the retired channel role.
+        reasons.append("direct_ct_measurement")
         if inp.stale:
-            reasons.append("dedicated_ct_stale:not_verifiable")
+            reasons.append("direct_ct_stale:not_verifiable")
             return ConfidenceTier.TIER_3_MEASURED, reasons
         if inp.state_says_off:
             # The CT carries power but the device claims to be off.  The value is
             # measured; the *attribution* is what is in question.
-            reasons.append("dedicated_ct_disagrees_with_state:not_verifiable")
+            reasons.append("direct_ct_disagrees_with_state:not_verifiable")
             return ConfidenceTier.TIER_3_MEASURED, reasons
         if corroborated and not inp.degraded:
             reasons.append(

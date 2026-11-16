@@ -42,21 +42,23 @@ one.
 
 | Level | Source | Condition |
 | --- | --- | --- |
-| 1 | `direct_measured` | verified dedicated CT, fresh, usable |
+| 1 | `direct_measured` | **historical only** — a stored result from the retired private-channel path; nothing new produces it |
 | 2 | `inferred` | device is identifiable **and** its rows are fresh |
 | 3 | `model_estimated` | a validated model gives a value for the current state |
 | 4 | `unknown` | none of the above, or ambiguity |
 
-A `branch` CT is never Level 1, however alone the device is on the circuit
-(ADR-0026): the branch may carry unmodelled load. Level 1 requires a
-`DEDICATED_DEVICE` channel or a declared `dedicated_ct_ids` entry.
+Level 1 no longer occurs for new results. The private-channel role and the
+direct path it gated were removed together (ADR-0034), so every live value is
+solved or modelled; a circuit that feeds one appliance is fitted through the
+ordinary tier rules. Level 1 survives only so a historical row keeps the grade
+it was stored with.
 
-Because of that gate a batch can legitimately contain **zero** direct readings --
-on a branch-only install nothing is capable of one. `InferenceBatch.diagnostics`
-therefore carries a verdict (`direct_availability`:
-`measured` / `explained_unavailable` / `no_dedicated_ct` /
+Because no install can produce a direct reading any more, a batch legitimately
+contains **zero** of them. `InferenceBatch.diagnostics` therefore still carries
+a verdict (`direct_availability`:
+`no_direct_capable_device` / `measured` / `explained_unavailable` /
 `unexplained_unavailable`, with `direct_capable_count` and
-`unexplained_direct_devices`) so "0 W because every circuit is a branch" is
+`unexplained_direct_devices`) so "0 W because every circuit is a branch" stays
 distinguishable from "the direct path produced nothing". Only
 `unexplained_unavailable` is a defect. See `docs/electrical_model.md` §7.
 
@@ -225,8 +227,8 @@ being re-recorded as a new physical sample.
 ### 3.4 Device events
 
 A device's event is the *most specific* CT step among the CTs that observe it:
-dedicated CT first, then branch, then main. A direction conflict between the HA
-transition and the CT step is visible in `explanation`
+its own branch CT first, then any enclosing branch, then main. A direction
+conflict between the HA transition and the CT step is visible in `explanation`
 (`branch_power_increase` / `branch_power_decrease` only added when they agree).
 
 ---
@@ -472,7 +474,7 @@ batch never aborts.
 
 | Explanation | Meaning |
 | --- | --- |
-| `direct_ct_measurement` | verified dedicated CT |
+| `direct_ct_measurement` | **historical only** — the retired private-channel path |
 | `constrained_nnls_fit` | solved from CT rows |
 | `ha_state_transition_activation` / `..._deactivation` | HA state change in window |
 | `branch_power_increase` / `..._decrease` | CT step agrees with the transition |

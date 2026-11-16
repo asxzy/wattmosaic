@@ -285,16 +285,19 @@ Honest list. Each is a real behaviour, not a documentation gap.
    other three (`hierarchy:` prefix plus the audit version, versus
    `HierarchyConfig`'s own `wp8-hierarchy-1.0.0`). Any consumer grouping
    relations by version must not assume the class default.
-6. **The manual `dedicated_device` declaration is deprecated but not removable
-   yet** (ADR-0029). The role still works and still produces
-   `Source.DIRECT_MEASURED`, because the reference installation's ~1032 W of
-   measured power depends on it; `WM_DEPRECATE_DEDICATED_DECLARATION` only
-   controls the notice. Three storage locations still describe the same fact
-   (`CTChannel.device_id`, `DeviceTopology.dedicated_ct_ids`,
-   `DeviceConfiguration.monitored_by_ct_ids`) and nothing auto-converts an
-   existing declaration. A `branch` CT reaching `CircuitClass.DEDICATED` at
-   `CONFIRMED` is the documented replacement, and it must be shown on live data
-   before the declaration can be retired.
+6. **The retired CT role and its direct measurement are gone** (ADR-0034, which
+   supersedes ADR-0025's retention of the declaration and ADR-0029's deprecation
+   of it). `CTType` is `main` / `branch` / `unknown`, `MonitoringLevel` has no
+   per-appliance channel role, the topology's separate id list for those rows is
+   gone and `effective_config.allows_direct_measurement` is removed, and nothing
+   produces `Source.DIRECT_MEASURED` any more. Kept here so the history is
+   recorded with its consequence: the reference installation's former direct
+   readings are now `inferred` and grade through the normal tier rules, and a
+   device alone on a row is detected structurally (`_is_solo_row`) rather than
+   declared. Stored `source = "direct_measured"` rows stay readable. A `branch`
+   CT reaching `CircuitClass.DEDICATED` at `CONFIRMED` remains the *inferred*
+   equivalent of the old declaration, and that class is unaffected by this
+   removal.
 7. **Configured priors were not bounded by the row that carries them** (fixed
    in this change; kept here so the history and the guard are recorded together).
    ADR-0025 bounds each claimant *individually* (`config_ceiling_w` is a solver

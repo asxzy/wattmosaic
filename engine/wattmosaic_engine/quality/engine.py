@@ -619,7 +619,7 @@ class DataQualityEngine:
             ct_type_value = getattr(cfg.ct_type, "value", cfg.ct_type)
             if (
                 polarity_value == Polarity.NORMAL.value
-                and ct_type_value in ("branch", "dedicated_device")
+                and ct_type_value == "branch"
                 and ch.value_w < 0
             ):
                 result.penalize(

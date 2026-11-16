@@ -28,28 +28,27 @@ Utility L1 (main)                                   3 000 W
 Summing every CT would give `3 000 + 1 200 + 700 + 200 + 120 + 1 800 = 7 020 W`
 for a 3 000 W service. The topology model exists to make that impossible.
 
-**Three channel roles** (`CTType`):
+**Two channel roles plus `unknown`** (`CTType`):
 
 | Role | Measures | Can be a device's attribution CT? |
 | --- | --- | --- |
 | `main` | an incoming line / panel feed | no (only a containment constraint) |
 | `branch` | a circuit containing zero or more devices and possibly child CTs | yes |
-| `dedicated_device` | exactly one logical device | yes (Level 1) |
 | `unknown` | unverified | no (validation warning) |
 
-`branch` is the honest default for a single-channel CT. One CT measures one
-*conductor*, not one appliance, so discovery cannot assert `dedicated_device` —
-that requires knowing the circuit feeds exactly one load, which only a person
-can state. `dedicated_device` is therefore only ever produced from a
-declaration (ADR-0025).
+`branch` is the only role a load CT can take. One CT measures one *conductor*,
+not one appliance, so nothing in the topology asserts that a circuit feeds
+exactly one load: a single-device circuit is a `branch` row with exactly one
+declaring device, which the solver detects structurally. There is no third role
+and no declaration that creates one (ADR-0034).
 
 **Containment** is `child.parent_ct_id == parent`. `TopologyGraph` indexes it,
 detects cycles, and refuses to build rows for inconsistent input.
 
 ### 1.1 The double-counting rule
 
-> A device is attributed using exactly **one** most-specific CT: its verified
-> dedicated CT if it has one, otherwise its **deepest** enclosing branch CT.
+> A device is attributed using exactly **one** most-specific CT: its **deepest**
+> enclosing branch CT.
 
 Everything above that CT is a *containment constraint*, modelled explicitly:
 
@@ -153,7 +152,7 @@ y(t) = A(t) · x(t) + e(t)
 
 | Row kind | `A[i,j]` |
 | --- | --- |
-| Dedicated CT of device `j` | `1` (phase split for a single-leg row of a double-pole pair) |
+| Single-device branch CT of `j` | `1` (a double-pole pair split across its two legs gets `0.5` per leg row; only a *single* leg row of a double-pole load uses `α`) |
 | Device `j`'s most-specific branch CT | `1` |
 | Any other branch CT above `j` | `0` — the child CT is subtracted from `y` instead |
 | Main CT containing `j` | `1` (containment) |
@@ -169,7 +168,7 @@ Testing coefficients keeps both cases right and stops a future container type
 from silently double counting.
 
 Worked example — the tree at the top of this page with devices
-`lights`, `fridge`, `washer` and a dedicated `tv` CT:
+`lights`, `fridge`, `washer` and a single-device `tv` CT:
 
 ```text
             lights  fridge  washer  tv
@@ -208,13 +207,20 @@ declared phase decides the split:
 | --- | --- | --- | --- |
 | `L1` | 1 | 0 | 1 |
 | `L2` | 0 | 1 | 1 |
-| `BOTH` (double-pole) | `α` | `1-α` | 1 |
+| `BOTH` (double-pole), one leg only | `α` | `1-α` | 1 |
+| `BOTH` (double-pole), both legs measured | 0.5 | 0.5 | 1 |
 
 * `α = phase_split_l1`, default **0.5**, configurable
   (`ElectricalModel(phase_split_l1=0.7)`).
 * The split is applied **only** when the topology declares the device
   `double_pole=True` / `phase=BOTH`. A single-phase load is never smeared across
   both legs.
+* On the two rows of a **complete leg pair** the coefficient is a fixed `0.5`,
+  **not** `α`: the pair is already a complete observation of the load, so
+  `y_L1 + y_L2` recovers the total exactly and a declared split would scale two
+  measurements that are whole (see §3). `α` is only for a *partial* observation
+  — one leg of a pair, or a single line — where it is the only way to recover
+  the unmeasured part.
 * `x_j` is always the **total** device power. On a `BOTH` row a 2 400 W dryer
   contributes `1 · 2 400`; on separate L1/L2 rows it contributes `1 200` to each.
   The device is still one column and one result.
@@ -236,7 +242,7 @@ attribution CTs:
 
 When the phase stays `UNKNOWN`, `phase_coefficient(..., solo=True)` returns
 **1.0** on the device's own row. The reasoning is the same as for a `BOTH` row:
-a CT dedicated to one device is an observation of that device, and halving it
+a CT whose circuit feeds one device is an observation of that device, and halving it
 because nobody wrote down which leg it is on would fabricate a missing 50 %. On
 a *shared* row (a branch or main carrying several devices) the total must still
 be apportioned, so the configured split applies there.
@@ -251,8 +257,19 @@ is a `double_pole=True` device declared `L1`/`L2`.
 `CTChannel.paired_ct_id` marks the two physical legs of a single load
 (e.g. `water_heater_ct1` ↔ `water_heater_ct2`). Symmetry is validated
 (`pairing is not symmetric` is reported). When a device declares both legs as
-its branch/dedicated CTs, `TopologyGraph.attribution_ct_ids()` returns **both**,
-and each leg receives its own share through `_attribution_coefficient`.
+its branch CTs, `TopologyGraph.attribution_ct_ids()` returns **both**,
+and each leg receives its own 0.5 share through `_attribution_coefficient`.
+
+**A complete pair is not split by the declaration.** Two leg rows are already a
+complete observation: the equations are `y_L1 = s·x` and `y_L2 = (1-s)·x` for the
+*physical* share `s`, so `y_L1 + y_L2 = x` whatever `s` is. Weighting the rows
+`α` and `1-α` instead makes the least-squares solution
+`x = P·(αs + (1-α)(1-s)) / (α² + (1-α)²)`, which equals `P` only when `α = s`:
+at `α = 0.7` on a 0.5/0.5 pair it reports `0.862 P`, the observed −13.8 %. That
+is why `TopologyGraph.complete_leg_pair()` exists and why it short-circuits the
+declared split. `α` remains correct -- and is still applied -- when only *one*
+leg is observed, because then the row really does measure a fraction nobody
+stated.
 
 A pair is only a leg pair when the partner is enabled **and** names the same
 `device_id`. The field is free text and discovery pairs channels heuristically,
@@ -262,7 +279,7 @@ other; summing such a pair would make each device report the other's power.
 Consequences:
 
 * The two legs are **never** two devices.
-* A dedicated double-pole pair sums its legs into one `power_w`
+* A double-pole pair sums its legs into one `power_w`
   (`ct_dryer_l1 + ct_dryer_l2 = 2 400 W`, one `InferenceResult`).
 * A pair is usable **only as a pair**. If either leg is stale, missing, bad
   quality, or the two legs were sampled more than `max_leg_skew_s` apart
@@ -671,63 +688,50 @@ validated model supplies the split, clearly labelled as not measurement-derived)
 
 ---
 
-## 7. Level-1 direct measurement
+## 7. Direct measurement was removed with the channel role
 
-`resolve_direct(window, graph)` returns a `DirectReading` per device that has a
-verified dedicated CT:
+There is no Level-1 direct-measurement path. `resolve_direct`, `DirectReading`,
+the private-channel resolver on `TopologyGraph` and the engine's Level-1 branch
+were deleted together with the channel role that gated them (ADR-0034). A circuit
+that feeds exactly one device is a `branch` row with one declaring device, and
+the solver fits it through the ordinary tier rules — `Source.INFERRED`, at the
+tier the evidence supports, with no special confidence floor.
 
-* Sums a symmetric double-pole pair into one total (`per_leg_w` retained for
-  provenance). Each leg carries its own `measurement_multiplier`, applied once
-  by `TopologyGraph.scale_w()`, so a single-CT 240 V load declared as `2.0`
-  reports the full load.
-* `usable=False` for missing, bad-quality, or older-than-`max_age_s` values, with
-  machine-readable reasons (`stale_measurement:ct_x`, `missing_measurement`, …).
-* `usable=False` when a double-pole pair's two legs were sampled more than
-  `max_leg_skew_s` apart, with reason `leg_skew_exceeded:...`. This is the
-  **same** limit and the **same** per-leg time source (each reading's `age_s`
-  against the window instant) that the solver path uses in
-  `_exclude_partial_legs`; the constant is defined once, as
-  `electrical/direct.py::DEFAULT_MAX_LEG_SKEW_S`, and `DisaggregationEngine`
-  defaults to it. Before dev.12 the direct path had no skew check, so one missed
-  poll on a 15.7 s panel could put a pair's legs 31 s apart and the direct path
-  would sum two vintages into one device watt while the solver excluded the same
-  row. The pair is never repaired by averaging, by taking the newer leg, or by
-  falling back to one leg.
-* A **branch** CT is never direct measurement for a device, even when only one
-  device currently draws power: the branch may carry unmodelled load.
-* A direct value is **never** replaced by a model estimate. Conflicts with a HA
-  state transition are surfaced (`state_direct_measurement_conflict`) and cap
-  confidence, but the measured value is kept.
+What survives is the **explanation** machinery, because its payload shape is
+consumed by the API and the panel and because a silent zero is still worth
+detecting. `Reconciliation` keeps `direct_measured_count` (always `0` for new
+results; historical rows stay readable), `missing_direct`,
+`direct_capable_count`, `direct_availability`, `direct_unavailable_explained`
+and `unexplained_direct_devices`.
 
-### The gate: 0 W direct is allowed only when explained
+### The verdict: 0 W direct is always explained now
 
 `direct_measured_count` alone cannot say whether a "0 W direct" batch is a
-legitimate install or a broken Level-1 path. Two very different houses produce
-the same count:
+legitimate install or a broken path. Two very different houses produced the same
+count:
 
-* every circuit is a `branch` (this is the honest default, ADR-0025/0026), so
-  nothing is *capable* of a direct reading;
-* the dedicated CTs exist but no reading reached the window, so the path is
-  producing nothing.
+* every circuit is a `branch` (the only load role that exists), so nothing is
+  *capable* of a direct reading;
+* a device had a private channel but no reading reached the window, so the path
+  produced nothing.
 
 The batch therefore carries a verdict, computed from the graph and the readings
 rather than from the explanation loop's own bookkeeping:
 
 | `direct_availability` | Meaning |
 | --- | --- |
-| `no_dedicated_ct` | the topology has no `DEDICATED_DEVICE` channel at all |
+| `no_direct_capable_device` | **the current outcome for every install**: no device can be read directly, because the capability was removed |
 | `measured` | at least one capable device produced a usable reading |
 | `explained_unavailable` | capable, but every device is named in `missing_direct` |
 | `unexplained_unavailable` | **a defect**: a capable device is neither measured nor named |
 
-`direct_capable_count`, `direct_unavailable_explained` and
-`unexplained_direct_devices` accompany it, and
-`Reconciliation.explanation` names the missing count by reason
-(`no_direct_measurement:N device(s) (no_dedicated_device_ct×k, ...)`). The
-release gate is exactly: `direct_measured_count > 0` **or** every capable device
-is named in `missing_direct`; i.e. `direct_availability` is never
-`unexplained_unavailable`. This is pinned on the real capture by
-`tests/simulation/test_real_topology.py::test_the_real_install_has_a_live_direct_measurement_path`.
+In practice `direct_capable_count` is `0` and the verdict is always
+`no_direct_capable_device`. The guard is kept deliberately: it is computed from
+the graph, not from the loop's branches, so if a future change ever reintroduces
+a capability, a device cannot vanish from the explanation without the payload
+reporting it. A device with no usable direct reading is named in `missing_direct`
+with reason `no_private_channel:attribution_ct_types=branch` (or
+`:no_attribution_ct` when it has none).
 
 ---
 
@@ -802,13 +806,14 @@ writes.
 Returns human-readable strings, never raises for bad input:
 
 * duplicate CT / device ids
-* unknown `parent_ct_id`, `paired_ct_id`, `dedicated_ct_ids`, `parent_device_id`
+* unknown `parent_ct_id`, `paired_ct_id`, `parent_device_id`
 * self-parent, CT topology **cycles**
 * asymmetric pairing, paired leg not L1/L2, paired leg marked BOTH
 * `main` with a parent is **not** a problem: it is a nested feed (utility →
   panel → sub-panel), and `effective_feeds()` resolves the outermost feed of each
   branch rather than rejecting the topology.
-* dedicated CT with no/unknown device, or missing from `DeviceTopology`
+* a device declaring `branch_ct_ids` that are unknown, `main`-typed, or all
+  disabled
 * `phase=BOTH` without `double_pole=True`, double-pole device declared L1/L2
 * device declaring branch CTs that are all disabled
 * unknown phase (rows treated as `BOTH`)
@@ -823,8 +828,10 @@ row/device carries a diagnostic and confidence is reduced.
 1. **Unidentifiable configurations are not solved by mathematics.** More CTs,
    different CT placement, or state information are the only real fixes.
 2. **Phase split `α` for double-pole devices is an assumption**, not a
-   measurement. It is reported and configurable; a per-device `α` is not in the
-   contract (see §10).
+   measurement — but only where it is used at all: a device observed by a
+   complete pair of leg CTs needs no assumption (its legs are summed), so `α`
+   applies solely to a *partially* observed double-pole load. It is reported and
+   configurable; a per-device `α` is not in the contract (see §10).
 3. **Unknown-phase channels** are conservatively modelled as `BOTH`, which
    over-attributes to the total but never loses energy.
 4. **`rel`/`resolution` metadata is only as good as the audit.** Defaults are
@@ -864,7 +871,7 @@ The remaining observations are non-blocking:
   contract change.
 * `CTChannel.paired_ct_id` is documented as "paired CT for a single double-pole
   load", but `DeviceTopology` has no `double_pole_pair` field. The pairing is
-  therefore expressed as two branch/dedicated CT ids plus `double_pole=True`,
+  therefore expressed as two branch CT ids plus `double_pole=True`,
   which the graph resolves; this works but requires the two declarations to
   agree, and disagreement is reported rather than silently fixed.
 * There is no explicit "unknown load" entity in the contract. It is represented

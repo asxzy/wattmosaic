@@ -852,13 +852,13 @@ def test_placement_refuses_a_main_row() -> None:
 
 
 def test_placement_refuses_a_row_owned_by_a_dedicated_measurement() -> None:
-    """Creating a second device on a dedicated CT would count the circuit twice."""
+    """Creating a second device on an owned row would count the circuit twice."""
     topology = _branch_topology().model_copy(
         update={
             "channels": [
                 _branch_topology().channels[0],
                 _branch_topology().channels[1].model_copy(
-                    update={"ct_type": CTType.DEDICATED_DEVICE, "device_id": "dev_lights"}
+                    update={"ct_type": CTType.BRANCH, "device_id": "dev_lights"}
                 ),
             ],
             "devices": [
@@ -866,7 +866,7 @@ def test_placement_refuses_a_row_owned_by_a_dedicated_measurement() -> None:
                     device_id="dev_lights",
                     name="lights",
                     phase=Phase.L1,
-                    dedicated_ct_ids=["ct1"],
+                    branch_ct_ids=["ct1"],
                 )
             ],
         }
@@ -882,7 +882,7 @@ def test_placement_refuses_a_row_owned_by_a_dedicated_measurement() -> None:
     )
 
     assert plan.accepted == ()
-    assert "dedicated measurement" in plan.refused["light.bar"]
+    assert "already owned by device 'dev_lights'" in plan.refused["light.bar"]
     assert "convert that channel to a shared circuit" in plan.refused["light.bar"]
 
 
@@ -1003,7 +1003,7 @@ def test_a_stale_dedicated_mirror_on_a_branch_row_is_still_refused() -> None:
                     device_id="dev_lights",
                     name="lights",
                     phase=Phase.L1,
-                    dedicated_ct_ids=["ct1"],
+                    branch_ct_ids=["ct1"],
                 ),
             ]
         }
@@ -1019,7 +1019,7 @@ def test_a_stale_dedicated_mirror_on_a_branch_row_is_still_refused() -> None:
     )
 
     assert plan.accepted == ()
-    assert "dedicated measurement" in plan.refused["light.bar"]
+    assert "already owned by device 'dev_lights'" in plan.refused["light.bar"]
 
 
 def test_a_candidate_with_no_positive_step_cannot_be_placed() -> None:

@@ -102,7 +102,8 @@ def test_report_is_stratified(oracle_report) -> None:
     assert oracle_report.per_concurrency
     assert oracle_report.per_quality
     assert len(oracle_report.per_device) >= 25
-    # Source tiers must include direct measurement (dedicated CTs exist).
+    # The oracle predictor grades solo-row devices as ``direct_measured``, so
+    # that tier must be present even though the engine no longer emits it.
     assert "direct_measured" in oracle_report.per_source
     # Multiple concurrency levels must be represented.
     assert len(oracle_report.per_concurrency) >= 3

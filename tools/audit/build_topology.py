@@ -292,14 +292,13 @@ def build() -> Topology:
         # Heuristic phase: channels named `*_ct1` / `*_ct2` are double-pole legs.
         m = re.search(r"_(ct)([12])_power$", eid)
         phase = Phase.L1 if m and m.group(2) == "1" else Phase.L2 if m else Phase.UNKNOWN
-        # A named appliance channel is a *dedicated* CT for that appliance if a
-        # single channel exists; if it is one leg of a paired set it is a branch.
-        is_leg = bool(m)
+        # Every circuit CT is a `branch` row, whether it measures one appliance
+        # or is one leg of a paired set: the contract has no single-load role.
         add(
             ct_id,
             eid,
             ch.get("name") or eid,
-            CTType.BRANCH if is_leg else CTType.DEDICATED_DEVICE,
+            CTType.BRANCH,
             phase,
             parent,
         )
@@ -375,22 +374,19 @@ def build() -> Topology:
         device_id = f"dev_{c.ct_id}"
         metadata: dict = {"note": "single channel; requires confirmation"}
         metadata.update(_mapping_for(device_id, mapping))
-        # A channel's role decides *how* the device owns it.  Filing a `branch`
-        # CT under `dedicated_ct_ids` makes `dedicated_channel_for` reject it
-        # (that resolver requires `CTType.DEDICATED_DEVICE`), and the device then
-        # has no attribution rows at all — it silently becomes invisible while
-        # still being measured by a real CT.  Two lighting circuits were affected.
-        # Explicit role check with a loud fallback: any *new* CTType must be
-        # classified deliberately here rather than silently landing in a bucket
-        # that a resolver will reject.
-        if c.ct_type == CTType.DEDICATED_DEVICE:
-            ownership: dict[str, list[str]] = {"dedicated_ct_ids": [c.ct_id]}
-        elif c.ct_type == CTType.BRANCH:
-            ownership = {"branch_ct_ids": [c.ct_id]}
+        # Every circuit CT is a `branch` row, so a single-channel device owns it
+        # through `branch_ct_ids`.  Filing a `branch` CT anywhere else would
+        # leave the device with no attribution rows at all -- it silently becomes
+        # invisible while still being measured by a real CT.  Two lighting
+        # circuits were affected.  Explicit role check with a loud fallback: any
+        # *new* CTType must be classified deliberately here rather than silently
+        # landing in a bucket the graph will reject.
+        if c.ct_type == CTType.BRANCH:
+            ownership: dict[str, list[str]] = {"branch_ct_ids": [c.ct_id]}
         else:  # pragma: no cover - defensive
             raise ValueError(
                 f"unhandled CTType {c.ct_type!r} for single-channel device {c.ct_id}; "
-                "decide whether it is dedicated- or branch-owned"
+                "decide how it is owned"
             )
         devices.append(
             DeviceTopology(

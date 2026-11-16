@@ -182,25 +182,22 @@ def test_topology_pairing_creates_single_double_pole_device() -> None:
     for dev in doubles:
         assert len(dev.branch_ct_ids) == 2
         assert dev.phase == "both"
-        assert not dev.dedicated_ct_ids
 
 
 def test_every_device_owns_a_ct_its_role_allows() -> None:
-    """A device must not file a `branch` CT under `dedicated_ct_ids`.
+    """A device may only file real load rows as its attribution rows.
 
-    ``dedicated_channel_for`` only accepts ``CTType.DEDICATED_DEVICE``, so a
-    mis-filed branch CT leaves the device with **zero** attribution rows: it
-    becomes invisible to inference while a real CT is still measuring it.  Two
-    lighting circuits were silently in that state.
+    Every circuit CT is a ``branch`` row now, so a device's rows are all read
+    from ``branch_ct_ids``.  A row filed there that is actually a ``main`` feed
+    would make the device look measured by the whole installation; a row that
+    does not exist is unreachable.  Both leave the device mis-attributed while a
+    real CT is still measuring it.
     """
     topology = _reference_topology()
     channels = topology.channel_map()
     for dev in topology.devices:
-        for cid in dev.dedicated_ct_ids:
-            assert channels[cid].ct_type == "dedicated_device", (
-                f"{dev.device_id} files {cid} ({channels[cid].ct_type}) as dedicated"
-            )
         for cid in dev.branch_ct_ids:
+            assert cid in channels, f"{dev.device_id} files unknown CT {cid}"
             assert channels[cid].ct_type != "main", f"{dev.device_id} files a main CT as branch"
 
 
@@ -208,8 +205,8 @@ def test_branch_owned_single_channel_device_gets_branch_rows() -> None:
     """A single-channel device on a `branch` CT must own it via `branch_ct_ids`.
 
     This is the precise shape of defect #28: `circuit_ct1`/`circuit_ct2` were
-    measured by real branch-typed CTs but filed under `dedicated_ct_ids`, which
-    the resolver rejects, so both devices had zero attribution rows and reported
+    measured by real branch-typed CTs but filed under a dedicated-only list the
+    graph rejected, so both devices had zero attribution rows and reported
     `home_total_only`.  The reference household contains exactly that shape, so
     this test would have caught it before it reached a live database.
     """
@@ -220,14 +217,12 @@ def test_branch_owned_single_channel_device_gets_branch_rows() -> None:
     branch_owned = [
         dev
         for dev in topology.devices
-        if len(dev.dedicated_ct_ids) + len(dev.branch_ct_ids) == 1
-        and channels[(dev.dedicated_ct_ids + dev.branch_ct_ids)[0]].ct_type == "branch"
+        if len(dev.branch_ct_ids) == 1
+        and channels[dev.branch_ct_ids[0]].ct_type == "branch"
     ]
     assert branch_owned, "reference fixture no longer exercises a branch-typed single CT"
+    graph = build_graph(topology)
     for dev in branch_owned:
-        assert dev.branch_ct_ids, f"{dev.device_id} lost its branch ownership"
-        assert not dev.dedicated_ct_ids, f"{dev.device_id} filed a branch CT as dedicated"
-        graph = build_graph(topology)
         assert graph.attribution_ct_ids(dev.device_id) == tuple(dev.branch_ct_ids)
 
 

@@ -239,8 +239,8 @@ Starts a **real `aiohttp` server** on an ephemeral loopback port, wired to the
 real `EngineCore` facade, real SQLite and the real backend, then drives it with
 simulated data through aligner → engine → SQLite → HTTP. It checks health and
 contract headers, auth (401), 404 for unknown devices, Prometheus text metrics,
-topology PUT round-trip and validation, that inference results for dedicated
-devices reach the API, that the residual is never redistributed, and that
+topology PUT round-trip and validation, that inference results for
+single-device circuits reach the API, that the residual is never redistributed, and that
 energy aggregation works over a full inference history.
 
 Two tests are **strict xfails** for engine defects found by this suite (see
@@ -372,7 +372,7 @@ WATTMOSAIC_REAL_DB=/path/to/wattmosaic.db \
 | `test_real_replay_excludes_refused_totals_from_the_mean` | A window where the engine refuses a total is counted as unavailable and excluded from every mean, never averaged in as `0 W` |
 | `test_shipped_replay_terminates` | The shipped topology finishes inside the deadline (E2-2 fixed) |
 | `test_shipped_replay_does_not_double_count` | The inverse of the old defect gate: shipped / nested paired ratio is within 5 % |
-| `test_the_real_install_has_a_live_direct_measurement_path` | C1: the topology keeps its dedicated channels, each resolves to exactly one device, at least one window produces a usable direct reading, and a majority of capable CTs is read in ≥ 90 % of windows (a stale-capture detector) |
+| `test_the_real_install_reports_no_direct_measurement` | C1, inverted after the path was deleted: the real replay produces **no** `direct_measured` source at all, and devices are still attributed by the solver (so "no direct rows" cannot quietly mean "nothing was inferred") |
 
 The gates are plain assertions now. Both were `xfail`s naming E2-1/E2-2 while
 the engine was broken; they flipped to passes when the fixes landed, and a

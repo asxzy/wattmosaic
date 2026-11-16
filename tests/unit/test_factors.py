@@ -156,7 +156,7 @@ def _ci_channels(fixture: HotTubFixture) -> list[CTChannel]:
             CTChannel(
                 ct_id=item.ct_id,
                 entity_id=item.entity_id,
-                ct_type=CTType.DEDICATED_DEVICE,
+                ct_type=CTType.BRANCH,
                 phase=item.leg,
                 device_id=DEVICE_ID,
                 paired_ct_id=partner.get(item.ct_id),
@@ -283,7 +283,7 @@ def test_classify_basis_never_derives_from_phase_ct_type_or_name() -> None:
         ct_id="ct_hot_tub_240v",
         entity_id="sensor.hot_tub_power",
         name="Hot Tub 240 V Double Pole",
-        ct_type=CTType.DEDICATED_DEVICE,
+        ct_type=CTType.BRANCH,
         phase=Phase.BOTH,
         nominal_voltage=240.0,
         device_id="hot_tub",
@@ -932,7 +932,7 @@ def _delegating_topology() -> Topology:
             CTChannel(
                 ct_id="ct_tub",
                 entity_id="sensor.tub",
-                ct_type=CTType.DEDICATED_DEVICE,
+                ct_type=CTType.BRANCH,
                 phase=Phase.L1,
                 device_id="tub",
                 measurement_multiplier=2.0,
@@ -941,7 +941,7 @@ def _delegating_topology() -> Topology:
         devices=[
             DeviceTopology(
                 device_id="tub",
-                dedicated_ct_ids=["ct_tub"],
+                branch_ct_ids=["ct_tub"],
                 phase=Phase.L1,
                 double_pole=True,
             )

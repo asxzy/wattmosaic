@@ -42,7 +42,6 @@ from wattmosaic_engine.disaggregation.configuration import (
     project_configuration,
 )
 from wattmosaic_engine.disaggregation.engine import DisaggregationEngine
-from wattmosaic_engine.electrical.direct import resolve_direct
 from wattmosaic_engine.electrical.topology import build_graph
 from wattmosaic_engine.electrical.window import ObservationWindow
 
@@ -143,39 +142,27 @@ def _declare(topology: Topology) -> Topology:
         [
             DeviceConfiguration(
                 device_id="hot_tub",
-                monitoring=MonitoringLevel.DEDICATED,
+                monitoring=MonitoringLevel.SHARED,
                 monitored_by_ct_ids=["ct_load"],
             )
         ],
     )
 
 
-def test_declared_dedicated_ct_becomes_a_direct_measurement() -> None:
-    """A declaration is not a note: the graph must expose it as an attribution."""
-    projected = _declare(_declared_topology(CTType.DEDICATED_DEVICE))
-    device = projected.device_map()["hot_tub"]
-    assert device.dedicated_ct_ids == ["ct_load"]
+def test_declared_ct_becomes_an_attribution_row_not_a_measurement() -> None:
+    """A declaration is not a note: the graph must expose it as an attribution.
 
-    graph = build_graph(projected)
-    assert graph.attribution_ct_ids("hot_tub") == ("ct_load",)
-    reading = resolve_direct(
-        {"ct_load": 1200.0}, graph, max_age_s=120, at=AT
-    ).get("hot_tub")
-    assert reading is not None
-    assert reading.usable is True
-    assert reading.power_w == pytest.approx(1200.0)
-
-
-def test_declared_branch_ct_becomes_an_inference_row_not_a_measurement() -> None:
-    """Only a dedicated role may claim a direct measurement."""
+    With the single-device role retired, a declared CT is a ``branch``
+    attribution row.  No role can claim a direct measurement any more, and the
+    direct resolver itself was deleted, so the row is the whole of what the
+    declaration buys.
+    """
     projected = _declare(_declared_topology(CTType.BRANCH))
     device = projected.device_map()["hot_tub"]
-    assert device.dedicated_ct_ids == []
     assert device.branch_ct_ids == ["ct_load"]
 
     graph = build_graph(projected)
     assert graph.attribution_ct_ids("hot_tub") == ("ct_load",)
-    assert resolve_direct({"ct_load": 1200.0}, graph, max_age_s=120, at=AT) == {}
 
 
 def test_declared_unclassified_ct_is_attributed_as_a_branch() -> None:
@@ -191,14 +178,13 @@ def test_removing_the_configuration_retracts_the_projected_ct() -> None:
     The retraction is limited to CTs this projection added, so a CT the user
     assigned through the channel wizard survives.
     """
-    projected = _declare(_declared_topology(CTType.DEDICATED_DEVICE))
+    projected = _declare(_declared_topology(CTType.BRANCH))
     assert projected.device_map()["hot_tub"].metadata.get(PROJECTED_CTS_KEY)
 
     removed = project_configuration(
         projected.model_copy(update={"version": projected.version + 1}), []
     )
     device = removed.device_map()["hot_tub"]
-    assert device.dedicated_ct_ids == []
     assert device.branch_ct_ids == []
     assert PROJECTED_CTS_KEY not in device.metadata
     assert build_graph(removed).attribution_ct_ids("hot_tub") == ()
@@ -206,24 +192,24 @@ def test_removing_the_configuration_retracts_the_projected_ct() -> None:
 
 def test_retraction_leaves_a_wizard_assigned_ct_alone() -> None:
     """Only what the projection added is removed."""
-    topology = _declared_topology(CTType.DEDICATED_DEVICE)
+    topology = _declared_topology(CTType.BRANCH)
     topology = topology.model_copy(
         update={
             "devices": [
                 topology.devices[0].model_copy(
-                    update={"dedicated_ct_ids": ["ct_load"]}
+                    update={"branch_ct_ids": ["ct_load"]}
                 )
             ]
         }
     )
     # No configuration at all: nothing is projected, nothing is retracted.
     left_alone = project_configuration(topology, [])
-    assert left_alone.device_map()["hot_tub"].dedicated_ct_ids == ["ct_load"]
+    assert left_alone.device_map()["hot_tub"].branch_ct_ids == ["ct_load"]
 
 
 def test_disabled_channel_is_not_attributed() -> None:
     """A disabled CT proves nothing; never invent a measurement from it."""
-    topology = _declared_topology(CTType.DEDICATED_DEVICE)
+    topology = _declared_topology(CTType.BRANCH)
     topology = topology.model_copy(
         update={
             "channels": [
@@ -233,7 +219,7 @@ def test_disabled_channel_is_not_attributed() -> None:
         }
     )
     projected = _declare(topology)
-    assert projected.device_map()["hot_tub"].dedicated_ct_ids == []
+    assert projected.device_map()["hot_tub"].branch_ct_ids == []
     assert build_graph(projected).attribution_ct_ids("hot_tub") == ()
 
 
@@ -315,8 +301,8 @@ def test_single_on_claimant_owns_the_whole_row() -> None:
     )
     assert results["lamp_a"].power_w == pytest.approx(200.0)
     # ``source`` is what the UI labels "Measurement source", and it must say
-    # ``inferred``: the row is still shared, so no dedicated CT measured this
-    # lamp.  The *evidence tier* says the value is a measurement, because a
+    # ``inferred``: the row is still shared and nothing measures the lamp
+    # privately.  The *evidence tier* says the value is a measurement, because a
     # 200 W step on the row at this lamp's transition, with the sibling steady,
     # measures it.
     assert results["lamp_a"].source == Source.INFERRED
@@ -948,11 +934,12 @@ def test_a_prior_within_the_row_is_still_reported() -> None:
 def test_a_prior_spends_only_what_the_row_has_left() -> None:
     """A measurement on another row does not license a bigger prior here.
 
-    The branch row reads 200 W; a device with its own dedicated CT sits on a
-    different row, so the priors get the whole 200 W and the residual closes to
-    zero when the mains agree with the panel feeds.  Bounding priors by the
-    enclosing main (500 W) instead of their own branch would have allowed 500 W
-    of declarations here, which is the over-attribution this guard prevents.
+    The branch row reads 200 W; a device measured privately on its own branch
+    CT sits on a different row, so the priors get the whole 200 W and the
+    residual closes once the mains agree with the panel feeds.  Bounding priors
+    by the enclosing main (500 W) instead of their own branch would have allowed
+    500 W of declarations here, which is the over-attribution this guard
+    prevents.
     """
     topology = Topology(
         status=TopologyStatus.CONFIRMED,
@@ -966,7 +953,7 @@ def test_a_prior_spends_only_what_the_row_has_left() -> None:
             CTChannel(
                 ct_id="ct_a",
                 entity_id="sensor.a",
-                ct_type=CTType.DEDICATED_DEVICE,
+                ct_type=CTType.BRANCH,
                 phase=Phase.L1,
                 device_id="a",
                 parent_ct_id="main",
@@ -980,7 +967,7 @@ def test_a_prior_spends_only_what_the_row_has_left() -> None:
             ),
         ],
         devices=[
-            DeviceTopology(device_id="a", phase=Phase.L1, dedicated_ct_ids=["ct_a"]),
+            DeviceTopology(device_id="a", phase=Phase.L1, branch_ct_ids=["ct_a"]),
             DeviceTopology(device_id="b", phase=Phase.L2, branch_ct_ids=["ct_bc"]),
             DeviceTopology(device_id="c", phase=Phase.L2, branch_ct_ids=["ct_bc"]),
         ],
@@ -1005,8 +992,12 @@ def test_a_prior_spends_only_what_the_row_has_left() -> None:
         {"b": "on", "c": "on"},
     )
     results = _by_device(batch)
-    assert results["a"].source == Source.DIRECT_MEASURED
+    # The retired dedicated-device role cannot claim a direct measurement, so a
+    # device alone on a branch CT is *inferred* from that row -- never direct.
+    assert results["a"].source == Source.INFERRED
+    assert results["a"].power_w == pytest.approx(300.0, abs=1e-3)
     # Two 500 W declarations on a 200 W row share it evenly, not the 500 W main.
     assert results["b"].power_w == pytest.approx(100.0)
     assert results["c"].power_w == pytest.approx(100.0)
-    assert batch.reconciliation.unknown_residual_w == pytest.approx(0.0, abs=1e-6)
+    # The NNLS fit leaves solver noise; a micro-watt is not over-attribution.
+    assert batch.reconciliation.unknown_residual_w == pytest.approx(0.0, abs=1e-3)

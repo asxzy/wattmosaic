@@ -80,7 +80,7 @@ def _topology() -> dict:
                 "paired_ct_id": "panel_l1",
             },
             {"ct_id": "branch_a", "name": "A", "ct_type": "branch", "phase": "l1"},
-            {"ct_id": "tub", "name": "Tub", "ct_type": "dedicated_device", "phase": "l1"},
+            {"ct_id": "tub", "name": "Tub", "ct_type": "branch", "phase": "l1"},
         ],
     }
 
@@ -169,10 +169,20 @@ def test_a_ct_cannot_be_its_own_parent():
     assert any(e.startswith("parent_self") for e in errors)
 
 
-def test_a_single_device_ct_cannot_be_a_parent():
-    """A ``dedicated_device`` CT watches one load; nothing sits behind it."""
+def test_a_non_container_ct_cannot_be_a_parent():
+    """Only a feed or a branch may contain another CT.
+
+    This used to be expressed by the retired ``dedicated_device`` role: a CT
+    watching exactly one load cannot have anything behind it.  That role no
+    longer exists (task-02 normalises it to ``branch``), so the surviving form of
+    the same rule is the ``unknown`` role -- a CT we know nothing about must not
+    be presented as a container.  The rule itself is unchanged: ``main`` and
+    ``branch`` are the only container roles.
+    """
     assignments = {
-        "tub": {"role": "dedicated_device", "phase": "l1", "device_id": "tub"},
+        # ``tub`` exists in the channel fixture; declaring its role ``unknown``
+        # is what makes it a non-container in this submission.
+        "tub": {"role": "unknown", "phase": "l1"},
         "branch_a": {"role": "branch", "phase": "l1", "parent_ct_id": "tub"},
     }
     errors = flow.validate_assignments(assignments, _channels())

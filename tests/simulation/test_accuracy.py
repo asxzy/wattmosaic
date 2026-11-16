@@ -3,7 +3,7 @@
 Every number asserted here was **measured** on the deterministic synthetic
 household and is a ceiling with headroom, not an aspirational target.  The
 purpose is to catch regressions: if the engine suddenly fabricates device power
-or stops attributing dedicated CTs, these tests fail.
+or stops attributing a device's own branch CT, these tests fail.
 
 The tests are deliberately stratified (per source tier, device type,
 concurrency level, data-quality level and per device) because the acceptance
@@ -12,6 +12,12 @@ criteria forbid a single aggregate accuracy score.
 Scenario used for the pinned numbers: seed 202, 60 simulated minutes, 15 s
 records, quality ``good``, audited topology.  See
 ``docs/acceptance_report.md`` for the full measured tables.
+
+Wave 2 retired the ``direct_measured`` source tier: a CT that names its device
+is now a seed row for the constrained fit, and the result grades as
+``inferred``.  The tests below were re-based onto that path; the numbers are
+re-measured, not carried over.  Devices whose CT is a solo row still track
+truth closely because ``_is_solo_row`` is role-independent (design.md §4.3).
 """
 
 from __future__ import annotations
@@ -34,9 +40,9 @@ SEED = 202
 MINUTES = 60
 INTERVAL = 15
 
-# Device ids that the audited topology meters with a dedicated CT.  These are
-# the only devices the engine may claim as ``direct_measured``.
-DEDICATED_DEVICES = {
+# Device ids whose branch row carries them alone (no other device shares it), so
+# the constrained fit can recover their power and grade them ``inferred``.
+SOLO_ROW_DEVICES = {
     d.device_id for d in REAL_HOME_TOPOLOGY.devices if d.dedicated_ct
 }
 # Devices that share a branch CT with at least one other device.
@@ -116,9 +122,12 @@ def test_wrong_predictors_are_separated_from_the_engine(
 
 
 def test_report_strata_are_all_populated(report) -> None:
-    # Per source tier.
-    assert "direct_measured" in report.per_source
+    # Per source tier.  Wave 2 retired the direct tier, so its *absence* is now
+    # the pinned fact: every attributed device grades as ``inferred`` and every
+    # unattributed one as ``unknown`` (design.md §4.3).
     assert "inferred" in report.per_source
+    assert "unknown" in report.per_source
+    assert "direct_measured" not in report.per_source
     # Per device type: the reference household exercises all of these.
     for expected in (
         "binary", "standby", "dimmable", "variable_speed", "hvac",
@@ -157,63 +166,74 @@ def test_no_single_aggregate_score_is_exposed(report) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Directly measured devices
+# Solo-row devices: formerly the "directly measured" tier
 # --------------------------------------------------------------------------- #
 
 
-def test_direct_measured_accuracy(report) -> None:
-    """Dedicated-CT devices track truth closely.
+def test_solo_row_accuracy(report) -> None:
+    """Solo-row devices track truth closely through the constrained fit.
 
-    Measured (seed 202 / 60 min / 15 s / good): MAE 12.73 W, relative error
-    0.0135 over 5 641 device-samples.  The residual error is dominated by
-    sample-vintage mismatch (the engine compares CT values taken at slightly
-    different instants) plus quantisation, not by mis-attribution.
+    Wave 2 deleted the direct measurement path, so these devices now grade as
+    ``inferred``; the tier that used to hold them no longer exists
+    (``test_report_strata_are_all_populated``).  Measured on the re-based run
+    (seed 202 / 60 min / 15 s / good): the ``inferred`` tier is n=5 558 with MAE
+    9.37 W, relative error 0.0189, mean bias -5.28 W.  That tier also contains
+    the devices that used to be inferred; the per-device ceilings below are what
+    hold each solo-row device to its own measured number.
+
+    The residual error is dominated by sample-vintage mismatch (the engine
+    compares CT values taken at slightly different instants) plus quantisation,
+    not by mis-attribution.
     """
-    direct = report.per_source["direct_measured"]
-    assert direct.n > 5_000
-    assert direct.mae_w < 40.0, direct.mae_w
-    assert direct.relative_error < 0.05, direct.relative_error
-    assert abs(direct.mean_bias_w) < 10.0, direct.mean_bias_w
+    inferred = report.per_source["inferred"]
+    assert inferred.n > 5_000
+    assert inferred.mae_w < 40.0, inferred.mae_w
+    assert inferred.relative_error < 0.05, inferred.relative_error
+    assert abs(inferred.mean_bias_w) < 10.0, inferred.mean_bias_w
 
 
-def test_every_dedicated_device_is_within_tolerance(report) -> None:
-    """Per-device check; no device may be silently ignored.
+def test_every_solo_row_device_is_within_tolerance(report) -> None:
+    """Per-device check; no solo-row device may be silently ignored.
 
     Ceilings are the measured MAE on this scenario with ~1.8x headroom, so a
     regression trips them but ordinary realisation noise does not.  Measured
-    worst offenders: water_heater 88.3 W (a 3 kW double-pole load, so a single
-    stale leg sample costs hundreds of watts), air_conditioner 44.8 W,
-    upper_ac 40.7 W, space_heater 38.2 W.
+    worst offenders after the re-base: water_heater 94.5 W (a 3 kW double-pole
+    load, so a single stale leg sample costs hundreds of watts),
+    space_heater 37.1 W, upper_ac 27.5 W, underfloor_loop 19.3 W,
+    patio_heater 15.5 W.  Aggregate over all 24 solo-row devices: MAE 10.76 W
+    over 5 760 device-samples.
 
-    The numbers moved when the simulator stopped seeding each load from its
-    display id (see ``test_a_rename_cannot_change_any_measurement``).  They are
-    measured from one engine run on the pinned scenario, never guessed.
+    ``patio_heater`` is the interesting one: it idles at 15.4 W, so the old
+    flat 10 W ON threshold scored every idle sample as an active one and its
+    measured MAE was 2.0 W against a threshold it was always already over.  With
+    the per-device threshold (``metrics.IDLE_ON_MARGIN``) its measured MAE is
+    15.5 W, which is the honest error against a load that is never below 15 W.
     """
     mae_ceiling = {
         "space_heater": 68.8,
-        "water_heater": 159.0,
-        "upper_ac": 73.3,
-        "air_conditioner": 80.6,
+        "water_heater": 171.0,
+        "upper_ac": 49.5,
+        "air_conditioner": 2.4,
         "underfloor_loop": 34.7,
-        "patio_heater": 2.0,
+        "patio_heater": 28.0,
         "guest_bath_unit": 12.3,
         "humidifier_2": 18.6,
         "lighting_2": 3.7,
-        "upper_central_hvac": 18.9,
-        "central_hvac": 14.0,
-        "garden_outlet": 15.7,
-        "utility_sink": 14.1,
+        "upper_central_hvac": 14.3,
+        "central_hvac": 9.5,
+        "garden_outlet": 17.1,
+        "utility_sink": 15.5,
         "hot_water_tank": 2.1,
-        "refrigerator_1": 3.9,
-        "refrigerator_2": 3.9,
-        "humidifier_1": 1.0,
-        "vehicle_charger": 2.0,
+        "refrigerator_1": 3.3,
+        "refrigerator_2": 3.0,
+        "humidifier_1": 2.0,
+        "vehicle_charger": 2.7,
         "eave_outlet": 1.1,
-        "wall_display_panel": 1.0,
-        "network_cabinet": 1.6,
+        "wall_display_panel": 0.8,
+        "network_cabinet": 2.9,
         "ventilation_unit": 1.0,
         "lighting_3": 2.8,
-        "lighting_1": 5.5,
+        "lighting_1": 3.8,
     }
     for dev_id, ceiling in mae_ceiling.items():
         st = report.per_device[dev_id]
@@ -221,13 +241,14 @@ def test_every_dedicated_device_is_within_tolerance(report) -> None:
         assert st.mae_w < ceiling, (dev_id, st.mae_w)
 
 
-def test_direct_devices_are_detected(report) -> None:
-    """ON/OFF detection on dedicated channels must be near perfect.
+def test_solo_row_devices_are_detected(report) -> None:
+    """ON/OFF detection on solo-row channels must stay near perfect.
 
-    Measured over every dedicated device on the pinned scenario: aggregate
-    recall 0.987, precision 0.991.  The soft spots are loads whose ON power is
-    barely above the noise floor (``lighting_3`` 0.857, ``lighting_1`` 0.800),
-    so the per-device floor is deliberately below the aggregate.
+    Measured over every solo-row device on the re-based scenario: aggregate
+    recall 0.981, precision 0.996.  The soft spots are loads whose ON power is
+    barely above their own noise/idle floor (``lighting_1`` 0.800,
+    ``lighting_3`` 0.857), so the per-device floor is deliberately below the
+    aggregate.
 
     A *rate* floor is only meaningful when there are enough ON samples to
     estimate a rate.  ``lighting_1`` is ON for 10 of 240 samples, so one missed
@@ -238,14 +259,14 @@ def test_direct_devices_are_detected(report) -> None:
     sample actually supports.
     """
     aggregate_tp = aggregate_fp = aggregate_fn = 0
-    for dev_id in DEDICATED_DEVICES:
+    for dev_id in SOLO_ROW_DEVICES:
         det = report.per_device_detection[dev_id]
         aggregate_tp += det.tp
         aggregate_fp += det.fp
         aggregate_fn += det.fn
         on_samples = det.tp + det.fn
         if on_samples >= 20:
-            # No dedicated device may be systematically invisible.
+            # No solo-row device may be systematically invisible.
             assert det.recall > 0.80, (dev_id, det.recall, on_samples)
             assert det.precision > 0.70, (dev_id, det.precision)
         else:
@@ -286,8 +307,8 @@ def test_shared_branch_devices_are_never_fabricated(report) -> None:
         assert det.precision >= 0.99, (dev_id, det.precision)
         if dev_id in measured_zero_recall:
             assert det.recall == 0.0, (dev_id, det.recall)
-        # Whatever happens, the claimed power must be honest: either measured
-        # from a dedicated CT or explicitly unknown.
+        # Whatever happens, the claimed power must be honest: either recovered
+        # from the device's own solo branch row or explicitly unknown.
         assert report.per_device[dev_id].mae_w >= 0.0
 
 
@@ -314,18 +335,35 @@ def test_unknown_residual_is_preserved(report) -> None:
 
 
 def test_no_forced_attribution(report) -> None:
-    # Forced attribution is always 0: inferred/model power never exceeds the
-    # post-direct residual, so no manufactured energy is ever claimed.
+    # Forced attribution is 0: inferred/model power never exceeds the
+    # post-attribution residual, so no manufactured energy is ever claimed.
     assert report.reconciliation.forced_attribution_count == 0
-    # Over-attribution is a *sample-vintage* effect, not fabrication: a
-    # dedicated CT sampled ~13 s earlier still carries the previous ON value
-    # when the load switched off, so the summed direct readings can briefly
-    # exceed the current panel draw.  The invariants separate this from
-    # fabrication (``negative_residual_records``); measured 0 of 240 records on
-    # the pinned run, with 1 negative-residual record bounded below.
+    # Over-attribution is a *sample-vintage* effect, not fabrication: a branch
+    # CT sampled ~13 s earlier still carries the previous ON value when the load
+    # switched off, so the summed readings can briefly exceed the current panel
+    # draw.  The invariants separate this from fabrication
+    # (``negative_residual_records``); measured 0 of 240 records on the pinned
+    # run, with 1 negative-residual record bounded below.
     assert report.reconciliation.over_attribution_count <= 5
     assert report.invariants["negative_residual_records"] <= 10
     assert report.invariants["forced_attribution_count"] == 0
+
+
+def test_stale_input_is_attributed_to_data_quality_not_the_engine(report) -> None:
+    """A pre-switch CT sample is stale *input*, not engine fabrication.
+
+    Measured on the pinned run: 7 records carry inferred power for a device that
+    is truth-OFF at the record instant, and every one of them has a supporting
+    CT sample with a vintage of 2.8-15.8 s whose value equals the device's truth
+    at *that* instant.  The engine faithfully propagated old evidence, so these
+    belong on the data-quality axis; ``forced_attribution_count`` must stay 0
+    while the stale-input counter carries them.
+    """
+    assert report.invariants["forced_attribution_from_stale_input_records"] > 0, (
+        "the pinned scenario no longer exercises a pre-switch sample; the "
+        "stale-input exemption is untested"
+    )
+    assert report.reconciliation.forced_attribution_count == 0
 
 
 def test_nested_cts_are_not_double_counted(report) -> None:
@@ -375,16 +413,19 @@ def test_quality_degradation_is_graceful(quality_reports) -> None:
         assert rep.coverage.false_attribution_rate < 0.05, name
 
 
-def test_direct_error_grows_with_impairment(quality_reports) -> None:
-    """Monotonic-ish: excellent must beat poor on direct-channel MAE."""
-    excellent = quality_reports["excellent"].per_source["direct_measured"].mae_w
-    good = quality_reports["good"].per_source["direct_measured"].mae_w
-    degraded = quality_reports["degraded"].per_source["direct_measured"].mae_w
-    poor = quality_reports["poor"].per_source["direct_measured"].mae_w
-    # Measured on this 30-minute scenario set: 18.11 / 21.60 / 29.15 / 36.07 W.
-    # Excellent and good are close (the simulator adds no noise at those tiers
-    # beyond rounding), so the assertion is "no worse than", not "strictly
-    # better".
+def test_solo_row_error_grows_with_impairment(quality_reports) -> None:
+    """Monotonic-ish: excellent must beat poor on the inferred-tier MAE.
+
+    Re-based onto the ``inferred`` tier, which is now the only tier a solo-row
+    CT can produce (design.md §4.3).  Measured on this 30-minute scenario set:
+    14.93 / 17.12 / 27.19 / 46.33 W.  Excellent and good are close (the
+    simulator adds no noise at those tiers beyond rounding), so the assertion is
+    "no worse than", not "strictly better".
+    """
+    excellent = quality_reports["excellent"].per_source["inferred"].mae_w
+    good = quality_reports["good"].per_source["inferred"].mae_w
+    degraded = quality_reports["degraded"].per_source["inferred"].mae_w
+    poor = quality_reports["poor"].per_source["inferred"].mae_w
     assert excellent <= good * 1.10
     assert good <= degraded * 1.25
     assert degraded <= poor * 1.25
@@ -413,32 +454,33 @@ def test_concurrency_is_stratified_not_averaged(report) -> None:
     assert len(report.per_concurrency) >= 10
     peak_key = max(report.per_concurrency, key=lambda k: int(k))
     peak = report.per_concurrency[peak_key]
-    # Measured peak-concurrency (26 simultaneous loads) MAE: 237.1 W.
+    # Measured peak-concurrency (26 simultaneous loads) MAE: 237.5 W.
     assert peak.n > 0
     assert peak.mae_w < 500.0, (peak_key, peak.mae_w)
-    # Every stratum has zero-error direct devices mixed with unattributed
-    # shared ones, so no stratum may show a *negative* bias larger than the
-    # whole-home draw.
+    # Every stratum mixes near-exact solo-row devices with unattributed shared
+    # ones, so no stratum may show a *negative* bias larger than the whole-home
+    # draw.
     for key, st in report.per_concurrency.items():
         assert abs(st.mean_bias_w) < 2000.0, (key, st.mean_bias_w)
 
 
 # --------------------------------------------------------------------------- #
-# Baseline comparison: the engine must beat "trust only dedicated CTs"
+# Baseline comparison: the engine must not claim more than "trust the CTs"
 # --------------------------------------------------------------------------- #
 
 
-def test_engine_beats_dedicated_only_baseline(scenario_records, report) -> None:
+def test_engine_does_not_outclaim_the_solo_row_baseline(scenario_records, report) -> None:
     baseline = evaluate(
         scenario_records,
         main_channel_only_predictor,
         panel_channels=panel_channel_map(REAL_HOME_TOPOLOGY),
     )
-    # Same safety, but the engine must add genuine inferred attribution.
+    # Same safety, and the engine must still produce genuine attribution.
     assert baseline.reconciliation.forced_attribution_count == 0
     inferred = report.per_source.get("inferred")
     assert inferred is not None and inferred.n > 0
-    # The engine claims slightly *less* than the dedicated-only baseline on
-    # this scenario (0.7031 vs 0.7034) because it conservatively withholds
-    # power it cannot justify; it must never claim dramatically more.
+    # Measured on the re-based run: engine 0.6955, baseline 0.7034.  The engine
+    # claims *less* because it conservatively leaves solo-row power it cannot
+    # justify as residual (design.md §4.3); it must never claim dramatically
+    # more than the baseline that simply credits every solo row.
     assert report.coverage.coverage <= baseline.coverage.coverage + 0.05

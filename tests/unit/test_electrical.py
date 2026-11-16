@@ -21,6 +21,7 @@ from wattmosaic_engine.contracts import (
     Topology,
     TopologyStatus,
 )
+from wattmosaic_engine.disaggregation import DisaggregationEngine
 from wattmosaic_engine.disaggregation.confidence import (
     ConfidenceInputs,
     compute_confidence,
@@ -32,9 +33,7 @@ from wattmosaic_engine.electrical import (
     analyse_identifiability,
     build_measurement_matrix,
     coerce_window,
-    direct_power_w,
     main_power_w,
-    resolve_direct,
     solve_constrained_nnls,
 )
 from wattmosaic_engine.electrical.topology import build_graph
@@ -95,7 +94,7 @@ def house_topology() -> Topology:
             *two_mains(),
             _ch("branch_kitchen", parent="main_l1"),
             _ch("branch_fridge", parent="branch_kitchen"),
-            _ch("ct_tv", CTType.DEDICATED_DEVICE, device="tv"),
+            _ch("ct_tv", CTType.BRANCH, device="tv"),
         ],
         devices=[
             DeviceTopology(
@@ -112,7 +111,7 @@ def house_topology() -> Topology:
             ),
             DeviceTopology(
                 device_id="tv",
-                dedicated_ct_ids=["ct_tv"],
+                branch_ct_ids=["ct_tv"],
                 phase=Phase.L1,
                 topology_status=TopologyStatus.CONFIRMED,
             ),
@@ -349,11 +348,11 @@ def test_matrix_shape_and_metadata():
     assert matrix.topology_version == 3
 
 
-def test_dedicated_device_has_a_one_in_its_own_row():
+def test_a_device_owning_a_branch_row_has_a_one_in_it():
     graph = build_graph(house_topology())
     matrix = build_measurement_matrix(graph, ["lights", "fridge", "tv"])
     assert matrix.coefficient("ct_tv", "tv") == pytest.approx(1.0)
-    # Nothing else is in the dedicated row.
+    # Nothing else is in that row.
     assert matrix.coefficient("ct_tv", "lights") == 0.0
     assert matrix.coefficient("ct_tv", "fridge") == 0.0
 
@@ -412,7 +411,7 @@ def test_main_row_contains_everything_below_it():
     matrix = build_measurement_matrix(graph, ["lights", "fridge", "tv"])
     assert matrix.coefficient("main_l1", "lights") == pytest.approx(1.0)
     assert matrix.coefficient("main_l1", "fridge") == pytest.approx(1.0)
-    # tv is on a dedicated CT with no declared parent, so it is not under main_l1.
+    # tv is on its own branch CT with no declared parent, so it is not under main_l1.
     assert matrix.coefficient("main_l1", "tv") == 0.0
 
 
@@ -802,20 +801,25 @@ def test_prediction_round_trip():
 
 
 # --------------------------------------------------------------------------- #
-# Direct measurement
+# Direct measurement — deleted in Wave 3
 # --------------------------------------------------------------------------- #
+# There is no direct measurement path at all any more: the channel role that
+# gated it is not part of the contract, so the resolver itself was removed.  The
+# electrical rules that path used to apply (leg pairing, staleness,
+# non-negativity, multipliers) are pinned through the solver and the graph, which
+# is where they now live.
 def _dedicated_topology() -> Topology:
     return Topology(
         channels=[
-            _ch("ct_tv", CTType.DEDICATED_DEVICE, device="tv"),
-            _ch("ct_tub_l1", CTType.DEDICATED_DEVICE, phase=Phase.L1, device="tub", pair="ct_tub_l2"),
-            _ch("ct_tub_l2", CTType.DEDICATED_DEVICE, phase=Phase.L2, device="tub", pair="ct_tub_l1"),
+            _ch("ct_tv", CTType.BRANCH, device="tv"),
+            _ch("ct_tub_l1", CTType.BRANCH, phase=Phase.L1, device="tub", pair="ct_tub_l2"),
+            _ch("ct_tub_l2", CTType.BRANCH, phase=Phase.L2, device="tub", pair="ct_tub_l1"),
         ],
         devices=[
-            DeviceTopology(device_id="tv", dedicated_ct_ids=["ct_tv"], phase=Phase.L1),
+            DeviceTopology(device_id="tv", branch_ct_ids=["ct_tv"], phase=Phase.L1),
             DeviceTopology(
                 device_id="tub",
-                dedicated_ct_ids=["ct_tub_l1", "ct_tub_l2"],
+                branch_ct_ids=["ct_tub_l1", "ct_tub_l2"],
                 phase=Phase.BOTH,
                 double_pole=True,
             ),
@@ -825,14 +829,23 @@ def _dedicated_topology() -> Topology:
     )
 
 
-def test_resolve_direct_uses_dedicated_ct_only():
-    graph = build_graph(_dedicated_topology())
-    window = ObservationWindow.from_values(T0, {"ct_tv": 75.0, "ct_tub_l1": 0.0, "ct_tub_l2": 0.0})
-    readings = resolve_direct(window, graph)
-    assert set(readings) == {"tv", "tub"}  # unknown_load has no dedicated CT
-    assert readings["tv"].power_w == pytest.approx(75.0)
-    assert readings["tv"].usable
-    assert readings["tv"].ct_ids == ("ct_tv",)
+def test_the_direct_resolver_no_longer_exists():
+    """No device can resolve to a direct reading, because the resolver is gone.
+
+    Every row here is a ``branch`` CT naming its device, which is exactly the
+    shape that used to produce a direct reading.  The contract has no role that
+    grants a direct measurement, so the machinery was deleted rather than left
+    returning nothing: a kept-but-inert resolver would still advertise a
+    capability the engine does not have.
+    """
+    import wattmosaic_engine.electrical as electrical
+    import wattmosaic_engine.electrical.direct as direct_module
+
+    assert not hasattr(direct_module, "resolve_direct")
+    assert not hasattr(direct_module, "DirectReading")
+    assert not hasattr(electrical, "resolve_direct")
+    assert not hasattr(electrical, "DirectReading")
+    assert not hasattr(electrical.ElectricalModel, "resolve_direct")
 
 
 def _single_leg_multiplier_topology() -> Topology:
@@ -842,7 +855,7 @@ def _single_leg_multiplier_topology() -> Topology:
             _ch("main", CTType.MAIN, phase=Phase.BOTH),
             _ch(
                 "ct_tub",
-                CTType.DEDICATED_DEVICE,
+                CTType.BRANCH,
                 phase=Phase.L1,
                 device="tub",
                 multiplier=2.0,
@@ -851,7 +864,7 @@ def _single_leg_multiplier_topology() -> Topology:
         devices=[
             DeviceTopology(
                 device_id="tub",
-                dedicated_ct_ids=["ct_tub"],
+                branch_ct_ids=["ct_tub"],
                 phase=Phase.L1,
                 double_pole=True,
             )
@@ -861,7 +874,7 @@ def _single_leg_multiplier_topology() -> Topology:
 
 def test_default_multiplier_is_one_and_changes_nothing():
     """The common case: the monitor already scales, so the engine must not."""
-    graph = build_graph(Topology(channels=[_ch("ct_tv", CTType.DEDICATED_DEVICE, device="tv")]))
+    graph = build_graph(Topology(channels=[_ch("ct_tv", CTType.BRANCH, device="tv")]))
     assert graph.multiplier_for("ct_tv") == 1.0
     assert graph.scale_w("ct_tv", 75.0) == 75.0
     assert graph.multiplier_for("not_a_channel") == 1.0
@@ -878,14 +891,20 @@ def test_scale_w_applies_the_declared_multiplier_once():
     assert graph.scale_w("ct_tub", None) is None
 
 
-def test_direct_measurement_applies_the_multiplier_and_reports_the_full_load():
+def test_the_multiplier_scales_the_devices_only_row_once():
+    """The declared multiplier reaches the solver, applied exactly once.
+
+    This used to be asserted through the direct resolver.  The multiplier is a
+    property of the row, not of the measurement path, so it is pinned where it
+    still applies: the device's own row scales, and the raw reading does not.
+    """
     graph = build_graph(_single_leg_multiplier_topology())
-    window = ObservationWindow.from_values(T0, {"main": 3000.0, "ct_tub": 1100.0})
-    readings = resolve_direct(window, graph)
-    assert readings["tub"].power_w == pytest.approx(2200.0)
-    assert readings["tub"].per_leg_w == {"ct_tub": pytest.approx(2200.0)}
+    matrix = build_measurement_matrix(graph, ["tub"])
+    assert matrix.channel_multiplier["ct_tub"] == 2.0
+    row = matrix.row_channel_ids.index("ct_tub")
+    assert matrix.prepare({"ct_tub": 1100.0}).y[row] == pytest.approx(2200.0)
     # The raw reading stays unscaled, so a caller cannot apply it a second time.
-    assert readings["tub"].raw_power_w is None
+    assert matrix._raw_reading_w({"ct_tub": 1100.0}, "ct_tub") == pytest.approx(1100.0)
 
 
 def test_main_power_applies_a_multiplier_on_a_nested_feed():
@@ -950,89 +969,132 @@ def test_detect_changes_scales_the_previous_snapshot_fallback():
     assert changes["ct_tub"].after_w == pytest.approx(800.0)
 
 
-def test_direct_double_pole_sums_both_legs():
+def test_a_double_pole_pair_sums_both_legs():
+    """Each leg is half the device, so the two rows together are the whole load.
+
+    the deleted direct resolver used to sum the pair itself.  The same
+    arithmetic is now the solver's: both legs carry a 0.5 coefficient, and their
+    two equations resolve to the summed device power rather than one leg's.
+    """
     graph = build_graph(_dedicated_topology())
+    matrix = build_measurement_matrix(graph, ["tv", "tub"])
+    j = matrix.col_index("tub")
+    assert matrix.coefficient("ct_tub_l1", "tub") == pytest.approx(0.5)
+    assert matrix.coefficient("ct_tub_l2", "tub") == pytest.approx(0.5)
+
     window = ObservationWindow.from_values(
         T0, {"ct_tv": 0.0, "ct_tub_l1": 1200.0, "ct_tub_l2": 1300.0}
     )
-    readings = resolve_direct(window, graph)
-    assert readings["tub"].power_w == pytest.approx(2500.0)
-    assert readings["tub"].per_leg_w == {"ct_tub_l1": 1200.0, "ct_tub_l2": 1300.0}
+    prepared = matrix.prepare(window.readings)
+    result = solve_constrained_nnls(
+        matrix.A[prepared.mask], prepared.y[prepared.mask], device_ids=matrix.col_device_ids
+    )
+    assert result.x[j] == pytest.approx(2500.0)
 
 
-def test_direct_measurement_stale_is_not_usable():
-    graph = build_graph(_dedicated_topology())
+def test_a_stale_measurement_is_not_usable():
+    """A row older than ``max_age_s`` is excluded, not trusted at face value.
+
+    Pinned on the window reading and on the engine's exclusion list, which is
+    where staleness is now enforced.
+    """
     window = ObservationWindow.from_values(
         T0,
         {"ct_tv": 75.0, "ct_tub_l1": 0.0, "ct_tub_l2": 0.0},
         ages={"ct_tv": 600.0},
     )
-    readings = resolve_direct(window, graph, max_age_s=120.0)
-    assert readings["tv"].usable is False
-    assert any("stale_measurement" in r for r in readings["tv"].reasons)
+    assert window.readings["ct_tv"].is_usable(120.0) is False
+    batch = DisaggregationEngine().infer(
+        window, device_states={}, models={}, topology=_dedicated_topology()
+    )
+    assert batch.diagnostics["excluded_rows"]["ct_tv"] == "stale_measurement"
 
 
-def test_direct_measurement_missing_channel_is_not_zero():
+def test_a_missing_measurement_is_not_treated_as_zero():
+    """No reading is not a reading of 0 W; the row is dropped instead."""
     graph = build_graph(_dedicated_topology())
     window = ObservationWindow.from_values(T0, {"ct_tub_l1": 10.0, "ct_tub_l2": 10.0})
-    readings = resolve_direct(window, graph)
-    assert readings["tv"].power_w is None
-    assert readings["tv"].usable is False
-    assert direct_power_w(window, graph) == {"tub": pytest.approx(20.0)}
+    matrix = build_measurement_matrix(graph, ["tv", "tub"])
+    prepared = matrix.prepare(window.readings)
+    assert not prepared.mask[matrix.row_index("ct_tv")]
+    assert prepared.excluded_rows["ct_tv"] == "missing_measurement"
+
+    batch = DisaggregationEngine().infer(
+        window, device_states={}, models={}, topology=_dedicated_topology()
+    )
+    assert batch.get("tv").power_w == pytest.approx(0.0)
+    assert batch.get("tub").power_w == pytest.approx(20.0)
 
 
-def test_direct_measurement_quality_bad_is_unusable():
-    graph = build_graph(_dedicated_topology())
+def test_a_bad_quality_measurement_is_unusable():
     window = ObservationWindow.from_values(
         T0,
         {"ct_tv": 75.0, "ct_tub_l1": 0.0, "ct_tub_l2": 0.0},
         qualities={"ct_tv": QualityStatus.BAD},
     )
-    assert resolve_direct(window, graph)["tv"].usable is False
+    assert window.readings["ct_tv"].is_usable(120.0) is False
+    batch = DisaggregationEngine().infer(
+        window, device_states={}, models={}, topology=_dedicated_topology()
+    )
+    assert "ct_tv" in batch.diagnostics["excluded_rows"]
 
 
-def test_negative_direct_reading_is_clipped_to_zero():
-    """A device cannot consume negative power; noise around zero is clipped.
+def test_a_negative_device_reading_cannot_make_a_negative_load():
+    """A device cannot consume negative power; the solver clamps at ``x >= 0``.
 
-    ``docs/electrical_model.md`` §9.5: a negative device-level reading is
-    export (a main property) or unmetered generation, and must not be reported
-    as a negatively consuming appliance.  The constrained solver enforces this
-    with ``x >= 0``; the Level-1 direct path must match.
+    ``docs/electrical_model.md`` §9.5: a negative device-level reading is export
+    (a main property) or unmetered generation, and must not be reported as a
+    negatively consuming appliance.  This used to be asserted through the
+    deleted direct resolver's clamp; the constrained solver enforces the same
+    bound, and it is the only path that runs.
     """
     graph = build_graph(_dedicated_topology())
+    matrix = build_measurement_matrix(graph, ["tv", "tub"])
+    j = matrix.col_index("tv")
     window = ObservationWindow.from_values(
         T0, {"ct_tv": -0.065, "ct_tub_l1": 0.0, "ct_tub_l2": 0.0}
     )
-    reading = resolve_direct(window, graph)["tv"]
-    assert reading.power_w == 0.0
-    # The raw signed value is preserved for diagnostics, never for reporting.
-    assert reading.raw_power_w == pytest.approx(-0.065)
-    assert reading.usable is True
-    assert "negative_device_power_clipped" in reading.reasons
+    prepared = matrix.prepare(window.readings)
+    result = solve_constrained_nnls(
+        matrix.A[prepared.mask], prepared.y[prepared.mask], device_ids=matrix.col_device_ids
+    )
+    assert result.x[j] == 0.0
+    assert "tv" in result.at_lower_bound
+    # The raw signed value is still what the sensor said; only the load is 0.
+    assert prepared.y[matrix.row_index("ct_tv")] == pytest.approx(-0.065)
 
 
-def test_negative_direct_reading_on_a_paired_ct_keeps_the_signed_sum():
-    """Legs are summed with sign, then the *device total* is clamped once."""
+def test_a_signed_leg_sum_below_zero_is_clamped_once_at_the_device():
+    """Legs are summed with sign; only the device total is clamped, at zero."""
     graph = build_graph(_dedicated_topology())
+    matrix = build_measurement_matrix(graph, ["tv", "tub"])
+    j = matrix.col_index("tub")
     window = ObservationWindow.from_values(
         T0, {"ct_tv": 0.0, "ct_tub_l1": 50.0, "ct_tub_l2": -120.0}
     )
-    reading = resolve_direct(window, graph)["tub"]
-    assert reading.power_w == 0.0
-    assert reading.raw_power_w == pytest.approx(-70.0)
-    assert reading.per_leg_w == {"ct_tub_l1": 50.0, "ct_tub_l2": -120.0}
-    assert "negative_device_power_signed_leg_sum" in reading.reasons
+    prepared = matrix.prepare(window.readings)
+    # The legs keep their signs on their own rows.
+    assert prepared.y[matrix.row_index("ct_tub_l1")] == pytest.approx(50.0)
+    assert prepared.y[matrix.row_index("ct_tub_l2")] == pytest.approx(-120.0)
+    result = solve_constrained_nnls(
+        matrix.A[prepared.mask], prepared.y[prepared.mask], device_ids=matrix.col_device_ids
+    )
+    assert result.x[j] == 0.0
 
 
-def test_positive_direct_reading_is_never_clamped():
+def test_a_positive_device_reading_is_never_clamped():
     graph = build_graph(_dedicated_topology())
+    matrix = build_measurement_matrix(graph, ["tv", "tub"])
+    j = matrix.col_index("tv")
     window = ObservationWindow.from_values(
         T0, {"ct_tv": 0.4, "ct_tub_l1": 0.0, "ct_tub_l2": 0.0}
     )
-    reading = resolve_direct(window, graph)["tv"]
-    assert reading.power_w == pytest.approx(0.4)
-    assert reading.raw_power_w is None
-    assert "negative_device_power_clipped" not in reading.reasons
+    prepared = matrix.prepare(window.readings)
+    result = solve_constrained_nnls(
+        matrix.A[prepared.mask], prepared.y[prepared.mask], device_ids=matrix.col_device_ids
+    )
+    assert result.x[j] == pytest.approx(0.4)
+    assert "tv" not in result.at_lower_bound
 
 
 # --------------------------------------------------------------------------- #
@@ -1184,57 +1246,60 @@ def test_a_pair_spanning_two_devices_is_not_summed_into_either() -> None:
     well**: the same watts attributed twice, and no error anywhere.
 
     A pair is only a double-pole leg when the partner names the same device.
+    Asserted through the solver, which is the path that now consumes the pair.
     """
     topo = Topology(
         channels=[
-            _ch("lights_ct1", CTType.DEDICATED_DEVICE, phase=Phase.L1,
+            _ch("lights_ct1", CTType.BRANCH, phase=Phase.L1,
                 device="lights_1", pair="lights_ct2"),
-            _ch("lights_ct2", CTType.DEDICATED_DEVICE, phase=Phase.L2,
+            _ch("lights_ct2", CTType.BRANCH, phase=Phase.L2,
                 device="lights_2", pair="lights_ct1"),
         ],
         devices=[
-            DeviceTopology(device_id="lights_1", dedicated_ct_ids=["lights_ct1"], phase=Phase.L1),
-            DeviceTopology(device_id="lights_2", dedicated_ct_ids=["lights_ct2"], phase=Phase.L2),
+            DeviceTopology(device_id="lights_1", branch_ct_ids=["lights_ct1"], phase=Phase.L1),
+            DeviceTopology(device_id="lights_2", branch_ct_ids=["lights_ct2"], phase=Phase.L2),
         ],
         status=TopologyStatus.CONFIRMED,
     )
     graph = build_graph(topo)
+    matrix = build_measurement_matrix(graph, ["lights_1", "lights_2"])
     window = ObservationWindow.from_values(T0, {"lights_ct1": 17.7, "lights_ct2": 238.7})
-    readings = resolve_direct(window, graph)
+    prepared = matrix.prepare(window.readings)
+    result = solve_constrained_nnls(
+        matrix.A[prepared.mask], prepared.y[prepared.mask], device_ids=matrix.col_device_ids
+    )
+    solved = dict(zip(matrix.col_device_ids, result.x.tolist(), strict=True))
 
-    assert readings["lights_1"].power_w == pytest.approx(17.7)
-    assert readings["lights_2"].power_w == pytest.approx(238.7)
+    assert solved["lights_1"] == pytest.approx(17.7)
+    assert solved["lights_2"] == pytest.approx(238.7)
     # Neither device may claim the other's row.
-    assert readings["lights_1"].ct_ids == ("lights_ct1",)
-    assert readings["lights_2"].ct_ids == ("lights_ct2",)
+    assert graph.attribution_ct_ids("lights_1") == ("lights_ct1",)
+    assert graph.attribution_ct_ids("lights_2") == ("lights_ct2",)
 
 
-def test_a_genuine_double_pole_pair_still_sums_both_legs() -> None:
+def test_a_genuine_double_pole_pair_still_attributes_both_legs() -> None:
     """The complement of defect #57: a real pair must keep working.
 
     Both legs belong to the same device, so the sum *is* the device's power.
     Dropping the partner here would report half the load.
     """
     graph = build_graph(_dedicated_topology())
-    window = ObservationWindow.from_values(
-        T0, {"ct_tv": 0.0, "ct_tub_l1": 1200.0, "ct_tub_l2": 1300.0}
-    )
-    readings = resolve_direct(window, graph)
 
-    assert readings["tub"].power_w == pytest.approx(2500.0)
-    assert set(readings["tub"].ct_ids) == {"ct_tub_l1", "ct_tub_l2"}
+    assert graph.attribution_ct_ids("tub") == ("ct_tub_l1", "ct_tub_l2")
+    assert graph.double_pole_leg("ct_tub_l1") == "ct_tub_l2"
+    assert graph.double_pole_leg("ct_tub_l2") == "ct_tub_l1"
 
 
 def test_attribution_never_borrows_a_cross_device_partner() -> None:
     """The same rule at the topology level, which feeds totals and nesting."""
     topo = Topology(
         channels=[
-            _ch("fridge_1", CTType.DEDICATED_DEVICE, device="fridge_1", pair="fridge_2"),
-            _ch("fridge_2", CTType.DEDICATED_DEVICE, device="fridge_2", pair="fridge_1"),
+            _ch("fridge_1", CTType.BRANCH, device="fridge_1", pair="fridge_2"),
+            _ch("fridge_2", CTType.BRANCH, device="fridge_2", pair="fridge_1"),
         ],
         devices=[
-            DeviceTopology(device_id="fridge_1", dedicated_ct_ids=["fridge_1"]),
-            DeviceTopology(device_id="fridge_2", dedicated_ct_ids=["fridge_2"]),
+            DeviceTopology(device_id="fridge_1", branch_ct_ids=["fridge_1"]),
+            DeviceTopology(device_id="fridge_2", branch_ct_ids=["fridge_2"]),
         ],
         status=TopologyStatus.CONFIRMED,
     )
@@ -1257,11 +1322,11 @@ def test_undeclared_device_on_its_own_ct_is_not_phase_split():
     topo = Topology(
         channels=[
             *two_mains(),
-            _ch("ct_lamp", CTType.DEDICATED_DEVICE, device="lamp"),
+            _ch("ct_lamp", CTType.BRANCH, device="lamp"),
         ],
         devices=[
             # phase deliberately left at the default (UNKNOWN)
-            DeviceTopology(device_id="lamp", dedicated_ct_ids=["ct_lamp"]),
+            DeviceTopology(device_id="lamp", branch_ct_ids=["ct_lamp"]),
         ],
         status=TopologyStatus.CONFIRMED,
     )
@@ -1271,16 +1336,15 @@ def test_undeclared_device_on_its_own_ct_is_not_phase_split():
     row = matrix.row_index("ct_lamp")
     assert matrix.A[row, j] == pytest.approx(1.0)
 
-    # And the direct path reports the measured value, not half of it.
+    # Nothing splits the reading, so the row target is the whole measurement.
     window = ObservationWindow.from_values(T0, {"ct_lamp": 240.0})
-    readings = resolve_direct(window, graph)
-    assert readings["lamp"].power_w == pytest.approx(240.0)
+    assert matrix.prepare(window.readings).y[row] == pytest.approx(240.0)
 
 
 def test_solo_flag_controls_the_unknown_phase_split():
     topo = Topology(
-        channels=[*two_mains(), _ch("ct_lamp", CTType.DEDICATED_DEVICE, device="lamp")],
-        devices=[DeviceTopology(device_id="lamp", dedicated_ct_ids=["ct_lamp"])],
+        channels=[*two_mains(), _ch("ct_lamp", CTType.BRANCH, device="lamp")],
+        devices=[DeviceTopology(device_id="lamp", branch_ct_ids=["ct_lamp"])],
         status=TopologyStatus.CONFIRMED,
     )
     graph = build_graph(topo)
@@ -1295,13 +1359,18 @@ def test_device_phase_is_derived_from_its_attribution_legs():
     topo = Topology(
         channels=[
             *two_mains(),
-            _ch("ct_a", CTType.DEDICATED_DEVICE, device="a", phase=Phase.L2),
-            _ch("ct_pair_l1", CTType.DEDICATED_DEVICE, device="pair", phase=Phase.L1, pair="ct_pair_l2"),
-            _ch("ct_pair_l2", CTType.DEDICATED_DEVICE, device="pair", phase=Phase.L2, pair="ct_pair_l1"),
+            _ch("ct_a", CTType.BRANCH, device="a", phase=Phase.L2),
+            _ch("ct_pair_l1", CTType.BRANCH, device="pair", phase=Phase.L1, pair="ct_pair_l2"),
+            _ch("ct_pair_l2", CTType.BRANCH, device="pair", phase=Phase.L2, pair="ct_pair_l1"),
         ],
         devices=[
-            DeviceTopology(device_id="a", dedicated_ct_ids=["ct_a"]),
-            DeviceTopology(device_id="pair", dedicated_ct_ids=["ct_pair_l1", "ct_pair_l2"]),
+            DeviceTopology(device_id="a", branch_ct_ids=["ct_a"]),
+            DeviceTopology(
+                device_id="pair",
+                branch_ct_ids=["ct_pair_l1", "ct_pair_l2"],
+                phase=Phase.BOTH,
+                double_pole=True,
+            ),
             DeviceTopology(device_id="unknown"),
         ],
         status=TopologyStatus.CONFIRMED,
@@ -1428,55 +1497,61 @@ def test_solver_with_no_supported_columns_converges_to_zero():
 
 
 # --------------------------------------------------------------------------- #
-# W6: the direct path enforces the same leg-skew rule as the solver path
+# W6: a declared pair is usable only as a pair, on the path that runs
 # --------------------------------------------------------------------------- #
-def test_direct_pair_with_legs_sampled_far_apart_is_not_usable():
-    """One missed poll must not make the direct path sum two vintages.
+def test_a_pair_with_legs_sampled_far_apart_is_not_used():
+    """One missed poll must not make the solver sum two vintages.
 
-    The solver path has excluded a pair whose legs are more than
-    ``max_leg_skew_s`` apart since dev.11.  ``resolve_direct`` did not: it
-    summed any two fresh legs, so on the reference install (Refoss panel polls
-    at 15.7 s) one missed poll put the legs 31 s apart and reported a 3-5 kW
-    device watt that the solver simultaneously refused to use.  Same rule,
-    same constant, same source of per-leg time.
+    A pair whose legs are more than ``max_leg_skew_s`` apart is excluded: on the
+    reference install (Refoss panel polls at 15.7 s) one missed poll puts the
+    legs 31 s apart and the sum would mix two instants into one equation.  The
+    rule used to be asserted on the deleted direct resolver as well; the engine
+    is the only path that applies it now.
     """
-    graph = build_graph(_dedicated_topology())
+    topo = _dedicated_topology()
     window = ObservationWindow.from_values(
         T0,
         {"ct_tv": 0.0, "ct_tub_l1": 1400.0, "ct_tub_l2": 1300.0},
         ages={"ct_tub_l1": 2.0, "ct_tub_l2": 33.0},
     )
-    tub = resolve_direct(window, graph)["tub"]
+    batch = DisaggregationEngine().infer(
+        window, device_states={}, models={}, topology=topo
+    )
+    excluded = batch.diagnostics["excluded_rows"]
 
-    assert tub.usable is False
-    assert any(r.startswith("leg_skew_exceeded") for r in tub.reasons)
-    # Not averaged, not the newer leg: the pair is simply not a measurement.
-    assert tub.ct_ids == ("ct_tub_l1", "ct_tub_l2")
+    # Not averaged, not the newer leg: both rows are dropped and the reason says
+    # why.
+    assert excluded["ct_tub_l1"].startswith("leg_skew_exceeded")
+    assert excluded["ct_tub_l2"].startswith("leg_skew_exceeded")
+    assert batch.get("tub").power_w != pytest.approx(2700.0)
 
 
-def test_direct_pair_with_legs_inside_the_skew_limit_still_sums():
+def test_a_pair_with_legs_inside_the_skew_limit_still_sums():
     """The guard must not fire on a healthy pair.
 
     A 2 s gap is what the live 240 V pairs actually show; the limit exists for
     the missed-poll case, not for normal jitter.
     """
-    graph = build_graph(_dedicated_topology())
+    topo = _dedicated_topology()
     window = ObservationWindow.from_values(
         T0,
         {"ct_tv": 0.0, "ct_tub_l1": 1400.0, "ct_tub_l2": 1300.0},
         ages={"ct_tub_l1": 2.0, "ct_tub_l2": 4.0},
     )
-    tub = resolve_direct(window, graph)["tub"]
+    batch = DisaggregationEngine().infer(
+        window, device_states={}, models={}, topology=topo
+    )
 
-    assert tub.usable is True
-    assert tub.power_w == pytest.approx(2700.0)
-    assert not any("leg_skew" in r for r in tub.reasons)
+    assert batch.diagnostics["excluded_rows"] == {}
+    assert batch.get("tub").power_w == pytest.approx(2700.0, rel=0.02)
 
 
 def test_the_leg_skew_limit_has_one_definition():
-    """The direct path and the solver path must read the same constant.
+    """The engine reads the one documented leg-skew limit.
 
-    A second default is how the two paths came to disagree in the first place.
+    A second default is how two measurement paths once came to disagree about
+    which pairs are usable.  The constant now has a single reader, so this pins
+    that the engine default *is* the documented rule.
     """
     from wattmosaic_engine.disaggregation import DisaggregationEngine
     from wattmosaic_engine.electrical.direct import DEFAULT_MAX_LEG_SKEW_S
@@ -1484,15 +1559,22 @@ def test_the_leg_skew_limit_has_one_definition():
     assert DisaggregationEngine().max_leg_skew_s == DEFAULT_MAX_LEG_SKEW_S
 
 
-def test_a_configured_skew_limit_reaches_the_direct_path():
-    from wattmosaic_engine.disaggregation import DisaggregationEngine
-
-    graph = build_graph(_dedicated_topology())
+def test_a_configured_skew_limit_reaches_the_engine():
+    """A stricter limit must exclude a pair the default accepts."""
+    topo = _dedicated_topology()
     window = ObservationWindow.from_values(
         T0,
         {"ct_tv": 0.0, "ct_tub_l1": 1400.0, "ct_tub_l2": 1300.0},
         ages={"ct_tub_l1": 2.0, "ct_tub_l2": 12.0},
     )
-    assert resolve_direct(window, graph)["tub"].usable is True
+    default_batch = DisaggregationEngine().infer(
+        window, device_states={}, models={}, topology=topo
+    )
+    assert default_batch.diagnostics["excluded_rows"] == {}
+
     strict = DisaggregationEngine(max_leg_skew_s=5.0)
     assert strict.max_leg_skew_s == 5.0
+    strict_batch = strict.infer(window, device_states={}, models={}, topology=topo)
+    assert strict_batch.diagnostics["excluded_rows"]["ct_tub_l1"].startswith(
+        "leg_skew_exceeded"
+    )

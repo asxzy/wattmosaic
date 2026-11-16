@@ -48,9 +48,10 @@ a real installation.
   `concurrent_events` is always `0` (`learning/sample_filter.py:307`) and
   `SampleRejection.CONCURRENT_EVENTS` can never fire. `concurrency_window_s`
   (`learning/thresholds.py:43`) is referenced **nowhere** outside its definition.
-- **Device↔CT association is topology metadata, not a persisted relationship.** It lives in three
-  unrelated places — `CTChannel.device_id` (`contracts.py:328`), `DeviceTopology.dedicated_ct_ids`
-  / `branch_ct_ids` (`contracts.py:400-401`), `DeviceConfiguration.monitored_by_ct_ids`
+- **Device↔CT association is topology metadata, not a persisted relationship.** It lives in
+  unrelated places — `CTChannel.device_id` (`contracts.py:328`),
+  `DeviceTopology.branch_ct_ids` (`contracts.py:400-401`),
+  `DeviceConfiguration.monitored_by_ct_ids`
   (`contracts.py:587`) — with no precedence rule, no evidence field, and no validity interval.
 - **Residual decomposition is honest but shallow.** `unmonitored_w + meter_disagreement_w ==
   unknown_residual_w` holds exactly (`disaggregation/engine.py:2177`), and nothing is
@@ -148,13 +149,13 @@ Assessment: this is the most complete part of the system; it needs **no rebuild*
 | --- | --- | --- | --- |
 | CT observation | `Measurement` (entity, ct, value, unit, 3 timestamps, quality, polarity, sequence) | `contracts.py:277-312` | Immutable reading; correct independent node |
 | CT channel | `CTChannel` (ct_id, entity, type, phase, parent, polarity, device, paired, alias, multiplier, panel) | `contracts.py:315-366` | Pre-assigns hierarchy facts onto the observation |
-| Sensor role | `CTType`: `MAIN`, `BRANCH`, `DEDICATED_DEVICE`, `UNKNOWN` | `contracts.py:43-47` | Classifies the *sensor* |
+| Sensor role | `CTType`: `MAIN`, `BRANCH`, `UNKNOWN` | `contracts.py:43-47` | Classifies the *sensor* |
 | Phase | `L1`, `L2`, `BOTH`, `UNKNOWN` | `contracts.py:50-54` | Double-pole is `BOTH` + `paired_ct_id` |
 | Scaling | `measurement_multiplier: float = 1.0`, validated >0 finite | `contracts.py:344`, `:367-383` | Applied once, on read, never written back |
 | Scaling application | `TopologyGraph.scale_w()` / `multiplier_for()`; `direct.py` and `matrix.py` consume it | `electrical/topology.py:615-640`, `electrical/direct.py:118`, `electrical/matrix.py:401` | Cannot be applied twice by construction |
 | Alias | `alias_of_ct_id`, resolved at read time by `canonical_channel_id` | `contracts.py:335`, `electrical/topology.py:641-660` | Correct: only the canonical channel contributes to totals |
 | Panel | `panel_id` / `panel_name`, additive since 1.5.0, migration 8 | `contracts.py:363-365`, `storage/migrations.py:96-114`, `:459-470` | Persisted, round-trips (fixed defect) |
-| Device visibility | `MonitoringLevel`: `DEDICATED`/`SHARED`/`HOME_TOTAL_ONLY`/`UNMONITORED`/`UNKNOWN` | `contracts.py:151-168` | Classifies a *device*, not a circuit |
+| Device visibility | `MonitoringLevel`: `SHARED`/`HOME_TOTAL_ONLY`/`UNMONITORED`/`UNKNOWN` | `contracts.py:151-168` | Classifies a *device*, not a circuit |
 | Measurement basis | `Source`: `DIRECT_MEASURED`/`INFERRED`/`MODEL_ESTIMATED`/`CONFIGURED_PRIOR`/`UNKNOWN` | `contracts.py:62-73` | Answers "how obtained", not "what instrument" |
 
 **Factor semantics — what exists and what does not.**
@@ -253,7 +254,7 @@ de-duplication is `DUPLICATE_STATE` at the *sample* level, keyed by `(device, st
 | Aspect | Implementation | Evidence |
 | --- | --- | --- |
 | Solver | Weighted least squares over a topology matrix, bounded, with preconditioning | `disaggregation/engine.py:992-1370`, `electrical/matrix.py`, `electrical/solver.py:136` |
-| Level 1 | Dedicated CT direct read (multiplier applied here) | `disaggregation/engine.py:1510-1589` |
+| Level 1 | *retired* — the former private-channel direct read (removed with the role, ADR-0034); stored results keep their grade | — |
 | Level 2a | Measured step on own row with siblings steady (`docs/decisions/README.md:1198`) | `:1681-1795` |
 | Level 2 | Inferred from the fit | `:1795-1910` |
 | Level 3 | Model estimate | `:1911-1968` |

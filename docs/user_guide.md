@@ -125,7 +125,7 @@ a fault**:
 | When | What you will see | Why |
 | --- | --- | --- |
 | Immediately | Global entities populate; per-device power mostly `0` or `unknown` | No measurements yet |
-| Minutes | Per-device values appear for devices with a dedicated CT | A CT measures them directly |
+| Minutes | Per-device values appear for devices on a circuit of their own | The solver fits a single-device row first |
 | Hours | `inferred` values appear for devices with a state entity | The engine needs to correlate state with power |
 | Days | `model_estimated` values for repeatable devices | Learning needs repetitions |
 | Ongoing | Some devices stay `unknown` forever | Nothing can attribute them — see §5 |
@@ -151,7 +151,7 @@ The engine cannot guess which CT measures what. On a fresh install the topology
 is a **candidate**, and candidate topology is treated as uncertain on purpose.
 
 1. Open the WattMosaic integration → **Configure**.
-2. Review each CT: its role (main / branch / dedicated), its phase, and the
+2. Review each CT: its role (main / branch), its phase, and the
    device it points at.
 3. Confirm the topology explicitly. Until you do, results carry a topology
    uncertainty penalty.
@@ -214,7 +214,7 @@ from another integration is unaffected.
 
 | Source | Meaning | Trust |
 | --- | --- | --- |
-| `direct_measured` | A dedicated CT measures this device alone. | Highest. It is a measurement. |
+| `direct_measured` | *Historical only.* A private CT once measured this device alone. Nothing new produces it; stored results keep the grade they were given. | Highest. It was a measurement. |
 | `inferred` | Solved from mains/branch CTs plus state events and topology. | Good when isolated; lower under concurrency. |
 | `model_estimated` | The device's learned model, conditioned on its HA state. | Depends on model validation quality. |
 | `configured_prior` | Only a value you stated (e.g. "this lamp is 40 W") supports it. | An assertion, not a measurement. |
@@ -236,7 +236,7 @@ number, and it never claims to be a probability.
 Tier 4 needs three things at once: a CT measurement, a *declared* load signal (or
 a model) agreeing with it, and a fresh sample. If your CT says 4.5 kW while your
 declared "heating" sensor says off, the value stays at tier 3 and the result says
-`dedicated_ct_disagrees_with_state:not_verifiable` — the measurement is real, the
+`direct_ct_disagrees_with_state:not_verifiable` — the measurement is real, the
 attribution is what is in doubt.
 
 ### Confidence score — *how well supported* it is
@@ -247,7 +247,7 @@ event isolation, topology certainty and residual size.
 
 The tier and the score answer different questions. The tier says *how the value
 was obtained*; the score says *how much to trust the number right now*. They can
-legitimately disagree — an old dedicated-CT reading keeps its tier 3 grade while
+legitimately disagree — an old direct reading keeps its tier 3 grade while
 its score collapses — and when they do, the result carries a
 `tier_score_divergence` reason rather than hiding it.
 
@@ -280,8 +280,8 @@ error.
 
 Each CT channel has four attributes that must reflect reality:
 
-1. **Role** — `main` (service entrance), `branch` (a circuit), `dedicated_device`
-   (one appliance), `unknown`.
+1. **Role** — `main` (service entrance), `branch` (a circuit), `unknown`.
+   There is no third role: a circuit feeding one appliance is still a `branch`.
 2. **Phase** — `l1`, `l2`, `both` for a 240 V circuit, `unknown`.
 3. **Polarity** — `normal`, or `inverted` if the CT is installed backwards.
 4. **Parent** — which CT physically contains this one, if any.
@@ -321,16 +321,15 @@ a device name.
 | `not_connected` | Non-smart. No HA entity exists; only its CT sees it. |
 | `unknown` | Not stated. |
 
-A non-smart device is not a second-class device. If it sits on a dedicated CT it
-is still `tier_3_measured` — it simply has no control signal to corroborate it,
+A non-smart device is not a second-class device. If it sits on a circuit of its
+own it is still solvable — it simply has no control signal to corroborate it,
 so it cannot reach tier 4 until a model validates.
 
 ### Axis 2 — How closely is it monitored?
 
 | Value | Meaning |
 | --- | --- |
-| `dedicated` | A CT measures this device and nothing else. |
-| `shared` | A sub-meter carries this device plus others (e.g. one light on a `lights` circuit). |
+| `shared` | A sub-meter carries this device plus others (e.g. one light on a `lights` circuit). This is also the derived level for a device alone on its circuit: the row measures a conductor, and other loads may appear on it later. |
 | `home_total_only` | No sub-meter; only the home energy monitor sees it. |
 | `unmonitored` | Nothing observes it; only a configured prior can supply a value. |
 | `unknown` | Derived from the CT graph. |
@@ -341,10 +340,13 @@ bound, the unexplained remainder stays out of your device, and the device can
 only report a **configured prior** (tier 1) — a 40 W lamp on a 300 W circuit is
 reported as 40 W, not 300 W.
 
-Leave it `unknown` and the level is derived from the CT graph: a dedicated CT is
-`dedicated`, a branch CT with no sibling device is also `dedicated` in fact
-(often several such devices exist), and a device with no attribution CT is
-`home_total_only`.
+Leave it `unknown` and the level is derived from the CT graph: any device with an
+attribution row is `shared`, and a device with no attribution CT is
+`home_total_only`. There is no private-measurement level. A branch CT with no
+sibling device is still `shared` — it is a circuit of its own today, but its row
+is a conductor, not a private measurement, and the solver treats it as one. (An
+earlier version of this page claimed such a device was measured privately in
+fact; the code never produced that, and the level no longer exists.)
 
 ### Axis 3 — How does power relate to its control?
 

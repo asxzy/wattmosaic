@@ -1109,7 +1109,13 @@ refusal is the ownership guard doing its job, not a defect.
 
 ## ADR-0025 — A single-channel CT is a branch circuit, and a declared wattage bounds what that row may credit
 
-**Status:** Accepted · 2026-11-09 · Extends ADR-0023 and ADR-0024 · **Amended by ADR-0026** (the ceiling now also caps a measured step)
+> **Partially superseded by [ADR-0034](#adr-0034--every-ct-is-a-circuit-direct-measurement-is-removed-with-the-role).**
+> Discovery's half stands: a single-channel CT is a branch, never a declared
+> private measurement. The retained `dedicated_device` *declaration* — and the
+> direct measurement it gated — is removed. Read this body as the record of why
+> the role existed, not as current behaviour.
+
+**Status:** Accepted · 2026-11-09 · Extends ADR-0023 and ADR-0024 · **Amended by ADR-0026** (the ceiling now also caps a measured step) · **Retention of the declaration superseded by ADR-0034**
 
 **Context.** Discovery classified every single-channel load as
 `CTType.DEDICATED_DEVICE`. The only discriminator was "this channel was not part
@@ -1196,6 +1202,12 @@ number. Discovery no longer asserts a fact only a person can supply.
 ---
 
 ## ADR-0026 — A CT is a circuit; attribute the measured step, not the whole row
+
+> **Referenced by [ADR-0034](#adr-0034--every-ct-is-a-circuit-direct-measurement-is-removed-with-the-role),
+> which leaves this decision unchanged.** The shared/solo attribution rules stand
+> and become the only attribution path once the private-measurement path is
+> removed. The `dedicated_device` role named in the evidence below no longer
+> exists; read it as a description of the topology as measured at the time.
 
 **Status:** Accepted · 2026-11-10 · Supersedes ADR-0023's whole-row credit and amends ADR-0025
 
@@ -1985,3 +1997,76 @@ unavoidable layer (see `docs/troubleshooting.md` §9.2), not this defect.
 **Non-claims.** This does not make a 168 h window complete within any particular
 proxy's timeout, and it does not claim the earlier timeout-budget work
 (ADR-0031) was the cause — it was a real but different defect.
+
+---
+
+## ADR-0034 — Every CT is a circuit; direct measurement is removed with the role
+
+**Status:** Accepted · 2026-11-14 · Supersedes ADR-0025's retention of `dedicated_device` as a declaration and
+supersedes ADR-0029 (the deprecation of that declaration); leaves ADR-0026 unchanged
+
+> **Numbering note.** The specification that authorised this decision
+> (`docs/specs/retire-dedicated-ct-concept/decisions.md`) calls it "ADR-0027",
+> because it was written when ADR-0026 was the highest record. Records have landed
+> since — ADR-0027 (the App panel), ADR-0028 (device links), ADR-0029 (deprecating
+> the declaration), and ADR-0030 through ADR-0033 — and they are cited elsewhere in
+> `PROJECT_STATUS.md` and in the shipped docs. Renumbering existing accepted
+> records to free the slot would rewrite history and break those citations, so
+> this decision takes the next free id. Every reference to "ADR-0027" inside the
+> specification set means this record.
+>
+> **Relationship to ADR-0029.** ADR-0029 deprecated the manual `dedicated_device`
+> *declaration* while keeping the capability, and scheduled removal "for a later
+> ADR that demonstrates on live evidence" that the inferred equivalent reproduces
+> the direct reading. This is that later ADR, and it goes further: the concept
+> itself goes. ADR-0029's diagnostics-only machinery (`deprecations.py`,
+> `WM_DEPRECATE_DEDICATED_DECLARATION`, `health["deprecations"]`) is removed with
+> it, because a notice pointing at a role that no longer exists has nothing left
+> to say.
+
+### Context
+
+ADR-0025 reclassified discovery's fallback from `CTType.DEDICATED_DEVICE` to `CTType.BRANCH`, on the grounds that a single-channel CT is a conductor, not an appliance, and discovery has no evidence for privacy. It deliberately retained `dedicated_device` as an *explicit user declaration* — the only legitimate source of the fact.
+
+That retention created a two-class vocabulary: the product said "dedicated" in five UI surfaces, backed by three distinct concepts (a role, a monitoring level, and a set of persisted rows), while discovery never produced one. The user concluded the concept itself is deprecated and instructed full removal, including the capability it gated.
+
+Investigation confirmed what that costs:
+
+- `dedicated_channel_for` (`electrical/topology.py`) was the only resolver feeding `resolve_direct` (`electrical/direct.py`).
+- `EffectiveConfig.allows_direct_measurement` (`disaggregation/configuration.py`) gated the Level-1 branch (`disaggregation/engine.py`), which was the sole producer of `Source.DIRECT_MEASURED`.
+- A device alone on its row still receives a whole-row wattage through `_is_solo_row` (`disaggregation/engine.py`), but as `Source.INFERRED`, without the 0.55 confidence floor (`quality/confidence.py`).
+- The live install *reportedly* stores ~21 `dedicated_device` rows (`PROJECT_STATUS.md`), so the change may affect real devices, not just vocabulary. **This figure is uncorroborated**: successive snapshots record 21/0/22/26 and a 2026-11-10 reset may have destroyed the data. It must be re-counted from the live database before any live apply, and no migration total may assume it.
+
+### Decision
+
+1. **`dedicated_device` is removed as a concept, not renamed.** No replacement boolean or neutral flag is introduced. A single-device channel is expressed structurally: it is a `branch` row with exactly one declaring device, which the solver already detects via `_is_solo_row`.
+2. **Level-1 direct measurement is deleted.** `resolve_direct`, `DirectReading`, `dedicated_channel_for`, the `direct_is_ours` gate and the Level-1 branch are removed. Results for former dedicated rows grade through the normal tier rules.
+3. **`MonitoringLevel.DEDICATED` is removed.** Monitoring is derived by `derive_monitoring`: a stored non-`UNKNOWN` declaration wins; only `UNKNOWN` falls through to the graph. A stored `"dedicated"` declaration resolves to `UNKNOWN` and then derives from attribution rows, which yields `SHARED` for any device with rows.
+4. **`DeviceTopology.dedicated_ct_ids` is removed.** Attribution lives entirely in `branch_ct_ids`.
+5. **Historical `source = "direct_measured"` rows stay readable.** The `Source` enum member is retained so existing database rows do not become invalid.
+6. **Both data migrations land before the enum narrowing.** Engine schema v9 demotes rows and moves ids; the HA config-entry migration rewrites stored assignments. Neither is optional.
+
+### Consequences
+
+- Former dedicated devices report `inferred` rather than `direct_measured`, at lower tiers and without the direct confidence floor. On the reference install this is reported as ~21 of 28 devices — a figure that is uncorroborated and must be re-counted before any live apply.
+- An OFF device on a solo row can report `unexplained_load_on_device_circuit` and become `unknown`. This is the honest answer under ADR-0026's "attribute the measured step".
+- The contract breaks (`CONTRACT_VERSION` 1.5.0 → 2.0.0); clients reading `dedicated_ct_ids` must migrate.
+- Roughly 23 unit test files, 5 integration files, 4 simulation/e2e files and every generated schema require edits.
+
+### Rejected alternatives
+
+- **Keep the capability, retire only the vocabulary** (replace the role with a neutral `single_device` boolean). Preserves direct measurement, but keeps the concept under another name and re-opens the ADR-0025 debate about whether a structural fact can stand in for a declaration. The user explicitly chose full removal.
+- **Labels/UI only.** Leaves the enums, the declaration and the stored rows in place; does not satisfy the instruction.
+- **Retain `dedicated_device` as a hidden accepted value.** Keeps the vocabulary in the product and contradicts the acceptance criterion that no shipped string contains it.
+
+### Relationship to prior ADRs
+
+| ADR | Effect |
+| --- | --- |
+| ADR-0025 (single-channel CT is a branch) | Its discovery half stands. Its retention of `dedicated_device` as a declaration is superseded. |
+| ADR-0026 (attribute the step, not the row) | Stands unchanged; the shared/solo attribution rules survive and become the only path. |
+| ADR-0011 rule 2 (a shared CT is an upper bound) | Unaffected. |
+
+### Verification
+
+Covered by `docs/specs/retire-dedicated-ct-concept/design.md` AC-1 … AC-11, principally: a pre-change database opens and migrates (AC-2), every device keeps an attribution row (AC-3), a legacy HA entry replays without a 400 (AC-5), no write can reintroduce the role (AC-6), and `tools/dev/verify.py` is green end to end (AC-8).

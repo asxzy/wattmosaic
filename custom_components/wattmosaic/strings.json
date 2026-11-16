@@ -45,19 +45,10 @@
         },
         "data_description": {
           "channel": "Which CT to configure.",
-          "role": "main = utility feed, branch = circuit, dedicated_device = single device (deprecated: declare branch and let circuit inference classify it; nothing is auto-converted).",
+          "role": "main = utility feed, branch = circuit, unknown = not assigned.",
           "phase": "l1, l2, both (double-pole) or unknown.",
           "paired_ct_id": "The other leg of a double-pole load, if any.",
-          "device_id": "Only used by a dedicated_device CT, whose manual declaration is deprecated; existing declarations keep working and are not auto-converted. Suggestions are never applied automatically."
-        }
-      },
-      "mapping": {
-        "title": "Device mapping",
-        "description": "Map {channel_name} ({channel_id}) to a device.\n\nSuggested candidates ({candidate_count}):\n{candidates}\n\nSuggestions are never applied automatically. Pick a candidate, type a device ID, or skip.",
-        "data": {
-          "candidate": "Suggested candidate",
-          "manual_override": "Enter device ID manually",
-          "skip": "Skip this channel"
+          "device_id": "The device this CT measures, if any. Suggestions are never applied automatically."
         }
       },
       "confirm": {
@@ -161,7 +152,7 @@
         },
         "data_description": {
           "connectivity": "connected = HA holds an entity for it; not_connected = non-smart device.",
-          "monitoring": "dedicated = its own CT; shared = a circuit with other loads; home_total_only = only visible in the total; unmonitored = no CT at all.",
+          "monitoring": "shared = a circuit with other loads; home_total_only = only visible in the total; unmonitored = no CT at all.",
           "monitored_by_ct_ids": "The CT rows that carry this load. Choose more than one only when they really are separate rows; several loads on one row is the shared-circuit case, settled by the switch states.",
           "behavior": "fixed = constant watts; variable = follows a dimmer/speed; complex = multi-state controller.",
           "bulb_count": "A five-bulb fixture at 9 W per bulb is 45 W, not 9 W.",
@@ -182,15 +173,6 @@
           "paired_ct_id": "Paired CT (double-pole)",
           "device_id": "Device",
           "enabled": "Enabled"
-        }
-      },
-      "mapping": {
-        "title": "Device mapping",
-        "description": "Map {channel_name} ({channel_id}) to a device.\n\nSuggested candidates ({candidate_count}):\n{candidates}\n\nSuggestions are never applied automatically.",
-        "data": {
-          "candidate": "Suggested candidate",
-          "manual_override": "Enter device ID manually",
-          "skip": "Skip this channel"
         }
       },
       "confirm": {
