@@ -186,7 +186,15 @@ def test_negative_residual_is_flagged_as_sample_vintage_skew() -> None:
     """
     backend = WattMosaicBackend(database=None)
     now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
-    # Branch CTs sampled "later" than the main: 900 W of devices but a 500 W main.
+    # The branch CT over-reads the main: 900 W on the fridge row against a 500 W
+    # main, which cannot both be true at one instant.
+    #
+    # Since Wave 2 the branch CT is a *seed row* for the constrained fit, not a
+    # direct measurement, so the device's power is the least-squares compromise
+    # between its two rows: (500 + 900) / 2 = 700 W.  The residual is therefore
+    # main - accounted = 500 - 700 = -200 W, not the -400 W of the old direct
+    # path (which credited the full 900 W).  The -200 figure is the correct one
+    # for the current model; both are preserved, neither is clamped to zero.
     window = _Window({"m_l1": 500.0, "ded_fridge": 900.0}, now)
     batch = backend.process(window, device_states={}, topology=_topology())
 
@@ -195,7 +203,7 @@ def test_negative_residual_is_flagged_as_sample_vintage_skew() -> None:
     assert "negative_residual_sample_vintage_skew" in rec.explanation
     assert "negative_residual_sample_vintage_skew" in batch.diagnostics["warnings"]
     # The value itself is preserved, not clamped to zero.
-    assert rec.unknown_residual_w == pytest.approx(-400.0, abs=1.0)
+    assert rec.unknown_residual_w == pytest.approx(-200.0, abs=1.0)
 
 
 def test_positive_residual_is_not_flagged_as_skew() -> None:
