@@ -7,6 +7,7 @@ in-memory ``StubFacade``/``NullFacade``; the inference engine is never imported.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from wattmosaic_engine.api.facade import (
 from wattmosaic_engine.api.server import APIServer, create_app
 from wattmosaic_engine.contracts import (
     CONTRACT_VERSION,
+    DeviceTopology,
     ErrorResponse,
     HealthResponse,
     ServiceCommand,
@@ -165,6 +167,27 @@ def test_devices_returns_list() -> None:
         return True
 
     assert run(_with_server(StubFacade(), fn))
+
+
+def test_stub_facade_matches_contract() -> None:
+    """The stub's fixed device row must still be a ``DeviceTopology``.
+
+    ``jsonschema`` is not a dependency of this project, so conformance against
+    ``data/schemas/device_topology.json`` is asserted structurally: the payload
+    names only declared properties, carries every required one, and validates
+    as the contract model it claims to be.  The stub is the fixture every
+    ``/devices`` and ``/topology`` test reads, so a field that outlives the
+    contract there would keep the retired vocabulary alive in the test suite.
+    """
+    schema = json.loads((REPO_ROOT / "data" / "schemas" / "device_topology.json").read_text())
+    device = StubFacade().topology()["devices"][0]
+
+    assert set(device) <= set(schema["properties"]), set(device) - set(schema["properties"])
+    assert set(schema["required"]) <= set(device), set(schema["required"]) - set(device)
+    # The contract model accepts it unchanged, and defines no dedicated field.
+    assert "dedicated_ct_ids" not in DeviceTopology.model_fields
+    assert not {"dedicated_ct_ids"} & set(device)
+    DeviceTopology.model_validate(device)
 
 
 def test_unknown_device_returns_structured_404() -> None:

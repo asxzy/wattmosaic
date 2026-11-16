@@ -60,6 +60,7 @@ from .contracts import (
     HealthResponse,
     InferenceResult,
     Measurement,
+    MonitoringLevel,
     Reconciliation,
     RelationKind,
     ServiceCommand,
@@ -1579,7 +1580,22 @@ class EngineCore:
             return {}
 
     @staticmethod
-    def _configuration_payload(config: Any) -> dict[str, Any] | None:
+    def _monitoring_text(value: Any) -> str:
+        """Publish the monitoring axis only as a value the contract defines.
+
+        Nothing produces the retired ``dedicated`` level any more, but the
+        payload must not lean on that implicitly: a stored declaration that
+        still carries it is read back from metadata, so an unrecognised value
+        degrades to ``unknown`` instead of being served verbatim.
+        """
+        raw = getattr(value, "value", value)
+        try:
+            return MonitoringLevel(str(raw)).value
+        except ValueError:
+            return MonitoringLevel.UNKNOWN.value
+
+    @classmethod
+    def _configuration_payload(cls, config: Any) -> dict[str, Any] | None:
         """JSON-ready view of one :class:`EffectiveConfig` (enums as strings)."""
         if config is None:
             return None
@@ -1593,7 +1609,7 @@ class EngineCore:
         return {
             "device_type": _text(getattr(config, "device_type", None)),
             "connectivity": _text(getattr(config, "connectivity", None)),
-            "monitoring": _text(getattr(config, "monitoring", None)),
+            "monitoring": cls._monitoring_text(getattr(config, "monitoring", None)),
             "behavior": _text(getattr(config, "behavior", None)),
             "monitored_by_ct_ids": _list(getattr(config, "monitored_by_ct_ids", ())),
             "load_entity_ids": _list(getattr(config, "load_entity_ids", ())),
