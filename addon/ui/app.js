@@ -279,8 +279,11 @@
     configured_prior: 'Configured prior',
     identified: 'Identified',
     probable: 'Probable',
-    dedicated: 'Dedicated CT',
     shared: 'Shared CT',
+    // Legacy CT role, retired by ADR-0029.  A stored value can still reach the
+    // panel, and without this entry ``titleCase`` would render it as a
+    // different, wrong label.  It is an alias, not a role.
+    dedicated_device: 'Branch CT',
     home_total_only: 'Home total only',
     unmonitored: 'Unmonitored',
     l1: 'L1',
@@ -1539,7 +1542,7 @@
       ['Phase', label(topology.phase)],
       ['Double pole', topology.double_pole ? 'Yes' : 'No'],
       ['Status', statusBadge(topology.topology_status)],
-      ['Dedicated CTs', (topology.dedicated_ct_ids || []).join(', ') || '—'],
+      ['Monitored by', (topology.branch_ct_ids || []).join(', ') || '—'],
       ['Branch CTs', (topology.branch_ct_ids || []).join(', ') || '—'],
       ['Parent device', topology.parent_device_id || '—'],
     ];
@@ -1550,7 +1553,6 @@
     const rows = [
       ['Device type', titleCase(configuration.device_type || '—')],
       ['Connectivity', titleCase(configuration.connectivity || '—')],
-      ['Monitoring', label(configuration.monitoring)],
       ['Behavior', titleCase(configuration.behavior || '—')],
       ['Expected on', configuration.expected_on_w === null || configuration.expected_on_w === undefined ? '—' : watts(configuration.expected_on_w)],
       ['Expected standby', configuration.expected_standby_w === null || configuration.expected_standby_w === undefined ? '—' : watts(configuration.expected_standby_w)],
@@ -1587,8 +1589,18 @@
   // panel renders it verbatim.
 
   const TREE_PATH = '/topology/tree';
-  const CT_TONES = { main: 'accent', branch: 'info', dedicated_device: 'ok' };
-  const ctTone = (type) => CT_TONES[String(type || '')] || 'mute';
+  const CT_TONES = { main: 'accent', branch: 'info' };
+  // ADR-0029 retired the third CT role.  A payload from an older engine can
+  // still carry it; ``STRINGS`` above aliases it to "Branch CT" so the badge
+  // never title-cases the retired spelling into a different label, and the tone
+  // follows the alias — a branch row in every respect.  The retired spelling is
+  // deliberately not repeated here: the alias key is the only occurrence AC-1
+  // allows in the panel (see ``tools/dev/check_panel.py``).
+  const ctTone = (type) => {
+    const key = String(type || '');
+    if (CT_TONES[key]) return CT_TONES[key];
+    return STRINGS[key] === 'Branch CT' ? CT_TONES.branch : 'mute';
+  };
 
   const topologyHead = (topology) =>
     el('div', { class: 'page-head' }, [
@@ -1718,7 +1730,7 @@
 
   function topologySummary(topology, tree) {
     const channels = topology.channels || [];
-    const counts = { main: 0, branch: 0, dedicated_device: 0, unknown: 0 };
+    const counts = { main: 0, branch: 0, unknown: 0 };
     for (const ch of channels) {
       counts[ch.ct_type] = (counts[ch.ct_type] || 0) + 1;
     }
@@ -1726,7 +1738,7 @@
     const panels = stats && stats.panels !== undefined ? String(stats.panels) : '—';
     const circuits = stats && stats.circuits !== undefined
       ? String(stats.circuits)
-      : String(counts.branch + counts.dedicated_device);
+      : String(counts.branch + counts.unknown);
     const devices = stats && stats.devices !== undefined
       ? String(stats.devices)
       : String((topology.devices || []).length);
@@ -1748,7 +1760,7 @@
       el('div', { class: 'grid cols-5', style: 'margin-bottom:16px' }, [
         statCard('Panels', panels, { hint: panels === '1' ? 'distribution board' : 'distribution boards' }),
         statCard('Circuits', circuits, {
-          hint: `${counts.main} feed · ${counts.branch} branch · ${counts.dedicated_device} dedicated`,
+          hint: `${counts.main} feed · ${counts.branch} branch · ${counts.unknown} unknown`,
         }),
         statCard('Devices', devices, {
           hint: unplaced ? `${unplaced} unplaced — shown, never dropped` : 'each placed once',
@@ -2368,7 +2380,7 @@
 
   function topologyChannelsCard(topology) {
     const channels = [...(topology.channels || [])].sort((a, b) => {
-      const order = { main: 0, branch: 1, dedicated_device: 2, unknown: 3 };
+      const order = { main: 0, branch: 1, unknown: 2 };
       return (order[a.ct_type] ?? 9) - (order[b.ct_type] ?? 9) || String(a.ct_id).localeCompare(String(b.ct_id));
     });
     return el('section', { class: 'card', id: 'topology-channels' }, [

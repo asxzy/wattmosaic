@@ -10,6 +10,15 @@ breaks inside the ingress frame in three predictable ways:
   which ``script-src 'self'`` refuses to run;
 * it names an asset that was never shipped, so the shell half-loads.
 
+It also gates the retired "dedicated CT" vocabulary.  ADR-0029 removed the CT
+role, the monitoring level and the attribution field, so the panel must not
+offer them.  One token survives on purpose: ``STRINGS.dedicated_device`` is an
+explicit legacy alias whose *value* is ``Branch CT``.  Without it the
+``titleCase`` fallback would render a stored legacy role as "Dedicated Device" —
+a different wrong label rather than the branch label.  Check 7 allowlists
+exactly that line and fails on every other match, so deleting the alias and
+reintroducing the word are both caught.
+
 These checks are static on purpose: they need no browser and no Docker, so they
 run in the same fast path as the rest of ``scripts/validate_addon.sh``.  The
 gateway-side behaviour (ingress gating, headers, asset content types, traversal
@@ -35,6 +44,100 @@ ALLOWED_URLS = ("http://www.w3.org/2000/svg",)
 #: Elements whose open/close counts must balance in the static shell.  The
 #: dynamic views are built by ``app.js`` and are not parsed here.
 BALANCED_TAGS = ("html", "head", "body", "header", "nav", "main", "footer")
+
+#: ADR-0029 retired the "dedicated CT" role, its monitoring level and its
+#: attribution field.  The panel must not print the word, so AC-1 is a static
+#: scan rather than a review checklist.
+RETIRED_VOCABULARY = re.compile(r"dedicat", re.I)
+
+#: The single allowlisted occurrence: the legacy alias key in ``STRINGS``, whose
+#: value renders "Branch CT".  It is matched by *content*, not by line number, so
+#: the allowlist cannot drift onto an unrelated line when code is inserted above
+#: it — and editing the value back to "Dedicated Device" stops matching, which
+#: is the regression that matters.  ``titleCase`` would render a stored legacy
+#: role as "Dedicated Device" without this key.
+LEGACY_ALIAS = re.compile(r"^\s*dedicated_device:\s*'Branch CT',\s*$", re.MULTILINE)
+
+
+def retired_vocabulary_errors(name: str, text: str) -> list[str]:
+    """Lines in ``text`` that name the retired concept, minus the alias line."""
+    allowed = {
+        text.count("\n", 0, match.start()) + 1 for match in LEGACY_ALIAS.finditer(text)
+    }
+    return [
+        f"{name}:{lineno} still names the retired dedicated CT concept"
+        for lineno, line in enumerate(text.splitlines(), start=1)
+        if RETIRED_VOCABULARY.search(line) and lineno not in allowed
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# AC-7: the badge text on a legacy payload
+# --------------------------------------------------------------------------- #
+
+#: ``app.js`` is a browser script with no module seam and the repo has no JS
+#: runner, so AC-7 ("the panel renders no dedicated text even on legacy data")
+#: is checked by *replaying* the panel's own label lookup rather than by a DOM
+#: render.  The table is parsed out of the shipped file, so this cannot pass
+#: against a copy of the strings that has drifted from what the browser loads.
+STRINGS_BLOCK = re.compile(r"const STRINGS = \{(.*?)\n  \};", re.DOTALL)
+STRINGS_ENTRY = re.compile(r"^ {4}([a-z0-9_]+):\s*'([^']*)',?$", re.MULTILINE)
+
+#: The payload shapes an older engine can still send.  ``dedicated_device`` is
+#: the retired CT role; it is the shape that used to print "Dedicated Device"
+#: through the ``titleCase`` fallback.
+LEGACY_BADGE_PAYLOADS = ("dedicated_device",)
+
+
+def panel_strings(script: str) -> dict[str, str]:
+    """The panel's ``STRINGS`` table, parsed from the shipped ``app.js``."""
+    block = STRINGS_BLOCK.search(script)
+    if block is None:
+        return {}
+    return dict(STRINGS_ENTRY.findall(block.group(1)))
+
+
+def _title_case(text: str) -> str:
+    """A Python port of ``app.js``'s ``titleCase`` (the fallback ``label`` uses)."""
+    spaced = re.sub(r"[_-]+", " ", str(text))
+    return re.sub(r"\b\w", lambda match: match.group(0).upper(), spaced)
+
+
+def render_label(value: str, strings: dict[str, str]) -> str:
+    """``const label = (value) => STRINGS[value] || titleCase(value || 'unknown')``."""
+    return strings.get(value) or _title_case(value or "unknown")
+
+
+def render_smoke_errors(script: str) -> list[str]:
+    """Replay the badge label for a legacy payload and reject retired text.
+
+    This is the AC-7 smoke check.  It asserts the rendered text *is* ``Branch
+    CT`` for the retired role, and that no legacy payload renders the word in
+    any casing.  It also proves the replay is not vacuous by feeding an unknown
+    value through the same fallback the panel uses.
+    """
+    strings = panel_strings(script)
+    if not strings:
+        return ["app.js: the STRINGS table could not be parsed for the AC-7 check"]
+
+    errors: list[str] = []
+    for ct_type in LEGACY_BADGE_PAYLOADS:
+        rendered = render_label(ct_type, strings)
+        if "dedicat" in rendered.lower():
+            errors.append(
+                f"app.js renders a legacy {ct_type!r} channel as {rendered!r}; "
+                "the badge must read 'Branch CT'"
+            )
+        elif rendered != "Branch CT":
+            errors.append(
+                f"app.js renders a legacy {ct_type!r} channel as {rendered!r}, "
+                "not 'Branch CT'"
+            )
+    if render_label("new_role", strings) != "New Role":
+        errors.append(
+            "app.js: the titleCase replay is broken, so the AC-7 check proves nothing"
+        )
+    return errors
 
 
 def check(root: Path) -> list[str]:
@@ -103,6 +206,23 @@ def check(root: Path) -> list[str]:
         errors.append("app.js fetches an absolute URL")
     if re.search(r"\bdocument\.write\s*\(", js):
         errors.append("app.js uses document.write()")
+
+    # 7. No retired "dedicated CT" vocabulary.  AC-1 is about what the panel
+    #    shows, and the word can only reach it from a shipped asset, so every
+    #    file is scanned; the ``STRINGS.dedicated_device`` alias is the one
+    #    allowlisted line and it renders "Branch CT".
+    for name, text in (
+        ("index.html", html),
+        ("app.css", css),
+        ("app.js", js),
+        ("mark.svg", svg),
+    ):
+        errors.extend(retired_vocabulary_errors(name, text))
+
+    # 8. AC-7: a legacy payload must still render the branch label.  This is a
+    #    replay of the panel's own label lookup, not a DOM render — there is no
+    #    JS runner in this repo, which is why the gate is static.
+    errors.extend(render_smoke_errors(js))
 
     return errors
 
