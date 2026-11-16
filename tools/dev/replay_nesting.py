@@ -42,7 +42,7 @@ from wattmosaic_engine.electrical.nesting import (  # noqa: E402
     build_nodes,
     infer_nesting,
 )
-from wattmosaic_engine.main import _direct_load_series, _forward_fill  # noqa: E402
+from wattmosaic_engine.main import _forward_fill  # noqa: E402
 
 
 def _as_utc(value: object) -> datetime | None:
@@ -148,7 +148,6 @@ def main() -> int:
         for ch in topology.channels
         if ch.enabled and str(ch.ct_type) in ("main", "branch")
     ]
-    direct_loads = _direct_load_series(topology, aligned)
     report: dict[str, object] = {}
     candidates = infer_nesting(
         {
@@ -162,12 +161,14 @@ def main() -> int:
         },
         {cid: values for cid, values in aligned.items() if cid in by_id},
         container_ct_ids=containers,
-        direct_loads=direct_loads,
+        # No per-container "own loads" series exists any more: the channel role
+        # that grouped one was deleted along with the direct measurement path,
+        # so closure relies on the parent's measured series alone.
+        direct_loads=None,
         report=report,
     )
 
     print("\nkinds:", dict(Counter(c.kind for c in candidates)))
-    print("closure evidence available for:", sorted(direct_loads))
     print(
         "ambiguous:",
         len(report.get("ambiguous", [])),

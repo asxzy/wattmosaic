@@ -80,7 +80,7 @@ def _topology() -> dict:
                 "paired_ct_id": "panel_l1",
             },
             {"ct_id": "branch_a", "name": "A", "ct_type": "branch", "phase": "l1"},
-            {"ct_id": "tub", "name": "Tub", "ct_type": "dedicated_device", "phase": "l1"},
+            {"ct_id": "tub", "name": "Tub", "ct_type": "branch", "phase": "l1"},
         ],
     }
 

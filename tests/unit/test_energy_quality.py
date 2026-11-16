@@ -386,7 +386,9 @@ def test_sole_occupant_branch_is_shared_not_dedicated() -> None:
     effective = effective_config("heater", topology=topology, graph=graph)
     assert effective.monitoring == "shared"
     assert effective.sole_occupant is True
-    assert effective.allows_direct_measurement is False
+    # There is no per-device direct-measurement capability left to consult: the
+    # property that gated Level-1 was deleted with the path itself.
+    assert not hasattr(effective, "allows_direct_measurement")
     # The label narrows; the watts do not.  The row is still fully attributable,
     # exactly as it was when the device was mislabelled DEDICATED.
     assert effective.shared_unmodelled is False
@@ -425,7 +427,7 @@ def test_own_circuit_ct_is_shared_and_now_a_sole_occupant() -> None:
     effective = effective_config("heater", topology=topology, graph=graph)
     assert effective.monitoring == "shared"
     assert effective.sole_occupant is True
-    assert effective.allows_direct_measurement is False
+    assert not hasattr(effective, "allows_direct_measurement")
     assert effective.shared_unmodelled is False
 
 
@@ -537,10 +539,9 @@ class _Window:
 def test_branch_ct_devices_are_reported_as_missing_direct_measurement(db: Database) -> None:
     """The branch-only case: 0 W direct, and the reason is stated.
 
-    ``resolve_direct`` only reads ``DEDICATED_DEVICE`` channels.  A branch CT
-    therefore never produces a direct reading, however alone the device is on
-    the circuit.  The ``ct_type`` gate is deliberately untouched here; what the
-    fix adds is the *explanation* so a dashboard can say why.
+    There is no direct measurement path any more, so a branch CT never produces
+    a direct reading, however alone the device is on the circuit.  What the fix
+    adds is the *explanation* so a dashboard can say why.
     """
     topology = _solo_branch_topology()
     backend = _backend_with_db(db)
@@ -552,7 +553,7 @@ def test_branch_ct_devices_are_reported_as_missing_direct_measurement(db: Databa
     assert gaps["direct_measured_count"] == 0
     assert gaps["missing_direct_count"] == 1
     assert gaps["missing_direct"]["heater"] == (
-        "no_dedicated_device_ct:attribution_ct_types=branch"
+        "no_private_channel:attribution_ct_types=branch"
     )
     # And the reconciliation says it out loud.
     assert any(
@@ -596,7 +597,7 @@ def test_own_circuit_ct_produces_no_direct_measurement_count(db: Database) -> No
     gaps = batch.diagnostics["measurement_gaps"]
     assert gaps["direct_measured_count"] == 0
     assert gaps["direct_capable_count"] == 0
-    assert gaps["direct_availability"] == "no_dedicated_ct"
+    assert gaps["direct_availability"] == "no_direct_capable_device"
     # The reading still reached the solver, so the device is not uncovered.
     heater = next(r for r in batch.results if r.device_id == "heater")
     assert heater.power_w == pytest.approx(400.0)
@@ -641,11 +642,11 @@ def test_measurement_gap_explanation_is_idempotent(db: Database) -> None:
 
 
 def test_direct_availability_names_the_branch_only_case(db: Database) -> None:
-    """A branch-only install is ``no_dedicated_ct``, not a silent zero.
+    """A branch-only install is ``no_direct_capable_device``, not a silent zero.
 
     C1 resolved to (b): a 0 W direct count is acceptable only when it is
-    *explained*.  This topology has no ``DEDICATED_DEVICE`` channel at all, so
-    nothing is capable of a direct reading and the verdict says so -- the case a
+    *explained*.  This topology has no channel that could ever be read
+    directly, so nothing is capable and the verdict says so -- the case a
     dashboard must render as "0 W because these are branch circuits", never as a
     bare zero.
     """
@@ -658,7 +659,7 @@ def test_direct_availability_names_the_branch_only_case(db: Database) -> None:
     gaps = batch.diagnostics["measurement_gaps"]
     assert gaps["direct_measured_count"] == 0
     assert gaps["direct_capable_count"] == 0
-    assert gaps["direct_availability"] == "no_dedicated_ct"
+    assert gaps["direct_availability"] == "no_direct_capable_device"
     assert gaps["direct_unavailable_explained"] is True
     assert gaps["unexplained_direct_devices"] == []
 
@@ -696,8 +697,8 @@ def test_direct_availability_reports_no_capable_device(db: Database) -> None:
     gaps = batch.diagnostics["measurement_gaps"]
     assert gaps["direct_measured_count"] == 0
     assert gaps["direct_capable_count"] == 0
-    assert gaps["direct_availability"] == "no_dedicated_ct"
-    assert gaps["missing_direct"]["heater"].startswith("no_dedicated_device_ct")
+    assert gaps["direct_availability"] == "no_direct_capable_device"
+    assert gaps["missing_direct"]["heater"].startswith("no_private_channel")
     assert gaps["direct_unavailable_explained"] is True
     assert gaps["unexplained_direct_devices"] == []
 
@@ -706,8 +707,9 @@ def test_a_solved_own_row_is_not_reported_as_directly_measured(db: Database) -> 
     """A row with a power value is still not a direct measurement.
 
     The device is measured through the solver over its own row, so
-    ``direct_availability`` stays ``no_dedicated_ct`` even though a usable
-    reading exists — the payload must not imply a capability the engine lacks.
+    ``direct_availability`` stays ``no_direct_capable_device`` even though a
+    usable reading exists — the payload must not imply a capability the engine
+    lacks.
     """
     topology = Topology(
         channels=[
@@ -735,7 +737,7 @@ def test_a_solved_own_row_is_not_reported_as_directly_measured(db: Database) -> 
     )
 
     gaps = batch.diagnostics["measurement_gaps"]
-    assert gaps["direct_availability"] == "no_dedicated_ct"
+    assert gaps["direct_availability"] == "no_direct_capable_device"
     assert gaps["direct_capable_count"] == 0
     assert gaps["unexplained_direct_devices"] == []
     heater = next(r for r in batch.results if r.device_id == "heater")

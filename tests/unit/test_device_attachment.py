@@ -42,7 +42,6 @@ from wattmosaic_engine.disaggregation.configuration import (
     project_configuration,
 )
 from wattmosaic_engine.disaggregation.engine import DisaggregationEngine
-from wattmosaic_engine.electrical.direct import resolve_direct
 from wattmosaic_engine.electrical.topology import build_graph
 from wattmosaic_engine.electrical.window import ObservationWindow
 
@@ -154,8 +153,9 @@ def test_declared_ct_becomes_an_attribution_row_not_a_measurement() -> None:
     """A declaration is not a note: the graph must expose it as an attribution.
 
     With the single-device role retired, a declared CT is a ``branch``
-    attribution row.  No role can claim a direct measurement any more, so the
-    resolver stays empty even for a row the user declared by hand.
+    attribution row.  No role can claim a direct measurement any more, and the
+    direct resolver itself was deleted, so the row is the whole of what the
+    declaration buys.
     """
     projected = _declare(_declared_topology(CTType.BRANCH))
     device = projected.device_map()["hot_tub"]
@@ -163,7 +163,6 @@ def test_declared_ct_becomes_an_attribution_row_not_a_measurement() -> None:
 
     graph = build_graph(projected)
     assert graph.attribution_ct_ids("hot_tub") == ("ct_load",)
-    assert resolve_direct({"ct_load": 1200.0}, graph, max_age_s=120, at=AT) == {}
 
 
 def test_declared_unclassified_ct_is_attributed_as_a_branch() -> None:

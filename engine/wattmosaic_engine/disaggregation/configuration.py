@@ -10,7 +10,7 @@ Projection, not a second source of truth
 ---------------------------------------
 ``Topology`` is already persisted, versioned and threaded through ingestion,
 inference and learning.  Adding a parallel configuration channel would let the
-two disagree — a device could be "shared" for the solver and "dedicated" for the
+two disagree — a device could be "shared" for the solver and "monitored" for the
 event intake.  So the resolved configuration is **projected into the device
 metadata**, and everything downstream reads it from there:
 
@@ -40,11 +40,11 @@ Rules
 1. **Never invent a monitoring level.**  When the user does not state one it is
    derived from the CT graph exactly as before configuration existed, so every
    existing topology keeps its current behaviour.
-2. **A declared level overrides the graph.**  If the user says ``shared`` for a
-   circuit the graph calls dedicated, the whole row is no longer this device's
-   power: siblings exist that are not modelled, so the row is an upper bound.
-   That override is the difference between claiming a whole lights circuit for
-   one lamp and reporting the lamp honestly.
+2. **A declared level overrides the graph.**  If the user says ``unmonitored``
+   for a circuit the graph derives as ``shared``, the whole row is no longer
+   this device's power: siblings exist that are not modelled, so the row is an
+   upper bound.  That override is the difference between claiming a whole lights
+   circuit for one lamp and reporting the lamp honestly.
 3. **Mode entities never prove load.**  Only ``state_entity_ids`` and
    ``controller.load_entity_ids`` may indicate runtime.  A label mapped with
    ``role=load`` and ``confirmed=True`` may supply a watt value; anything else
@@ -132,18 +132,12 @@ class EffectiveConfig:
     shared_unmodelled: bool = False
     #: True when this device is the only topology device on its attribution
     #: rows.  A sole occupant of a branch CT is monitored alone in practice, but
-    #: no direct-measurement capability exists, so the label stays ``shared``
-    #: and this flag records that nothing else draws on the circuit.
+    #: the row is still a shared circuit as far as measurement capability goes,
+    #: so the label stays ``shared`` and this flag records that nothing else
+    #: draws on the circuit.
     sole_occupant: bool = False
     #: Reasons surfaced in ``InferenceResult.tier_reasons``.
     notes: tuple[str, ...] = ()
-
-    @property
-    def allows_direct_measurement(self) -> bool:
-        """A shared/home-total/absent CT must never be read as this device's power."""
-        return self.monitoring in (
-            MonitoringLevel.UNKNOWN,
-        )
 
     @property
     def config_ceiling_w(self) -> float | None:
@@ -166,18 +160,18 @@ def derive_monitoring(
     it: whatever CT observes it also carries the possibility of other loads, so
     its power has to be separated.  With no attribution row there is nothing
     that observes it alone and it is ``HOME_TOTAL_ONLY``.
+
+    Graph-only, deliberately: there is no CT role that measures a single device
+    directly, so a row is a row and the level describes *how much of the row*
+    belongs to this device, not how it was measured.
     """
     if declared != MonitoringLevel.UNKNOWN:
         return declared
-    if device is None:
-        return MonitoringLevel.UNKNOWN
-    if graph is None:  # pragma: no cover - graph is always supplied in production
+    if device is None or graph is None:
         return MonitoringLevel.UNKNOWN
     rows = set(graph.attribution_ct_ids(device.device_id))
     if not rows:
         return MonitoringLevel.HOME_TOTAL_ONLY
-    # Attribution rows are always a shared/branch circuit as far as measurement
-    # capability goes — including the sole-occupant case.
     return MonitoringLevel.SHARED
 
 
@@ -403,12 +397,12 @@ def effective_config(
     # ``SHARED``.  That label must not change the solver: the row is treated as
     # fully attributable (no unknown slack), because nothing else draws on it.
     # Only the *label* is conservative; the watts are untouched.
-    derived_dedicated_downgrade = (
+    derived_sole_occupant_row = (
         declared == MonitoringLevel.UNKNOWN
         and monitoring == MonitoringLevel.SHARED
         and is_sole_occupant(device, graph, topology=topology)
     )
-    if monitoring == MonitoringLevel.SHARED and not derived_dedicated_downgrade:
+    if monitoring == MonitoringLevel.SHARED and not derived_sole_occupant_row:
         observed = set(declared_cts)
         if not observed and device is not None:
             observed = set(device.branch_ct_ids)
@@ -454,7 +448,7 @@ def effective_config(
         notes.append("shared_circuit_without_modelled_siblings")
 
     sole_occupant = is_sole_occupant(device, graph, topology=topology)
-    if derived_dedicated_downgrade:
+    if derived_sole_occupant_row:
         notes.append("sole_occupant_branch_ct_not_direct_measurable")
 
     return EffectiveConfig(
@@ -590,12 +584,12 @@ def materialisation_blockers(
             continue
         owner_device, ct_id = owner
         if owner_device == config.device_id:
-            # Its own dedicated row: the normal direct-measurement path.
+            # Its own row: the normal single-claimant path.
             continue
         out[config.device_id] = (
-            f"CT row {ct_id!r} is a dedicated measurement of device "
-            f"{owner_device!r}; convert that channel to a shared circuit "
-            "before another device can be placed on it"
+            f"CT row {ct_id!r} is already this device's whole measurement, "
+            f"claimed by {owner_device!r}; convert that channel to a shared "
+            "circuit before another device can be placed on it"
         )
         if config.device_id in known:
             out[config.device_id] += (

@@ -238,16 +238,17 @@ def test_unrecognised_domain_is_neither_load_nor_mode() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_monitoring_is_derived_from_the_dedicated_channel_only() -> None:
+def test_monitoring_is_derived_from_the_graph_not_a_single_device_role() -> None:
     """A branch CT a device owns alone is *not* a direct measurement.
 
     Sole occupancy of a branch CT used to be labelled ``DEDICATED``, although
-    ``resolve_direct`` only ever reads a ``DEDICATED_DEVICE`` channel and can
+    the direct resolver only ever read a dedicated-device channel and could
     therefore never produce a reading for it.  The label overstated the
     capability and fed tiers/confidence.  The level stays ``SHARED`` and the
     fact is surfaced as ``sole_occupant`` instead — a narrower label, with the
     same watts (``shared_unmodelled`` stays ``False``, so the row is still
-    treated as fully attributable).
+    treated as fully attributable).  With the direct path deleted there is no
+    per-device direct-measurement capability left to ask about at all.
     """
     topology = Topology(
         channels=[
@@ -263,9 +264,10 @@ def test_monitoring_is_derived_from_the_dedicated_channel_only() -> None:
     graph = build_graph(topology)
     assert derive_monitoring(topology.devices[0], graph, topology=topology) == MonitoringLevel.SHARED
     effective = effective_config("heater", topology=topology, graph=graph)
+    assert effective.monitoring == MonitoringLevel.SHARED
     assert effective.sole_occupant is True
     assert effective.shared_unmodelled is False
-    assert effective.allows_direct_measurement is False
+    assert not hasattr(effective, "allows_direct_measurement")
     assert "sole_occupant_branch_ct_not_direct_measurable" in effective.notes
 
 
@@ -686,9 +688,9 @@ def test_declared_load_signal_promotes_measured_grading() -> None:
 def test_a_state_signal_that_disagrees_withholds_the_value() -> None:
     """State says off while the row carries power: do not credit the device.
 
-    The ``dedicated_ct_disagrees_with_state`` reason no longer exists because no
-    row is read directly; the conservative half of that rule still applies — no
-    corroboration, so the reading is not attributed.
+    The ``direct_ct_disagrees_with_state`` reason is not produced for a new
+    result because no row is read directly; the conservative half of that rule
+    still applies — no corroboration, so the reading is not attributed.
     """
     topology = _with(
         [

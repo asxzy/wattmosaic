@@ -32,7 +32,7 @@ from wattmosaic_engine.electrical.nesting import (
 
 MAIN = {"ct_type": "main"}
 BRANCH = {"ct_type": "branch"}
-LOAD = {"ct_type": "dedicated_device"}
+LOAD = {"ct_type": "branch"}
 
 
 def _noisy(base: float, n: int, *, seed: int = 7, jitter: float = 0.02) -> list[float]:

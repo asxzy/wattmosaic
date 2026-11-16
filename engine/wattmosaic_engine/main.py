@@ -379,18 +379,6 @@ def _forward_fill(
     return out
 
 
-def _direct_load_series(
-    topology: Topology, aligned: Mapping[str, list[float]]
-) -> dict[str, list[float | None]]:
-    """Per-container series of its *own* loads, for closure.
-
-    Retired: the container grouping was driven by the dedicated-device channel
-    role, which the contract no longer defines, so no channel can be grouped
-    here.  Closure therefore relies on the parent's measured series alone.
-    """
-    return {}
-
-
 def _event_time(event: Any) -> datetime | None:
     """``occurred_at`` of an HA device event, tolerant of mapping or object."""
     raw = (
@@ -1935,7 +1923,6 @@ class EngineCore:
             for ch in channels
             if ch.enabled and str(ch.ct_type) in ("main", "branch")
         ]
-        direct_loads = _direct_load_series(topology, aligned)
 
         report: dict[str, Any] = {}
         candidates = infer_nesting(
@@ -1957,7 +1944,11 @@ class EngineCore:
             },
             {cid: values for cid, values in aligned.items() if cid in by_id},
             container_ct_ids=container_ids,
-            direct_loads=direct_loads,
+            # Closure now relies on the parent's measured series alone: there is
+            # no per-container "own loads" series to subtract, because the
+            # channel role that grouped one is gone.  ``infer_nesting`` accepts
+            # ``None`` and skips the own-load correction.
+            direct_loads=None,
             report=report,
         )
 

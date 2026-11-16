@@ -33,9 +33,7 @@ from wattmosaic_engine.electrical import (
     analyse_identifiability,
     build_measurement_matrix,
     coerce_window,
-    direct_power_w,
     main_power_w,
-    resolve_direct,
     solve_constrained_nnls,
 )
 from wattmosaic_engine.electrical.topology import build_graph
@@ -803,13 +801,13 @@ def test_prediction_round_trip():
 
 
 # --------------------------------------------------------------------------- #
-# Direct measurement — retired in Wave 2
+# Direct measurement — deleted in Wave 3
 # --------------------------------------------------------------------------- #
-# ``resolve_direct`` is inert: the channel role that gated it is no longer part
-# of the contract, so no device can resolve to a direct reading.  The tests below
-# pin *that* rather than a reading, and the electrical rules the path used to
-# apply (leg pairing, staleness, non-negativity, multipliers) are pinned through
-# the solver and the graph, which is where they now live.
+# There is no direct measurement path at all any more: the channel role that
+# gated it is not part of the contract, so the resolver itself was removed.  The
+# electrical rules that path used to apply (leg pairing, staleness,
+# non-negativity, multipliers) are pinned through the solver and the graph, which
+# is where they now live.
 def _dedicated_topology() -> Topology:
     return Topology(
         channels=[
@@ -831,18 +829,23 @@ def _dedicated_topology() -> Topology:
     )
 
 
-def test_resolve_direct_is_inert_whatever_the_topology():
-    """No device resolves to a direct reading any more.
+def test_the_direct_resolver_no_longer_exists():
+    """No device can resolve to a direct reading, because the resolver is gone.
 
     Every row here is a ``branch`` CT naming its device, which is exactly the
-    shape that used to produce a direct reading.  It must produce nothing: the
-    contract has no role that grants a direct measurement, so claiming one would
-    assert a capability the engine does not have.
+    shape that used to produce a direct reading.  The contract has no role that
+    grants a direct measurement, so the machinery was deleted rather than left
+    returning nothing: a kept-but-inert resolver would still advertise a
+    capability the engine does not have.
     """
-    graph = build_graph(_dedicated_topology())
-    window = ObservationWindow.from_values(T0, {"ct_tv": 75.0, "ct_tub_l1": 0.0, "ct_tub_l2": 0.0})
-    assert resolve_direct(window, graph) == {}
-    assert direct_power_w(window, graph) == {}
+    import wattmosaic_engine.electrical as electrical
+    import wattmosaic_engine.electrical.direct as direct_module
+
+    assert not hasattr(direct_module, "resolve_direct")
+    assert not hasattr(direct_module, "DirectReading")
+    assert not hasattr(electrical, "resolve_direct")
+    assert not hasattr(electrical, "DirectReading")
+    assert not hasattr(electrical.ElectricalModel, "resolve_direct")
 
 
 def _single_leg_multiplier_topology() -> Topology:
@@ -891,14 +894,11 @@ def test_scale_w_applies_the_declared_multiplier_once():
 def test_the_multiplier_scales_the_devices_only_row_once():
     """The declared multiplier reaches the solver, applied exactly once.
 
-    This used to be asserted through ``resolve_direct``.  The multiplier is a
+    This used to be asserted through the direct resolver.  The multiplier is a
     property of the row, not of the measurement path, so it is pinned where it
     still applies: the device's own row scales, and the raw reading does not.
     """
     graph = build_graph(_single_leg_multiplier_topology())
-    window = ObservationWindow.from_values(T0, {"main": 3000.0, "ct_tub": 1100.0})
-    assert resolve_direct(window, graph) == {}
-
     matrix = build_measurement_matrix(graph, ["tub"])
     assert matrix.channel_multiplier["ct_tub"] == 2.0
     row = matrix.row_channel_ids.index("ct_tub")
@@ -972,9 +972,9 @@ def test_detect_changes_scales_the_previous_snapshot_fallback():
 def test_a_double_pole_pair_sums_both_legs():
     """Each leg is half the device, so the two rows together are the whole load.
 
-    ``resolve_direct`` used to sum the pair itself.  The same arithmetic is now
-    the solver's: both legs carry a 0.5 coefficient, and their two equations
-    resolve to the summed device power rather than one leg's.
+    the deleted direct resolver used to sum the pair itself.  The same
+    arithmetic is now the solver's: both legs carry a 0.5 coefficient, and their
+    two equations resolve to the summed device power rather than one leg's.
     """
     graph = build_graph(_dedicated_topology())
     matrix = build_measurement_matrix(graph, ["tv", "tub"])
@@ -1044,9 +1044,9 @@ def test_a_negative_device_reading_cannot_make_a_negative_load():
 
     ``docs/electrical_model.md`` §9.5: a negative device-level reading is export
     (a main property) or unmetered generation, and must not be reported as a
-    negatively consuming appliance.  This used to be asserted through
-    ``resolve_direct``'s clamp; the constrained solver enforces the same bound,
-    and it is the path that still runs.
+    negatively consuming appliance.  This used to be asserted through the
+    deleted direct resolver's clamp; the constrained solver enforces the same
+    bound, and it is the only path that runs.
     """
     graph = build_graph(_dedicated_topology())
     matrix = build_measurement_matrix(graph, ["tv", "tub"])
@@ -1505,8 +1505,8 @@ def test_a_pair_with_legs_sampled_far_apart_is_not_used():
     A pair whose legs are more than ``max_leg_skew_s`` apart is excluded: on the
     reference install (Refoss panel polls at 15.7 s) one missed poll puts the
     legs 31 s apart and the sum would mix two instants into one equation.  The
-    rule used to be asserted on ``resolve_direct`` as well; the engine is the
-    path that still applies it.
+    rule used to be asserted on the deleted direct resolver as well; the engine
+    is the only path that applies it now.
     """
     topo = _dedicated_topology()
     window = ObservationWindow.from_values(
@@ -1547,11 +1547,11 @@ def test_a_pair_with_legs_inside_the_skew_limit_still_sums():
 
 
 def test_the_leg_skew_limit_has_one_definition():
-    """The engine and the retired direct path must read the same constant.
+    """The engine reads the one documented leg-skew limit.
 
-    A second default is how the two paths came to disagree in the first place.
-    ``resolve_direct`` no longer resolves anything, but the constant it exposes
-    is still the single definition the engine reads.
+    A second default is how two measurement paths once came to disagree about
+    which pairs are usable.  The constant now has a single reader, so this pins
+    that the engine default *is* the documented rule.
     """
     from wattmosaic_engine.disaggregation import DisaggregationEngine
     from wattmosaic_engine.electrical.direct import DEFAULT_MAX_LEG_SKEW_S

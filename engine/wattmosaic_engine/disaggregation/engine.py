@@ -9,16 +9,14 @@ Public contract (``docs/interface_contracts.md`` §3.4)::
 Pipeline
 --------
 1. Validate/index the topology (``TopologyGraph``).
-2. Resolve Level-1 dedicated CT measurements (``resolve_direct``).
-3. Build ``y = A x`` (``build_measurement_matrix``), residualising nested CTs
+2. Build ``y = A x`` (``build_measurement_matrix``), residualising nested CTs
    so no physical quantity is counted twice.
-4. Subtract direct contributions from ``y`` and solve for the remaining
-   devices with bounded NNLS.
-5. SVD identifiability analysis decides what may be called ``inferred``.
-6. Event detection (observed cadence, MAD threshold) provides evidence and
+3. Solve for every device with bounded NNLS.
+4. SVD identifiability analysis decides what may be called ``inferred``.
+5. Event detection (observed cadence, MAD threshold) provides evidence and
    concurrency/ambiguity detection.
-7. Assign the measurement hierarchy per device, with per-device isolation.
-8. Reconcile: ``unknown_residual = main - accounted`` and never redistribute.
+6. Assign the measurement hierarchy per device, with per-device isolation.
+7. Reconcile: ``unknown_residual = main - accounted`` and never redistribute.
 
 Nothing in this module mutates the topology or calls Home Assistant.
 """
@@ -59,11 +57,7 @@ from wattmosaic_engine.disaggregation.configuration import (
 )
 from wattmosaic_engine.disaggregation.events import StepChange, StepTracker, detect_changes
 from wattmosaic_engine.disaggregation.tiers import TierInputs, grade
-from wattmosaic_engine.electrical.direct import (
-    DEFAULT_MAX_LEG_SKEW_S,
-    DirectReading,
-    resolve_direct,
-)
+from wattmosaic_engine.electrical.direct import DEFAULT_MAX_LEG_SKEW_S
 from wattmosaic_engine.electrical.main_power import (
     MainPower,
     main_power_w,
@@ -501,9 +495,8 @@ class DisaggregationEngine:
         #: row is a mix of two instants and neither leg may be used.
         #:
         #: The limit itself is defined once, in
-        #: :mod:`wattmosaic_engine.electrical.direct`, because ``resolve_direct``
-        #: enforces the same rule; two independent defaults would let the direct
-        #: path and the solver path disagree about which pairs are usable.
+        #: :mod:`wattmosaic_engine.electrical.direct`, so the documented rule and
+        #: the engine default cannot drift apart.
         self.max_leg_skew_s = float(max_leg_skew_s)
         self.phase_split_l1 = float(phase_split_l1)
         self.k_mad = float(k_mad)
@@ -648,16 +641,6 @@ class DisaggregationEngine:
                 models_by_device[did] = None
                 diagnostics["errors"][did] = f"model_resolution_failed:{type(exc).__name__}"
 
-        # ---- Level 1: direct measurement ---------------------------------
-        direct = resolve_direct(
-            coerced,
-            graph,
-            max_age_s=self.max_measurement_age_s,
-            max_leg_skew_s=self.max_leg_skew_s,
-            at=coerced.at,
-        )
-        diagnostics["direct_measurements"] = {d: r.as_dict() for d, r in direct.items()}
-
         # ---- measurement system ------------------------------------------
         matrix = build_measurement_matrix(
             graph, device_ids, noise_floor_w=self.noise_floor_w
@@ -666,7 +649,6 @@ class DisaggregationEngine:
             matrix,
             graph,
             coerced,
-            direct,
             device_ids,
             models_by_device,
             all_states,
@@ -702,14 +684,6 @@ class DisaggregationEngine:
                     did,
                     graph=graph,
                     window=coerced,
-                    direct=(
-                        None
-                        if (
-                            (cfg := configs.get(did)) is not None
-                            and not cfg.allows_direct_measurement
-                        )
-                        else direct.get(did)
-                    ),
                     model=models_by_device.get(did),
                     state=all_states.get(did),
                     transition=transitions.get(did),
@@ -732,7 +706,7 @@ class DisaggregationEngine:
 
         self._bound_configured_priors_by_row(graph, coerced, results, diagnostics)
         reconciliation = self._reconcile(
-            graph, coerced, results, matrix, direct, diagnostics
+            graph, coerced, results, matrix, diagnostics
         )
         diagnostics["accounted_devices"] = [
             r.device_id for r in results if r.source != Source.UNKNOWN
@@ -995,7 +969,6 @@ class DisaggregationEngine:
         matrix: MeasurementMatrix,
         graph: TopologyGraph,
         window: CoercedWindow,
-        direct: Mapping[str, DirectReading],
         device_ids: list[str],
         models: Mapping[str, ModelView | None],
         states: Mapping[str, str | None],
@@ -1034,44 +1007,27 @@ class DisaggregationEngine:
 
         self._exclude_partial_legs(matrix, graph, window, mask, excluded)
 
-        # Direct powers, used to remove known contributions from y.
-        x_direct = np.zeros(n)
-        for did, reading in direct.items():
-            if reading.usable and reading.power_w is not None and did in idx:
-                x_direct[idx[did]] = float(reading.power_w)
-
         A = np.array(matrix.A, dtype=float)
-        y_adj = prepared.y - A @ x_direct
 
-        # Solve only for devices that are not directly measured and that have
-        # at least one live coefficient.  Everything else is left at zero.
-        direct_usable = {
-            did for did, r in direct.items() if r.usable and r.power_w is not None
-        }
+        # Solve for every device that has at least one live coefficient.
+        # Everything else is left at zero.
         solve_cols = [
-            j
-            for j, did in enumerate(device_ids)
-            if did not in direct_usable and np.any(np.abs(A[:, j]) > 0)
+            j for j in range(n) if np.any(np.abs(A[:, j]) > 0)
         ]
         if not solve_cols:
-            x = x_direct.copy()
             solve_result = solve_constrained_nnls(
                 np.zeros((0, 0)), np.zeros(0), device_ids=[], analyse=True
             )
-            # Identifiability still matters for the non-direct devices.
-            ident = analyse_identifiability(
-                A[:, [j for j in range(n) if device_ids[j] not in direct_usable]],
-                [d for d in device_ids if d not in direct_usable],
-            )
+            ident = analyse_identifiability(A, list(device_ids))
             return {
-                "x": {d: float(x[idx[d]]) for d in device_ids},
+                "x": {d: 0.0 for d in device_ids},
                 "index": idx,
                 "identifiability": ident,
                 "solve_result": solve_result,
             }
 
         A_sub = A[:, solve_cols]
-        y_sub = y_adj
+        y_sub = prepared.y
         sub_ids = [device_ids[j] for j in solve_cols]
 
         # Main CT rows get an explicit non-negative "unknown load" slack.  The
@@ -1097,7 +1053,7 @@ class DisaggregationEngine:
             if not row_has_support[i]:
                 mask[i] = False
                 if cid not in excluded:
-                    excluded[cid] = "direct_only_row"
+                    excluded[cid] = "row_without_device_support"
 
         upper: list[float | None] = []
         prior: list[float] = []
@@ -1318,7 +1274,7 @@ class DisaggregationEngine:
             if k + n_sub < len(solve_result.x)
         }
 
-        x = x_direct.copy()
+        x = np.zeros(n)
         for k, j in enumerate(solve_cols):
             x[j] = float(solve_result.x[k]) if k < len(solve_result.x) else 0.0
 
@@ -1427,7 +1383,6 @@ class DisaggregationEngine:
         *,
         graph: TopologyGraph,
         window: CoercedWindow,
-        direct: DirectReading | None,
         model: ModelView | None,
         state: str | None,
         transition: _Transition | None,
@@ -1456,10 +1411,6 @@ class DisaggregationEngine:
         has_load_signal = bool(config is not None and config.load_entity_ids)
         state_on = has_load_signal and _is_on(state, state_overrides)
         state_off = has_load_signal and _is_off(state, state_overrides)
-        # A shared CT is not this device's measurement, however the topology
-        # labels it: the user has stated that siblings share the circuit, so the
-        # row is an upper bound rather than an observation (ADR-0011 rule 2).
-        direct_is_ours = config is None or config.allows_direct_measurement
         # Measured dimmer output for *this* device, when the control entity
         # reported one.  ``None`` means "not reported", never "full brightness":
         # a light that is merely ``on`` must not be read as 100 % output.
@@ -1508,91 +1459,8 @@ class DisaggregationEngine:
             result.tier_reasons = [*config_notes, *reasons]
             return result
 
-        # ---------------- Level 1: direct measurement --------------------
-        if direct_is_ours and direct is not None and direct.usable and direct.power_w is not None:
-            explanation = ["direct_ct_measurement"]
-            # ``resolve_direct`` clips a negative device-level sum to zero and
-            # records the signed value in ``raw_power_w``.  Surface both facts so
-            # a consumer can see *why* a zero is reported and can reconcile the
-            # reading against the raw sensor value.  Export stays a main-side
-            # property; it is never attributed to a device.
-            if direct.raw_power_w is not None:
-                explanation.append("negative_device_power_clipped")
-            if direct.repeated:
-                explanation.append("repeated_state_update")
-            age = direct.age_s
-            quality = _quality_from_age(age, direct.quality)
-            stale = age > self.max_measurement_age_s
-            # Conflict between a fresh state transition and a direct value is
-            # surfaced, but a direct measurement is never replaced.
-            conflict = False
-            expected = _state_power(model, state)
-            if own_event and expected is not None:
-                tolerance = max(0.5 * abs(expected), 25.0)
-                if abs(direct.power_w - expected) > tolerance:
-                    conflict = True
-                    explanation.append("state_direct_measurement_conflict")
-            confidence = compute_confidence(
-                ConfidenceInputs(
-                    source=Source.DIRECT_MEASURED,
-                    measurement_qualities=[quality],
-                    measurement_ages_s=[age],
-                    supporting_ct_count=len(direct.ct_ids),
-                    model_quality=0.0 if model is None else model.quality,
-                    event_isolation=event_isolation_score(
-                        own_event=own_event,
-                        concurrent_events=concurrent_events,
-                        ambiguous=False,
-                    ),
-                    topology_status=topology_status,
-                    residual_w=0.0,
-                    residual_sigma_w=self.noise_floor_w,
-                    stale=stale,
-                    missing_rows=False,
-                    ambiguous=False,
-                    repeated=direct.repeated,
-                )
-            )
-            stage, stage_status = _stage_for(model, direct.power_w)
-            return finish(
-                InferenceResult(
-                    device_id=device_id,
-                    timestamp=now,
-                    power_w=float(direct.power_w),
-                    source=Source.DIRECT_MEASURED,
-                    confidence=(
-                        confidence.score if not conflict else min(confidence.score, 0.6)
-                    ),
-                    model_id=None if model is None else model.model_id,
-                    model_version=None if model is None else model.version,
-                    operating_stage=stage,
-                    stage_status=stage_status,
-                    sample_count=0 if model is None else model.sample_count,
-                    quality_status=quality,
-                    measurement_age_seconds=age,
-                    supporting_ct_channels=list(direct.ct_ids),
-                    explanation=explanation,
-                    provenance={
-                        "direct_reasons": list(direct.reasons),
-                        "per_leg_w": dict(direct.per_leg_w),
-                        "raw_power_w": direct.raw_power_w,
-                        "confidence": confidence.as_dict(),
-                    },
-                    confidence_is_calibrated=False,
-                ),
-                model_corroborates=(
-                    expected is not None
-                    and not conflict
-                    and abs(direct.power_w - expected)
-                    <= max(MODEL_MATCH_REL_TOL * abs(expected), 25.0)
-                ),
-            )
-
-        # ---------------- Level 2/3/4: no usable direct value -------------
+        # ---------------- Level 2/3/4: nothing measured this device directly ----
         explanation: list[str] = []
-        if direct is not None and not direct.usable:
-            explanation.append("direct_ct_unusable")
-            explanation.extend(direct.reasons)
         if own_event:
             explanation.append(
                 "ha_state_transition_activation"
@@ -2191,14 +2059,12 @@ class DisaggregationEngine:
         window: CoercedWindow,
         results: Sequence[InferenceResult],
         matrix: MeasurementMatrix,
-        direct: Mapping[str, DirectReading],
         diagnostics: dict[str, Any],
     ) -> Reconciliation:
-        direct_w = sum(r.power_w for r in results if r.source == Source.DIRECT_MEASURED)
         inferred_w = sum(r.power_w for r in results if r.source == Source.INFERRED)
         model_w = sum(r.power_w for r in results if r.source == Source.MODEL_ESTIMATED)
         prior_w = sum(r.power_w for r in results if r.source == Source.CONFIGURED_PRIOR)
-        accounted = direct_w + inferred_w + model_w + prior_w
+        accounted = inferred_w + model_w + prior_w
 
         main: MainPower = main_power_w(
             graph, window.readings, phase_split_l1=self.phase_split_l1
@@ -2381,7 +2247,6 @@ class DisaggregationEngine:
             main_power_w=main.total_w,
             l1_power_w=main.l1_w,
             l2_power_w=main.l2_w,
-            direct_measured_w=direct_w,
             inferred_w=inferred_w,
             model_estimated_w=model_w,
             configured_prior_w=prior_w,
