@@ -408,7 +408,6 @@
     "MonitoringLevel": {
       "description": "Axis 2 \u2014 how closely does the electrical tree observe the device?",
       "enum": [
-        "dedicated",
         "shared",
         "home_total_only",
         "unmonitored",
@@ -537,5 +536,5 @@
   "title": "DeviceConfiguration",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/device_configuration.json",
-  "x-contract-version": "1.6.0"
+  "x-contract-version": "2.0.0"
 }

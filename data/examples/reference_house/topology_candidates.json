@@ -91,7 +91,7 @@
       "ct_id": "panel_a_heat_pump",
       "entity_id": "sensor.panel_a_heat_pump_power",
       "name": "Panel A Heat Pump power",
-      "ct_type": "dedicated_device",
+      "ct_type": "branch",
       "phase": "unknown",
       "parent_ct_id": "panel_a_l1",
       "polarity": "normal",
@@ -112,7 +112,7 @@
       "ct_id": "panel_a_vehicle_charger",
       "entity_id": "sensor.panel_a_vehicle_charger_power",
       "name": "Panel A Vehicle Charger power",
-      "ct_type": "dedicated_device",
+      "ct_type": "branch",
       "phase": "unknown",
       "parent_ct_id": "panel_a_l1",
       "polarity": "normal",
@@ -263,7 +263,7 @@
       "ct_id": "panel_a_lighting_ct3",
       "entity_id": "sensor.panel_a_lighting_ct3_power",
       "name": "Panel A Lighting Circuit 3 power",
-      "ct_type": "dedicated_device",
+      "ct_type": "branch",
       "phase": "unknown",
       "parent_ct_id": "panel_a_l1",
       "polarity": "normal",
@@ -284,7 +284,7 @@
       "ct_id": "panel_a_air_conditioner",
       "entity_id": "sensor.panel_a_air_conditioner_power",
       "name": "Panel A Air Conditioner power",
-      "ct_type": "dedicated_device",
+      "ct_type": "branch",
       "phase": "unknown",
       "parent_ct_id": "panel_a_l1",
       "polarity": "normal",
@@ -305,7 +305,7 @@
       "ct_id": "panel_a_central_hvac",
       "entity_id": "sensor.panel_a_central_hvac_power",
       "name": "Panel A Central HVAC power",
-      "ct_type": "dedicated_device",
+      "ct_type": "branch",
       "phase": "unknown",
       "parent_ct_id": "panel_a_l1",
       "polarity": "normal",
@@ -326,7 +326,7 @@
       "ct_id": "panel_a_space_heater",
       "entity_id": "sensor.panel_a_space_heater_power",
       "name": "Panel A Space Heater power",
-      "ct_type": "dedicated_device",
+      "ct_type": "branch",
       "phase": "unknown",
       "parent_ct_id": "panel_a_l1",
       "polarity": "normal",
@@ -392,7 +392,7 @@
       "ct_id": "panel_a_upper_ac",
       "entity_id": "sensor.panel_a_upper_ac_power",
       "name": "Panel A Upper Floor AC power",
-      "ct_type": "dedicated_device",
+      "ct_type": "branch",
       "phase": "unknown",
       "parent_ct_id": "panel_a_l1",
       "polarity": "normal",
@@ -413,7 +413,7 @@
       "ct_id": "panel_a_upper_central_hvac",
       "entity_id": "sensor.panel_a_upper_central_hvac_power",
       "name": "Panel A Upper Floor HVAC power",
-      "ct_type": "dedicated_device",
+      "ct_type": "branch",
       "phase": "unknown",
       "parent_ct_id": "panel_a_l1",
       "polarity": "normal",
@@ -434,7 +434,7 @@
       "ct_id": "panel_b_refrigerator_1",
       "entity_id": "sensor.panel_b_refrigerator_1_power",
       "name": "Panel B Refrigerator 1 power",
-      "ct_type": "dedicated_device",
+      "ct_type": "branch",
       "phase": "unknown",
       "parent_ct_id": "panel_b_l1",
       "polarity": "normal",
@@ -455,7 +455,7 @@
       "ct_id": "panel_b_refrigerator_2",
       "entity_id": "sensor.panel_b_refrigerator_2_power",
       "name": "Panel B Refrigerator 2 power",
-      "ct_type": "dedicated_device",
+      "ct_type": "branch",
       "phase": "unknown",
       "parent_ct_id": "panel_b_l1",
       "polarity": "normal",
@@ -476,7 +476,7 @@
       "ct_id": "panel_b_hot_water_tank",
       "entity_id": "sensor.panel_b_hot_water_tank_power",
       "name": "Panel B Hot Water Tank power",
-      "ct_type": "dedicated_device",
+      "ct_type": "branch",
       "phase": "unknown",
       "parent_ct_id": "panel_b_l1",
       "polarity": "normal",
@@ -497,7 +497,7 @@
       "ct_id": "panel_b_utility_sink",
       "entity_id": "sensor.panel_b_utility_sink_power",
       "name": "Panel B Utility Sink power",
-      "ct_type": "dedicated_device",
+      "ct_type": "branch",
       "phase": "unknown",
       "parent_ct_id": "panel_b_l1",
       "polarity": "normal",
@@ -518,7 +518,7 @@
       "ct_id": "panel_b_workshop_outlet",
       "entity_id": "sensor.panel_b_workshop_outlet_power",
       "name": "Panel B Workshop Outlet power",
-      "ct_type": "dedicated_device",
+      "ct_type": "branch",
       "phase": "unknown",
       "parent_ct_id": "panel_b_l1",
       "polarity": "normal",
@@ -539,7 +539,7 @@
       "ct_id": "panel_b_guest_bath_unit",
       "entity_id": "sensor.panel_b_guest_bath_unit_power",
       "name": "Panel B Guest Bath Unit power",
-      "ct_type": "dedicated_device",
+      "ct_type": "branch",
       "phase": "unknown",
       "parent_ct_id": "panel_b_l1",
       "polarity": "normal",
@@ -560,7 +560,7 @@
       "ct_id": "panel_b_humidifier_1",
       "entity_id": "sensor.panel_b_humidifier_1_power",
       "name": "Panel B Humidifier 1 power",
-      "ct_type": "dedicated_device",
+      "ct_type": "branch",
       "phase": "unknown",
       "parent_ct_id": "panel_b_l1",
       "polarity": "normal",
@@ -581,7 +581,7 @@
       "ct_id": "panel_b_office_outlet",
       "entity_id": "sensor.panel_b_office_outlet_power",
       "name": "Panel B Office Outlet power",
-      "ct_type": "dedicated_device",
+      "ct_type": "branch",
       "phase": "unknown",
       "parent_ct_id": "panel_b_l1",
       "polarity": "normal",
@@ -602,7 +602,7 @@
       "ct_id": "panel_b_garden_outlet",
       "entity_id": "sensor.panel_b_garden_outlet_power",
       "name": "Panel B Garden Outlet power",
-      "ct_type": "dedicated_device",
+      "ct_type": "branch",
       "phase": "unknown",
       "parent_ct_id": "panel_b_l1",
       "polarity": "normal",
@@ -623,7 +623,7 @@
       "ct_id": "panel_b_display_panel",
       "entity_id": "sensor.panel_b_display_panel_power",
       "name": "Panel B Wall Display power",
-      "ct_type": "dedicated_device",
+      "ct_type": "branch",
       "phase": "unknown",
       "parent_ct_id": "panel_b_l1",
       "polarity": "normal",
@@ -644,7 +644,7 @@
       "ct_id": "panel_b_network_cabinet",
       "entity_id": "sensor.panel_b_network_cabinet_power",
       "name": "Panel B Network Cabinet power",
-      "ct_type": "dedicated_device",
+      "ct_type": "branch",
       "phase": "unknown",
       "parent_ct_id": "panel_b_l1",
       "polarity": "normal",
@@ -665,7 +665,7 @@
       "ct_id": "panel_b_eave_outlet",
       "entity_id": "sensor.panel_b_eave_outlet_power",
       "name": "Panel B Eave Outlet power",
-      "ct_type": "dedicated_device",
+      "ct_type": "branch",
       "phase": "unknown",
       "parent_ct_id": "panel_b_l1",
       "polarity": "normal",
@@ -686,7 +686,7 @@
       "ct_id": "panel_b_ventilation_unit",
       "entity_id": "sensor.panel_b_ventilation_unit_power",
       "name": "Panel B Ventilation Unit power",
-      "ct_type": "dedicated_device",
+      "ct_type": "branch",
       "phase": "unknown",
       "parent_ct_id": "panel_b_l1",
       "polarity": "normal",
@@ -707,7 +707,7 @@
       "ct_id": "panel_b_humidifier_2",
       "entity_id": "sensor.panel_b_humidifier_2_power",
       "name": "Panel B Humidifier 2 power",
-      "ct_type": "dedicated_device",
+      "ct_type": "branch",
       "phase": "unknown",
       "parent_ct_id": "panel_b_l1",
       "polarity": "normal",
@@ -773,10 +773,9 @@
     {
       "device_id": "dev_panel_a_heat_pump",
       "name": "Panel A Heat Pump power",
-      "dedicated_ct_ids": [
+      "branch_ct_ids": [
         "panel_a_heat_pump"
       ],
-      "branch_ct_ids": [],
       "phase": "unknown",
       "double_pole": false,
       "parent_device_id": null,
@@ -788,10 +787,9 @@
     {
       "device_id": "dev_panel_a_vehicle_charger",
       "name": "Panel A Vehicle Charger power",
-      "dedicated_ct_ids": [
+      "branch_ct_ids": [
         "panel_a_vehicle_charger"
       ],
-      "branch_ct_ids": [],
       "phase": "unknown",
       "double_pole": false,
       "parent_device_id": null,
@@ -803,7 +801,6 @@
     {
       "device_id": "dev_panel_a_water_heater",
       "name": "Panel A Water Heater",
-      "dedicated_ct_ids": [],
       "branch_ct_ids": [
         "panel_a_water_heater_ct1",
         "panel_a_water_heater_ct2"
@@ -824,7 +821,6 @@
     {
       "device_id": "dev_panel_a_dishwasher",
       "name": "Panel A Dishwasher",
-      "dedicated_ct_ids": [],
       "branch_ct_ids": [
         "panel_a_dishwasher_ct1",
         "panel_a_dishwasher_ct2"
@@ -845,7 +841,6 @@
     {
       "device_id": "dev_panel_a_lighting_ct1",
       "name": "Panel A Lighting Circuit 1 power",
-      "dedicated_ct_ids": [],
       "branch_ct_ids": [
         "panel_a_lighting_ct1"
       ],
@@ -860,7 +855,6 @@
     {
       "device_id": "dev_panel_a_lighting_ct2",
       "name": "Panel A Lighting Circuit 2 power",
-      "dedicated_ct_ids": [],
       "branch_ct_ids": [
         "panel_a_lighting_ct2"
       ],
@@ -875,10 +869,9 @@
     {
       "device_id": "dev_panel_a_lighting_ct3",
       "name": "Panel A Lighting Circuit 3 power",
-      "dedicated_ct_ids": [
+      "branch_ct_ids": [
         "panel_a_lighting_ct3"
       ],
-      "branch_ct_ids": [],
       "phase": "unknown",
       "double_pole": false,
       "parent_device_id": null,
@@ -890,10 +883,9 @@
     {
       "device_id": "dev_panel_a_air_conditioner",
       "name": "Panel A Air Conditioner power",
-      "dedicated_ct_ids": [
+      "branch_ct_ids": [
         "panel_a_air_conditioner"
       ],
-      "branch_ct_ids": [],
       "phase": "unknown",
       "double_pole": false,
       "parent_device_id": null,
@@ -905,10 +897,9 @@
     {
       "device_id": "dev_panel_a_central_hvac",
       "name": "Panel A Central HVAC power",
-      "dedicated_ct_ids": [
+      "branch_ct_ids": [
         "panel_a_central_hvac"
       ],
-      "branch_ct_ids": [],
       "phase": "unknown",
       "double_pole": false,
       "parent_device_id": null,
@@ -936,10 +927,9 @@
     {
       "device_id": "dev_panel_a_space_heater",
       "name": "Panel A Space Heater power",
-      "dedicated_ct_ids": [
+      "branch_ct_ids": [
         "panel_a_space_heater"
       ],
-      "branch_ct_ids": [],
       "phase": "unknown",
       "double_pole": false,
       "parent_device_id": null,
@@ -951,7 +941,6 @@
     {
       "device_id": "dev_panel_a_patio_heater",
       "name": "Panel A Patio Heater",
-      "dedicated_ct_ids": [],
       "branch_ct_ids": [
         "panel_a_patio_heater_ct1",
         "panel_a_patio_heater_ct2"
@@ -972,10 +961,9 @@
     {
       "device_id": "dev_panel_a_upper_ac",
       "name": "Panel A Upper Floor AC power",
-      "dedicated_ct_ids": [
+      "branch_ct_ids": [
         "panel_a_upper_ac"
       ],
-      "branch_ct_ids": [],
       "phase": "unknown",
       "double_pole": false,
       "parent_device_id": null,
@@ -987,10 +975,9 @@
     {
       "device_id": "dev_panel_a_upper_central_hvac",
       "name": "Panel A Upper Floor HVAC power",
-      "dedicated_ct_ids": [
+      "branch_ct_ids": [
         "panel_a_upper_central_hvac"
       ],
-      "branch_ct_ids": [],
       "phase": "unknown",
       "double_pole": false,
       "parent_device_id": null,
@@ -1002,10 +989,9 @@
     {
       "device_id": "dev_panel_b_refrigerator_1",
       "name": "Panel B Refrigerator 1 power",
-      "dedicated_ct_ids": [
+      "branch_ct_ids": [
         "panel_b_refrigerator_1"
       ],
-      "branch_ct_ids": [],
       "phase": "unknown",
       "double_pole": false,
       "parent_device_id": null,
@@ -1017,10 +1003,9 @@
     {
       "device_id": "dev_panel_b_refrigerator_2",
       "name": "Panel B Refrigerator 2 power",
-      "dedicated_ct_ids": [
+      "branch_ct_ids": [
         "panel_b_refrigerator_2"
       ],
-      "branch_ct_ids": [],
       "phase": "unknown",
       "double_pole": false,
       "parent_device_id": null,
@@ -1032,10 +1017,9 @@
     {
       "device_id": "dev_panel_b_hot_water_tank",
       "name": "Panel B Hot Water Tank power",
-      "dedicated_ct_ids": [
+      "branch_ct_ids": [
         "panel_b_hot_water_tank"
       ],
-      "branch_ct_ids": [],
       "phase": "unknown",
       "double_pole": false,
       "parent_device_id": null,
@@ -1056,10 +1040,9 @@
     {
       "device_id": "dev_panel_b_utility_sink",
       "name": "Panel B Utility Sink power",
-      "dedicated_ct_ids": [
+      "branch_ct_ids": [
         "panel_b_utility_sink"
       ],
-      "branch_ct_ids": [],
       "phase": "unknown",
       "double_pole": false,
       "parent_device_id": null,
@@ -1071,10 +1054,9 @@
     {
       "device_id": "dev_panel_b_workshop_outlet",
       "name": "Panel B Workshop Outlet power",
-      "dedicated_ct_ids": [
+      "branch_ct_ids": [
         "panel_b_workshop_outlet"
       ],
-      "branch_ct_ids": [],
       "phase": "unknown",
       "double_pole": false,
       "parent_device_id": null,
@@ -1086,10 +1068,9 @@
     {
       "device_id": "dev_panel_b_guest_bath_unit",
       "name": "Panel B Guest Bath Unit power",
-      "dedicated_ct_ids": [
+      "branch_ct_ids": [
         "panel_b_guest_bath_unit"
       ],
-      "branch_ct_ids": [],
       "phase": "unknown",
       "double_pole": false,
       "parent_device_id": null,
@@ -1101,10 +1082,9 @@
     {
       "device_id": "dev_panel_b_humidifier_1",
       "name": "Panel B Humidifier 1 power",
-      "dedicated_ct_ids": [
+      "branch_ct_ids": [
         "panel_b_humidifier_1"
       ],
-      "branch_ct_ids": [],
       "phase": "unknown",
       "double_pole": false,
       "parent_device_id": null,
@@ -1116,10 +1096,9 @@
     {
       "device_id": "dev_panel_b_office_outlet",
       "name": "Panel B Office Outlet power",
-      "dedicated_ct_ids": [
+      "branch_ct_ids": [
         "panel_b_office_outlet"
       ],
-      "branch_ct_ids": [],
       "phase": "unknown",
       "double_pole": false,
       "parent_device_id": null,
@@ -1131,10 +1110,9 @@
     {
       "device_id": "dev_panel_b_garden_outlet",
       "name": "Panel B Garden Outlet power",
-      "dedicated_ct_ids": [
+      "branch_ct_ids": [
         "panel_b_garden_outlet"
       ],
-      "branch_ct_ids": [],
       "phase": "unknown",
       "double_pole": false,
       "parent_device_id": null,
@@ -1146,10 +1124,9 @@
     {
       "device_id": "dev_panel_b_display_panel",
       "name": "Panel B Wall Display power",
-      "dedicated_ct_ids": [
+      "branch_ct_ids": [
         "panel_b_display_panel"
       ],
-      "branch_ct_ids": [],
       "phase": "unknown",
       "double_pole": false,
       "parent_device_id": null,
@@ -1161,10 +1138,9 @@
     {
       "device_id": "dev_panel_b_network_cabinet",
       "name": "Panel B Network Cabinet power",
-      "dedicated_ct_ids": [
+      "branch_ct_ids": [
         "panel_b_network_cabinet"
       ],
-      "branch_ct_ids": [],
       "phase": "unknown",
       "double_pole": false,
       "parent_device_id": null,
@@ -1176,10 +1152,9 @@
     {
       "device_id": "dev_panel_b_eave_outlet",
       "name": "Panel B Eave Outlet power",
-      "dedicated_ct_ids": [
+      "branch_ct_ids": [
         "panel_b_eave_outlet"
       ],
-      "branch_ct_ids": [],
       "phase": "unknown",
       "double_pole": false,
       "parent_device_id": null,
@@ -1191,10 +1166,9 @@
     {
       "device_id": "dev_panel_b_ventilation_unit",
       "name": "Panel B Ventilation Unit power",
-      "dedicated_ct_ids": [
+      "branch_ct_ids": [
         "panel_b_ventilation_unit"
       ],
-      "branch_ct_ids": [],
       "phase": "unknown",
       "double_pole": false,
       "parent_device_id": null,
@@ -1206,10 +1180,9 @@
     {
       "device_id": "dev_panel_b_humidifier_2",
       "name": "Panel B Humidifier 2 power",
-      "dedicated_ct_ids": [
+      "branch_ct_ids": [
         "panel_b_humidifier_2"
       ],
-      "branch_ct_ids": [],
       "phase": "unknown",
       "double_pole": false,
       "parent_device_id": null,
@@ -1221,7 +1194,6 @@
     {
       "device_id": "dev_panel_b_upper_plug",
       "name": "Panel B Upper Floor Plug",
-      "dedicated_ct_ids": [],
       "branch_ct_ids": [
         "panel_b_upper_plug_ct1",
         "panel_b_upper_plug_ct2"

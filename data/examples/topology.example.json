@@ -59,10 +59,10 @@
       "metadata": {}
     },
     {
-      "ct_id": "dedicated_fridge",
+      "ct_id": "branch_fridge",
       "entity_id": "sensor.ct_fridge_power",
       "name": "Fridge",
-      "ct_type": "dedicated_device",
+      "ct_type": "branch",
       "phase": "l1",
       "parent_ct_id": "branch_kitchen",
       "polarity": "normal",
@@ -71,13 +71,13 @@
       "metadata": {}
     },
     {
-      "ct_id": "dedicated_spa_pump_l1",
+      "ct_id": "branch_spa_pump_l1",
       "entity_id": "sensor.ct_spa_pump_l1_power",
       "name": "Hot tub leg 1",
       "ct_type": "branch",
       "phase": "l1",
       "parent_ct_id": "main_l1",
-      "paired_ct_id": "dedicated_spa_pump_l2",
+      "paired_ct_id": "branch_spa_pump_l2",
       "polarity": "normal",
       "enabled": true,
       "topology_status": "candidate",
@@ -86,13 +86,13 @@
       }
     },
     {
-      "ct_id": "dedicated_spa_pump_l2",
+      "ct_id": "branch_spa_pump_l2",
       "entity_id": "sensor.ct_spa_pump_l2_power",
       "name": "Hot tub leg 2",
       "ct_type": "branch",
       "phase": "l2",
       "parent_ct_id": "main_l2",
-      "paired_ct_id": "dedicated_spa_pump_l1",
+      "paired_ct_id": "branch_spa_pump_l1",
       "polarity": "normal",
       "enabled": true,
       "topology_status": "candidate",
@@ -105,21 +105,19 @@
     {
       "device_id": "dev_fridge",
       "name": "Kitchen Fridge",
-      "dedicated_ct_ids": [
-        "dedicated_fridge"
+      "branch_ct_ids": [
+        "branch_fridge"
       ],
-      "branch_ct_ids": [],
       "phase": "l1",
       "double_pole": false,
       "topology_status": "candidate",
       "metadata": {
-        "note": "dedicated CT -> direct_measured"
+        "note": "single device on its own branch CT"
       }
     },
     {
       "device_id": "dev_kitchen_plugs",
       "name": "Kitchen plug loads",
-      "dedicated_ct_ids": [],
       "branch_ct_ids": [
         "branch_kitchen_plugs"
       ],
@@ -131,10 +129,9 @@
     {
       "device_id": "dev_spa_pump",
       "name": "Spa Pump",
-      "dedicated_ct_ids": [],
       "branch_ct_ids": [
-        "dedicated_spa_pump_l1",
-        "dedicated_spa_pump_l2"
+        "branch_spa_pump_l1",
+        "branch_spa_pump_l2"
       ],
       "phase": "both",
       "double_pole": true,
