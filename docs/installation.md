@@ -207,7 +207,7 @@ the word "main" in a name — a load called `main_area_ac` stays a load.
 The result is always a **candidate**, never a confirmed topology. Review it in
 the integration options:
 
-1. Assign each CT a role (`main` / `branch` / `dedicated_device` / `unknown`).
+1. Assign each CT a role (`main` / `branch` / `unknown`).
 2. Set the phase (`l1` / `l2` / `both`) and polarity.
 3. Pair double-pole legs if they were not detected.
 4. Confirm or reject each device→CT candidate.

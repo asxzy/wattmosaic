@@ -113,7 +113,7 @@ discovery card.
 | Scan interval | `30` s | Snapshot poll period. Does not affect engine inference cadence. |
 | Stale after | `120` s | Result age at which entities become unavailable. |
 | Unavailable after | `120` s | Engine unreachable duration before entities become unavailable. |
-| CT role | from topology | `main`, `branch`, `dedicated_device`, `unknown`. |
+| CT role | from topology | `main`, `branch`, `unknown`. |
 | CT phase | from topology | `l1`, `l2`, `both`, `unknown`. |
 | CT polarity | `normal` | Set `inverted` if a CT is installed backwards. |
 | Paired CT | from topology | Second leg of a double-pole load. |
@@ -132,7 +132,7 @@ silently defaulted.
   "device_id": "dev_panel_a_lighting_3",   // set from the command, not the payload
   "device_type": "light",
   "connectivity": "connected",        // connected | not_connected | unknown
-  "monitoring": "shared",             // dedicated | shared | home_total_only | unmonitored | unknown
+  "monitoring": "shared",             // shared | home_total_only | unmonitored | unknown
   "behavior": "variable",             // fixed | variable | complex | unknown
 
   "state_entity_ids": ["light.panel_a_lighting_3"],
@@ -201,7 +201,7 @@ curl -X POST http://localhost:8787/api/v1/commands \
         "parameters": {
           "device_type": "hvac_heat",
           "connectivity": "connected",
-          "monitoring": "dedicated",
+          "monitoring": "shared",
           "behavior": "complex",
           "expected": {"on_w": 4500.0},
           "controller": {
