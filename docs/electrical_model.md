@@ -153,7 +153,7 @@ y(t) = A(t) · x(t) + e(t)
 
 | Row kind | `A[i,j]` |
 | --- | --- |
-| Dedicated CT of device `j` | `1` (phase split for a single-leg row of a double-pole pair) |
+| Dedicated CT of device `j` | `1` (a double-pole pair split across its two legs gets `0.5` per leg row; only a *single* leg row of a double-pole load uses `α`) |
 | Device `j`'s most-specific branch CT | `1` |
 | Any other branch CT above `j` | `0` — the child CT is subtracted from `y` instead |
 | Main CT containing `j` | `1` (containment) |
@@ -208,13 +208,20 @@ declared phase decides the split:
 | --- | --- | --- | --- |
 | `L1` | 1 | 0 | 1 |
 | `L2` | 0 | 1 | 1 |
-| `BOTH` (double-pole) | `α` | `1-α` | 1 |
+| `BOTH` (double-pole), one leg only | `α` | `1-α` | 1 |
+| `BOTH` (double-pole), both legs measured | 0.5 | 0.5 | 1 |
 
 * `α = phase_split_l1`, default **0.5**, configurable
   (`ElectricalModel(phase_split_l1=0.7)`).
 * The split is applied **only** when the topology declares the device
   `double_pole=True` / `phase=BOTH`. A single-phase load is never smeared across
   both legs.
+* On the two rows of a **complete leg pair** the coefficient is a fixed `0.5`,
+  **not** `α`: the pair is already a complete observation of the load, so
+  `y_L1 + y_L2` recovers the total exactly and a declared split would scale two
+  measurements that are whole (see §3). `α` is only for a *partial* observation
+  — one leg of a pair, or a single line — where it is the only way to recover
+  the unmeasured part.
 * `x_j` is always the **total** device power. On a `BOTH` row a 2 400 W dryer
   contributes `1 · 2 400`; on separate L1/L2 rows it contributes `1 200` to each.
   The device is still one column and one result.
@@ -252,7 +259,18 @@ is a `double_pole=True` device declared `L1`/`L2`.
 (e.g. `water_heater_ct1` ↔ `water_heater_ct2`). Symmetry is validated
 (`pairing is not symmetric` is reported). When a device declares both legs as
 its branch/dedicated CTs, `TopologyGraph.attribution_ct_ids()` returns **both**,
-and each leg receives its own share through `_attribution_coefficient`.
+and each leg receives its own 0.5 share through `_attribution_coefficient`.
+
+**A complete pair is not split by the declaration.** Two leg rows are already a
+complete observation: the equations are `y_L1 = s·x` and `y_L2 = (1-s)·x` for the
+*physical* share `s`, so `y_L1 + y_L2 = x` whatever `s` is. Weighting the rows
+`α` and `1-α` instead makes the least-squares solution
+`x = P·(αs + (1-α)(1-s)) / (α² + (1-α)²)`, which equals `P` only when `α = s`:
+at `α = 0.7` on a 0.5/0.5 pair it reports `0.862 P`, the observed −13.8 %. That
+is why `TopologyGraph.complete_leg_pair()` exists and why it short-circuits the
+declared split. `α` remains correct -- and is still applied -- when only *one*
+leg is observed, because then the row really does measure a fraction nobody
+stated.
 
 A pair is only a leg pair when the partner is enabled **and** names the same
 `device_id`. The field is free text and discovery pairs channels heuristically,
@@ -823,8 +841,10 @@ row/device carries a diagnostic and confidence is reduced.
 1. **Unidentifiable configurations are not solved by mathematics.** More CTs,
    different CT placement, or state information are the only real fixes.
 2. **Phase split `α` for double-pole devices is an assumption**, not a
-   measurement. It is reported and configurable; a per-device `α` is not in the
-   contract (see §10).
+   measurement — but only where it is used at all: a device observed by a
+   complete pair of leg CTs needs no assumption (its legs are summed), so `α`
+   applies solely to a *partially* observed double-pole load. It is reported and
+   configurable; a per-device `α` is not in the contract (see §10).
 3. **Unknown-phase channels** are conservatively modelled as `BOTH`, which
    over-attributes to the total but never loses energy.
 4. **`rel`/`resolution` metadata is only as good as the audit.** Defaults are
