@@ -22,6 +22,7 @@ from wattmosaic_engine.api.facade import (
 from wattmosaic_engine.api.server import APIServer, create_app
 from wattmosaic_engine.contracts import (
     CONTRACT_VERSION,
+    CTType,
     DeviceTopology,
     ErrorResponse,
     HealthResponse,
@@ -369,6 +370,59 @@ def test_topology_put_without_devices_is_400() -> None:
             body = await resp.json()
             assert body["error"] == "bad_request"
             assert "device" in body["detail"]
+        return True
+
+    assert run(_with_server(StubFacade(), fn))
+
+
+def test_topology_put_rejects_the_retired_dedicated_role() -> None:
+    """AC-6: no new write can reintroduce the removed role.
+
+    ``CTType.DEDICATED_DEVICE`` no longer exists, so ``ct_type`` is constrained
+    to the three surviving members.  The payload is otherwise valid, and the
+    same body with ``ct_type="branch"`` is accepted in the control below — so
+    the 400 is attributable to the role alone, not to some unrelated defect in
+    the fixture.
+    """
+
+    def payload(ct_type: str) -> dict[str, Any]:
+        return {
+            "channels": [
+                {"ct_id": "main_l1", "entity_id": "sensor.m1", "ct_type": "main",
+                 "phase": "l1"},
+                {"ct_id": "br_hot_tub", "entity_id": "sensor.tub", "phase": "l1",
+                 "parent_ct_id": "main_l1", "ct_type": ct_type},
+            ],
+            "devices": [{"device_id": "hot_tub", "branch_ct_ids": ["br_hot_tub"]}],
+        }
+
+    async def fn(session, base):
+        # Control: the identical body with a surviving role must be accepted,
+        # or the rejection below would prove nothing about the retired value.
+        async with session.put(
+            f"{base}/topology", json=payload("branch"), headers=HEADERS
+        ) as resp:
+            assert resp.status == 200, await resp.text()
+
+        async with session.put(
+            f"{base}/topology", json=payload("dedicated_device"), headers=HEADERS
+        ) as resp:
+            assert resp.status == 400, await resp.text()
+            body = await resp.json()
+            ErrorResponse.model_validate(body)
+            assert body["error"] == "bad_request"
+            assert "ct_type" in body["detail"]
+            # The detail echoes the rejected input verbatim, so the retired
+            # word appears there by design.  What must not appear is the role
+            # among the *expected* values: a message still offering it would
+            # send the user straight back to the removed concept.
+            error = next(
+                e for e in json.loads(body["detail"]) if "ct_type" in e.get("loc", ())
+            )
+            expected = error["ctx"]["expected"]
+            assert "dedicated" not in expected
+            for member in CTType:
+                assert member.value in expected
         return True
 
     assert run(_with_server(StubFacade(), fn))

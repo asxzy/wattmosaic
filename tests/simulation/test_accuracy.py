@@ -40,10 +40,9 @@ SEED = 202
 MINUTES = 60
 INTERVAL = 15
 
-# Device ids that the audited topology meters with their own solo branch CT.
-# Wave 2 no longer produces ``direct_measured``; these devices are the ones whose
-# branch row carries them alone, so the constrained fit can recover their power.
-DEDICATED_DEVICES = {
+# Device ids whose branch row carries them alone (no other device shares it), so
+# the constrained fit can recover their power and grade them ``inferred``.
+SOLO_ROW_DEVICES = {
     d.device_id for d in REAL_HOME_TOPOLOGY.devices if d.dedicated_ct
 }
 # Devices that share a branch CT with at least one other device.
@@ -260,7 +259,7 @@ def test_solo_row_devices_are_detected(report) -> None:
     sample actually supports.
     """
     aggregate_tp = aggregate_fp = aggregate_fn = 0
-    for dev_id in DEDICATED_DEVICES:
+    for dev_id in SOLO_ROW_DEVICES:
         det = report.per_device_detection[dev_id]
         aggregate_tp += det.tp
         aggregate_fp += det.fp
@@ -308,8 +307,8 @@ def test_shared_branch_devices_are_never_fabricated(report) -> None:
         assert det.precision >= 0.99, (dev_id, det.precision)
         if dev_id in measured_zero_recall:
             assert det.recall == 0.0, (dev_id, det.recall)
-        # Whatever happens, the claimed power must be honest: either measured
-        # from a dedicated CT or explicitly unknown.
+        # Whatever happens, the claimed power must be honest: either recovered
+        # from the device's own solo branch row or explicitly unknown.
         assert report.per_device[dev_id].mae_w >= 0.0
 
 

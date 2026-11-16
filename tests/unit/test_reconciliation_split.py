@@ -304,7 +304,7 @@ def test_split_does_not_change_any_power_value():
     }
     topo = _aliased_topology()
     rec = _infer(topo, _window(values)).reconciliation
-    # The device value is the dedicated CT reading, unchanged.
+    # The device value comes from its own branch CT row, unchanged.
     batch = _infer(topo, _window(values))
     assert batch.get("heater").power_w == pytest.approx(700.0)
     # And the total is the canonical feed, not the alias and not their sum.

@@ -13,9 +13,10 @@ What is proven here:
   cannot double count;
 * ``Database.energy_total`` sums exactly one bucket size, mirroring the
   repository, so the same energy stored at two resolutions is counted once;
-* ``derive_monitoring`` labels ``DEDICATED`` only when the graph yields a
-  dedicated channel; sole occupancy of a branch CT is ``SHARED`` with
-  ``sole_occupant=True`` and the same watts;
+* ``derive_monitoring`` is graph-only: a device with attribution rows is
+  ``SHARED`` and one with none is ``HOME_TOTAL_ONLY``. The retired ``DEDICATED``
+  label cannot be produced at all, so sole occupancy of a branch CT is
+  ``SHARED`` with ``sole_occupant=True`` and the same watts;
 * ``confidence``'s ``DIRECT_MEASURED_FLOOR`` is a direct-measurement floor only,
   not the 55 % analytic fixed point of an inferred device with no models.
 """
@@ -353,7 +354,7 @@ def test_database_energy_total_is_zero_without_rows(db: Database) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# E4: DEDICATED only when the graph yields a dedicated channel
+# E4: sole occupancy no longer narrows to DEDICATED
 # --------------------------------------------------------------------------- #
 
 
@@ -390,7 +391,7 @@ def test_sole_occupant_branch_is_shared_not_dedicated() -> None:
     # property that gated Level-1 was deleted with the path itself.
     assert not hasattr(effective, "allows_direct_measurement")
     # The label narrows; the watts do not.  The row is still fully attributable,
-    # exactly as it was when the device was mislabelled DEDICATED.
+    # exactly as it was when the same device was labelled with the retired role.
     assert effective.shared_unmodelled is False
 
 

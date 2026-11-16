@@ -902,3 +902,90 @@ def test_a_resumed_tab_probes_the_session_even_off_the_overview() -> None:
     assert "get('/health')" in handler, (
         "a non-overview resume must still probe the session"
     )
+
+
+# --------------------------------------------------------------------------- #
+# AC-1 / AC-7: the retired dedicated-CT vocabulary (task-12)
+# --------------------------------------------------------------------------- #
+
+
+def test_checker_rejects_stray_retired_vocabulary(tmp_path: Path) -> None:
+    """AC-1: the panel must not print the retired concept.
+
+    ``Dedicated CTs`` was a real row label before ADR-0029.  Reintroducing it
+    anywhere outside the one allowlisted alias line must fail the static gate,
+    so the vocabulary cannot drift back in during a later edit.
+    """
+    checker = _panel_checker()
+    root = _panel_fixture(tmp_path)
+    script = root / "app.js"
+    script.write_text(script.read_text().replace("['Branch CTs'", "['Dedicated CTs'"))
+    errors = checker.check(root)
+    assert any("retired dedicated CT concept" in error for error in errors), errors
+
+
+def test_checker_rejects_a_deleted_legacy_alias(tmp_path: Path) -> None:
+    """AC-7: deleting the alias restores the ``titleCase`` leak.
+
+    Without ``STRINGS.dedicated_device`` a stored legacy role renders
+    ``titleCase("dedicated_device")`` = "Dedicated Device" -- a different wrong
+    string that no plain grep for the old label would find.  The smoke check
+    replays the panel's own ``label`` and must catch it.
+    """
+    checker = _panel_checker()
+    root = _panel_fixture(tmp_path)
+    script = root / "app.js"
+    script.write_text(
+        script.read_text().replace("    dedicated_device: 'Branch CT',\n", "")
+    )
+    errors = checker.check(root)
+    assert any("must read 'Branch CT'" in error for error in errors), errors
+    # The vocabulary scan alone does not fire: the word is gone, and only the
+    # render replay can see that the *rendering* regressed.
+    assert not any("retired dedicated CT concept" in error for error in errors)
+
+
+def test_checker_rejects_an_alias_that_renders_the_retired_word(tmp_path: Path) -> None:
+    """The allowlist is conditional on the alias *rendering* ``Branch CT``."""
+    checker = _panel_checker()
+    root = _panel_fixture(tmp_path)
+    script = root / "app.js"
+    script.write_text(
+        script.read_text().replace(
+            "dedicated_device: 'Branch CT'", "dedicated_device: 'Dedicated Device'"
+        )
+    )
+    errors = checker.check(root)
+    assert any("retired dedicated CT concept" in error for error in errors), errors
+    assert any("must read 'Branch CT'" in error for error in errors), errors
+
+
+def test_the_render_replay_is_not_vacuous() -> None:
+    """A broken ``titleCase`` port would make every AC-7 assertion pass.
+
+    The replay asserts the fallback it depends on actually works, so an
+    unknown value must come out title-cased rather than passed through.
+    """
+    checker = _panel_checker()
+    strings = checker.panel_strings(_app_js())
+    assert strings, "the STRINGS table could not be parsed"
+    assert checker.render_label("dedicated_device", strings) == "Branch CT"
+    assert checker.render_label("not_a_real_role", strings) == "Not A Real Role"
+
+
+def test_the_panel_prints_no_retired_ct_wording() -> None:
+    """The rendered surfaces task-12 touched, pinned by their new wording."""
+    script = _app_js()
+    assert "['Monitored by', (topology.branch_ct_ids || []).join(', ')" in script, (
+        "the placement card no longer feeds Monitored by from branch_ct_ids"
+    )
+    assert "'Dedicated CTs'" not in script
+    assert "feed · ${counts.branch} branch · ${counts.unknown} unknown" in script, (
+        "the Circuits hint still reports a dedicated count"
+    )
+    assert "const order = { main: 0, branch: 1, unknown: 2 };" in script
+    assert "['Monitoring', label(configuration.monitoring)]," not in script, (
+        "the declared-configuration Monitoring row is derived state, not a declaration"
+    )
+    css = (REPO_ROOT / "addon" / "ui" / "app.css").read_text(encoding="utf-8")
+    assert 'data-type="dedicated_device"' not in css, "the retired swatch rule is back"

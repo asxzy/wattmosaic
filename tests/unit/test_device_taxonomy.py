@@ -8,7 +8,8 @@ from a real observation in this household's 7-day recorder history:
   inherit the whole row;
 * a complex controller reports a setpoint mode while the CT tracks real heating,
   so the mode entity must never be treated as runtime;
-* a dedicated CT is a measurement whether or not any state entity exists.
+* a CT that a device owns alone still yields a measurement whether or not any
+  state entity exists; ownership, not a retired role, is what attributes a row.
 """
 
 from __future__ import annotations
@@ -67,7 +68,7 @@ AT = datetime(2026, 11, 6, 12, 0, tzinfo=UTC)
 
 
 def _topology() -> Topology:
-    """One main, one dedicated CT, one shared branch carrying an unmodelled load."""
+    """One main, one branch CT owned alone, one shared branch with an unmodelled load."""
     return Topology(
         channels=[
             CTChannel(ct_id="main_l1", entity_id="sensor.main", ct_type=CTType.MAIN, phase=Phase.L1),

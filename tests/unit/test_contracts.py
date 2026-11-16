@@ -5,8 +5,11 @@ These guard the interfaces every other module depends on.
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import re
 import sqlite3
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -47,6 +50,17 @@ from wattmosaic_engine.storage.migrations import MIGRATIONS, apply_migrations, c
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def _export_schemas_module():
+    """``tools/dev/export_schemas.py`` as a module, for its ``MODELS`` map."""
+    path = ROOT / "tools" / "dev" / "export_schemas.py"
+    spec = importlib.util.spec_from_file_location("wm_export_schemas_contracts", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_contract_version_is_2_0_0() -> None:
     """Removing contract enum values is a breaking change, so the major moves."""
     assert contracts.CONTRACT_VERSION == "2.0.0"
@@ -56,6 +70,50 @@ def test_schema_files_match_contract_version() -> None:
     index = json.loads((ROOT / "data" / "schemas" / "index.json").read_text())
     assert index["contract_version"] == contracts.CONTRACT_VERSION
     assert "inference_result" in index["schemas"]
+
+
+def test_the_interface_contract_doc_states_the_current_version() -> None:
+    """AC-10: the doc's own mandatory protocol is bump, regenerate, update.
+
+    ``docs/interface_contracts.md`` §5 tells a maintainer to bump
+    ``CONTRACT_VERSION``, regenerate ``data/schemas/`` and *update this
+    document*.  Step 3 is the one nobody notices missing: the doc is prose, so
+    a stale version line still reads as authoritative.  This pins the stated
+    version against the source of truth.
+    """
+    doc = (ROOT / "docs" / "interface_contracts.md").read_text(encoding="utf-8")
+    stated = re.findall(r"Contract version:\s*`([^`]+)`", doc)
+    assert stated == [contracts.CONTRACT_VERSION], (
+        f"interface_contracts.md states {stated}, contracts.py says "
+        f"{contracts.CONTRACT_VERSION!r}"
+    )
+
+
+def test_the_committed_schemas_are_what_the_contract_generates() -> None:
+    """AC-9, at pytest level: the committed schemas are not stale.
+
+    CI runs ``export_schemas.py`` then ``git diff --exit-code data/schemas``,
+    and ``verify.py`` has the same gate.  Both only work in a git checkout with
+    the tool importable, so this restates the comparison in-process: regenerate
+    each model's schema exactly as the tool would and require the committed
+    file to match byte-for-byte.  A contract edit that forgets the regeneration
+    fails here rather than at review time.
+    """
+    schemas = ROOT / "data" / "schemas"
+    index = json.loads((schemas / "index.json").read_text())
+    # The mapping is read from the exporter itself, so this test and the gate
+    # can never disagree about which model produces which file.
+    exporter = _export_schemas_module()
+    checked = 0
+    for name, filename in index["schemas"].items():
+        model = exporter.MODELS[name]
+        expected = model.model_json_schema(mode="serialization")
+        expected["$id"] = f"https://wattmosaic.local/schemas/{name}.json"
+        expected["x-contract-version"] = contracts.CONTRACT_VERSION
+        committed = json.loads((schemas / filename).read_text())
+        assert committed == expected, f"data/schemas/{filename} is stale"
+        checked += 1
+    assert checked == len(index["schemas"]), "not every indexed schema was checked"
 
 
 def test_measurement_kw_conversion_and_polarity() -> None:

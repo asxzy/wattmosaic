@@ -348,11 +348,11 @@ def test_matrix_shape_and_metadata():
     assert matrix.topology_version == 3
 
 
-def test_dedicated_device_has_a_one_in_its_own_row():
+def test_a_device_owning_a_branch_row_has_a_one_in_it():
     graph = build_graph(house_topology())
     matrix = build_measurement_matrix(graph, ["lights", "fridge", "tv"])
     assert matrix.coefficient("ct_tv", "tv") == pytest.approx(1.0)
-    # Nothing else is in the dedicated row.
+    # Nothing else is in that row.
     assert matrix.coefficient("ct_tv", "lights") == 0.0
     assert matrix.coefficient("ct_tv", "fridge") == 0.0
 
@@ -411,7 +411,7 @@ def test_main_row_contains_everything_below_it():
     matrix = build_measurement_matrix(graph, ["lights", "fridge", "tv"])
     assert matrix.coefficient("main_l1", "lights") == pytest.approx(1.0)
     assert matrix.coefficient("main_l1", "fridge") == pytest.approx(1.0)
-    # tv is on a dedicated CT with no declared parent, so it is not under main_l1.
+    # tv is on its own branch CT with no declared parent, so it is not under main_l1.
     assert matrix.coefficient("main_l1", "tv") == 0.0
 
 
