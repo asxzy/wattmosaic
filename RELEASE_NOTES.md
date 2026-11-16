@@ -1,5 +1,26 @@
 # Release Notes
 
+## v0.2.1-dev.34 — 2026-11-16 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- Merge pull request #5 from asxzy/feature/retire-dedicated-device-w1
+- test: align the suite with the retired dedicated-CT concept
+- feat(integration)!: drop the retired role, monitoring level and mapping step
+- feat(panel): drop the retired dedicated-CT wording and gate regression
+- docs: retire the dedicated-device vocabulary from shipped docs
+- docs: state the branch-only vocabulary and record the supersession
+- feat(schemas)!: regenerate the public contract at 2.0.0 and rebase the examples
+- feat(api): stop publishing the retired monitoring level
+- feat(engine): remove the Level-1 direct measurement path
+- fix(electrical): stop the declared split scaling a complete leg pair
+- test: close out Wave 2 by re-basing suites onto branch-only CTs
+- refactor(contracts)!: narrow CT channels to branch-only and drop dedicated device
+- test: adapt six pinning tests to the retired dedicated-device role
+- feat(storage): add schema 9 migration retiring the dedicated-device role
+
 ## v0.2.1-dev.34 — 2026-11-15 (development channel)
 
 **This release breaks the API contract: `CONTRACT_VERSION` 1.5.0 → 2.0.0.** The
