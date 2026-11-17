@@ -1,5 +1,34 @@
 # Release Notes
 
+## v0.2.1-dev.38 — 2026-11-17 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- docs: record final decisions and honest deployment report
+- feat(models): implement delayed and always-on response as orthogonal parameters
+- docs: reconcile task trackers with completion sprint outcomes
+- docs: add final verification report with orchestrator gate evidence
+- feat(deploy): add a unified workflow and a post-deploy smoke script
+- test: add replay-identical, migration-matrix and performance gates
+- test(simulator): add a deterministic builder for every scenario id
+- feat(topology): reconcile mapping and inference history after a version change
+- feat(ui): render version history, suspected changes and event evidence
+- feat(ui): render residual decomposition, mapping and identifiability ranges
+- feat(topology): detect configuration changes as suspected typed events
+- feat(contracts): add typed status and confidence to configuration changes
+- feat(api): expose the derived mapping matrix read path
+- feat(disaggregation): publish non-fabricating group estimates with bounds
+- feat(disaggregation): publish every inference source used and unused
+- feat(disaggregation): derive the device-reader mapping matrix
+- feat(contracts): extend the mapping-cell contract for the mapping matrix
+- feat(models): generalize adjustable power response beyond dimmable lights
+- test(residual): verify the production baseline window and decomposition
+- feat(residual): feed a real baseline window into the production residual path
+- feat(contracts): settle additive residual-noise and inference-output shapes
+- docs: completion gap analysis and dependency-ordered completion plan
+
 ## v0.2.1-dev.37 — 2026-11-17 (development channel)
 
 Automatic development build.
