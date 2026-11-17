@@ -153,6 +153,12 @@ class EngineConfig:
 
     # Behaviour
     learning_enabled: bool = True
+    #: How often a CT reader publishes a *new state*, in seconds.  This is the
+    #: last-resort fallback used when the aligner has no usable observed
+    #: history; it is **not** a measurement and must never be presented as one
+    #: (spec 03 §6.2).  ``WM_DEFAULT_SAMPLE_INTERVAL_S`` overrides it.  The
+    #: audited median for the reference install is 15.7 s, which the aligner
+    #: derives per channel from its own history rather than from this key.
     default_sample_interval_s: float = 10.0
     stale_after_s: float = 120.0
     inference_interval_s: float = 5.0
@@ -260,6 +266,10 @@ class EngineConfig:
             get("WM_RETENTION_DAYS_AGGREGATES", default=str(cfg.retention_days_aggregates)) or 730
         )
         cfg.learning_enabled = _bool(get("WM_LEARNING_ENABLED"), True)
+        cfg.default_sample_interval_s = float(
+            get("WM_DEFAULT_SAMPLE_INTERVAL_S", default=str(cfg.default_sample_interval_s))
+            or cfg.default_sample_interval_s
+        )
         cfg.stale_after_s = float(get("WM_STALE_AFTER_S", default=str(cfg.stale_after_s)) or 120)
         cfg.inference_interval_s = float(
             get("WM_INFERENCE_INTERVAL_S", default=str(cfg.inference_interval_s)) or 5
@@ -339,6 +349,8 @@ class EngineConfig:
             problems.append("api_port out of range")
         if self.inference_interval_s <= 0:
             problems.append("inference_interval_s must be positive")
+        if self.default_sample_interval_s <= 0:
+            problems.append("default_sample_interval_s must be positive")
         if self.queue_max_size < 100:
             problems.append("queue_max_size too small")
         if self.history_lookback_s <= 0:
@@ -427,6 +439,7 @@ class EngineConfig:
             "learning_enabled": self.learning_enabled,
             "auto_placement": self.auto_placement,
             "stale_after_s": self.stale_after_s,
+            "default_sample_interval_s": self.default_sample_interval_s,
             "inference_interval_s": self.inference_interval_s,
             "log_level": self.log_level,
             "history_lookback_s": self.history_lookback_s,

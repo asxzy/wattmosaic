@@ -136,7 +136,14 @@ def test_window_age_uses_state_timestamp_not_arrival() -> None:
 
 
 def test_channel_health_age_uses_state_timestamp_not_arrival() -> None:
-    """``ChannelHealth.missing`` must follow the same rule as the window."""
+    """``ChannelHealth.missing`` must follow the same rule as the window.
+
+    Both directions are pinned.  Old state / fresh arrival is stale (a replay
+    must not look current); fresh state / old arrival is fresh (a value that
+    just arrived late is still a current measurement).  Measuring from the
+    arrival time would flip both.
+    """
+    # Old state, fresh arrival: the replayed state is stale.
     aligner = SampleAligner(max_age_s=10_000, stale_after_s=120)
     aligner.add(_m("replayed", 0.0, seconds=0, offset=7200.0))
 
@@ -144,6 +151,16 @@ def test_channel_health_age_uses_state_timestamp_not_arrival() -> None:
     assert health.last_update_age_s == pytest.approx(7200.0)
     assert health.missing is True
     assert health.stale is True
+
+    # Fresh state, old arrival: the value is current despite arriving late.
+    aligner2 = SampleAligner(max_age_s=10_000, stale_after_s=120)
+    delayed = _m("delayed", 5.0, seconds=0, offset=0.0, received_at=T0 - timedelta(seconds=7200))
+    aligner2.add(delayed.model_copy(update={"state_timestamp": T0}))
+
+    health2 = aligner2.channel_health_one("delayed", now=T0, stale_after_s=120)
+    assert health2.last_update_age_s == pytest.approx(0.0)
+    assert health2.missing is False
+    assert health2.stale is False
 
 
 def test_window_marks_missing_channels() -> None:
@@ -342,6 +359,91 @@ def test_channel_health_noise_and_resolution() -> None:
     health = aligner.channel_health(now=T0 + timedelta(seconds=40))["l1"]
     assert health.resolution_w == pytest.approx(1.0)
     assert health.noise_mad_w is not None and health.noise_mad_w > 0
+
+
+def test_a_repeated_state_is_not_a_transition() -> None:
+    """A repeat is flagged, is not a transition, and moves no evidence.
+
+    The repeated frame still refreshes the current value and still counts in
+    ``sample_count`` -- it is an observation -- but it is not new evidence, so
+    ``evidence_count`` stays put.  A changed value is a transition and does
+    advance it.  Without the distinction a reader that reports constantly while
+    its value never moves would look like a rich measurement history.
+    """
+    aligner = SampleAligner(max_age_s=10_000, stale_after_s=600)
+    aligner.add(_m("ct", 100.0, seconds=0, sequence=1))
+    aligner.add(_m("ct", 100.0, seconds=15, repeated=True, sequence=2))
+
+    window = aligner.window(at=T0 + timedelta(seconds=20), channels=["ct"])
+    ch = window["ct"]
+    assert ch.value_w == 100.0  # the current value is still exposed
+    assert ch.repeated is True  # and flagged as a repeat
+    assert ch.fresh is False  # it is not a new measurement
+
+    health = aligner.channel_health_one("ct", now=T0 + timedelta(seconds=20))
+    assert health.sample_count == 2  # both frames were observed
+    assert health.evidence_count == 1  # but only one is new evidence
+    assert health.repeat_count == 1
+
+    # A changed value is a transition: the repeat does not suppress it.
+    aligner.add(_m("ct", 140.0, seconds=30, sequence=3))
+    health2 = aligner.channel_health_one("ct", now=T0 + timedelta(seconds=35))
+    assert health2.sample_count == 3
+    assert health2.evidence_count == 2  # advanced by the changed value only
+    assert health2.repeat_count == 1
+
+
+def test_cadence_is_derived_from_observed_history_not_hardcoded() -> None:
+    """The published cadence is the observed median, or the labelled default.
+
+    A 15.7 s series must resolve to ~15.7 s with source ``observed_history``.
+    A channel that has not shown a repeatable spacing (fewer than
+    ``MIN_CADENCE_INTERVALS`` gaps) must publish the *documented default* with
+    source ``configured_default`` -- never a fabricated observation.  A
+    hard-coded 2 s would satisfy neither.
+    """
+    from wattmosaic_engine.electrical.window import DEFAULT_CADENCE_S
+    from wattmosaic_engine.synchronization import (
+        CADENCE_SOURCE_DEFAULT,
+        CADENCE_SOURCE_OBSERVED,
+        MIN_CADENCE_INTERVALS,
+    )
+
+    assert MIN_CADENCE_INTERVALS == 2
+
+    observed = SampleAligner(max_age_s=10_000)
+    for i in range(6):
+        observed.add(_m("ct", float(i), seconds=i * 15.7))
+    resolved = observed.channel_cadence("ct")
+    assert resolved.source == CADENCE_SOURCE_OBSERVED
+    assert resolved.seconds == pytest.approx(15.7)
+    assert resolved.intervals == 5
+    assert resolved.seconds != pytest.approx(2.0)
+
+    # One observed gap is a coincidence, not a spacing: documented default.
+    thin = SampleAligner(max_age_s=10_000)
+    thin.add(_m("ct", 1.0, seconds=0.0))
+    thin.add(_m("ct", 2.0, seconds=15.7))
+    fallback = thin.channel_cadence("ct")
+    assert fallback.source == CADENCE_SOURCE_DEFAULT
+    assert fallback.seconds == pytest.approx(DEFAULT_CADENCE_S)
+    assert fallback.intervals == 0
+
+    # No history at all is the same labelled default, not an observation.
+    empty = SampleAligner(max_age_s=10_000)
+    assert empty.channel_cadence("absent") == fallback
+
+    # The topology merges only observing channels and publishes its source.
+    merged, per_channel = observed.topology_cadence()
+    assert merged.source == CADENCE_SOURCE_OBSERVED
+    assert per_channel["ct"].source == CADENCE_SOURCE_OBSERVED
+    assert merged.seconds == pytest.approx(15.7)
+
+    # A topology with no observing channel publishes the labelled default.
+    merged_default, per_channel_default = thin.topology_cadence()
+    assert merged_default.source == CADENCE_SOURCE_DEFAULT
+    assert merged_default.seconds == pytest.approx(DEFAULT_CADENCE_S)
+    assert per_channel_default["ct"].source == CADENCE_SOURCE_DEFAULT
 
 
 def test_window_repeated_is_not_counted_as_fresh_measurement() -> None:
