@@ -21,11 +21,19 @@ Design rules (spec ``06-device-and-load-model-spec.md`` §5):
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from typing import Any
 
-from ..contracts import ExpectedPower, PowerLevel
+from ..contracts import (
+    DeviceModelParameters,
+    ExpectedPower,
+    LearningSample,
+    LoadShape,
+    ModelType,
+    PowerLevel,
+)
+from .base import _linear_interp, enforce_monotonic, finite
 
 #: The four levels in their natural order: lowest (off but connected) to
 #: highest (doing work), with the transient last because it is not a level.
@@ -35,6 +43,155 @@ LEVEL_ORDER: tuple[PowerLevel, ...] = (
     PowerLevel.ACTIVE,
     PowerLevel.TRANSIENT,
 )
+
+
+@dataclass(slots=True, frozen=True)
+class AdjustableResponse:
+    """A declared ``control level -> watts`` curve for any adjustable load.
+
+    This is the generic form of the dimmable-light response curve.  It is *not*
+    limited to lighting: any device whose load shape is
+    :attr:`~wattmosaic_engine.contracts.LoadShape.ADJUSTABLE` and whose power
+    follows a continuous control value (a speed, a position, a duty cycle, a
+    valve opening, ...) can declare a set of measured ``(level, watts)`` points
+    through this model.
+
+    The class reuses the very same machinery the dimmable model is built on --
+    :func:`~wattmosaic_engine.models.base.enforce_monotonic` (PAVA) and
+    :func:`~wattmosaic_engine.models.base._linear_interp` -- so a non-linear
+    response is represented without duplicating that logic and without any
+    dimmable-light-specific attribute names.  The control variable is a plain
+    declared string, matched against a context attribute of the same name (or
+    the generic ``control_value``/``control_variable`` pair).  No device or
+    entity name is ever consulted.
+
+    Design rules:
+
+    * ``points`` is a *declared* curve.  It is sorted and made monotonic only
+      when ``monotonic=True`` is declared; otherwise the declared shape is kept
+      exactly (a non-monotonic device is legitimate and must not be
+      "corrected" into a false claim).
+    * :meth:`power_at` interpolates linearly between declared points and clamps
+      beyond the range -- it never extrapolates.
+    * All fields are neutral by default: an empty curve answers ``None``, and a
+      lookup that cannot be answered returns ``None`` rather than a fabricated
+      number.
+    """
+
+    points: tuple[tuple[float, float], ...] = ()
+    control_variable: str = "level"
+    monotonic: bool = True
+    #: A declared label for the curve, carried through to diagnostics.
+    name: str = "adjustable"
+
+    @classmethod
+    def from_declared(
+        cls,
+        points: Sequence[tuple[float, float]],
+        *,
+        control_variable: str = "level",
+        monotonic: bool = True,
+        name: str = "adjustable",
+    ) -> AdjustableResponse:
+        """Build a response from declared ``(level, watts)`` points.
+
+        A declared curve is taken at face value: only finite points are kept,
+        duplicates are collapsed to their mean, and points are sorted by level.
+        Monotonicity is enforced only when the declaration says the device is
+        monotonic; a non-monotonic device keeps its declared (non-linear) shape.
+        """
+        clean = [
+            (float(x), float(y))
+            for x, y in points
+            if finite(x) is not None and finite(y) is not None
+        ]
+        clean.sort(key=lambda pair: pair[0])
+        collapsed: list[tuple[float, float]] = []
+        for x, y in clean:
+            if collapsed and abs(collapsed[-1][0] - x) < 1e-9:
+                px, py = collapsed[-1]
+                collapsed[-1] = (px, (py + y) / 2.0)
+            else:
+                collapsed.append((x, y))
+        curve = enforce_monotonic(collapsed) if monotonic else collapsed
+        return cls(
+            points=tuple(curve),
+            control_variable=control_variable,
+            monotonic=monotonic,
+            name=name,
+        )
+
+    @classmethod
+    def from_samples(
+        cls,
+        samples: Sequence[LearningSample],
+        *,
+        control_variable: str = "level",
+        monotonic: bool = True,
+        name: str = "adjustable",
+    ) -> AdjustableResponse:
+        """Build a response from accepted learning samples for one control axis.
+
+        Samples whose control variable does not match (or that carry no usable
+        control value / power) are ignored, so a partially-labelled dataset
+        yields a curve from just the declared axis rather than a blended guess.
+        """
+        desired = control_variable.strip().lower()
+        points: list[tuple[float, float]] = []
+        for sample in samples:
+            if not sample.accepted:
+                continue
+            variable = (sample.control_variable or "").strip().lower()
+            if variable != desired:
+                continue
+            x, y = finite(sample.control_value), finite(sample.event_power_w)
+            if x is not None and y is not None:
+                points.append((x, y))
+        return cls.from_declared(
+            points,
+            control_variable=control_variable,
+            monotonic=monotonic,
+            name=name,
+        )
+
+    @property
+    def model_type(self) -> ModelType:
+        """The model implementation axis this response belongs to."""
+        return ModelType.DIMMABLE
+
+    def as_parameters(self) -> DeviceModelParameters:
+        """The curve in the contract's shared ``DeviceModelParameters`` shape."""
+        return DeviceModelParameters(curve=[(x, y) for x, y in self.points])
+
+    def power_at(self, level: float | None) -> float | None:
+        """Interpolate the declared curve at ``level`` (clamped, never extrapolated).
+
+        ``None`` (no level reported) is answered with ``None``: a level that was
+        not reported is not "full scale", and reporting a number would fabricate
+        one.
+        """
+        x = finite(level)
+        if x is None or not self.points:
+            return None
+        predicted = _linear_interp(x, self.points)
+        return float(predicted) if predicted is not None else None
+
+    def is_monotonic(self) -> bool:
+        """True when the declared response is non-decreasing across its points."""
+        watts = [y for _, y in self.points]
+        return all(watts[i] <= watts[i + 1] + 1e-9 for i in range(len(watts) - 1))
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "model_type": self.model_type.value,
+            "load_shape": LoadShape.ADJUSTABLE.value,
+            "control_variable": self.control_variable,
+            "monotonic_declared": self.monotonic,
+            "monotonic": self.is_monotonic(),
+            "curve_points": len(self.points),
+            "curve": [[x, y] for x, y in self.points],
+        }
 
 
 @dataclass(slots=True, frozen=True)
@@ -58,6 +215,11 @@ class DevicePowerProfile:
     transient_w: float | None = None
     #: Absolute tolerance for matching a measurement to ``active_w``.
     tolerance_w: float = 2.0
+    #: An optional declared adjustable response curve.  ``None`` means the
+    #: device declared no control-to-power relationship; the profile then
+    #: answers no adjustable question, exactly as before this field existed.
+    #: Attaching one never changes the standby/idle/active/transient lookups.
+    adjustable_response: AdjustableResponse | None = None
 
     # -- constructors ----------------------------------------------------- #
     @classmethod
@@ -82,6 +244,39 @@ class DevicePowerProfile:
         if expected.startup_w is not None:
             return expected.startup_w
         return expected.shutdown_w
+
+    @classmethod
+    def for_adjustable(
+        cls,
+        device_id: str,
+        load_shape: LoadShape,
+        points: Sequence[tuple[float, float]],
+        *,
+        expected: ExpectedPower | None = None,
+        control_variable: str = "level",
+        monotonic: bool = True,
+    ) -> DevicePowerProfile:
+        """Build a profile with a declared adjustable response.
+
+        The response is attached **only** when the load shape is explicitly
+        :attr:`LoadShape.ADJUSTABLE`.  That is the declaration gate: a device
+        whose shape is undeclared (``UNKNOWN``) or any other shape keeps a
+        neutral profile with no response, even if its name suggests otherwise.
+        Nothing here reads a device or entity name.
+        """
+        profile = (
+            cls.from_expected(device_id, expected)
+            if expected is not None
+            else cls(device_id=device_id)
+        )
+        if load_shape != LoadShape.ADJUSTABLE:
+            return profile
+        response = AdjustableResponse.from_declared(
+            points,
+            control_variable=control_variable,
+            monotonic=monotonic,
+        )
+        return profile.with_adjustable_response(response)
 
     @classmethod
     def from_mapping(cls, device_id: str, data: Mapping[str, Any]) -> DevicePowerProfile:
@@ -168,8 +363,28 @@ class DevicePowerProfile:
         level = self.level_for(power_w)
         return level is not PowerLevel.TRANSIENT and level is not PowerLevel.UNKNOWN
 
+    # -- adjustable response ---------------------------------------------- #
+    def with_adjustable_response(self, response: AdjustableResponse) -> DevicePowerProfile:
+        """Return a copy of this profile carrying a declared adjustable response.
+
+        A pure, additive attachment: the standby/idle/active/transient levels and
+        all existing lookups are unchanged.  The copy keeps the profile frozen
+        and leaves every other caller's profile untouched.
+        """
+        return replace(self, adjustable_response=response)
+
+    def power_at_level(self, level: float | None) -> float | None:
+        """Expected watts at a control level, or ``None`` when not declared."""
+        if self.adjustable_response is None:
+            return None
+        return self.adjustable_response.power_at(level)
+
+    def is_adjustable(self) -> bool:
+        """True when a declared adjustable response is attached."""
+        return self.adjustable_response is not None
+
     def as_dict(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "device_id": self.device_id,
             "standby_w": self.standby_w,
             "idle_w": self.idle_w,
@@ -177,6 +392,9 @@ class DevicePowerProfile:
             "transient_w": self.transient_w,
             "tolerance_w": self.tolerance_w,
         }
+        if self.adjustable_response is not None:
+            data["adjustable_response"] = self.adjustable_response.describe()
+        return data
 
 
 def _opt_float(value: Any) -> float | None:
@@ -196,5 +414,6 @@ TRANSIENT_LEVEL = PowerLevel.TRANSIENT
 __all__ = [
     "LEVEL_ORDER",
     "TRANSIENT_LEVEL",
+    "AdjustableResponse",
     "DevicePowerProfile",
 ]

@@ -15,7 +15,7 @@ from .base import (
 )
 from .binary import BinaryDeviceModel
 from .composite import CompositeDeviceModel
-from .device_profile import DevicePowerProfile
+from .device_profile import AdjustableResponse, DevicePowerProfile
 from .dimmable import DimmableDeviceModel
 from .multi_state import MultiStateDeviceModel
 from .protocols import ModelContextProtocol, SimpleReading, SimpleWindow, window_channels
@@ -38,6 +38,7 @@ from .time_varying import CycleSummary, TimeVaryingApplianceModel, trapezoidal_e
 from .variable_speed import VariableSpeedDeviceModel
 
 __all__ = [
+    "AdjustableResponse",
     "BinaryDeviceModel",
     "CompositeDeviceModel",
     "CycleSummary",

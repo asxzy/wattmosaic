@@ -60,6 +60,7 @@ from wattmosaic_engine.disaggregation.tiers import (
 from wattmosaic_engine.electrical.topology import build_graph
 from wattmosaic_engine.electrical.window import ObservationWindow
 from wattmosaic_engine.entity_evidence import classify_entity, select_runtime_entities
+from wattmosaic_engine.models import AdjustableResponse, DevicePowerProfile
 
 AT = datetime(2026, 11, 6, 12, 0, tzinfo=UTC)
 
@@ -864,3 +865,47 @@ def test_published_power_names_its_level_distinct_from_power_state() -> None:
     # No declaration -> the honest UNKNOWN fallback, never a guess.
     plain = _infer(_topology(), {"main_l1": 100.0}, {}).get("lamp")
     assert plain.power_level == PowerLevel.UNKNOWN.value
+
+
+def test_adjustable_load_shape_is_published_with_a_non_linear_response() -> None:
+    """TASK-POWER-003: an ADJUSTABLE declaration publishes its shape and curve.
+
+    The synthetic response is non-linear (mid-level power is not the linear
+    midpoint), attaches to a non-light device, and is gated purely on the
+    declared load shape -- never on the device name.  The published
+    ``power_state``/``power_level`` axes stay intact.
+    """
+    projected = _with(
+        [
+            DeviceConfiguration(
+                device_id="water_heater",
+                load_shape=LoadShape.ADJUSTABLE,
+                expected=ExpectedPower(on_w=110.0),
+            )
+        ]
+    )
+    batch = _infer(
+        projected, {"main_l1": 110.0, "ct_water_heater": 110.0}, {"water_heater": "on"}
+    )
+    result = batch.get("water_heater")
+    assert result.load_shape == LoadShape.ADJUSTABLE.value
+    assert result.model_dump(mode="json")["load_shape"] == "adjustable"
+    # Provenance and level axes are unchanged by the adjustable declaration.
+    assert result.power_state in {"measured", "estimated", "allocated", "unknown"}
+    assert result.power_level == PowerLevel.ACTIVE.value
+
+    response = AdjustableResponse.from_declared(
+        [(0.0, 10.0), (50.0, 85.0), (100.0, 110.0)],
+        control_variable="position",
+        monotonic=True,
+    )
+    profile = DevicePowerProfile.for_adjustable(
+        "water_heater",
+        LoadShape.ADJUSTABLE,
+        [(0.0, 10.0), (50.0, 85.0), (100.0, 110.0)],
+        expected=ExpectedPower(on_w=110.0),
+        control_variable="position",
+    )
+    assert profile.power_at_level(50.0) == response.power_at(50.0) == pytest.approx(85.0)
+    assert profile.power_at_level(50.0) != pytest.approx((10.0 + 110.0) / 2.0)
+    assert profile.is_adjustable() is True

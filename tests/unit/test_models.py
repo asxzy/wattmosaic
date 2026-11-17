@@ -24,6 +24,7 @@ from wattmosaic_engine.contracts import (
     DeviceModelParameters,
     DeviceModelVersion,
     ExpectedPower,
+    LoadShape,
     ModelStatus,
     ModelType,
     OperatingStage,
@@ -31,6 +32,7 @@ from wattmosaic_engine.contracts import (
     StageStatus,
 )
 from wattmosaic_engine.models import (
+    AdjustableResponse,
     BinaryDeviceModel,
     CompositeDeviceModel,
     DevicePowerProfile,
@@ -155,6 +157,116 @@ def test_enforce_monotonic_produces_non_decreasing_curve() -> None:
     assert values[-1] == pytest.approx(100.0)
 
     assert enforce_monotonic([]) == []
+
+
+# --------------------------------------------------------------------------- #
+# TASK-POWER-003: generalised adjustable response (G-03)
+# --------------------------------------------------------------------------- #
+
+
+def test_adjustable_response_is_non_linear_and_monotonic() -> None:
+    """A synthetic declared curve proves non-linearity and declared monotonicity.
+
+    The curve is intentionally non-linear: at the mid control level the power is
+    NOT the arithmetic midpoint of the endpoints (a linear response would put it
+    at the midpoint).  This is the mutation-proven assertion for G-03.
+    """
+    # level 0 -> 10 W, level 100 -> 110 W (linear midpoint would be 60 W), but
+    # level 50 -> 85 W -- a convex, accelerating response.
+    response = AdjustableResponse.from_declared(
+        [(0.0, 10.0), (50.0, 85.0), (100.0, 110.0)],
+        control_variable="position",
+        monotonic=True,
+        name="synthetic_valve",
+    )
+    linear_midpoint = (10.0 + 110.0) / 2.0  # 60 W
+
+    assert response.model_type == ModelType.DIMMABLE
+    assert response.control_variable == "position"
+    assert response.power_at(50.0) == pytest.approx(85.0)
+    assert response.power_at(50.0) != pytest.approx(linear_midpoint)
+    # Monotonic where the profile declares it.
+    assert response.monotonic is True
+    assert response.is_monotonic() is True
+    assert response.as_parameters().curve == [(0.0, 10.0), (50.0, 85.0), (100.0, 110.0)]
+    assert response.describe()["load_shape"] == LoadShape.ADJUSTABLE.value
+
+
+def test_adjustable_response_clamps_and_answers_none_neutrally() -> None:
+    """Out-of-range levels clamp; an unreported level yields no number."""
+    response = AdjustableResponse.from_declared([(10.0, 20.0), (90.0, 180.0)])
+    assert response.power_at(0.0) == pytest.approx(20.0)
+    assert response.power_at(200.0) == pytest.approx(180.0)
+    assert response.power_at(None) is None
+    assert AdjustableResponse().power_at(50.0) is None
+
+
+def test_adjustable_response_respects_a_declared_non_monotonic_curve() -> None:
+    """A non-monotonic declaration is kept, not silently PAVA-corrected."""
+    response = AdjustableResponse.from_declared(
+        [(0.0, 10.0), (50.0, 90.0), (100.0, 40.0)],
+        monotonic=False,
+    )
+    assert response.points == ((0.0, 10.0), (50.0, 90.0), (100.0, 40.0))
+    assert response.is_monotonic() is False
+    assert response.power_at(50.0) == pytest.approx(90.0)
+
+
+def test_adjustable_learning_samples_use_any_declared_control_variable() -> None:
+    """The generic model learns from a control axis that is not a dimmer."""
+    samples = [
+        make_sample(
+            "damper",
+            i,
+            baseline=0.0,
+            event=power,
+            control_value=level,
+            control_variable="damper_position",
+            state="on",
+        )
+        for i, (level, power) in enumerate([(0, 10), (50, 85), (100, 110)])
+    ]
+    response = AdjustableResponse.from_samples(samples, control_variable="damper_position")
+    assert response.points == ((0.0, 10.0), (50.0, 85.0), (100.0, 110.0))
+    assert response.power_at(50.0) != pytest.approx((10.0 + 110.0) / 2.0)
+
+    # Samples on a different control axis never bleed into this curve.
+    other = AdjustableResponse.from_samples(samples, control_variable="brightness")
+    assert other.points == ()
+
+
+def test_declared_adjustable_profile_preserves_level_lookup() -> None:
+    """An attached curve is additive: the standby/idle/active levels are intact.
+
+    Behaviour is driven by the declared ``LoadShape.ADJUSTABLE``, never by the
+    device name, and an undeclared device keeps a neutral (non-adjustable)
+    profile.
+    """
+    declared = DevicePowerProfile.for_adjustable(
+        "noisy_name_dim",
+        LoadShape.ADJUSTABLE,
+        [(0.0, 10.0), (50.0, 85.0), (100.0, 110.0)],
+        expected=ExpectedPower(standby_w=10.0, on_w=110.0),
+        control_variable="position",
+    )
+    assert declared.is_adjustable() is True
+    assert declared.power_at_level(50.0) == pytest.approx(85.0)
+    # The power-level lookup (the published power_level axis) is unchanged.
+    assert declared.level_for(110.0) == PowerLevel.ACTIVE
+    assert declared.level_for(10.0) == PowerLevel.STANDBY
+    assert declared.level_for(85.0) == PowerLevel.UNKNOWN
+    assert declared.operating_w() == pytest.approx(110.0)
+
+    # Declaration gate: a suggestive name alone never attaches a response.
+    undeclared = DevicePowerProfile.for_adjustable(
+        "dimmable_light",
+        LoadShape.UNKNOWN,
+        [(0.0, 10.0), (50.0, 85.0), (100.0, 110.0)],
+        expected=ExpectedPower(on_w=110.0),
+    )
+    assert undeclared.is_adjustable() is False
+    assert undeclared.power_at_level(50.0) is None
+    assert undeclared.level_for(110.0) == PowerLevel.ACTIVE
 
 
 def test_context_from_sample_parses_state_control_and_notes() -> None:
