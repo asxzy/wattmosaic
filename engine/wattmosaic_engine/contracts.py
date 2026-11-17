@@ -29,7 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from . import __version__ as ENGINE_VERSION
 
-CONTRACT_VERSION = "2.1.0"
+CONTRACT_VERSION = "2.2.0"
 
 
 def utcnow() -> datetime:
@@ -870,6 +870,19 @@ class ResidualPower(Model):
 
     dynamic_w: float | None = None
     """Cycling part of the residual, when decomposition has been performed."""
+
+    #: The observed noise part of the residual, in W (spec ``01-…``
+    #: REQ-RESIDUAL-002 / ``18-…`` G-01).  ``None`` = not determinable; the
+    #: contract never back-fills it to force a three-way sum.  Additive and
+    #: optional so a pre-change two-part decomposition still validates.
+    noise_w: float | None = None
+    #: The measured noise floor the noise part was derived against, in W.
+    #: ``None`` = no measured floor; mirrors the vocabulary of
+    #: ``ResidualBaselineChange.noise_floor_w`` and ``channel_noise_floor_w``.
+    noise_floor_w: float | None = None
+    #: How ``noise_w`` was derived (e.g. ``"measured_mad"`` / ``"row_mad"``).
+    #: ``None`` = not stated.  Free text, never parsed by the engine.
+    noise_source: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -2065,6 +2078,25 @@ class InferenceResult(Model):
     algorithm_version: str | None = None
     #: Link to the versioned ``InferenceRecord`` that carries this result.
     record_id: str | None = None
+    # -- contract 2.2.0 additions (additive/neutral, so 2.1.0 payloads validate) - #
+    #: The joint-inference source ledger (spec ``01-…`` REQ-DISAGG-001 / ``18-…``
+    #: G-05): names every source consumed in this cycle.  Each entry carries a
+    #: ``source`` and a ``reason`` code.  Empty = no source named; distinct from
+    #: the field being absent.  Additive so an old payload reads as "none named".
+    sources_used: list[dict[str, str]] = Field(default_factory=list)
+    #: Sources that were available this cycle but deliberately unused, each with
+    #: a concrete reason.  The counterpart of ``sources_used`` in the ledger.
+    sources_unused: list[dict[str, str]] = Field(default_factory=list)
+    #: Identifiability/group range for an inseparable group this value belongs to
+    #: (spec ``01-…`` REQ-DISAGG-003/004 / ``18-…`` G-06).  ``min_w``/``max_w``
+    #: are the honest floor and cap of the group's *sum*, never a fabricated
+    #: per-device split; ``0 <= min_w <= max_w`` when both are stated.  ``None``
+    #: = no range established, so a pre-change value reads as "no group range".
+    min_w: float | None = None
+    max_w: float | None = None
+    #: The members of the ambiguous group the range above describes.  Empty =
+    #: this value is not part of a published group range.
+    group_members: list[str] = Field(default_factory=list)
 
 
 class Reconciliation(Model):

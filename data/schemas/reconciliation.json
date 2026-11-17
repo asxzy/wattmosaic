@@ -102,6 +102,42 @@
           ],
           "default": null,
           "title": "Dynamic W"
+        },
+        "noise_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Noise W"
+        },
+        "noise_floor_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Noise Floor W"
+        },
+        "noise_source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Noise Source"
         }
       },
       "title": "ResidualPower",
@@ -246,5 +282,5 @@
   "title": "Reconciliation",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/reconciliation.json",
-  "x-contract-version": "2.1.0"
+  "x-contract-version": "2.2.0"
 }

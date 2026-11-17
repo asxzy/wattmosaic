@@ -311,6 +311,57 @@
           ],
           "default": null,
           "title": "Record Id"
+        },
+        "sources_used": {
+          "items": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "title": "Sources Used",
+          "type": "array"
+        },
+        "sources_unused": {
+          "items": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "title": "Sources Unused",
+          "type": "array"
+        },
+        "min_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min W"
+        },
+        "max_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max W"
+        },
+        "group_members": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Group Members",
+          "type": "array"
         }
       },
       "required": [
@@ -622,6 +673,42 @@
           ],
           "default": null,
           "title": "Dynamic W"
+        },
+        "noise_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Noise W"
+        },
+        "noise_floor_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Noise Floor W"
+        },
+        "noise_source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Noise Source"
         }
       },
       "title": "ResidualPower",
@@ -684,5 +771,5 @@
   "title": "SnapshotResponse",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/snapshot_response.json",
-  "x-contract-version": "2.1.0"
+  "x-contract-version": "2.2.0"
 }

@@ -352,5 +352,5 @@
   "title": "EventEvidenceRecord",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/event_evidence_record.json",
-  "x-contract-version": "2.1.0"
+  "x-contract-version": "2.2.0"
 }

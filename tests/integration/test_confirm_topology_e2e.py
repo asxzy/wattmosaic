@@ -491,6 +491,8 @@ def test_the_engine_contract_version_is_1_4_0(tmp_path: Path, path: str) -> None
             return response.headers.get("X-WattMosaic-Contract-Version"), await response.json()
 
     header, body = _with_harness(tmp_path, scenario)
-    assert header == contracts.CONTRACT_VERSION == "2.1.0"
+    # Pin the served header to the authoritative constant, not a stale literal,
+    # so an additive contract bump does not require editing this assertion.
+    assert header == contracts.CONTRACT_VERSION
     if "contract_version" in body:
-        assert body["contract_version"] == "2.1.0"
+        assert body["contract_version"] == contracts.CONTRACT_VERSION

@@ -971,24 +971,52 @@ def test_the_residual_is_never_redistributed_onto_a_device():
     assert not any("redistribut" in name for name in Reconciliation.model_fields)
 
 
-def test_the_noise_component_is_not_publishable_without_a_contract_change():
-    """``05-…`` §3.3.4 / ``G74``: the third component has no contract home.
+def test_the_noise_component_round_trips_additively():
+    """``05-…`` §3.3.4 / ``REQ-RESIDUAL-002`` / ``G-01``: the third component
+    now has a contract home, and it is additive-and-neutral.
 
-    The measured per-Reader noise floor exists (``main.py:1093`` publishes
-    ``channel_noise_floor_w``), but ``ResidualPower`` has no field to carry it,
-    so the residual decomposition cannot publish a noise term today.  This test
-    records that boundary: it fails if a noise field appears on the contract
-    without the additive-and-optional protocol, and it is the check the later
-    wave must update.
+    ``ResidualPower`` gained optional ``noise_w`` / ``noise_floor_w`` /
+    ``noise_source`` fields with ``None`` defaults.  Two things must hold: a
+    payload that states them round-trips exactly, and a payload written before
+    the change (without them) still validates and reads as ``None`` -- the
+    additive/optional protocol of ``REQ-FOUNDATION-002``.
     """
     fields = ResidualPower.model_fields
     assert "baseline_w" in fields
     assert "dynamic_w" in fields
-    assert "noise_w" not in fields
-    assert "noise_floor_w" not in fields
-    assert "noise_source" not in fields
+    assert "noise_w" in fields
+    assert "noise_floor_w" in fields
+    assert "noise_source" in fields
+
+    # A payload WITH the noise components round-trips exactly.
+    stated = ResidualPower.model_validate(
+        {
+            "residual_w": 12.0,
+            "baseline_w": 8.0,
+            "dynamic_w": 3.0,
+            "noise_w": 1.0,
+            "noise_floor_w": 0.5,
+            "noise_source": "measured_mad",
+        }
+    )
+    dumped = stated.model_dump()
+    assert dumped["noise_w"] == pytest.approx(1.0)
+    assert dumped["noise_floor_w"] == pytest.approx(0.5)
+    assert dumped["noise_source"] == "measured_mad"
+    assert ResidualPower.model_validate(dumped) == stated
+
+    # A pre-change payload WITHOUT the noise fields still validates, and the
+    # new fields read as neutral (None), not as a fabricated 0.0.
+    legacy = ResidualPower.model_validate(
+        {"residual_w": 12.0, "baseline_w": 8.0, "dynamic_w": 4.0}
+    )
+    assert legacy.noise_w is None
+    assert legacy.noise_floor_w is None
+    assert legacy.noise_source is None
+    assert "noise_w" in legacy.model_dump()
+
     # The decomposition still sums to the residual without a noise term: the
-    # split is a two-part decomposition until the contract grows a third.
+    # noise fields are optional metadata, not a required fourth summand.
     residual = ResidualAnalyzer().compute(_scope(window_w=(190.0, 200.0, 210.0)), 1200.0)
     assert residual.baseline_w + residual.dynamic_w == pytest.approx(
         residual.residual_w, abs=1e-9

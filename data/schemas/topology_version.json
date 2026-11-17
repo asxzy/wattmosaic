@@ -96,5 +96,5 @@
   "title": "TopologyVersion",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/topology_version.json",
-  "x-contract-version": "2.1.0"
+  "x-contract-version": "2.2.0"
 }

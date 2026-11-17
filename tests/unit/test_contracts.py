@@ -64,9 +64,13 @@ def _export_schemas_module():
     return module
 
 
-def test_contract_version_is_2_0_0() -> None:
-    """Removing contract enum values is a breaking change, so the major moves."""
-    assert contracts.CONTRACT_VERSION == "2.1.0"
+def test_contract_version_is_2_2_0() -> None:
+    """The canonical pin: the authoritative version is the one this task bumped.
+
+    Other version assertions compare against this exported constant so they
+    stay correct across future additive bumps; the pin lives here.
+    """
+    assert contracts.CONTRACT_VERSION == "2.2.0"
 
 
 def test_schema_files_match_contract_version() -> None:

@@ -538,7 +538,9 @@ def test_reconciliation_fields_are_additive_with_zero_defaults():
     assert rec.unknown_residual_w == 0.0
 
 
-def test_contract_version_is_2_0_0():
+def test_contract_version_matches_the_authoritative_constant():
     from wattmosaic_engine import contracts
 
-    assert contracts.CONTRACT_VERSION == "2.1.0"
+    # Track the source of truth rather than a fresh stale literal so this pin
+    # stays correct across additive contract bumps.
+    assert contracts.CONTRACT_VERSION == "2.2.0"
