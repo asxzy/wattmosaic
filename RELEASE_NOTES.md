@@ -1,5 +1,30 @@
 # Release Notes
 
+## v0.2.1-dev.37 — 2026-11-17 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- Merge pull request #6 from asxzy/feat/retention-horizon-app-options
+- feat(addon): expose the L2/L4 retention horizons as app options
+- docs: update progress and traceability to actual implementation status
+- fix(simulation): correct the state-lag test so a genuine lag is withheld
+- feat(models): add the load-shape axis, the device power profile and version reversal
+- feat(events): name every event kind, group automations and derive the window on the live path
+- feat(electrical): enforce the containment evidence bar and once-only contribution
+- feat(topology): version the topology with a deterministic diff
+- feat(topology): resolve every edge to one relation kind with an explicit lifecycle
+- feat(residual): pin the signed residual, its decomposition and the unresolved state
+- feat(storage): add the four-tier registry, per-tier retention and payload encoding
+- docs(spec): clarify the two cadence defaults are independent by design
+- feat(engine): make the leg pair atomic and publish the reader declaration
+- feat(sync): publish the resolved cadence with its source and gate the 2s assumption
+- feat(engine): enforce the measurement unit whitelist and phase declaration
+- feat(engine): add the machine-readable four-state power label
+- feat(contracts): add the circuit-aware topology and evidence contracts
+- docs(spec): add the circuit-aware load disaggregation specification set
+
 ## v0.2.1-dev.36 — 2026-11-16 (development channel)
 
 Automatic development build.
