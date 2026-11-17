@@ -102,6 +102,19 @@ MATERIALISED_KEY = "materialised_from_config"
 #: Documented simplification, never presented as a fitted model.
 LINEAR_DIMMING_DEFAULT = True
 
+#: Where a resolved *isolation window width* came from.  This vocabulary is
+#: deliberately separate from the ``device`` / ``class`` / ``global`` labels
+#: :meth:`IsolationConfig.resolve` publishes (those name the configuration layer
+#: that answered) and from ``aligner.CADENCE_SOURCE_DEFAULT``
+#: (``"configured_default"``).  The last one labels a fallback *cadence* -- a
+#: sampling rate a reader with no usable history was given.  This one labels a
+#: *window width*: ``configured`` is a width the operator declared, and
+#: ``observed_history`` is one derived from the reader's own cadence.  A
+#: consumer that sees ``"configured"`` here must not read it as "the cadence was
+#: a default", and one that sees ``"configured_default"`` from the aligner must
+#: not read it as "the window width was declared".
+WINDOW_SOURCE_CONFIGURED = "configured"
+
 
 @dataclass(slots=True, frozen=True)
 class EffectiveConfig:

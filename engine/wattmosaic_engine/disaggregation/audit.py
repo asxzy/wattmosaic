@@ -42,7 +42,7 @@ import json
 import math
 from collections import Counter, deque
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -168,6 +168,10 @@ class AuditConfig:
     write_residual: bool = True
     write_hierarchy: bool = True
     write_records: bool = True
+    #: Live step tracker, supplied by :class:`AuditPass` so the isolation window
+    #: can be sized from the reader's *observed* cadence on the production path.
+    #: ``None`` (the default for a standalone config) keeps the configured width.
+    tracker: Any | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if float(self.analysis_offset_s) < 0.0:
@@ -269,12 +273,19 @@ class AuditConfig:
         them, ``IsolationConfig.resolve`` actually has the layers its docstring
         promises.  ``IsolationWindow.merged`` drops non-finite/negative values,
         so a typo cannot produce a window that silently never matches.
+
+        ``cadence_samples`` carries the tracker's observed per-channel history,
+        so on this production path the global window is *derived* from the
+        reader's own cadence and the verdict publishes ``window_source`` as
+        ``observed_history`` rather than ``configured``.  The learning pipeline
+        is a separate producer and still resolves the configured width.
         """
         base = self.isolation_base_window
         return IsolationConfig(
             analysis_offset_s=base.analysis_offset_s,
             isolation_window_s=base.isolation_window_s,
             power_window_s=base.analysis_window_s,
+            cadence_samples=self.cadence_samples(),
             min_baseline_samples=int(self.min_baseline_samples),
             min_event_samples=int(self.min_event_samples),
             defaults={
@@ -305,6 +316,41 @@ class AuditConfig:
             float(window.analysis_offset_s) + float(window.analysis_window_s)
             for window in windows
         )
+
+    def cadence_samples(self) -> dict[str, list[tuple[datetime, float]]]:
+        """Per-channel ``(received_at, value_w)`` history from the tracker.
+
+        The tracker is the pass's own record of every channel it has observed,
+        so this is the *observed* cadence rather than an assumed one.  It is
+        built fresh each call because history grows during a run.  A tracker
+        that is absent, or a channel it cannot read, simply contributes nothing
+        -- an absent measurement is never presented as a cadence of zero.
+        """
+        tracker = self.tracker
+        if tracker is None:
+            return {}
+        out: dict[str, list[tuple[datetime, float]]] = {}
+        try:
+            channels = list(tracker.channels())
+        except Exception:  # noqa: BLE001 - a foreign tracker is not an error
+            channels = []
+        for ct_id in channels:
+            try:
+                points = list(tracker.history(ct_id))
+            except Exception:  # noqa: BLE001 - a missing channel is not an error
+                continue
+            rows: list[tuple[datetime, float]] = []
+            for stamp, watts in points:
+                if not isinstance(stamp, datetime):
+                    continue
+                try:
+                    value = float(watts)
+                except (TypeError, ValueError):
+                    continue
+                rows.append((stamp if stamp.tzinfo else stamp.replace(tzinfo=UTC), value))
+            if rows:
+                out[str(ct_id)] = rows
+        return out
 
     @property
     def association(self) -> AssociationConfig:
@@ -607,6 +653,10 @@ class AuditPass:
         self.config = config or AuditConfig()
         self.database = database
         self.tracker = tracker
+        # Carry the live tracker on the config so ``AuditConfig.isolation`` can
+        # size the global window from channels actually observed by this pass.
+        if tracker is not None and self.config.tracker is not tracker:
+            self.config = replace(self.config, tracker=tracker)
         self.last_report: AuditReport | None = None
         #: Entity bindings the isolator uses to collapse many HA entities of one
         #: appliance into one physical device.  ``None`` means "read the stored
@@ -1266,9 +1316,10 @@ class AuditPass:
         """
         if not histories:
             return None
-        window, _source = self.config.isolation.resolve(
+        resolved = self.config.isolation.resolved_window(
             str(device_id), self._device_classes.get(str(device_id), ())
         )
+        window = resolved.window
         start = occurred_at + timedelta(seconds=window.analysis_offset_s)
         isolation_end = start + timedelta(seconds=window.isolation_window_s)
         power_end = start + timedelta(seconds=window.analysis_window_s)

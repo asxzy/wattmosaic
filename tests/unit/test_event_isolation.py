@@ -1131,3 +1131,113 @@ def test_classify_never_needs_the_real_clock(monkeypatch) -> None:
     assert result.status == IsolationStatus.ISOLATED
     assert isinstance(result, EventIsolation)
     assert utcnow()  # sanity: the real helper still exists elsewhere
+
+
+# --------------------------------------------------------------------------- #
+# REQ-EVENT-004 — the resolved window publishes its source
+# --------------------------------------------------------------------------- #
+
+
+def _cadence_history(seconds: float, *, step: float, channels: int = 1):
+    """Per-channel ``(received_at, value_w)`` points spaced ``step`` apart."""
+    out: dict[str, list[tuple[datetime, float]]] = {}
+    for channel in range(channels):
+        points = []
+        for index in range(0, int(seconds // step) + 1):
+            points.append(
+                (BASE_TIME + timedelta(seconds=step * index), 100.0 + index)
+            )
+        out[f"ct_{channel}"] = points
+    return out
+
+
+def test_resolved_window_publishes_its_source() -> None:
+    """The window a verdict is decided in says whether it was measured.
+
+    ``cadence_samples`` with at least two gaps per channel derives the global
+    window from the observed cadence and publishes ``observed_history``;
+    fewer than ``MIN_CADENCE_INTERVALS`` gaps has not shown a repeatable
+    spacing, so the configured width stays and publishes ``configured``.
+    """
+    from wattmosaic_engine.disaggregation.isolation import (
+        CADENCE_SOURCE_OBSERVED,
+        KIND_SOURCE_EVENT_TYPE,
+        WINDOW_SOURCE_CONFIGURED,
+        WINDOW_SOURCE_OBSERVED,
+    )
+    from wattmosaic_engine.synchronization.aligner import MIN_CADENCE_INTERVALS
+
+    assert MIN_CADENCE_INTERVALS == 2
+
+    # 60 s of 15 s samples: 5 points, 4 gaps -> cadence 15 s -> derived window.
+    observed = IsolationConfig(cadence_samples=_cadence_history(60.0, step=15.0))
+    verdict = isolator(config=observed).classify(
+        event("e1", "lamp", "light.lamp", BASE_TIME),
+        [event("e1", "lamp", "light.lamp", BASE_TIME)],
+        now=MATURE,
+        coverage=COVERED,
+    )
+    assert verdict.evidence["window_source"] == WINDOW_SOURCE_OBSERVED
+    assert verdict.evidence["window_source"] == CADENCE_SOURCE_OBSERVED
+    assert verdict.evidence["config_source"] == "global"
+    # WINDOW_CADENCES=2 at a 15 s cadence = 30 s, i.e. the shipped width, but
+    # the *source* is the observation, not the constant.
+    assert verdict.isolation_window_s == pytest.approx(30.0)
+    assert verdict.evidence["resolved_window"]["cadence_seconds"] == pytest.approx(15.0)
+    assert verdict.evidence["resolved_window"]["cadence_intervals"] >= MIN_CADENCE_INTERVALS
+
+    # A wider observed cadence actually widens the derived window, up to the cap.
+    wide = IsolationConfig(cadence_samples=_cadence_history(300.0, step=60.0))
+    wide_verdict = isolator(config=wide).classify(
+        event("e2", "lamp", "light.lamp", BASE_TIME),
+        [event("e2", "lamp", "light.lamp", BASE_TIME)],
+        now=MATURE,
+        coverage=COVERED,
+    )
+    assert wide_verdict.evidence["window_source"] == WINDOW_SOURCE_OBSERVED
+    assert wide_verdict.isolation_window_s == pytest.approx(120.0)  # MAX_DERIVED_WINDOW_S
+
+    # One gap is a single coincidence: the configured width stays, labelled.
+    thin = IsolationConfig(cadence_samples=_cadence_history(15.0, step=15.0))
+    thin_verdict = isolator(config=thin).classify(
+        event("e3", "lamp", "light.lamp", BASE_TIME),
+        [event("e3", "lamp", "light.lamp", BASE_TIME)],
+        now=MATURE,
+        coverage=COVERED,
+    )
+    assert thin_verdict.evidence["window_source"] == WINDOW_SOURCE_CONFIGURED
+    assert thin_verdict.isolation_window_s == pytest.approx(30.0)
+
+    # No cadence at all is the same honest answer.
+    plain = isolator().classify(
+        event("e4", "lamp", "light.lamp", BASE_TIME),
+        [event("e4", "lamp", "light.lamp", BASE_TIME)],
+        now=MATURE,
+        coverage=COVERED,
+    )
+    assert plain.evidence["window_source"] == WINDOW_SOURCE_CONFIGURED
+    assert plain.isolation_window_s == pytest.approx(30.0)
+
+    # The ``device`` / ``class`` layers are declarations and are never
+    # second-guessed by a cadence.
+    override = IsolationConfig(
+        isolation_window_s=30.0,
+        power_window_s=60.0,
+        cadence_samples=_cadence_history(60.0, step=60.0),
+        defaults={"hot_tub": IsolationWindow(0.0, 90.0, 90.0)},
+    )
+    declared = isolator(
+        config=override, device_classes={"lamp": ("hot_tub",)}
+    ).classify(
+        event("e5", "lamp", "light.lamp", BASE_TIME),
+        [event("e5", "lamp", "light.lamp", BASE_TIME)],
+        now=MATURE,
+        coverage=COVERED,
+    )
+    assert declared.evidence["config_source"] == "class"
+    assert declared.evidence["window_source"] == WINDOW_SOURCE_CONFIGURED
+    assert declared.isolation_window_s == pytest.approx(90.0)
+
+    # And the kind travels with the verdict.
+    assert verdict.evidence["event_kind"] == "ha_driven"
+    assert verdict.evidence["event_kind_source"] == KIND_SOURCE_EVENT_TYPE

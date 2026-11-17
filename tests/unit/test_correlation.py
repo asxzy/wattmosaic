@@ -180,18 +180,78 @@ def _co_toggling_pair(
     return observations
 
 
+def _co_toggling_device_events(*, offset_s: float):
+    """The same co-toggling pair as emitted ``DeviceEvent`` rows.
+
+    ``EntityObservation`` carries no group id, so the grouping claim has to be
+    asserted on the event shape the isolation layer actually reads.  Both
+    fixtures change within ``GROUP_PROXIMITY_S`` and neither declares an
+    automation id, so they are one *candidate* simultaneity group.
+
+    Only the one physical scene is emitted: two simultaneous changes are one
+    cause, which is exactly the claim under test.  Repeating the scene three
+    times would produce three separate groups and would not prove "one group,
+    one credit" at all.
+    """
+    from wattmosaic_engine.contracts import DeviceEvent
+
+    events = []
+    at = T0
+    for position, entity_id in enumerate(("light.gym_pot_lights", "light.gym_sauna_lights")):
+        shifted = at + timedelta(seconds=offset_s if position else 0.0)
+        events.append(
+            DeviceEvent(
+                event_id=f"{entity_id}@{shifted.isoformat()}",
+                device_id=entity_id,
+                entity_id=entity_id,
+                event_type="state_changed",
+                previous_state="off",
+                new_state="on",
+                attributes={},
+                occurred_at=shifted,
+                received_at=shifted,
+            )
+        )
+    return events
+
+
 def test_fixtures_switched_by_one_scene_are_withheld_not_counted_twice() -> None:
     """Two lights on one row that always toggle together are one event.
 
     Each sees the row rise by both loads, so each would be credited the whole
     step and the row would be counted twice.  Neither is placed; both are
     reported so the user can declare the wiring by hand.
+
+    "One group, one credit" is asserted on the emitted device events rather
+    than on ``EntityObservation``: the observation carries no group id, so the
+    group is the only place the grouping exists.  The two fixtures switch within
+    ``GROUP_PROXIMITY_S`` of each other with no declared automation id, so they
+    form exactly one candidate simultaneity group -- one physical change, never
+    two independent credits.
     """
+    from wattmosaic_engine.disaggregation.isolation import group_events
+
     report = _correlate(_co_toggling_pair(offset_s=0.5, watts_each=40.0))
 
     assert report.candidates == ()
     assert report.unresolved["light.gym_pot_lights"].startswith("co_toggles_with_another_fixture_on_ct1")
     assert report.unresolved["light.gym_sauna_lights"].startswith("co_toggles_with_another_fixture_on_ct1")
+
+    events = _co_toggling_device_events(offset_s=0.5)
+    groups = group_events(events)
+
+    assert len(groups) == 1, [group.as_dict() for group in groups]
+    group = groups[0]
+    assert group.kind == "simultaneous"
+    assert group.size == 2
+    assert set(group.device_ids) == {
+        "light.gym_pot_lights",
+        "light.gym_sauna_lights",
+    }
+    # Both entity events of the pair are members of that one group, and no
+    # event is left out or double-counted into a second group.
+    assert len(group.member_event_ids) == 2
+    assert len({event.entity_id for event in events}) == 2
 
 
 def test_fixtures_sharing_a_row_but_switching_independently_are_both_placed() -> None:

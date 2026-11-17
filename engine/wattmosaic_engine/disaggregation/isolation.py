@@ -93,6 +93,7 @@ was already ``ISOLATED``.  ``occurred_at`` stays byte-identical throughout.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -100,17 +101,147 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from wattmosaic_engine.contracts import (
+    CONTRACT_VERSION,
     EventIsolation,
     HaEntityBinding,
     HaEntityRole,
     IsolationStatus,
     utcnow,
 )
+from wattmosaic_engine.synchronization.aligner import (
+    CADENCE_SOURCE_DEFAULT,
+    CADENCE_SOURCE_OBSERVED,
+    ResolvedCadence,
+    resolve_channel_cadence,
+    resolve_topology_cadence,
+)
 
 #: Roles that prove a physical load changed.  ``MODE_ONLY`` and
 #: ``ENERGY_COUNTER`` deliberately absent: a mode signal and a cumulative meter
 #: do not tell us the appliance drew power *at this instant*.
 LOAD_EVIDENCE_ROLES = frozenset({HaEntityRole.LOAD_STATE, HaEntityRole.POWER_MEASUREMENT})
+
+#: The three event kinds (spec 07 §2).  Every event names exactly one; the
+#: values are the spec's names verbatim so a consumer can compare them.
+EVENT_KIND_HA = "ha_driven"
+EVENT_KIND_MEASUREMENT = "measurement_driven"
+EVENT_KIND_UNKNOWN_RESIDUAL = "unknown_residual"
+
+#: The closed set.  A marker outside it is a defect, not a fourth kind.
+EVENT_KINDS = frozenset(
+    {EVENT_KIND_HA, EVENT_KIND_MEASUREMENT, EVENT_KIND_UNKNOWN_RESIDUAL}
+)
+
+#: The versioned marker an unknown-residual producer writes to name its own
+#: kind.  It carries the contract version so a payload written by a newer
+#: producer is still recognisable; the bare forms in :data:`EXPLICIT_KIND_MARKERS`
+#: are accepted so a producer is not forced to know the version.  Defined before
+#: its first use below so the module imports cleanly.
+UNKNOWN_RESIDUAL_MARKER = f"{EVENT_KIND_UNKNOWN_RESIDUAL}:{CONTRACT_VERSION}"
+
+#: Explicit marker values a producer may write to name its own kind.  The
+#: unknown-residual marker carries the contract version so a payload written by
+#: a newer producer is still recognisable; the bare forms are accepted so a
+#: producer is not forced to know the version.
+EXPLICIT_KIND_MARKERS: Mapping[str, str] = {
+    UNKNOWN_RESIDUAL_MARKER: EVENT_KIND_UNKNOWN_RESIDUAL,
+    "unknown_residual": EVENT_KIND_UNKNOWN_RESIDUAL,
+    "residual": EVENT_KIND_UNKNOWN_RESIDUAL,
+    "ha_driven": EVENT_KIND_HA,
+    "measurement_driven": EVENT_KIND_MEASUREMENT,
+}
+
+#: ``event_type`` -> kind for an HA-produced :class:`DeviceEvent`.  A CT power
+#: entity's ``power_change`` is still HA-*driven*: the source is the Home
+#: Assistant entity, not the step detector (spec 07 §2.1/§2.2).
+HA_EVENT_TYPE_KINDS: Mapping[str, str] = {
+    "state_changed": EVENT_KIND_HA,
+    "power_change": EVENT_KIND_HA,
+    "cycle_start": EVENT_KIND_HA,
+    "stage_change": EVENT_KIND_HA,
+    "cycle_end": EVENT_KIND_HA,
+    "availability": EVENT_KIND_HA,
+}
+
+#: Where a kind was resolved from, published beside it so a consumer can tell a
+#: producer's own declaration from a classification made by the engine.
+KIND_SOURCE_EXPLICIT = "explicit_marker"
+KIND_SOURCE_EVENT_TYPE = "event_type"
+KIND_SOURCE_INFERRED = "inferred_source"
+
+
+def event_kind(obj: Any) -> str:
+    """Resolve one observation's kind -- always exactly one of the three.
+
+    Resolution order, first match wins:
+
+    1. an explicit ``kind`` / ``event_kind`` marker naming one of
+       :data:`EVENT_KINDS` -- that kind as written by the producer;
+    2. the ``event_type`` vocabulary (:data:`HA_EVENT_TYPE_KINDS`)
+       -- :data:`EVENT_KIND_HA`;
+    3. a ``channel`` / ``ct_id`` / ``magnitude_delta`` / signed ``delta_w``
+       payload, or ``source`` naming ``ct_step`` / ``step_detection``
+       -- :data:`EVENT_KIND_MEASUREMENT`;
+    4. otherwise :data:`EVENT_KIND_HA`.
+
+    Step 4 is honest rather than generous: every producer this module reads is
+    either an HA state change or a CT step, and an HA-shaped observation that
+    carries neither signal is still a Home-Assistant-driven observation.  What
+    the function may *never* return is "unknown": an event with no kind is a
+    defect, so callers that need the distinction read :func:`event_kind_source`
+    as well.
+    """
+    marker = _field(obj, "kind", _field(obj, "event_kind"))
+    if isinstance(marker, str):
+        text = marker.strip()
+        if text in EXPLICIT_KIND_MARKERS:
+            return EXPLICIT_KIND_MARKERS[text]
+        if text in EVENT_KINDS:
+            return text
+    event_type = _field(obj, "event_type")
+    if isinstance(event_type, str):
+        kind = HA_EVENT_TYPE_KINDS.get(event_type.strip())
+        if kind is not None:
+            return kind
+    if _has_measurement_shape(obj):
+        return EVENT_KIND_MEASUREMENT
+    return EVENT_KIND_HA
+
+
+def event_kind_source(obj: Any) -> str:
+    """Where :func:`event_kind`'s answer came from.
+
+    ``explicit_marker`` means the producer wrote the kind itself; ``event_type``
+    means the HA vocabulary decided it; ``inferred_source`` means the payload's
+    shape did.  Published with the kind so a consumer can audit it.
+    """
+    marker = _field(obj, "kind", _field(obj, "event_kind"))
+    if isinstance(marker, str):
+        text = marker.strip()
+        if text in EXPLICIT_KIND_MARKERS or text in EVENT_KINDS:
+            return KIND_SOURCE_EXPLICIT
+    event_type = _field(obj, "event_type")
+    if isinstance(event_type, str) and event_type.strip() in HA_EVENT_TYPE_KINDS:
+        return KIND_SOURCE_EVENT_TYPE
+    return KIND_SOURCE_INFERRED
+
+
+def _has_measurement_shape(obj: Any) -> bool:
+    """Does this observation carry a reader-side (CT step) payload?"""
+    for name in ("channel", "ct_id"):
+        if _field(obj, name) not in (None, ""):
+            return True
+    if _field(obj, "magnitude_delta") is not None:
+        return True
+    raw = _field(obj, "delta_w")
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return True
+    source = _field(obj, "source")
+    if isinstance(source, str):
+        lowered = source.strip().lower()
+        if "ct_step" in lowered or "step_detection" in lowered or "step_detector" in lowered:
+            return True
+    return False
 
 #: State labels that mean "the appliance is running" / "not running".  Local
 #: copies of the learning filter's labels on purpose: importing
@@ -224,6 +355,104 @@ class IsolationWindow:
         )
 
 
+#: Where a *derived* window came from.  The vocabulary is deliberately separate
+#: from :meth:`IsolationConfig.resolve`'s ``device`` / ``class`` / ``global``
+#: (that one names the configuration layer that answered).  These name how the
+#: number was obtained.
+#:
+#: Two different ``"configured"* values are published by this codebase and they
+#: must not be conflated: :data:`WINDOW_SOURCE_CONFIGURED` (here) is the width
+#: an operator set, while ``aligner.CADENCE_SOURCE_DEFAULT``
+#: (``"configured_default"``) is the *cadence* fallback a reader with no usable
+#: history gets.  One is a user declaration about an appliance, the other a
+#: documented default about a sampling rate.
+WINDOW_SOURCE_CONFIGURED = "configured"
+WINDOW_SOURCE_OBSERVED = CADENCE_SOURCE_OBSERVED
+
+#: How many cadences the global isolation window spans when the observed
+#: cadence is used.  Two intervals is the smallest spacing a channel can show,
+#: so a window narrower than two cadences could never hold the evidence it asks
+#: for; two gives the documented behaviour at the audited 15.7 s cadence
+#: (~31.4 s against the shipped 30 s) while still being a derivation rather
+#: than a constant.
+WINDOW_CADENCES = 2.0
+
+#: Upper bound on the derived isolation window, and on the power window derived
+#: from it.  The same clamp the step detector applies to its own cadence windows
+#: (``disaggregation/events.py``): one pathological cadence must not produce a
+#: minutes-long event window.  The shipped configured widths stay the floor, so
+#: an unusual reader can only widen a window, never narrow it below the
+#: documented default.
+MAX_DERIVED_WINDOW_S = 120.0
+
+
+@dataclass(frozen=True, slots=True)
+class _CadencePoint:
+    """The one field :func:`resolve_channel_cadence` reads: arrival time.
+
+    The aligner resolves a cadence from ``entry.received_at``.  Isolation
+    receives ``(received_at, value_w)`` pairs, so the value is carried only to
+    keep the caller's shape; the cadence depends on the timestamps alone.
+    """
+
+    received_at: datetime
+    value_w: float
+
+
+def window_from_cadence(
+    cadence: float,
+    *,
+    default_s: float = 30.0,
+    power_s: float = 60.0,
+    samples: int = 0,
+) -> tuple[float, float, str]:
+    """Derive ``(isolation_window_s, power_window_s, source)`` from a cadence.
+
+    A channel with fewer than :data:`MIN_CADENCE_INTERVALS` observed gaps has not
+    shown a repeatable spacing (the aligner's own rule), so its cadence is the
+    documented fallback and the configured widths stay, labelled
+    :data:`WINDOW_SOURCE_CONFIGURED`.  Otherwise the isolation window is
+    :data:`WINDOW_CADENCES` cadences wide, clamped into
+    ``[default_s, MAX_DERIVED_WINDOW_S]``, and the power window keeps the
+    configured ratio (twice the isolation window) up to the same ceiling.
+
+    The derivation is total: every input produces a window, so an unobserved
+    channel can never yield a zero-width window.
+    """
+    try:
+        value = float(cadence)
+    except (TypeError, ValueError):
+        value = 0.0
+    if not math.isfinite(value) or value <= 0.0 or samples < 2:
+        return float(default_s), float(power_s), WINDOW_SOURCE_CONFIGURED
+    derived = min(max(WINDOW_CADENCES * value, float(default_s)), MAX_DERIVED_WINDOW_S)
+    ratio = (float(power_s) / float(default_s)) if float(default_s) > 0 else 1.0
+    power = min(max(derived * ratio, derived), MAX_DERIVED_WINDOW_S)
+    return derived, power, WINDOW_SOURCE_OBSERVED
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedWindow:
+    """A resolved isolation window, its width and where the width came from."""
+
+    window: IsolationWindow
+    source: str
+    cadence_source: str
+    cadence_seconds: float | None = None
+    cadence_intervals: int = 0
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "analysis_offset_s": self.window.analysis_offset_s,
+            "isolation_window_s": self.window.isolation_window_s,
+            "power_window_s": self.window.analysis_window_s,
+            "source": self.source,
+            "cadence_source": self.cadence_source,
+            "cadence_seconds": self.cadence_seconds,
+            "cadence_intervals": self.cadence_intervals,
+        }
+
+
 @dataclass(slots=True)
 class IsolationConfig:
     """Global isolation timings plus optional class and per-device overrides.
@@ -237,6 +466,14 @@ class IsolationConfig:
     analysis_offset_s: float = 0.0
     isolation_window_s: float = 30.0
     power_window_s: float = 60.0
+    #: Optional observed-cadence history, ``channel -> [(received_at, value_w)]``.
+    #: When supplied (and non-empty) the global window is *derived* from it by
+    #: :func:`window_from_cadence` instead of being read as a constant.  This is
+    #: the wave-1.2 cadence publication consumed at the point of use, so the
+    #: resolved window can say whether it was measured or configured.
+    cadence_samples: Mapping[str, Sequence[tuple[datetime, float]]] = field(
+        default_factory=dict
+    )
     #: Minimum usable readings on each side before a verdict is trustworthy.
     min_baseline_samples: int = 3
     min_event_samples: int = 3
@@ -291,6 +528,80 @@ class IsolationConfig:
             if found is not None:
                 return found, "class"
         return self.global_window, "global"
+
+    # -- observed-cadence sizing ------------------------------------------ #
+    def topology_cadence(self) -> ResolvedCadence:
+        """The topology cadence implied by :attr:`cadence_samples`.
+
+        Thin channels (fewer than ``MIN_CADENCE_INTERVALS`` gaps) are excluded,
+        exactly as ``SampleAligner.topology_cadence`` excludes them, so a
+        channel on the configured fallback cannot vote a default into the merge.
+        """
+        per_channel: dict[str, list[Any]] = {}
+        for channel, entries in self.cadence_samples.items():
+            rows: list[Any] = []
+            for stamp, _watts in entries:
+                rows.append(_CadencePoint(stamp, 0.0))
+            if rows:
+                per_channel[str(channel)] = rows
+        return resolve_topology_cadence(
+            {name: resolve_channel_cadence(rows) for name, rows in per_channel.items()}
+        )
+
+    def resolved_window(
+        self, device_id: str, device_classes: Sequence[str] = ()
+    ) -> ResolvedWindow:
+        """Resolve one device's window *and* publish where the width came from.
+
+        The configuration layer still answers first: a ``device`` or ``class``
+        override is the user's declaration and is never second-guessed by a
+        cadence.  Only the global layer consults the observed cadence, because
+        that is the shipped default -- the number a fresh install would
+        otherwise read off a constant.  The returned :class:`ResolvedWindow`
+        therefore says both which layer answered (``source``) and whether the
+        width was measured or configured (``cadence_source``), so a consumer can
+        tell an observation from a default without reading the config.
+        """
+        override = self.per_device.get(device_id)
+        if override is not None:
+            return ResolvedWindow(
+                window=override,
+                source="device",
+                cadence_source=WINDOW_SOURCE_CONFIGURED,
+            )
+        for label in device_classes:
+            found = self.defaults.get(str(label))
+            if found is not None:
+                return ResolvedWindow(
+                    window=found,
+                    source="class",
+                    cadence_source=WINDOW_SOURCE_CONFIGURED,
+                )
+        if not self.cadence_samples:
+            return ResolvedWindow(
+                window=self.global_window,
+                source="global",
+                cadence_source=WINDOW_SOURCE_CONFIGURED,
+            )
+        cadence = self.topology_cadence()
+        derived_s, power_s, source = window_from_cadence(
+            cadence.seconds,
+            default_s=self.isolation_window_s,
+            power_s=self.power_window_s,
+            samples=cadence.intervals,
+        )
+        window = IsolationWindow(
+            analysis_offset_s=self.analysis_offset_s,
+            isolation_window_s=derived_s,
+            power_window_s=power_s,
+        )
+        return ResolvedWindow(
+            window=window,
+            source="global",
+            cadence_source=source,
+            cadence_seconds=cadence.seconds,
+            cadence_intervals=cadence.intervals,
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -585,6 +896,187 @@ def physical_device_events(
 
 
 # --------------------------------------------------------------------------- #
+# Automation event groups (spec 07 §9)
+# --------------------------------------------------------------------------- #
+
+#: How close two member changes must be to belong to one automation group.
+#: Deliberately wider than ``correlation.CO_TOGGLE_S`` (5 s): that constant is a
+#: *placement* gate for a history recorder, while this one decides whether two
+#: simultaneous physical changes are evidence about one cause.  The spec's
+#: membership rule is "declared by the HA automation's id plus observed time
+#: proximity"; the proximity bound has to exist and be named, or an automation
+#: that ramps its members over a minute would silently become N causes.
+GROUP_PROXIMITY_S = 30.0
+
+
+def _automation_key(obj: Any) -> str | None:
+    """The declared automation/script id, when the event carries one.
+
+    ``attributes["automation_id"]`` is what Home Assistant puts on an entity
+    state change caused by an automation; ``script_id`` / ``cause_id`` /
+    ``correlation_group`` are accepted as aliases so a producer that names the
+    cause differently is not silently ungrouped.
+    """
+    attributes = _field(obj, "attributes")
+    if isinstance(attributes, Mapping):
+        for name in ("automation_id", "script_id", "cause_id", "correlation_group"):
+            raw = attributes.get(name)
+            if raw not in (None, ""):
+                return str(raw)
+    for name in ("automation_id", "correlation_group"):
+        raw = _field(obj, name)
+        if raw not in (None, ""):
+            return str(raw)
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class EventGroup:
+    """One candidate grouping of events that share a cause.
+
+    A group is deliberately a *transient correlation artefact*, not a persisted
+    object: it is derived from the events in one neighbourhood and published
+    with them.  ``kind`` is the spec's ``automation`` / ``simultaneous`` /
+    ``manual`` vocabulary.  Membership never attributes anything -- it records
+    that these changes were one cause, which is why a member of a group of size
+    > 1 is never credited an independent step.
+    """
+
+    group_id: str
+    member_event_ids: tuple[str, ...]
+    device_ids: tuple[str, ...]
+    kind: str
+    #: The cause, when the events declared one (an HA automation id).
+    cause: str | None = None
+    window_start: datetime | None = None
+    window_end: datetime | None = None
+    completeness: str = "complete"
+    #: The raw members, carried so a caller can read their states and kinds
+    #: without re-deriving the membership.  Never serialized by :meth:`as_dict`.
+    members: tuple[Any, ...] = ()
+
+    @property
+    def size(self) -> int:
+        return len(self.member_event_ids)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "group_id": self.group_id,
+            "member_event_ids": list(self.member_event_ids),
+            "device_ids": list(self.device_ids),
+            "kind": self.kind,
+            "cause": self.cause,
+            "window_start": None
+            if self.window_start is None
+            else self.window_start.isoformat(),
+            "window_end": None if self.window_end is None else self.window_end.isoformat(),
+            "completeness": self.completeness,
+            "size": self.size,
+        }
+
+
+def group_events(
+    events: Iterable[Any],
+    *,
+    proximity_s: float = GROUP_PROXIMITY_S,
+) -> list[EventGroup]:
+    """Group one neighbourhood's events by declared cause and time proximity.
+
+    Two rules, both from spec 07 §9.2:
+
+    * a **declared** cause (the automation id on each member) groups its members
+      regardless of spacing -- the declaration is the fact, proximity only
+      corroborates it;
+    * without a declaration, events whose ``occurred_at`` falls within
+      ``proximity_s`` of the group's first member are one **candidate**
+      simultaneity group.
+
+    One event is returned in at most one group.  A singleton group is omitted:
+    a group of one is not a group, and returning it would make every isolated
+    event look grouped.  Events are ordered by ``occurred_at`` (never arrival),
+    so the result is deterministic for a fixed input.
+    """
+    items = [item for item in events if _field(item, "device_id")]
+    if not items:
+        return []
+    ordered = sorted(items, key=lambda item: (_aware(_field(item, "occurred_at")),))
+    groups: list[EventGroup] = []
+
+    # Pass 1 -- declared causes.
+    by_cause: dict[str, list[Any]] = {}
+    for item in ordered:
+        cause = _automation_key(item)
+        if cause is not None:
+            by_cause.setdefault(cause, []).append(item)
+    for cause in sorted(by_cause):
+        members = by_cause[cause]
+        if len(members) < 2:
+            continue
+        groups.append(_build_group(members, "automation", cause=cause))
+
+    # Pass 2 -- undeclared proximity clusters among the remaining events.
+    assigned = {
+        id(item)
+        for group in groups
+        for item in (group.members or ())
+    }
+    rest = [item for item in ordered if id(item) not in assigned]
+    cluster: list[Any] = []
+    for item in [*rest, None]:
+        if item is None:
+            if len(cluster) >= 2:
+                groups.append(_build_group(cluster, "simultaneous"))
+            break
+        if (
+            cluster
+            and (
+                _aware(_field(item, "occurred_at"))
+                - _aware(_field(cluster[-1], "occurred_at"))
+            ).total_seconds()
+            > proximity_s
+        ):
+            if len(cluster) >= 2:
+                groups.append(_build_group(cluster, "simultaneous"))
+            cluster = []
+        cluster.append(item)
+
+    groups.sort(key=lambda group: (group.window_start or datetime.min.replace(tzinfo=UTC)))
+    return groups
+
+
+def _build_group(members: Sequence[Any], kind: str, *, cause: str | None = None) -> EventGroup:
+    """Assemble one group from already-collected members."""
+    stamps = [_aware(_field(item, "occurred_at")) for item in members]
+    device_ids = tuple(
+        dict.fromkeys(
+            str(_field(item, "device_id")) for item in members if _field(item, "device_id")
+        )
+    )
+    prefix = cause or kind
+    payload = "|".join(
+        [
+            str(prefix),
+            min(stamps).isoformat(),
+            *[str(device) for device in device_ids],
+        ]
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return EventGroup(
+        group_id=f"grp_{digest[:16]}",
+        member_event_ids=tuple(
+            _identity(item, str(_field(item, "device_id")), _field(item, "occurred_at"))
+            for item in members
+        ),
+        device_ids=device_ids,
+        kind=kind,
+        cause=cause,
+        window_start=min(stamps),
+        window_end=max(stamps),
+        members=tuple(members),
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Isolator
 # --------------------------------------------------------------------------- #
 
@@ -612,8 +1104,18 @@ class EventIsolator:
         """One :class:`PhysicalDeviceEvent` per physical device, time ordered."""
         return physical_device_events(events, self.bindings)
 
+    def groups(self, events: Iterable[Any]) -> list[EventGroup]:
+        """The candidate groups among ``events`` (spec 07 §9)."""
+        return group_events(events)
+
     def window_for(self, device_id: str) -> tuple[IsolationWindow, str]:
         return self.config.resolve(device_id, self._device_classes.get(device_id, ()))
+
+    def resolved_window_for(self, device_id: str) -> ResolvedWindow:
+        """The window this device's verdicts are decided in, with its source."""
+        return self.config.resolved_window(
+            device_id, self._device_classes.get(device_id, ())
+        )
 
     # -- classification --------------------------------------------------- #
     def classify(
@@ -639,12 +1141,27 @@ class EventIsolator:
         entity_id = str(_field(event, "entity_id", ""))
         event_id = _identity(event, device_id, occurred_at)
 
-        window, source = self.window_for(device_id)
+        resolved = self.resolved_window_for(device_id)
+        window = resolved.window
+        source = resolved.source
         coverage_obj = _coerce_coverage(coverage)
         window_start, window_end, power_end = window.shifted(occurred_at)
         evidence: dict[str, Any] = {
             "config_source": source,
+            #: How the *width* was obtained: ``observed_history`` when the
+            #: global window was derived from the reader's own cadence,
+            #: ``configured`` when it was read off the declared width.  This is
+            #: a different question from ``config_source`` (which configuration
+            #: layer answered), and it is not ``aligner.CADENCE_SOURCE_DEFAULT``
+            #: (``"configured_default"``): that one labels a fallback *cadence*,
+            #: this one labels a *window width*.
+            "window_source": resolved.cadence_source,
+            "resolved_window": resolved.as_dict(),
             "device_class": list(self._device_classes.get(device_id, ())),
+            #: Every event names its kind (spec 07 §2), and the verdict carries
+            #: it so a consumer never has to re-derive it from the event shape.
+            "event_kind": event_kind(event),
+            "event_kind_source": event_kind_source(event),
         }
 
         def build(
@@ -704,6 +1221,22 @@ class EventIsolator:
                 "conflicting": own_group.conflicting,
                 "power_contributor": own_group.power_contributor,
             }
+
+        # Groups are computed over the *raw* neighbourhood, not the collapsed
+        # physical devices: two HA entities of one appliance are one physical
+        # change but are separate events, and a declared automation id lives on
+        # the entity event.  A subject in a group of size > 1 is credited as a
+        # member, never as an independent step.
+        event_groups = group_events(competing_events)
+        own_event_groups = [
+            group for group in event_groups if event_id in set(group.member_event_ids)
+        ]
+        evidence["event_groups"] = [group.as_dict() for group in event_groups]
+        evidence["own_event_groups"] = [group.group_id for group in own_event_groups]
+        evidence["own_group_size"] = max(
+            (len(group.member_event_ids) for group in own_event_groups), default=1
+        )
+        evidence["grouped_once"] = bool(own_event_groups)
 
         in_isolation = [
             group for group in others if window_start <= _aware(group.occurred_at) < window_end
@@ -868,13 +1401,34 @@ def clean_attribution_inputs(isolations: Iterable[EventIsolation]) -> list[Event
 
 
 __all__ = [
+    "CADENCE_SOURCE_DEFAULT",
+    "CADENCE_SOURCE_OBSERVED",
+    "EVENT_KIND_HA",
+    "EVENT_KIND_MEASUREMENT",
+    "EVENT_KIND_UNKNOWN_RESIDUAL",
+    "EVENT_KINDS",
+    "EventGroup",
     "EventIsolator",
+    "GROUP_PROXIMITY_S",
     "IsolationConfig",
     "IsolationWindow",
+    "KIND_SOURCE_EXPLICIT",
+    "KIND_SOURCE_EVENT_TYPE",
+    "KIND_SOURCE_INFERRED",
+    "MAX_DERIVED_WINDOW_S",
     "PhysicalDeviceEvent",
+    "ResolvedWindow",
     "SampleCoverage",
+    "UNKNOWN_RESIDUAL_MARKER",
+    "WINDOW_CADENCES",
+    "WINDOW_SOURCE_CONFIGURED",
+    "WINDOW_SOURCE_OBSERVED",
     "clean_attribution_inputs",
     "could_share_ct",
+    "event_kind",
+    "event_kind_source",
+    "group_events",
     "physical_device_events",
     "split_attribution",
+    "window_from_cadence",
 ]

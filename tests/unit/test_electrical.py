@@ -26,7 +26,6 @@ from wattmosaic_engine.contracts import (
     TopologyStatus,
 )
 from wattmosaic_engine.disaggregation import DisaggregationEngine
-from wattmosaic_engine.electrical.hierarchy import HierarchyFinder
 from wattmosaic_engine.disaggregation.confidence import (
     ConfidenceInputs,
     compute_confidence,
@@ -41,6 +40,7 @@ from wattmosaic_engine.electrical import (
     main_power_w,
     solve_constrained_nnls,
 )
+from wattmosaic_engine.electrical.hierarchy import HierarchyFinder
 from wattmosaic_engine.electrical.topology import build_graph
 from wattmosaic_engine.electrical.window import ChannelReading
 
