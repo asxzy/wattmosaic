@@ -595,3 +595,55 @@ Diagnostics never include tokens; verify before sharing.
 scripts/validate_addon.sh            # static checks + real docker build
 scripts/validate_addon.sh --no-build  # static checks only (CI lint stage)
 ```
+
+---
+
+## 13. Unified workflow (build → migrate → smoke → observe)
+
+A single command drives the full post-change verification path:
+
+```bash
+scripts/run_workflow.sh [BASE_URL]     # BASE_URL defaults to http://127.0.0.1:8787
+```
+
+It runs these stages in order, stopping at the first failure:
+
+| Stage | What it does |
+| --- | --- |
+| **build** | Stages a self-contained App with `scripts/package_addon.sh --check` (no image push). Skip with `WM_SKIP_BUILD=1`. |
+| **migrate** | Applies pending forward-only migrations to `WM_DATABASE_PATH` (default `/data/wattmosaic.db`) with the venv python and asserts `schema_version == LATEST_VERSION`. Skip for a remote DB with `WM_SKIP_MIGRATE=1`. |
+| **smoke** | Runs `scripts/smoke_test.sh BASE_URL` (below). Any failed check exits non-zero and stops the workflow. |
+| **observe** | Polls `/api/v1/health` `WM_OBSERVE_COUNT` times (default 5) every `WM_OBSERVE_INTERVAL` seconds (default 5); fails if the engine leaves `ok`/`degraded` or becomes unreachable. |
+
+`WM_API_TOKEN`, when set, is sent as `X-API-Token` on every API call in the
+smoke and observe stages.
+
+### Post-deploy smoke test
+
+`scripts/smoke_test.sh` is the standalone smoke gate. It is **distinct from the
+App watchdog probe** (`addon/healthcheck.py`, which only polls `/healthz`): the
+smoke test exercises the whole post-deploy surface and exits NON-ZERO if **any**
+check fails. Every check runs even after a failure, so one invocation reports
+all problems.
+
+```bash
+scripts/smoke_test.sh [BASE_URL]
+```
+
+Registered checks:
+
+| Check | Endpoint / source | Pass condition |
+| --- | --- | --- |
+| `health` | `/api/v1/health` | `status` is `ok` or `degraded` |
+| `status` | `/api/v1/status` | JSON with a `status` field |
+| `panel` | `/` (gateway ingress) | index looks like the WattMosaic panel |
+| `migrations` | `PRAGMA user_version` vs `LATEST_VERSION` (fallback: `/api/v1/diagnostics` `database.schema_current`) | local DB is at the latest schema |
+| `residuals` | `/api/v1/residuals` | reachable, JSON object |
+| `mapping` | `/api/v1/mapping` | reachable, JSON object |
+| `topology` | `/api/v1/topology/tree` | reachable, panel device data responds |
+| `devices` | `/api/v1/devices` | reachable, JSON list/object |
+| `metrics` | `/api/v1/metrics` | scrape contains `wattmosaic_` series |
+
+The script needs only `curl` and the repo venv's python — no new runtime
+dependency. A `curl` HTTP error (>= 400) counts as a FAIL rather than a silent
+success.
