@@ -67,6 +67,34 @@ status column.
 | `TASK-TEST-002` | API surface, replay and migration harnesses | `REQ-TEST-002`, `REQ-TEST-005`, `REQ-TEST-008` | 4 | 4.1 | `NOT_STARTED` | — | 2026-11-16 | Carries the `OD-36` assumption |
 | `TASK-TEST-003` | The T01–T15 builders, the matrix reconciliation and the performance and accuracy harnesses | `REQ-TEST-003`, `REQ-TEST-004`, `REQ-TEST-009`, `REQ-TEST-010` | 4 | 4.2 | `NOT_STARTED` | — | 2026-11-16 | — |
 
+### 1.1 Completion sprint tasks (Phase B proposal — none started)
+
+Added 2026-11-17 by Phase A (`18-completion-gap-analysis.md`, `19-completion-plan.md`).
+These are **proposed** task IDs; they are `NOT_STARTED` and carry no commit or
+verification evidence. The `Wave` column uses the B0–B4 completion tiers of
+`../19-completion-plan.md` §2, which is authoritative for these tasks; the
+original wave labels above are unchanged. Acceptance criteria are summarised
+here and detailed in `../19-completion-plan.md` §2. No task may be marked
+`VERIFIED` without an orchestrator-run test log.
+
+| Task ID | Title | Requirement IDs | Wave | Segment | Status | Owner | Last updated | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `TASK-FOUNDATION-003` | Settle the residual noise and model-class contracts | `REQ-FOUNDATION-002`, `REQ-FOUNDATION-003`, `REQ-POWER-001`, `REQ-RESIDUAL-002` | B0 | 0.3 | `NOT_STARTED` | — | 2026-11-17 | Shared contract freeze: bump `CONTRACT_VERSION`, regenerate 30 schemas, record the `OD-46`/`OD-47` decision. Acceptance: additive payloads still validate; `contract_schema_sync` gate green. |
+| `TASK-RESIDUAL-003` | Define the noise-component contract home and the residual baseline window shape | `REQ-RESIDUAL-002`, `REQ-RESIDUAL-004`, `REQ-FOUNDATION-002` | B0 | 0.3 | `NOT_STARTED` | — | 2026-11-17 | Acceptance: additive optional fields with neutral defaults; update `test_residual_power.py:974` which currently pins noise absence. |
+| `TASK-RESIDUAL-004` | Populate the residual baseline window on the production audit path | `REQ-RESIDUAL-002`, `REQ-RESIDUAL-004`, `REQ-RESIDUAL-008` | B1 | 1.5 | `NOT_STARTED` | — | 2026-11-17 | Closes G-02. Acceptance: production `ResidualScope` carries `window_w`; `median_of_window` and non-degenerate `dynamic_w`; signed identity holds. |
+| `TASK-RESIDUAL-005` | Residual drift events and the unknown-residual hand-off to learning | `REQ-RESIDUAL-005`, `REQ-RESIDUAL-006`, `REQ-RESIDUAL-007`, `REQ-EVENT-001`, `REQ-LEARNING-004` | B1 | 1.6 | `NOT_STARTED` | — | 2026-11-17 | Completes `TASK-RESIDUAL-002`. Acceptance: named drift event, ledger entry with reason, residual-never-redistributed guard green. |
+| `TASK-POWER-003` | Generalise adjustable models beyond dimmable lights | `REQ-POWER-001`, `REQ-POWER-002`, `REQ-POWER-007` | B2 | 2.6 | `NOT_STARTED` | — | 2026-11-17 | Closes G-03. Acceptance: non-linear adjustable response published with `LoadShape`; priors bound green. |
+| `TASK-POWER-004` | Implement `DELAYED` and `ALWAYS_ON` load-shape behavior | `REQ-POWER-001`, `REQ-POWER-004`, `REQ-EVENT-003` | B2 | 2.7 | `NOT_STARTED` | — | 2026-11-17 | Closes G-04. **Blocked on `OD-46`/`OD-47`** (decision); do not guess. Acceptance: declared delay honoured; always-on has no OFF state; existing enum labels not broken. |
+| `TASK-MAPPING-003` | Build the derived mapping projection and its `/mapping` read path | `REQ-MAPPING-001`, `REQ-MAPPING-002`, `REQ-MAPPING-003`, `REQ-MAPPING-006`, `REQ-MAPPING-007` | B3 | 3.7 | `NOT_STARTED` | — | 2026-11-17 | Completes `TASK-MAPPING-001`. Acceptance: derived/deterministic, all cardinalities, nine cell fields, coverage block. |
+| `TASK-MAPPING-004` | Unknown-load entries and evidence-triggered refresh | `REQ-MAPPING-004`, `REQ-MAPPING-005`, `REQ-RESIDUAL-007` | B3 | 3.8 | `NOT_STARTED` | — | 2026-11-17 | Completes `TASK-MAPPING-002`. Acceptance: unknown entry names no device; no write on identical samples. |
+| `TASK-TOPOLOGY-005` | Automatic change detection, `ConfigurationChangeEvent` and inference-history reconciliation | `REQ-TOPO-009`, `REQ-CHANGE-001`, `REQ-CHANGE-002`, `REQ-CHANGE-005`, `REQ-CHANGE-007` | B3 | 3.9 | `NOT_STARTED` | — | 2026-11-17 | Completes deferred half of `TASK-TOPOLOGY-003`. Acceptance: one event per change kind; change response lists affected records; no record rewritten. |
+| `TASK-DISAGG-003` | Joint inference source ledger (`sources_used` / available-but-unused) | `REQ-DISAGG-001`, `REQ-FOUNDATION-005` | B4 | 4.4 | `NOT_STARTED` | — | 2026-11-17 | Supersedes reverted `TASK-DISAGG-001`. Acceptance: result names every source used and unused with reason; `infer()` changed additively. |
+| `TASK-DISAGG-004` | Identifiability + non-fabricating group estimates with `min_w`/`max_w` | `REQ-DISAGG-002`, `REQ-DISAGG-003`, `REQ-DISAGG-004`, `REQ-DISAGG-005` | B4 | 4.5 | `NOT_STARTED` | — | 2026-11-17 | Supersedes reverted `TASK-DISAGG-001`/`002`. Acceptance: rank/null-space published; ambiguous group publishes `min_w`/`max_w` and no per-device watt — must not reproduce the 250 W fabrication in `stash@{0}`. |
+| `TASK-UI-004` | Panel views for residual, mapping, identifiability, model versions and version history | `REQ-UI-003`, `REQ-UI-004`, `REQ-UI-005`, `REQ-UI-006`, `REQ-UI-007`, `REQ-UI-008`, `REQ-UI-009`, `REQ-UI-010`, `REQ-UI-011`, `REQ-UI-012`, `REQ-UI-013` | B4-UI | 4.6 | `NOT_STARTED` | — | 2026-11-17 | Depends on stable APIs from B1/B3/B4. Acceptance: `UT-panel` data-rendering assertions (new), `check_panel.py` green. |
+| `TASK-DEPLOY-003` | Unified end-to-end workflow entry point and post-deploy smoke script | `REQ-DEPLOY-005`, `REQ-DEPLOY-006`, `REQ-DEPLOY-007`, `REQ-TEST-002` | B4-WF | 4.7 | `NOT_STARTED` | — | 2026-11-17 | Closes G-10. Acceptance: `scripts/smoke_test.sh` exits non-zero on any of six checks; one documented run command; addon validation green. |
+| `TASK-TEST-004` | Missing verification gates: performance, replay, migration matrix and UI | `REQ-TEST-003`, `REQ-TEST-004`, `REQ-TEST-005`, `REQ-TEST-008`, `REQ-TEST-009`, `REQ-STORAGE-012` | B4-WF | 4.8 | `NOT_STARTED` | — | 2026-11-17 | Closes G-11. Acceptance: T01–T15 builders; migration matrix; new-path performance budgets; UI data assertions. Runs continuously as the verification vehicle. |
+| `TASK-DEPLOY-004` | Author `16-final-verification-report.md` and `17-deployment-report.md` | `REQ-DEPLOY-005`, `REQ-DEPLOY-007`, `REQ-TEST-001`, `REQ-TEST-010` | B4-WF | 4.9 | `NOT_STARTED` | — | 2026-11-17 | Closes G-12/G-13. Terminal gate: both reports exist with version, orchestrator gate table, smoke output, rollback rehearsal; update README file index. |
+
 **Rule.** The `Owner` column names the builder or the orchestrator. It is
 `—` until a task is assigned. The `Last updated` column is an ISO date and
 changes on every status move.
@@ -93,6 +121,12 @@ runs alongside every wave.
 
 **Rule.** The seven status columns sum to the wave total. A row that does not
 balance is an error in this tracker and is corrected in the same change.
+
+**Completion-sprint tasks.** The 15 proposed Phase B tasks in §1.1 are tracked
+separately because their waves use the B0–B4 tiers of `../19-completion-plan.md`,
+not the five original waves above. All 15 are `NOT_STARTED`; they are **not**
+counted in this §2 table, whose totals remain the original 36 tasks. The
+original counts are therefore unchanged by the Phase A documentation.
 
 **Rule.** `VERIFIED` is the only status that counts as done. The delivery
 progress figure quoted to a stakeholder is the `VERIFIED` column and nothing
@@ -171,6 +205,7 @@ in the same change that updates the plan and this tracker.
 | 2026-11-16 | Tracker created; all 36 tasks set to `NOT_STARTED`; blockers section created and left empty | builder | the plan and the task files were produced in the same change; no implementation has started |
 | 2026-11-16 | Wave and segment labels reconciled with the plan; a `Segment` column added to §1 | builder | 16 task files carried a stale segment label, and a seventeenth (`task-storage-002.md`) named another task's segment in its blocker note; the plan's §2 and §4.3 mapping is authoritative. No task ID, requirement ID, dependency, acceptance criterion, test requirement or status changed. |
 | 2026-11-17 | Task statuses reconciled with the implementation record; §4.2 verification evidence and §4.3 deferred work added | builder | Documentation-only reconciliation after the implementation phase: 11 tasks set to `VERIFIED` with commit evidence, `TASK-TOPOLOGY-003` to `IN_REVIEW` (partial), `TASK-TEST-001` to `IN_PROGRESS` (continuous vehicle), `TASK-DISAGG-001` to `FAILED` (reverted fabrication), and 22 tasks left `NOT_STARTED`. Wave counts and the traceability matrix reconciled in the same change. No task ID, requirement ID or status vocabulary changed. |
+| 2026-11-17 | Phase A of the completion sprint: §1.1 added with 15 proposed completion tasks, all `NOT_STARTED` | builder (PHASE-A-GAP) | Documentation only. Task IDs, titles, requirement refs, Builder assignments and verification methods come from `../19-completion-plan.md`; evidence base is `../18-completion-gap-analysis.md`. No task started, no status moved, no original task ID changed, and no `VERIFIED` recorded. |
 
 ---
 

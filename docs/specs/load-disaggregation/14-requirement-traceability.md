@@ -20,6 +20,12 @@ tasks, or whose only vehicle is a manual review, remain `NOT RUN`. See §1 and
 not land. Requirements in deferred, partial or reverted tasks have no commit
 and their `Verification Result` stays `NOT RUN`.
 
+**Completion-sprint extension (2026-11-17).** §11 adds 15 *proposed* completion
+tasks from `19-completion-plan.md`, linking them to the requirement IDs they
+would finish. The 130 original rows in §7 and their `Verification Result`
+values are **unchanged** by Phase A. Every new link's verification is `NOT RUN`
+(no orchestrator log); in particular **no DISAGG requirement is marked PASS**.
+
 ---
 
 ## 1. Scope and status
@@ -587,6 +593,42 @@ requirement is withdrawn, `01-requirements.md` is the place it is withdrawn.
 
 ---
 
+## 11. Completion-sprint task links (Phase A, 2026-11-17)
+
+The 15 proposed tasks from `19-completion-plan.md` are appended here so each
+Requirement ID they would finish has a forward link. These are **proposed** IDs;
+ they are `NOT_STARTED` in `tasks/progress.md` and carry no commit or
+ orchestrator log. Every row's verification is `NOT RUN`. The original 130 rows
+ in §7 — and their `Verification Result` values — are unchanged; this section
+ does **not** promote any requirement. In particular, **no `REQ-DISAGG-*` row is
+ marked PASS**: `TASK-DISAGG-001` remains `FAILED` (reverted) and
+ `TASK-DISAGG-002` remains `NOT_STARTED`; the proposed `TASK-DISAGG-003/004`
+ would replace them.
+
+| Proposed task ID | Requirement IDs linked | Closes gap | Verification result |
+| --- | --- | --- | --- |
+| `TASK-FOUNDATION-003` | `REQ-FOUNDATION-002`, `REQ-FOUNDATION-003`, `REQ-POWER-001`, `REQ-RESIDUAL-002` | shared contract freeze; `OD-46`/`OD-47` | `NOT RUN` |
+| `TASK-RESIDUAL-003` | `REQ-RESIDUAL-002`, `REQ-RESIDUAL-004`, `REQ-FOUNDATION-002` | G-01 noise contract home | `NOT RUN` |
+| `TASK-RESIDUAL-004` | `REQ-RESIDUAL-002`, `REQ-RESIDUAL-004`, `REQ-RESIDUAL-008` | G-02 baseline window population | `NOT RUN` |
+| `TASK-RESIDUAL-005` | `REQ-RESIDUAL-005`, `REQ-RESIDUAL-006`, `REQ-RESIDUAL-007`, `REQ-EVENT-001`, `REQ-LEARNING-004` | deferred `TASK-RESIDUAL-002` | `NOT RUN` |
+| `TASK-POWER-003` | `REQ-POWER-001`, `REQ-POWER-002`, `REQ-POWER-007` | G-03 adjustable models | `NOT RUN` |
+| `TASK-POWER-004` | `REQ-POWER-001`, `REQ-POWER-004`, `REQ-EVENT-003` | G-04 delayed models (`BLOCKED`: `OD-46`/`OD-47`) | `NOT RUN` |
+| `TASK-MAPPING-003` | `REQ-MAPPING-001`, `REQ-MAPPING-002`, `REQ-MAPPING-003`, `REQ-MAPPING-006`, `REQ-MAPPING-007` | G-07 mapping projection | `NOT RUN` |
+| `TASK-MAPPING-004` | `REQ-MAPPING-004`, `REQ-MAPPING-005`, `REQ-RESIDUAL-007` | G-07 unknown-load entries | `NOT RUN` |
+| `TASK-TOPOLOGY-005` | `REQ-TOPO-009`, `REQ-CHANGE-001`, `REQ-CHANGE-002`, `REQ-CHANGE-005`, `REQ-CHANGE-007` | G-08 change detection/reconciliation | `NOT RUN` |
+| `TASK-DISAGG-003` | `REQ-DISAGG-001`, `REQ-FOUNDATION-005` | G-05 source ledger (`sources_used`) | `NOT RUN` |
+| `TASK-DISAGG-004` | `REQ-DISAGG-002`, `REQ-DISAGG-003`, `REQ-DISAGG-004`, `REQ-DISAGG-005` | G-06 `min_w`/`max_w`, non-fabrication | `NOT RUN` |
+| `TASK-UI-004` | `REQ-UI-003`, `REQ-UI-004`, `REQ-UI-005`, `REQ-UI-006`, `REQ-UI-007`, `REQ-UI-008`, `REQ-UI-009`, `REQ-UI-010`, `REQ-UI-011`, `REQ-UI-012`, `REQ-UI-013` | G-09 UI data exposure | `NOT RUN` |
+| `TASK-DEPLOY-003` | `REQ-DEPLOY-005`, `REQ-DEPLOY-006`, `REQ-DEPLOY-007`, `REQ-TEST-002` | G-10 unified workflow / smoke | `NOT RUN` |
+| `TASK-TEST-004` | `REQ-TEST-003`, `REQ-TEST-004`, `REQ-TEST-005`, `REQ-TEST-008`, `REQ-TEST-009`, `REQ-STORAGE-012` | G-11 performance/replay/migration/UI gates | `NOT RUN` |
+| `TASK-DEPLOY-004` | `REQ-DEPLOY-005`, `REQ-DEPLOY-007`, `REQ-TEST-001`, `REQ-TEST-010` | G-12/G-13 final + deployment reports | `NOT RUN` |
+
+**Rule.** A row here is a forward link, not a claim. The `Verification Result`
+column moves to `PASS` only by the orchestrator's own test log
+(§10 update protocol), never by this Phase A documentation.
+
+---
+
 ## Related documents
 
 - [`README.md`](README.md) — the specification index and the conventions.
@@ -603,4 +645,6 @@ requirement is withdrawn, `01-requirements.md` is the place it is withdrawn.
 - [`../../interface_contracts.md`](../../interface_contracts.md) — the frozen contracts and the change protocol.
 - [`../../implementation_plan_v2.md`](../../implementation_plan_v2.md) — the governing decisions, the seven acceptance gates and the one-owner-per-wave rule.
 - [`../../agent_assignments.md`](../../agent_assignments.md) — workstream ownership and the orchestrator-run evidence rule.
+- [`18-completion-gap-analysis.md`](18-completion-gap-analysis.md) — the Phase A gap analysis that identifies the work these new tasks close.
+- [`19-completion-plan.md`](19-completion-plan.md) — the dependency-ordered plan that defines the new task IDs in §11.
 - [`../../assessment_gap_analysis.md`](../../assessment_gap_analysis.md) — the `G1`–`G20` gap register and the "must NOT be rebuilt" list.
