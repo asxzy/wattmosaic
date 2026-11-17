@@ -16,10 +16,18 @@ transport works standalone, and the real engine replaces it at startup.
 from __future__ import annotations
 
 import inspect
+from collections.abc import Mapping
 from typing import Any, Protocol, runtime_checkable
 
 from .. import __version__ as ENGINE_VERSION
-from ..contracts import CONTRACT_VERSION, ServiceCommand, ServiceResult
+from ..contracts import (
+    CONTRACT_VERSION,
+    ServiceCommand,
+    ServiceResult,
+    Topology,
+    TopologyRelation,
+)
+from ..electrical.models import resolve_model
 
 
 class FacadeUnavailable(RuntimeError):
@@ -88,6 +96,91 @@ def confidence_tier_vocabulary() -> dict[str, Any]:
             "the numeric confidence score remains the finer-grained estimator"
         ),
     }
+
+
+def _relation_from_raw(raw: Any) -> TopologyRelation | None:
+    """Best-effort parse of a stored/serialised relation into the contract."""
+    if isinstance(raw, TopologyRelation):
+        return raw
+    if not isinstance(raw, Mapping):
+        return None
+    try:
+        return TopologyRelation.model_validate(dict(raw))
+    except Exception:  # noqa: BLE001 - one bad edge never fails the whole read
+        return None
+
+
+async def derive_mapping_matrix(facade: EngineFacade) -> dict[str, Any]:
+    """Project the mapping matrix from a facade's *current* state.
+
+    This is a pure read-time projection (REQ-MAPPING-001/005): it calls only the
+    facade's existing read methods — ``topology``, ``relations`` and ``models``
+    — and hands their current values to ``build_mapping_matrix``.  It writes no
+    storage, takes no sample and keeps no per-sample snapshot, so repeated calls
+    against unchanged state yield a byte-identical matrix.
+
+    ``reader_configuration_version`` is derived from the topology version: the
+    topology *is* the reader configuration (its channels are the readers), so a
+    stable, non-invented version string is available from its own version id.
+    No association/model data that is absent is fabricated: an empty topology
+    yields empty cells and a zeroed coverage block.
+
+    ``dev_fridge``-style model reads come back as dicts; ``resolve_model``
+    normalises them to ``ModelView`` without constructing a second registry.
+    """
+    from ..disaggregation.mapping import MappingEvidence, build_mapping_matrix
+
+    topology_obj = await maybe_await(facade.topology())
+    if not isinstance(topology_obj, Topology):
+        try:
+            topology_obj = Topology.model_validate(topology_obj)
+        except Exception:  # noqa: BLE001
+            topology_obj = Topology()
+    topology: Topology = topology_obj
+
+    associations: list[TopologyRelation] = []
+    relations_reader = getattr(facade, "relations", None)
+    if relations_reader is not None:
+        try:
+            payload = await maybe_await(relations_reader("device_ct_association"))
+            rows = (
+                payload.get("kinds", {}).get("device_ct_association", [])
+                if isinstance(payload, Mapping)
+                else []
+            )
+            for raw in rows:
+                relation = _relation_from_raw(raw)
+                if relation is not None:
+                    associations.append(relation)
+        except Exception:  # noqa: BLE001 - a backend without relations still works
+            associations = []
+    # Relations already declared on the topology are the primary evidence and
+    # are read by build_mapping_matrix directly; stored ones are additive.
+
+    model_views: dict[str, Any] = {}
+    models_reader = getattr(facade, "models", None)
+    if models_reader is not None:
+        for device in topology.devices:
+            try:
+                payload = await maybe_await(models_reader(device.device_id))
+                active = payload.get("active") if isinstance(payload, Mapping) else None
+                if active is None:
+                    continue
+                view = resolve_model({device.device_id: active}, device.device_id)
+                if view is not None:
+                    model_views[device.device_id] = view
+            except Exception:  # noqa: BLE001 - per-device isolation
+                continue
+
+    evidence = MappingEvidence(associations=tuple(associations))
+    matrix = build_mapping_matrix(
+        topology,
+        models=model_views,
+        evidence=evidence,
+        reader_configuration_version=f"topology-{topology.version}",
+        topology_version=str(topology.version),
+    )
+    return matrix.as_dict()
 
 
 @runtime_checkable
@@ -262,6 +355,14 @@ class NullFacade:
     def metrics(self) -> Any:
         return self._unavailable()
 
+    def mapping_matrix(self) -> Any:
+        """Optional additive hook: ``None`` means "derive from current state".
+
+        The HTTP layer falls back to :func:`derive_mapping_matrix`, so a facade
+        that predates this method still serves the route without any change.
+        """
+        return None
+
 
 class StubFacade(NullFacade):
     """A deterministic in-memory facade for tests and demos.
@@ -423,5 +524,6 @@ __all__ = [
     "NullFacade",
     "StubFacade",
     "confidence_tier_vocabulary",
+    "derive_mapping_matrix",
     "maybe_await",
 ]
