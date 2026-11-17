@@ -289,6 +289,22 @@
     l1: 'L1',
     l2: 'L2',
     both: 'Both legs',
+    // Additive labels for the derived mapping matrix and group ranges.  A status
+    // the engine invents still falls through ``titleCase`` rather than rendering
+    // blank, so this table is a readability improvement, not an allowlist.
+    non_identifiable: 'Non-identifiable',
+    valid: 'Valid',
+    invalid: 'Invalid',
+    learning: 'Learning',
+    provisional: 'Provisional',
+    conflicted: 'Conflicted',
+    direct: 'Direct',
+    derived: 'Derived',
+    indirect: 'Indirect',
+    one_to_one: 'One-to-one',
+    one_to_many: 'One-to-many',
+    many_to_one: 'Many-to-one',
+    many_to_many: 'Many-to-many',
   };
   const label = (value) => STRINGS[value] || titleCase(value || 'unknown');
 
@@ -684,13 +700,17 @@
    * ---------------------------------------------------------------------- */
 
   async function fetchOverview(signal) {
-    const [health, status, snapshot, devices] = await Promise.all([
+    const [health, status, snapshot, devices, residuals, mapping] = await Promise.all([
       get('/health', signal),
       get('/status', signal).catch(() => null),
       get('/snapshot', signal).catch(() => null),
       get('/devices', signal).catch(() => []),
+      // Additive derived data: an engine that predates these routes still shows
+      // the overview, just without the new cards.
+      get('/residuals', signal).catch(() => null),
+      get('/mapping', signal).catch(() => null),
     ]);
-    return { health, status, snapshot, devices };
+    return { health, status, snapshot, devices, residuals, mapping };
   }
 
   async function fetchDevice(deviceId, signal) {
@@ -771,7 +791,7 @@
   /* --- Overview --------------------------------------------------------- */
 
   async function renderOverview(root, signal) {
-    const { health, status, snapshot, devices } = await fetchOverview(signal);
+    const { health, status, snapshot, devices, residuals, mapping } = await fetchOverview(signal);
     if (signal.aborted) return;
 
     state.lastHealth = health;
@@ -816,6 +836,11 @@
     root.append(cols);
 
     root.append(overviewDevices(devices, snapshot));
+
+    const groupRanges = groupRangesCard(devices);
+    if (groupRanges) root.append(groupRanges);
+    if (residuals) root.append(residualDecompositionCard(residuals));
+    if (mapping) root.append(mappingMatrixCard(mapping));
   }
 
   function overviewHeader() {
@@ -994,6 +1019,165 @@
       ],
       { foot: 'Residual = measured mains minus what the model could attribute.' }
     );
+  }
+
+  /* --- Derived backend data (completion sprint B4-UIa) ------------------- *
+   * Three additive renderers for data the engine now publishes: the residual
+   * decomposition, the derived device/reader mapping matrix, and identifiability
+   * group ranges.  Every field comes from an API payload and is inserted as text.
+   * A value the engine did not publish (``null``/absent) reads "—", never 0 W,
+   * and a non-identifiable device shows a *group range*, never a fabricated
+   * per-device watt.
+   * ---------------------------------------------------------------------- */
+
+  // GET /api/v1/residuals -> { window_hours, count, components: [...] }.
+  // A component carries the signed residual, its three-way split and the
+  // estimator/resolved state.  Older payloads may omit noise_w or the estimator;
+  // ``watts``/the fallback render those as "—" rather than inventing a number.
+  function residualDecompositionCard(payload) {
+    const data = payload || {};
+    const components = Array.isArray(data.components) ? data.components : [];
+    const rows = components.slice(0, 25).map((c) => {
+      const estimator = c && (c.baseline_estimator || c.estimator);
+      return [
+        c && c.timestamp ? clock(c.timestamp) : '—',
+        watts(c && c.residual_w),
+        watts(c && c.baseline_w),
+        watts(c && c.dynamic_w),
+        watts(c && c.noise_w),
+        estimator ? String(estimator) : '—',
+        c && c.resolved === true ? 'Resolved' : 'Unresolved',
+        label((c && c.kind) || 'unknown'),
+      ];
+    });
+    const body = rows.length
+      ? el('div', { class: 'table-wrap' }, [
+          el('table', { class: 'data residual-decomposition' }, [
+            el('thead', {}, el('tr', {}, [
+              el('th', {}, 'Time'),
+              el('th', { class: 'num' }, 'Residual'),
+              el('th', { class: 'num' }, 'Baseline'),
+              el('th', { class: 'num' }, 'Dynamic'),
+              el('th', { class: 'num' }, 'Noise'),
+              el('th', {}, 'Estimator'),
+              el('th', {}, 'State'),
+              el('th', {}, 'Kind'),
+            ])),
+            el('tbody', {},
+              rows.map((cells) => el('tr', {}, cells.map((value) => el('td', {}, value))))),
+          ]),
+        ])
+      : emptyState(
+          'No residual observations',
+          'The engine has not recorded a residual decomposition in this window.'
+        );
+    return card('Residual decomposition', [body], {
+      foot: 'A signed measurement of what the engine could not attribute. Baseline, dynamic and noise are the residual’s own split — never redistributed to a device.',
+    });
+  }
+
+  // GET /api/v1/mapping -> { cells: [...], coverage: { counts: {...} } }.
+  // Each cell states a device↔reader relation with its status, observability
+  // and contribution bounds.  A NON_IDENTIFIABLE cell carries bounds but no
+  // point contribution, so this never turns a shared conductor into a per-device
+  // watt.
+  function mappingMatrixCard(payload) {
+    const data = payload || {};
+    const cells = Array.isArray(data.cells) ? data.cells : [];
+    const rows = cells.map((cell) => {
+      const status = String((cell && cell.status) || 'unknown');
+      const nonIdentifiable = status.toLowerCase() === 'non_identifiable';
+      const estimate = cell && cell.estimated_contribution_w;
+      const contribution = nonIdentifiable || estimate === null || estimate === undefined
+        ? '—'
+        : watts(estimate);
+      const low = cell && cell.min_contribution_w;
+      const high = cell && cell.max_contribution_w;
+      const bounds =
+        (low === null || low === undefined) && (high === null || high === undefined)
+          ? '—'
+          : `${watts(low)} – ${watts(high)}`;
+      return [
+        String((cell && cell.device_id) || '—'),
+        String((cell && cell.reader_id) || '—'),
+        badge(label(status), toneFor(status)),
+        label((cell && cell.observability) || 'unknown'),
+        contribution,
+        bounds,
+        label((cell && cell.relation_type) || 'unknown'),
+        cell && cell.is_unknown_load ? badge('unknown load', 'warn') : null,
+      ];
+    });
+    const coverage = (data.coverage && data.coverage.counts) || {};
+    const byStatus = coverage.by_status || {};
+    const summary = kv([
+      ['Cells', String(coverage.cell_count === undefined ? cells.length : coverage.cell_count)],
+      ['Unknown loads', String(coverage.unknown_load_count === undefined ? 0 : coverage.unknown_load_count)],
+      ...Object.keys(byStatus).sort().map((key) => [label(key), String(byStatus[key])]),
+    ]);
+    const body = rows.length
+      ? el('div', {}, [
+          el('div', { class: 'table-wrap' }, [
+            el('table', { class: 'data mapping-matrix' }, [
+              el('thead', {}, el('tr', {}, [
+                el('th', {}, 'Device'),
+                el('th', {}, 'Reader'),
+                el('th', {}, 'Status'),
+                el('th', {}, 'Observability'),
+                el('th', { class: 'num' }, 'Contribution'),
+                el('th', { class: 'num' }, 'Bounds'),
+                el('th', {}, 'Relation'),
+                el('th', {}, 'Marker'),
+              ])),
+              el('tbody', {},
+                rows.map((cellsRow) => el('tr', {}, cellsRow.map((value) => el('td', {}, value))))),
+            ]),
+          ]),
+          el('div', { class: 'mapping-coverage', style: 'margin-top:14px' }, [
+            el('div', { class: 'stat-label' }, 'Coverage'),
+            summary,
+          ]),
+        ])
+      : emptyState('No mapping cells', 'The engine has not derived a device/reader mapping matrix yet.');
+    return card('Device-reader mapping', [body], {
+      foot: 'A cell states how a reader observes a device and the bounds of its contribution. Non-identifiable cells carry a range, not an invented per-device watt.',
+    });
+  }
+
+  // The /devices payload carries each result's min_w/max_w/group_members: the
+  // honest floor and cap of an inseparable group's SUM.  A device with such a
+  // range is non-identifiable on its own, so this renderer shows the group range
+  // and the members and NEVER reads the result's 0.0 ``power_w`` placeholder as a
+  // device measurement.
+  function groupRangesCard(devices) {
+    const list = Array.isArray(devices) ? devices : [];
+    const ranged = list.filter((d) => {
+      const r = d && d.latest_result;
+      if (!r) return false;
+      const hasBounds =
+        (r.min_w !== null && r.min_w !== undefined) ||
+        (r.max_w !== null && r.max_w !== undefined);
+      const hasMembers = Array.isArray(r.group_members) && r.group_members.length > 0;
+      return hasBounds || hasMembers;
+    });
+    if (!ranged.length) return null;
+
+    const rows = ranged.map((d) => {
+      const r = d.latest_result;
+      const range = `${watts(r.min_w)} – ${watts(r.max_w)}`;
+      const members = Array.isArray(r.group_members) && r.group_members.length
+        ? r.group_members.join(', ')
+        : String((d && (d.name || d.device_id)) || 'device');
+      return el('div', { class: 'group-range-row', dataset: { status: 'non_identifiable' } }, [
+        el('span', { class: 'group-range-name' }, String((d && (d.name || d.device_id)) || 'device')),
+        el('span', { class: 'chip chip-non-identifiable' }, 'NON-IDENTIFIABLE'),
+        el('span', { class: 'group-range-value' }, range),
+        el('span', { class: 'group-range-members' }, `Group total of: ${members}`),
+      ]);
+    });
+    return card('Identifiability ranges', rows, {
+      foot: 'A non-identifiable group is observable only as a total. The range is the group sum; no per-device watt is shown because the split is not measured.',
+    });
   }
 
   function systemCard(health, status) {
