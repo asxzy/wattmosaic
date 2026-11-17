@@ -60,9 +60,18 @@ service, no message bus, no distributed infrastructure
 | [`15-implementation-plan.md`](15-implementation-plan.md) | The 36 tasks in 5 dependency waves, the ownership matrix, the contract-freeze list and the acceptance gates. |
 | [`phase0-repository-and-environment-discovery.md`](phase0-repository-and-environment-discovery.md) | The repository architecture summary and implementation constraints the set was written from. |
 
-`16-final-verification-report.md` and `17-deployment-report.md` are the
-forthcoming delivery and acceptance appendices. They do not exist yet, so they
-are named here rather than linked.
+Delivery and acceptance appendices:
+
+- [`16-final-verification-report.md`](16-final-verification-report.md) — the
+  final verification report with the delivered version, exact HEAD and the
+  orchestrator gate table.
+- [`18-completion-gap-analysis.md`](18-completion-gap-analysis.md) — the
+  read-only, requirement-by-requirement completion gap analysis.
+- [`19-completion-plan.md`](19-completion-plan.md) — the dependency-ordered
+  completion plan.
+- `17-deployment-report.md` — **deferred**: a version-stamped deployment and
+  rollback report requires a real deployed system and a recorded smoke run. It
+  does not exist yet, so it is named here rather than linked.
 
 The sibling files are listed above and linked from `00` and `01`; the links are
 relative and resolve to the files in this folder.
