@@ -305,6 +305,18 @@
     one_to_many: 'One-to-many',
     many_to_one: 'Many-to-one',
     many_to_many: 'Many-to-many',
+    // Additive labels for version history, suspected changes and event evidence.
+    // A value the engine invents still falls through ``titleCase``; these are
+    // readability improvements, not an allowlist.  SUSPECTED is deliberately
+    // distinct from CONFIRMED and must never read as established.
+    suspected: 'Suspected',
+    pending: 'Pending',
+    active: 'Active',
+    frozen: 'Frozen',
+    rolled_back: 'Rolled back',
+    isolated: 'Isolated',
+    contaminated: 'Contaminated',
+    insufficient_data: 'Insufficient data',
   };
   const label = (value) => STRINGS[value] || titleCase(value || 'unknown');
 
@@ -1180,6 +1192,276 @@
     });
   }
 
+  /* --- Version history, suspected changes and event evidence ------------- *
+   * Completion sprint B4-UIb (REQ-UI-009/010/011, gap G-09).  All three cards
+   * are additive and read only fields the panel already receives from the API:
+   * there is no new route.  Topology/config versions come from the current
+   * /topology and /models payloads plus the version records mirrored into the
+   * status/diagnostics bundles; suspected changes come from the audit bundle
+   * (``status.audit.last_pass.configuration_changes``) and from the mirrored
+   * ``configuration_change`` system events in diagnostics; event evidence comes
+   * from the diagnostics event log and the isolation verdict list.
+   *
+   * A SUSPECTED change is NEVER shown as confirmed: its status badge is derived
+   * only from the published ``status`` field, and a change whose status is not
+   * literally ``confirmed`` is rendered with the SUSPECTED status and a "not
+   * applied" marker.  Nothing here mutates configuration.
+   * ---------------------------------------------------------------------- */
+
+  // A topology version record is the wire shape of TopologyVersion (contract
+  // 2.4.0): version_number, status, created_at, edge_count, created_by, summary.
+  // The current /topology payload is an authoritative single-row history when
+  // a fuller version list is not published.  Accept either a bare array or the
+  // common {versions: [...]} envelope, and add the current topology when no
+  // record duplicates it.
+  function versionHistoryCard(topology, modelPayload, versionPayload) {
+    const versions = [];
+    const seen = new Set();
+    const add = (record) => {
+      if (!record || typeof record !== 'object') return;
+      const id =
+        record.version_id !== undefined && record.version_id !== null
+          ? String(record.version_id)
+          : record.version_number !== undefined && record.version_number !== null
+            ? `v${record.version_number}`
+            : null;
+      if (id !== null && seen.has(id)) return;
+      if (id !== null) seen.add(id);
+      versions.push(record);
+    };
+
+    const bundle = versionPayload || {};
+    const records = Array.isArray(bundle)
+      ? bundle
+      : Array.isArray(bundle.versions)
+        ? bundle.versions
+        : Array.isArray(bundle.topology_versions)
+          ? bundle.topology_versions
+          : [];
+    records.forEach(add);
+    if (topology && typeof topology === 'object' && (topology.version !== undefined || topology.status !== undefined)) {
+      // Only add the live topology when the version list does not already carry
+      // its version number, so the same version is never shown twice.
+      const already = versions.some(
+        (v) => v && v.version_number !== undefined && topology.version !== undefined
+          && Number(v.version_number) === Number(topology.version)
+      );
+      if (!already) {
+        add({
+          version_number: topology.version,
+          status: topology.status,
+          created_at: topology.created_at,
+          edge_count: topology.edge_count,
+          created_by: topology.created_by,
+          summary: topology.summary,
+        });
+      }
+    }
+
+    // Model versions come from /models/{device_id}: {device_id, active, versions}.
+    const models = [];
+    const modelList = modelPayload || {};
+    const deviceId =
+      modelList.device_id || (topology && topology.device_id) || 'device';
+    const activeVersion = modelList.active && modelList.active.version;
+    (Array.isArray(modelList.versions) ? modelList.versions : []).forEach((model) => {
+      if (!model || typeof model !== 'object') return;
+      models.push(model);
+    });
+    if (!models.length && modelList.active) models.push(modelList.active);
+
+    const topRows = versions.map((v) => [
+      v.version_id !== undefined && v.version_id !== null
+        ? String(v.version_id)
+        : v.version_number !== undefined && v.version_number !== null
+          ? `v${v.version_number}`
+          : '—',
+      v.version_number === undefined || v.version_number === null ? '—' : String(v.version_number),
+      v.status ? statusBadge(v.status) : '—',
+      v.edge_count === undefined || v.edge_count === null ? '—' : String(v.edge_count),
+      v.created_at ? ago(v.created_at) : '—',
+      v.created_by ? String(v.created_by) : '—',
+      v.summary ? String(v.summary) : '—',
+    ]);
+
+    const modelRows = models.map((m) => [
+      deviceId ? String(deviceId) : '—',
+      m.model_type ? titleCase(m.model_type) : '—',
+      m.version === undefined || m.version === null ? '—' : String(m.version),
+      m.status ? statusBadge(m.status) : '—',
+      m.confidence === undefined || m.confidence === null ? '—' : percent(m.confidence, 0),
+      m.created_at ? ago(m.created_at) : '—',
+      activeVersion !== undefined && activeVersion !== null && Number(m.version) === Number(activeVersion)
+        ? badge('Active', 'ok')
+        : null,
+    ]);
+
+    const table = (headings, rows) =>
+      el('div', { class: 'table-wrap' }, [
+        el('table', { class: 'data version-history' }, [
+          el('thead', {}, el('tr', {}, headings.map((h) => el('th', {}, h)))),
+          el('tbody', {}, rows.map((cells) =>
+            el('tr', {}, cells.map((value) => el('td', {}, value === null ? '—' : value))))),
+        ]),
+      ]);
+
+    const body = [];
+    body.push(el('div', { class: 'stat-label' }, 'Topology versions'));
+    body.push(
+      topRows.length
+        ? table(['Version', 'Number', 'Status', 'Edges', 'Created', 'By', 'Summary'], topRows)
+        : el('p', { class: 'stat-hint' }, 'No topology version has been recorded yet.')
+    );
+    body.push(el('div', { class: 'stat-label', style: 'margin-top:14px' }, 'Model versions'));
+    body.push(
+      modelRows.length
+        ? table(['Device', 'Type', 'Version', 'Status', 'Confidence', 'Created', 'Active'], modelRows)
+        : el('p', { class: 'stat-hint' }, 'No learned model version is available.')
+    );
+    return card('Version history', body, {
+      foot: 'Topology and model versions are append-only history. A candidate or suspected version is never treated as confirmed.',
+    });
+  }
+
+  // A suspected configuration change is a ConfigurationChangeEvent (contract
+  // 2.4.0): kind, status ('suspected' | 'confirmed'), confidence, evidence_event_ids,
+  // occurred_at, device_id/reader_id.  It may arrive as the audit bundle's
+  // ``configuration_changes`` list or mirrored into a ``configuration_change``
+  // system event whose details carry the event under ``details.event``.  Neither
+  // shape is promoted: only a literal ``status === 'confirmed'`` reads confirmed,
+  // and even that is shown with its published status, never auto-confirmed here.
+  function suspectedChangesCard(status, diagnostics) {
+    const changes = [];
+    const add = (raw) => {
+      if (!raw || typeof raw !== 'object') return;
+      // The details envelope of a mirrored system event: {status, event}.
+      const event = raw.event && typeof raw.event === 'object' ? raw.event : raw;
+      if (!event.kind && !event.change_id) return;
+      changes.push(event);
+    };
+
+    const audit = (status && status.audit) || {};
+    const lastPass = audit.last_pass || {};
+    (Array.isArray(lastPass.configuration_changes) ? lastPass.configuration_changes : []).forEach(add);
+
+    const errors = (diagnostics && diagnostics.errors) || {};
+    (Array.isArray(errors.recent_system_events) ? errors.recent_system_events : [])
+      .filter((row) => row && row.category === 'configuration_change')
+      .forEach((row) => {
+        const details = row.details || row.details_json || {};
+        add(details.event || details);
+      });
+
+    if (!changes.length) {
+      return card('Suspected configuration changes', [
+        emptyState(
+          'No suspected changes',
+          'The engine has not detected a configuration change that needs review.'
+        ),
+      ], {
+        foot: 'A suspected change is an uncertain proposal and never applies itself. Only an operator can confirm a change.',
+      });
+    }
+
+    const rows = changes.map((change) => {
+      const statusValue = String(change.status || 'suspected').toLowerCase();
+      const confirmed = statusValue === 'confirmed';
+      // Deliberately NOT derived from detection/confidence: only the published
+      // status decides, and a missing status stays suspected.
+      const statusCell = confirmed
+        ? statusBadge('confirmed')
+        : el('span', { class: 'badge', dataset: { tone: 'warn' } }, [
+            el('span', { class: 'dot', 'aria-hidden': 'true' }),
+            'SUSPECTED',
+          ]);
+      const evidence = Array.isArray(change.evidence_event_ids)
+        ? change.evidence_event_ids.length
+        : 0;
+      return el('div', { class: 'suspected-change-row', dataset: { status: confirmed ? 'confirmed' : 'suspected' } }, [
+        el('span', { class: 'change-kind' }, change.kind ? titleCase(change.kind) : 'Unknown change'),
+        statusCell,
+        confirmed ? null : badge('not applied', 'mute'),
+        el('span', { class: 'change-confidence' },
+          `Confidence ${change.confidence === undefined || change.confidence === null ? '—' : percent(change.confidence, 0)}`),
+        el('span', { class: 'change-evidence' }, `${evidence} evidence ${evidence === 1 ? 'event' : 'events'}`),
+        el('span', { class: 'change-where' },
+          [change.device_id, change.reader_id].filter(Boolean).join(' · ') || '—'),
+        el('span', { class: 'change-when' }, change.occurred_at ? ago(change.occurred_at) : '—'),
+      ]);
+    });
+
+    return card('Suspected configuration changes', rows, {
+      foot: 'A SUSPECTED change is an uncertain proposal shown with its confidence and evidence count; it is never applied or auto-confirmed. Confirmation is an operator decision.',
+    });
+  }
+
+  // Event evidence is drawn from two payloads the panel already fetches: the
+  // diagnostics event log (system/quality events, including configuration_change
+  // mirrors) and the isolation verdict list from /isolation.  A verdict shows its
+  // status, window bounds, competing device ids and reason code, as REQ-UI-009
+  // requires.  The two sources are labelled so they are never confused.
+  function eventEvidenceCard(diagnostics, isolation) {
+    const entries = [];
+    const errors = (diagnostics && diagnostics.errors) || {};
+    const system = Array.isArray(errors.recent_system_events) ? errors.recent_system_events : [];
+    const quality = Array.isArray(errors.recent_quality_events) ? errors.recent_quality_events : [];
+    [...system.map((row) => ({ ...row, source: 'system' })),
+     ...quality.map((row) => ({ ...row, source: 'quality' }))]
+      .sort((a, b) => String(b.timestamp || b.created_at || '').localeCompare(String(a.timestamp || a.created_at || '')))
+      .slice(0, 25)
+      .forEach((row) => {
+        const tag = row.category || row.code || row.level || row.severity || row.source;
+        entries.push({
+          when: row.timestamp || row.created_at,
+          label: tag ? String(tag) : 'event',
+          status: row.level || row.severity || null,
+          detail: row.message || row.detail || '',
+          evidence: null,
+        });
+      });
+
+    const verdicts = (isolation && isolation.verdicts) || [];
+    (Array.isArray(verdicts) ? verdicts : []).slice(0, 25).forEach((v) => {
+      const competitors = Array.isArray(v.competing_device_ids) ? v.competing_device_ids : [];
+      const window =
+        v.window_start && v.window_end
+          ? `${clock(v.window_start)} – ${clock(v.window_end)}`
+          : '—';
+      entries.push({
+        when: v.occurred_at,
+        label: v.device_id ? `Isolation · ${v.device_id}` : 'Isolation verdict',
+        status: v.status,
+        detail: [
+          v.reason ? `Reason: ${v.reason}` : null,
+          competitors.length ? `Competitors: ${competitors.join(', ')}` : null,
+          v.power_window_contaminated ? 'Power window contaminated' : null,
+        ].filter(Boolean).join(' · '),
+        evidence: window,
+      });
+    });
+
+    if (!entries.length) {
+      return card('Event evidence', [
+        emptyState('No event evidence', 'No recent events or isolation verdicts have been recorded yet.'),
+      ], {
+        foot: 'Evidence comes from the engine’s own event log and isolation analysis; nothing is inferred here.',
+      });
+    }
+
+    const rows = entries.map((entry) =>
+      el('div', { class: 'event-evidence-row' }, [
+        el('span', { class: 'ee-when' }, entry.when ? ago(entry.when) : '—'),
+        el('span', { class: 'ee-label' }, entry.label),
+        entry.status ? statusBadge(String(entry.status).toLowerCase()) : null,
+        entry.evidence ? el('span', { class: 'ee-window' }, `Window ${entry.evidence}`) : null,
+        el('span', { class: 'ee-detail' }, entry.detail || '—'),
+      ])
+    );
+    return card('Event evidence', rows, {
+      foot: 'Engine event-log entries and isolation verdicts, newest first. A verdict names the window examined, competing devices and the reason code.',
+    });
+  }
+
   function systemCard(health, status) {
     const inference = (status && status.inference) || {};
     const learning = (status && status.learning) || {};
@@ -1495,6 +1777,9 @@
     mainCol.append(deviceHero(device, result));
     mainCol.append(deviceHistoryCard(device));
     mainCol.append(deviceEvidenceCard(result));
+    // Additive B4-UIb: this device's model versions come from the /models payload
+    // this view already fetches, so no extra request is needed.
+    mainCol.append(versionHistoryCard(topology, models, null));
     if (device.configuration) mainCol.append(deviceConfigurationCard(device.configuration));
 
     sideCol.append(deviceSourceCard(result));
@@ -1873,6 +2158,12 @@
     // The hierarchy is the subject of this tab, so it gets the full width: a
     // tree squeezed into half a page forces every ct_id to wrap.
     root.append(topologyHierarchyCard(topology, tree));
+
+    // Additive B4-UIb cards: the topology's append-only version history and any
+    // suspected configuration changes the audit pass detected.  Both read only
+    // payloads already fetched for this view (/topology and /status).
+    root.append(versionHistoryCard(topology, null, null));
+    root.append(suspectedChangesCard(status, null));
 
     // Placement discovery renders into its own slot; it is only populated when
     // the user asks for it (or when a previous answer is cached in state).
@@ -3777,7 +4068,15 @@
   /* --- Diagnostics ------------------------------------------------------ */
 
   async function renderDiagnostics(root, signal) {
-    const report = await get('/diagnostics', signal);
+    // Additive B4-UIb evidence payloads.  Both are optional: an older engine that
+    // does not serve /isolation (or a /status without an audit bundle) still gets
+    // the full diagnostics view, with the evidence cards reading whatever the
+    // diagnostics bundle already carries.
+    const [report, isolation, status] = await Promise.all([
+      get('/diagnostics', signal),
+      get('/isolation', signal).catch(() => null),
+      get('/status', signal).catch(() => null),
+    ]);
     if (signal.aborted) return;
 
     root.append(
@@ -3838,6 +4137,12 @@
     root.append(modelsTable(models));
     root.append(channelHealthCard(report.channels || {}, report.aligner || {}));
     root.append(errorsCard(report.errors || {}));
+
+    // Additive B4-UIb: suspected changes (from the status audit bundle and the
+    // diagnostics event log) and the event evidence list (event log + isolation
+    // verdicts).  All fields come from the payloads above.
+    root.append(suspectedChangesCard(status, report));
+    root.append(eventEvidenceCard(report, isolation));
 
     root.append(
       detailsPanel('Configuration (redacted)', [

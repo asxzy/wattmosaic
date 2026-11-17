@@ -273,3 +273,213 @@ def test_non_identifiable_device_has_no_fabricated_watt(rendered: dict[str, str]
     # the card must not present a per-device "Estimated power" figure.
     assert "0.00 W" not in text
     assert "Estimated power" not in text
+
+
+# ---------------------------------------------------------------------------
+# B4-UIb: version history, suspected changes and event evidence.
+#
+# The three new renderers live in the same harness slice as the UIa cards (all
+# before ``systemCard``), so the very same DOM shim and slice are reused.  The
+# payload shapes are taken from the engine wire forms:
+#   version  -> {versions:[{version_id, version_number, status, ...}]}
+#   model    -> /models/{id} {device_id, active:{version}, versions:[...]}
+#   status   -> /status {audit:{last_pass:{configuration_changes:[...]}}}
+#   diagnostics -> {errors:{recent_system_events, recent_quality_events}}
+#   isolation -> {verdicts:[{device_id, status, reason, ...}]}
+# ---------------------------------------------------------------------------
+
+SAMPLE_TOPOLOGY = {
+    "version": 7,
+    "status": "active",
+    "created_at": "2026-11-16T10:00:00+00:00",
+    "edge_count": 12,
+    "created_by": "op",
+    "summary": "rebalanced",
+}
+
+SAMPLE_MODEL = {
+    "device_id": "light.kitchen",
+    "active": {"version": 3},
+    "versions": [
+        {
+            "model_type": "linear",
+            "version": 3,
+            "status": "confirmed",
+            "confidence": 0.91,
+            "created_at": "2026-11-15T10:00:00+00:00",
+        },
+    ],
+}
+
+SAMPLE_VERSION = {
+    "versions": [
+        {
+            "version_id": "v6",
+            "version_number": 6,
+            "status": "frozen",
+            "edge_count": 11,
+            "created_at": "2026-11-14T10:00:00+00:00",
+            "created_by": "sys",
+            "summary": "initial",
+        },
+    ],
+}
+
+SAMPLE_STATUS = {
+    "audit": {
+        "last_pass": {
+            "configuration_changes": [
+                {
+                    "kind": "reader_reassign",
+                    "status": "suspected",
+                    "confidence": 0.62,
+                    "evidence_event_ids": ["e1", "e2"],
+                    "occurred_at": "2026-11-17T08:00:00+00:00",
+                    "device_id": "light.hall",
+                    "reader_id": "ct_shared",
+                },
+            ],
+        },
+    },
+}
+
+SAMPLE_DIAGNOSTICS = {
+    "errors": {
+        "recent_system_events": [
+            {
+                "category": "configuration_change",
+                "timestamp": "2026-11-17T08:00:00+00:00",
+                "details": {
+                    "event": {
+                        "kind": "threshold_tune",
+                        "status": "suspected",
+                        "confidence": 0.44,
+                        "evidence_event_ids": ["e3"],
+                    },
+                },
+            },
+            {
+                "category": "quality",
+                "timestamp": "2026-11-17T07:30:00+00:00",
+                "level": "degraded",
+                "message": "signal dropped below threshold",
+            },
+        ],
+        "recent_quality_events": [
+            {
+                "timestamp": "2026-11-17T07:00:00+00:00",
+                "code": "noise_spike",
+                "severity": "warn",
+                "detail": "noise floor rose",
+            },
+        ],
+    },
+}
+
+SAMPLE_ISOLATION = {
+    "verdicts": [
+        {
+            "device_id": "light.hall",
+            "status": "isolated",
+            "occurred_at": "2026-11-17T06:00:00+00:00",
+            "reason": "contaminated_window",
+            "competing_device_ids": ["light.entry", "ct_shared"],
+            "power_window_contaminated": True,
+            "window_start": "2026-11-17T05:00:00+00:00",
+            "window_end": "2026-11-17T06:00:00+00:00",
+        },
+    ],
+}
+
+
+def _render_uib() -> dict[str, str]:
+    """Render the three B4-UIb cards under node and return their text content."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed; the panel does not need it at runtime")
+
+    script = APP_JS.read_text(encoding="utf-8")
+    start = script.index(_SLICE_START)
+    end = script.index(_SLICE_END, start)
+    block = script[start:end]
+
+    literals = "\n".join(
+        [
+            f"const SAMPLE_TOPOLOGY = {json.dumps(SAMPLE_TOPOLOGY)};",
+            f"const SAMPLE_MODEL = {json.dumps(SAMPLE_MODEL)};",
+            f"const SAMPLE_VERSION = {json.dumps(SAMPLE_VERSION)};",
+            f"const SAMPLE_STATUS = {json.dumps(SAMPLE_STATUS)};",
+            f"const SAMPLE_DIAGNOSTICS = {json.dumps(SAMPLE_DIAGNOSTICS)};",
+            f"const SAMPLE_ISOLATION = {json.dumps(SAMPLE_ISOLATION)};",
+        ]
+    )
+    program = (
+        _DOM_SHIM
+        + "\n"
+        + block
+        + "\n"
+        + literals
+        + "\n"
+        + "console.log(JSON.stringify({\n"
+        + "  version: versionHistoryCard(SAMPLE_TOPOLOGY, SAMPLE_MODEL, SAMPLE_VERSION).textContent,\n"
+        + "  suspected: suspectedChangesCard(SAMPLE_STATUS, SAMPLE_DIAGNOSTICS).textContent,\n"
+        + "  evidence: eventEvidenceCard(SAMPLE_DIAGNOSTICS, SAMPLE_ISOLATION).textContent,\n"
+        + "}));\n"
+    )
+    completed = subprocess.run(
+        [node, "-e", program],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(completed.stdout)
+
+
+@pytest.fixture(scope="module")
+def rendered_uib() -> dict[str, str]:
+    return _render_uib()
+
+
+def test_panel_renders_version_history(rendered_uib: dict[str, str]) -> None:
+    """The version card shows topology version ids and the model's status."""
+    text = rendered_uib["version"]
+    assert "Version history" in text
+    assert "Topology versions" in text and "Model versions" in text
+    # Published topology version ids, not just a scalar current version.
+    assert "v6" in text and "v7" in text
+    # The model's status and confidence come straight from the payload.
+    assert "Confirmed" in text
+    assert "91%" in text
+    assert "Active" in text
+    assert "Frozen" in text  # an earlier topology record is not treated as active
+
+
+def test_panel_renders_suspected_changes(rendered_uib: dict[str, str]) -> None:
+    """Suspected changes show their kind, SUSPECTED status and confidence."""
+    text = rendered_uib["suspected"]
+    assert "Suspected configuration changes" in text
+    assert "Reader Reassign" in text and "Threshold Tune" in text
+    assert "SUSPECTED" in text
+    assert "62%" in text and "44%" in text
+    assert "2 evidence events" in text and "1 evidence event" in text
+    # A SUSPECTED change carries a not-confirmed marker and is NEVER shown as
+    # confirmed — only a literal ``status === 'confirmed'`` would read Confirmed.
+    assert "not applied" in text
+    assert "Confirmed" not in text
+
+
+def test_panel_renders_event_evidence(rendered_uib: dict[str, str]) -> None:
+    """Event evidence surfaces diagnostics events and isolation verdicts."""
+    text = rendered_uib["evidence"]
+    assert "Event evidence" in text
+    # The diagnostics event log entries, with their published detail.
+    assert "configuration_change" in text
+    assert "signal dropped below threshold" in text
+    assert "noise_spike" in text and "noise floor rose" in text
+    assert "Degraded" in text and "Warn" in text
+    # The isolation verdict with its window, reason and competing devices.
+    assert "Isolation · light.hall" in text
+    assert "Isolated" in text
+    assert "Window" in text
+    assert "contaminated_window" in text
+    assert "light.entry, ct_shared" in text
