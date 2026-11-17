@@ -18,6 +18,7 @@ import pytest
 from pydantic import ValidationError
 from wattmosaic_engine import contracts
 from wattmosaic_engine.contracts import (
+    ChangeStatus,
     Circuit,
     CircuitClass,
     ConfidenceDimension,
@@ -66,13 +67,13 @@ def _export_schemas_module():
     return module
 
 
-def test_contract_version_is_2_3_0() -> None:
+def test_contract_version_is_2_4_0() -> None:
     """The canonical pin: the authoritative version is the one this task bumped.
 
     Other version assertions compare against this exported constant so they
     stay correct across future additive bumps; the pin lives here.
     """
-    assert contracts.CONTRACT_VERSION == "2.3.0"
+    assert contracts.CONTRACT_VERSION == "2.4.0"
 
 
 def test_schema_files_match_contract_version() -> None:
@@ -1495,3 +1496,52 @@ def test_mapping_cell_status_has_the_six_state_vocabulary() -> None:
     } <= values
     # Original members are retained.
     assert {"valid", "stale", "invalid", "unknown"} <= values
+
+
+# --------------------------------------------------------------------------- #
+# The 2.4.0 additive change: typed status and confidence on configuration changes
+# --------------------------------------------------------------------------- #
+
+
+def _pre_2_4_change_event_payload() -> dict:
+    """A pre-2.4.0 configuration change: only the fields that already existed."""
+    return {
+        "change_id": "chg-1",
+        "kind": "smart_plug_relocation",
+        "detection": "observed",
+        "notes": "operator moved the plug",
+    }
+
+
+def test_change_event_new_fields_round_trip() -> None:
+    """2.4.0 payloads with status and confidence survive a model round-trip."""
+    payload = {
+        **_pre_2_4_change_event_payload(),
+        "status": "confirmed",
+        "confidence": 0.87,
+    }
+    event = contracts.ConfigurationChangeEvent.model_validate(payload)
+    # Model uses use_enum_values=True, so status is stored as its string value.
+    assert event.status == ChangeStatus.CONFIRMED.value
+    assert event.confidence == 0.87
+
+    # Dumping and re-validating preserves every new field.
+    reloaded = contracts.ConfigurationChangeEvent.model_validate(event.model_dump())
+    assert reloaded.model_dump() == event.model_dump()
+
+
+def test_change_event_pre_2_4_payload_gets_neutral_defaults() -> None:
+    """A payload written before 2.4.0 still validates and reads neutrally."""
+    event = contracts.ConfigurationChangeEvent.model_validate(
+        _pre_2_4_change_event_payload()
+    )
+    assert event.status == ChangeStatus.SUSPECTED.value
+    assert event.confidence is None
+    # Frozen fields keep their names, types and semantics.
+    assert event.detection == "observed"
+    assert event.notes == "operator moved the plug"
+
+
+def test_change_status_has_the_suspected_confirmed_vocabulary() -> None:
+    """The status enum carries exactly the SUSPECTED/CONFIRMED vocabulary."""
+    assert {member.value for member in ChangeStatus} == {"suspected", "confirmed"}

@@ -29,7 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from . import __version__ as ENGINE_VERSION
 
-CONTRACT_VERSION = "2.3.0"
+CONTRACT_VERSION = "2.4.0"
 
 
 def utcnow() -> datetime:
@@ -792,6 +792,24 @@ class ChangeDetection(str, Enum):
 
     INFERRED = "inferred"
     """The engine concluded it from indirect evidence."""
+
+
+class ChangeStatus(str, Enum):
+    """Whether a recorded configuration change is established (spec 09 §7.6).
+
+    Contract 2.4.0 adds this as a vocabulary distinct from ``ChangeDetection``:
+    ``detection`` says *how* the engine learned of the change, while ``status``
+    says *whether* the change is established.  A ``SUSPECTED`` change is an
+    uncertain, not-auto-confirmed proposal that leaves the live configuration
+    untouched until validated (REQ-CHANGE-002/005); only ``CONFIRMED`` reads
+    as established.
+    """
+
+    SUSPECTED = "suspected"
+    """An uncertain proposal, not auto-confirmed; live configuration untouched."""
+
+    CONFIRMED = "confirmed"
+    """The change was validated and is established."""
 
 
 # --------------------------------------------------------------------------- #
@@ -2707,6 +2725,21 @@ class ConfigurationChangeEvent(Model):
 
     detection: ChangeDetection = ChangeDetection.OBSERVED
     """How the change was learned."""
+
+    # -- contract 2.4.0 additions (additive/neutral, so pre-2.4.0 payloads validate) - #
+    status: ChangeStatus = ChangeStatus.SUSPECTED
+    """Whether the change is established: ``SUSPECTED`` (the neutral default,
+    an uncertain, not-auto-confirmed proposal) or ``CONFIRMED``.  Distinct from
+    ``detection`` (how the change was learned) and ``notes`` (free text); a
+    pre-change payload reads as ``SUSPECTED``.
+    """
+
+    confidence: float | None = None
+    """Confidence that the change actually occurred, in ``[0.0, 1.0]``.
+
+    ``None`` = not stated (the neutral default for pre-change payloads).  This
+    is separate from ``detection`` and never parsed from ``notes``.
+    """
 
     occurred_at: datetime = Field(default_factory=utcnow)
     """When the change happened; the HA clock where known, else the engine's."""

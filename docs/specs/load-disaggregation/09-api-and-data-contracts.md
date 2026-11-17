@@ -458,12 +458,15 @@ A recorded configuration change with its effect on the version identifiers.
 
 `ConfigurationChangeKind` (**new enum**, exactly the nine kinds): `SMART_PLUG_RELOCATION`, `CT_READER_RELOCATION`, `READER_REPLACEMENT`, `CT_DIRECTION_CHANGE`, `CALIBRATION_CHANGE`, `CIRCUIT_RECONFIGURATION`, `READER_INSTALLATION`, `READER_REMOVAL`, `MEASUREMENT_SCOPE_CHANGE`.
 `ChangeDetection` (**new enum**): `DECLARED`, `OBSERVED`, `INFERRED`.
+`ChangeStatus` (**new enum, 2.4.0**): `SUSPECTED`, `CONFIRMED`. Distinct from `ChangeDetection`: `detection` says *how* the change was learned, `status` says *whether* it is established.
 
 | Field | Type | Unit | Null | Default | Required | Notes |
 |---|---|---|---|---|---|---|
 | `change_id` | `str` | — | no | — | `REQUIRED` | opaque `chg-<n>` |
 | `kind` | `ConfigurationChangeKind` | — | no | — | `REQUIRED` | one of the nine kinds above |
 | `detection` | `ChangeDetection` | — | no | `OBSERVED` | `REQUIRED` | how the change was learned |
+| `status` | `ChangeStatus` | — | no | `SUSPECTED` | additive (2.4.0) | whether the change is established; `SUSPECTED` = uncertain, not auto-confirmed (REQ-CHANGE-002/005), `CONFIRMED` = validated; distinct from `detection` and `notes` |
+| `confidence` | `float \| None` | — | **yes** | `None` | additive (2.4.0) | confidence the change occurred, in `[0.0, 1.0]`; `None` = not stated; separate from `detection` and never parsed from `notes` |
 | `occurred_at` | `datetime` (UTC) | — | no | — | `REQUIRED` | HA `last_updated` where known, else engine clock |
 | `device_id` | `str` | — | **yes** | `None` | `REQUIRED` | `None` = change is not device-specific |
 | `reader_id` | `str` | — | **yes** | `None` | `REQUIRED` | `None` = change is not reader-specific |
@@ -479,6 +482,22 @@ A recorded configuration change with its effect on the version identifiers.
 | `superseded_by` | `str` | — | **yes** | `None` | `REQUIRED` | a later `change_id` that replaces this one |
 
 **Rule.** A change of kind `READER_REMOVAL` must not delete history: the affected `DeviceReaderMappingCell` rows move to `status = INVALID` and are retained.
+
+> **Completion sprint amendment (2026-11-17, contract 2.4.0) — SPEC CHANGE.** The
+> `ConfigurationChangeEvent` contract is extended additively so topology
+> self-healing can express an uncertain, not-auto-confirmed change (REQ-CHANGE-002,
+> REQ-CHANGE-005). Two optional fields are added with neutral defaults: `status`
+> (`ChangeStatus`, default `SUSPECTED`) and `confidence` (`float | None`, default
+> `None`). `ChangeStatus` has exactly the two members `SUSPECTED` and `CONFIRMED`:
+> a `SUSPECTED` change is an uncertain proposal that leaves the live configuration
+> untouched until validated, and only `CONFIRMED` reads as established. The new
+> `status` field is deliberately **distinct** from `ChangeDetection` (which says
+> *how* the change was learned — `DECLARED`/`OBSERVED`/`INFERRED`) and from the
+> frozen `notes` field (free text, never parsed); `confidence` is likewise a
+> separate numeric signal. Every new field is optional/neutral, so every
+> pre-2.4.0 payload still validates and no pre-existing field is renamed,
+> retyped or removed — in particular `detection` and `notes` keep their meaning
+> and types.
 
 ### 7.7 `EventEvidenceRecord`
 

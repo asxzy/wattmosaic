@@ -10,6 +10,15 @@
       "title": "ChangeDetection",
       "type": "string"
     },
+    "ChangeStatus": {
+      "description": "Whether a recorded configuration change is established (spec 09 \u00a77.6).\n\nContract 2.4.0 adds this as a vocabulary distinct from ``ChangeDetection``:\n``detection`` says *how* the engine learned of the change, while ``status``\nsays *whether* the change is established.  A ``SUSPECTED`` change is an\nuncertain, not-auto-confirmed proposal that leaves the live configuration\nuntouched until validated (REQ-CHANGE-002/005); only ``CONFIRMED`` reads\nas established.",
+      "enum": [
+        "suspected",
+        "confirmed"
+      ],
+      "title": "ChangeStatus",
+      "type": "string"
+    },
     "ConfigurationChangeKind": {
       "description": "The nine kinds of configuration change (spec 09 \u00a77.6).\n\nExactly nine members, and the set is not extensible: a residual baseline\ndrift is **not** a configuration change, so the change surface's\ndiscriminator is a separate, wider vocabulary (09 \u00a77.10).",
       "enum": [
@@ -40,6 +49,22 @@
     "detection": {
       "$ref": "#/$defs/ChangeDetection",
       "default": "observed"
+    },
+    "status": {
+      "$ref": "#/$defs/ChangeStatus",
+      "default": "suspected"
+    },
+    "confidence": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Confidence"
     },
     "occurred_at": {
       "format": "date-time",
@@ -165,5 +190,5 @@
   "title": "ConfigurationChangeEvent",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/configuration_change_event.json",
-  "x-contract-version": "2.3.0"
+  "x-contract-version": "2.4.0"
 }
