@@ -69,6 +69,7 @@ import numpy as np
 
 from wattmosaic_engine.contracts import (
     CTChannel,
+    EdgeLifecycle,
     MeasurementBasis,
     RelationKind,
     TopologyRelation,
@@ -398,6 +399,11 @@ def _construct_rejected(payload: dict[str, Any], evidence: dict[str, Any]) -> To
         subject_id=str(payload.get("subject_id") or ""),
         object_id=str(payload.get("object_id") or ""),
         status=TopologyStatus.REJECTED,
+        # Terminal on the lifecycle axis as well, so a reader that filters on
+        # ``lifecycle`` sees the rejection without re-deriving it from
+        # ``status``.  ``model_construct`` skips validation, but the field is
+        # still set: this is the one producer that must not rely on a default.
+        lifecycle=EdgeLifecycle.REJECTED,
         confidence=None,
         evidence=dict(evidence),
         requires_confirmation=True,
@@ -413,7 +419,11 @@ def _reject(relation: TopologyRelation, evidence: dict[str, Any]) -> TopologyRel
     payload = dict(relation.evidence)
     payload.update(evidence)
     return relation.model_copy(
-        update={"status": TopologyStatus.REJECTED, "evidence": payload}
+        update={
+            "status": TopologyStatus.REJECTED,
+            "lifecycle": EdgeLifecycle.REJECTED,
+            "evidence": payload,
+        }
     )
 
 
@@ -547,6 +557,9 @@ class HierarchyFinder:
                     subject_id=first,
                     object_id=second,
                     status=TopologyStatus.CANDIDATE,
+                    # An overlap is a proposal about two CTs, never a fact;
+                    # the lifecycle states that independently of ``status``.
+                    lifecycle=EdgeLifecycle.CANDIDATE,
                     evidence={
                         "implies_parenthood": False,
                         "devices": sorted(devices),
@@ -842,6 +855,10 @@ class HierarchyFinder:
             subject_id=geometry.child_ct_id,
             object_id=geometry.parent_ct_id,
             status=TopologyStatus.CANDIDATE,
+            # A containment edge is the strongest claim here, and it is still
+            # only a proposal: the lifecycle says so independently of
+            # ``status``, and only a user may move it to ``CONFIRMED``.
+            lifecycle=EdgeLifecycle.CANDIDATE,
             evidence={
                 "devices": list(devices),
                 "independent_devices": len(devices),

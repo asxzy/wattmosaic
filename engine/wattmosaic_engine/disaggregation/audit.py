@@ -49,6 +49,7 @@ from typing import Any
 from ..contracts import (
     Circuit,
     ConfidenceVector,
+    EdgeLifecycle,
     EventIsolation,
     HaEntityBinding,
     InferenceRecord,
@@ -1647,6 +1648,7 @@ class AuditPass:
                     subject_id=str(channel.ct_id),
                     object_id=str(parent),
                     status=TopologyStatus.CONFIRMED,
+                    lifecycle=EdgeLifecycle.CONFIRMED,
                     requires_confirmation=False,
                     declared_by="user",
                     evidence={"source": "declared_parent_ct_id"},

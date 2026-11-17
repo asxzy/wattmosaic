@@ -41,6 +41,7 @@ from typing import Any
 
 import pytest
 from wattmosaic_engine.contracts import (
+    EdgeLifecycle,
     IsolationStatus,
     MeasurementBasis,
     MeasurementFactor,
@@ -49,10 +50,13 @@ from wattmosaic_engine.contracts import (
     TopologyStatus,
 )
 from wattmosaic_engine.disaggregation.association import (
+    MAX_CONFIDENCE,
+    RELATION_KIND_NAMES,
     AssociationConfig,
     AssociationFinder,
     Observation,
     persist,
+    relation_kind_name,
 )
 from wattmosaic_engine.disaggregation.isolation import EventIsolation
 from wattmosaic_engine.electrical.factors import FactorRegistry
@@ -1228,3 +1232,172 @@ def test_confidence_is_bounded_and_never_claims_certainty() -> None:
     confidence = relation.confidence or 0.0
     assert 0.0 < confidence < 1.0
     assert not math.isnan(confidence)
+
+
+# --------------------------------------------------------------------------- #
+# T13 / T12 — the typed relationship set and the edge lifecycle
+# --------------------------------------------------------------------------- #
+
+
+def _every_produced_edge() -> list[TopologyRelation]:
+    """Every edge this module's finders can produce, across their branches.
+
+    AssociationFinder is the module's edge producer (the hierarchy finder is
+    exercised separately in ``test_hierarchy.py``), so this drives it through
+    the supported, split and ambiguous verdicts, the Hot Tub overlap and a
+    withdrawal.  The point is coverage of *produced* edges, not of one fixture.
+    """
+    finder = AssociationFinder()
+    out: list[TopologyRelation] = []
+    # supported: one device, one CT
+    out += finder.analyze(
+        observe_n(finder, "pump", n=4, device_delta=800.0, ct_deltas={CT: 800.0}),
+        registry=registry(),
+    )
+    # split / ambiguous: two devices moving together
+    out += finder.analyze(
+        observe_n(finder, "twin_a", n=3, device_delta=500.0, ct_deltas={CT: 500.0})
+        + observe_n(finder, "twin_b", n=3, device_delta=500.0, ct_deltas={CT: 500.0}),
+        registry=registry(),
+    )
+    # the Hot Tub: one device, two CTs
+    out += finder.analyze(
+        hot_tub_observations("factor_two", finder=finder),
+        registry=hot_tub_registry("factor_two"),
+    )
+    # a withdrawal: the same edge, terminal
+    if out:
+        out.append(finder.withdraw(out[0], "test withdrawal"))
+    return out
+
+
+def test_relation_kind_is_single_and_typed() -> None:
+    """T13 · one kind per edge, and one name per kind.
+
+    Every produced edge carries exactly one ``RelationKind`` member, and the
+    product-facing name resolves single-valuedly: the map is total over the
+    enum (no kind is unnameable), injective (no name names two kinds), and the
+    resolver agrees with the map on both the enum and its stored string value.
+    """
+    relations = _every_produced_edge()
+    assert relations, "the producer fixture emitted nothing"
+
+    for relation in relations:
+        kind = RelationKind(relation.kind)
+        assert isinstance(kind, RelationKind)
+        assert kind in RELATION_KIND_NAMES
+        assert relation_kind_name(kind) == RELATION_KIND_NAMES[kind]
+        # The stored string value resolves identically, so a persisted row and
+        # an in-memory edge cannot disagree about their name.
+        assert relation_kind_name(str(relation.kind)) == relation_kind_name(kind)
+
+    # Total and injective: four kinds, four distinct names.
+    assert set(RELATION_KIND_NAMES) == set(RelationKind)
+    assert len(set(RELATION_KIND_NAMES.values())) == len(RELATION_KIND_NAMES)
+    # The four product-facing names of REQ-TOPO-001 are present, and the two
+    # readings of DEVICE_CT_ASSOCIATION resolve to the one stored kind rather
+    # than to a blend.
+    assert set(RELATION_KIND_NAMES.values()) == {
+        "CONTAINS",
+        "SHARED_LOAD",
+        "PAIRED_LEG",
+        "CIRCUIT_MEMBERSHIP",
+    }
+    assert relation_kind_name(RelationKind.DEVICE_CT_ASSOCIATION) == "PAIRED_LEG"
+
+
+def test_edge_lifecycle_states() -> None:
+    """T12 · eight states, a separate vocabulary, and no false establishment.
+
+    The eight ``EdgeLifecycle`` states exist and are distinct from the three
+    ``TopologyStatus`` members, so a lifecycle state can never be mistaken for
+    an aggregate status.  Only ``CONFIRMED`` reads as established: a consumer
+    that admits an edge exactly when its lifecycle is ``CONFIRMED`` rejects
+    every non-confirmed edge the producer emits, whatever its status.
+    """
+    lifecycles = set(EdgeLifecycle)
+    statuses = set(TopologyStatus)
+    assert len(lifecycles) == 8
+    assert {state.value for state in lifecycles} == {
+        "candidate",
+        "provisional",
+        "confirmed",
+        "suspected_change",
+        "under_review",
+        "conflicted",
+        "rejected",
+        "retired",
+    }
+    assert len(statuses) == 3
+    # Distinct vocabularies: the members are not interchangeable, and the
+    # overlap is only the two spellings both vocabularies need.
+    assert lifecycles != statuses
+    assert {state.name for state in lifecycles} != {state.name for state in statuses}
+
+    def established(relation: TopologyRelation) -> bool:
+        """A CONFIRMED-only consumer: the only reading of *established*."""
+        return EdgeLifecycle(relation.lifecycle) is EdgeLifecycle.CONFIRMED
+
+    for relation in _every_produced_edge():
+        assert EdgeLifecycle(relation.lifecycle) in lifecycles
+        # The producer never emits a confirmed edge: every candidate is a
+        # proposal, so a CONFIRMED-only consumer rejects all of them.
+        assert not established(relation), (
+            f"{relation.relation_id} reads as established without confirmation"
+        )
+        assert relation.requires_confirmation is True
+        assert (relation.confidence or 0.0) <= MAX_CONFIDENCE
+
+
+def test_lifecycle_and_kind_are_independent_axes() -> None:
+    """A lifecycle never implies a kind, and a kind never implies a lifecycle.
+
+    Both directions must be *representable*: the same kind under two different
+    lifecycles, and the same lifecycle under two different kinds.  If either
+    axis were derived from the other, one of these pairs would be refused.
+    """
+    base: dict[str, Any] = {
+        "relation_id": "axis",
+        "subject_id": "ct_child",
+        "object_id": "ct_parent",
+    }
+    containment = TopologyRelation(
+        **base,
+        kind=RelationKind.ELECTRICAL_PARENT_CHILD,
+        lifecycle=EdgeLifecycle.CANDIDATE,
+    )
+    confirmed_containment = TopologyRelation(
+        **base,
+        kind=RelationKind.ELECTRICAL_PARENT_CHILD,
+        lifecycle=EdgeLifecycle.CONFIRMED,
+        status=TopologyStatus.CONFIRMED,
+        requires_confirmation=False,
+        declared_by="user",
+    )
+    # Same kind, different lifecycle: the lifecycle did not drag the kind.
+    assert containment.kind is confirmed_containment.kind
+    assert containment.lifecycle is not confirmed_containment.lifecycle
+
+    membership = TopologyRelation(
+        **{**base, "relation_id": "axis-membership"},
+        kind=RelationKind.CIRCUIT_MEMBERSHIP,
+        lifecycle=EdgeLifecycle.CONFIRMED,
+        status=TopologyStatus.CONFIRMED,
+        requires_confirmation=False,
+        declared_by="user",
+        evidence={"circuit_id": "c1"},
+    )
+    # Same lifecycle, different kind: the lifecycle did not drag the kind.
+    assert membership.lifecycle is confirmed_containment.lifecycle
+    assert membership.kind is not confirmed_containment.kind
+
+    # And the two axes stay separable in the refusal: a CONFIRMED lifecycle
+    # with a CANDIDATE status is refused (the lifecycle must not imply
+    # confirmation), while a CANDIDATE lifecycle with a CANDIDATE status and
+    # ``requires_confirmation=True`` is the ordinary proposal.
+    with pytest.raises(ValueError):
+        TopologyRelation(
+            **base,
+            kind=RelationKind.ELECTRICAL_PARENT_CHILD,
+            lifecycle=EdgeLifecycle.CONFIRMED,
+        )

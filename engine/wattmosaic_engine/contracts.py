@@ -985,6 +985,17 @@ class TopologyRelation(Model):
     Keeping the four kinds in one model is what stops them implying one another:
     a ``DEVICE_CT_ASSOCIATION`` cannot assert parenthood, and a duplicate CT is
     an overlap rather than a nested feed.
+
+    Two axes, never one
+    -------------------
+    ``kind`` is *which* of the four relations this is.  ``lifecycle`` (spec 09
+    §7.1, carried here as the same ``EdgeLifecycle`` vocabulary ``TopologyEdge``
+    uses) is *where the edge is in its life*.  They are deliberately separate:
+    a ``CANDIDATE`` edge may be any kind and a ``CONFIRMED`` edge may be any
+    kind, and neither field is ever derived from the other.  The three-member
+    ``TopologyStatus`` in ``status`` is the older aggregate vocabulary and is
+    retained unchanged for existing readers; ``lifecycle`` is additive, so a
+    payload written before it existed still validates.
     """
 
     relation_id: str
@@ -1001,6 +1012,13 @@ class TopologyRelation(Model):
 
     status: TopologyStatus = TopologyStatus.CANDIDATE
     """Whether the relation is proposed or confirmed.  Never auto-confirm."""
+
+    #: The edge lifecycle (spec 09 §7.1).  Additive and defaulted, so a payload
+    #: written before it existed still validates; the default is ``CANDIDATE``
+    #: and is never auto-confirmed.  This is a *second* vocabulary from
+    #: ``status``: ``CANDIDATE`` / ``CONFIRMED`` / ``REJECTED`` there is the
+    #: older aggregate set, while these eight states describe one edge's life.
+    lifecycle: EdgeLifecycle = EdgeLifecycle.CANDIDATE
 
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     """Per-relation confidence -- deliberately not a device power score."""
@@ -1025,6 +1043,41 @@ class TopologyRelation(Model):
 
     algorithm_version: str | None = None
     """The inference version that produced it, when inferred."""
+
+    @model_validator(mode="after")
+    def _lifecycle_is_not_confirmation(self) -> TopologyRelation:
+        """A lifecycle state may never *imply* that the edge is confirmed.
+
+        ``lifecycle`` and ``status`` answer different questions, so a caller may
+        set one without the other.  What may never happen is the lifecycle
+        silently doing the other's work: a ``CONFIRMED`` lifecycle on an edge
+        that still says ``CANDIDATE`` (or still asks for confirmation) would
+        present a proposal as fact.  The guard therefore requires agreement
+        about *establishedness* only -- not about vocabulary, and never about
+        ``kind``.  A ``CANDIDATE`` edge stays a candidate whatever its kind, and
+        a ``CONFIRMED`` lifecycle must be a confirmation the caller actually
+        declared.
+        """
+        lifecycle = EdgeLifecycle(self.lifecycle)
+        status = TopologyStatus(self.status)
+        established = lifecycle is EdgeLifecycle.CONFIRMED
+        if established and status is not TopologyStatus.CONFIRMED:
+            raise ValueError(
+                "a CONFIRMED edge lifecycle may not coexist with status="
+                f"{status.value!r}; a lifecycle state must not imply confirmation"
+            )
+        if established and self.requires_confirmation:
+            raise ValueError(
+                "a CONFIRMED edge lifecycle may not carry requires_confirmation=True; "
+                "a lifecycle state must not imply confirmation"
+            )
+        if status is TopologyStatus.CONFIRMED and not established:
+            raise ValueError(
+                "a CONFIRMED status may not coexist with lifecycle="
+                f"{lifecycle.value!r}; confirmation is a user act and must be "
+                "declared on both axes"
+            )
+        return self
 
     @model_validator(mode="wrap")
     @classmethod

@@ -46,6 +46,7 @@ from wattmosaic_engine.contracts import (
     CircuitClass,
     CTChannel,
     CTType,
+    EdgeLifecycle,
     IsolationStatus,
     MeasurementFactor,
     Phase,
@@ -212,6 +213,18 @@ def edge(child: str, parent: str, **kwargs: Any) -> TopologyRelation:
         "status": kwargs.pop("status", TopologyStatus.CANDIDATE),
         "declared_by": kwargs.pop("declared_by", "inference"),
     }
+    # A CONFIRMED status is a user act and must be declared on the lifecycle axis
+    # too: the contract refuses the half-declared shape (spec 09 §7.1).  Only an
+    # explicit caller value is honoured; the defaults below fill in the rest of
+    # the confirmation, never an omission.
+    if payload["status"] is TopologyStatus.CONFIRMED:
+        payload.setdefault(
+            "lifecycle", kwargs.pop("lifecycle", EdgeLifecycle.CONFIRMED)
+        )
+        payload.setdefault(
+            "requires_confirmation",
+            kwargs.pop("requires_confirmation", False),
+        )
     payload.update(kwargs)
     return TopologyRelation(**payload)
 

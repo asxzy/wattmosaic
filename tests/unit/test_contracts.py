@@ -27,6 +27,7 @@ from wattmosaic_engine.contracts import (
     DeviceConfiguration,
     DeviceEvent,
     DeviceTopology,
+    EdgeLifecycle,
     EventIsolation,
     HaEntityBinding,
     HaEntityRole,
@@ -750,6 +751,8 @@ def test_new_enums_round_trip_through_the_models() -> None:
         subject_id="d1",
         object_id="ct1",
         status=TopologyStatus.CONFIRMED,
+        lifecycle=EdgeLifecycle.CONFIRMED,
+        requires_confirmation=False,
         confidence=0.8,
         declared_by="inference",
     )
@@ -1344,6 +1347,28 @@ def test_pre_change_payload_gains_no_new_required_field() -> None:
 
     reconciliation = Reconciliation.model_validate(payload["reconciliation"])
     assert reconciliation.residual is None
+
+
+def test_a_topology_relation_without_lifecycle_still_validates() -> None:
+    """The lifecycle field is additive-and-optional, so 2.0.0 payloads survive.
+
+    ``lifecycle`` was added to ``TopologyRelation`` without bumping
+    ``CONTRACT_VERSION``: it is a second vocabulary from ``status``, not a
+    replacement, and it must have a neutral default.  A payload written before
+    it existed therefore still validates *and* resolves to the proposal state
+    -- never to a confirmation the writer never declared.  This is the property
+    that justifies leaving the version at 2.1.0.
+    """
+    payload = {
+        "relation_id": "r1",
+        "kind": "device_ct_association",
+        "subject_id": "d1",
+        "object_id": "ct1",
+    }
+    relation = TopologyRelation.model_validate(payload)
+    assert relation.lifecycle is EdgeLifecycle.CANDIDATE
+    assert EdgeLifecycle(relation.lifecycle) is not EdgeLifecycle.CONFIRMED
+    assert relation.requires_confirmation is True
 
 
 def test_a_pre_change_payload_that_was_already_invalid_is_still_invalid() -> None:
