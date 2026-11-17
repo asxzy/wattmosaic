@@ -73,6 +73,79 @@ class Source(str, Enum):
     UNKNOWN = "unknown"
 
 
+class PowerState(str, Enum):
+    """The four-state provenance label of a device power value.
+
+    This is a *different axis* from ``Source`` and ``MeasurementBasis`` and
+    must never be conflated with either.  ``Source`` records **how the value was
+    obtained** (measurement hierarchy) and ``MeasurementBasis`` records **what
+    kind of instrument produced the watts**; ``PowerState`` records **what kind
+    of value it is** to a reader.  ``10-ui-and-user-experience-spec.md`` §7.1's
+    ``inferred -> ESTIMATED`` entry is the ``STRINGS`` label for the ``Source``
+    value -- a different axis -- and does not conflict with
+    ``06-device-and-load-model-spec.md`` §3.3, which is operative here.
+
+    Exactly one member per value; a result carries no second, prose label.
+    """
+
+    MEASURED = "measured"
+    """A real meter or CT reading produced the value."""
+
+    ESTIMATED = "estimated"
+    """A model reproduced it, or only a declared prior exists."""
+
+    ALLOCATED = "allocated"
+    """The solver allocated a share of a measured total; not a reading."""
+
+    UNKNOWN = "unknown"
+    """Neither axis says anything; no claim is made either way."""
+
+
+def power_state_for(source: Source, basis: MeasurementBasis) -> PowerState:
+    """Derive the one power-state label from a result's ``Source`` and basis.
+
+    ``Source`` is authoritative about *how* the value was obtained;
+    ``MeasurementBasis`` is a secondary refinement, consulted only when the
+    source makes no claim.  The label is therefore never independently
+    settable and cannot disagree with how the value was produced.
+
+    The ordering guarantees three properties:
+
+    * An ``INFERRED`` value can **never** be ``MEASURED`` -- the ``INFERRED``
+      branch precedes any basis consultation, so it holds even if a basis
+      claims ``CT_MEASURED``.
+    * An **unattributed** value is never ``ESTIMATED`` -- that path is
+      ``source=UNKNOWN, basis=UNKNOWN`` and falls to ``UNKNOWN``.  (The
+      solver's unknown-slack columns ``__unknown__:<ct_id>``
+      (``electrical/solver.py``) are diagnostic-only and never become device
+      results.)
+    * The function is **total** -- every ``(Source, MeasurementBasis)`` pair
+      returns one of the four values; none raises.
+
+    ``Source`` and ``PowerState`` are different axes: ``Source`` records how
+    the value was obtained; ``PowerState`` records what kind of value it is.
+    """
+    # 1. The source is authoritative about HOW the value was obtained.
+    if source == Source.INFERRED:
+        return PowerState.ALLOCATED  # the solver allocated a share of a shared row
+    if source in (Source.MODEL_ESTIMATED, Source.CONFIGURED_PRIOR):
+        return PowerState.ESTIMATED  # a model reproduced it, or only a declared prior exists
+    if source == Source.DIRECT_MEASURED:
+        return PowerState.MEASURED
+    # 2. The source claims nothing (Source.UNKNOWN). Fall through to the
+    #    basis, which records WHAT INSTRUMENT produced the value.
+    if basis in (
+        MeasurementBasis.CT_MEASURED,
+        MeasurementBasis.MONITOR_REPORTED,
+        MeasurementBasis.FACTOR_ADJUSTED,
+    ):
+        return PowerState.MEASURED
+    if basis == MeasurementBasis.ESTIMATED_APPLIANCE_TOTAL:
+        return PowerState.ESTIMATED
+    # 3. Neither axis says anything.
+    return PowerState.UNKNOWN
+
+
 class QualityStatus(str, Enum):
     GOOD = "good"
     DEGRADED = "degraded"
@@ -1819,6 +1892,11 @@ class InferenceResult(Model):
     #: ``Source`` cannot: "factor-adjusted" is not "how obtained", it is "what
     #: produced the watts".
     measurement_basis: MeasurementBasis = MeasurementBasis.UNKNOWN
+    #: The four-state provenance label, derived from ``source`` and
+    #: ``measurement_basis`` by ``power_state_for`` and never independently
+    #: settable.  Optional with a neutral default so a pre-change payload
+    #: validates and reads as "unknown", not as a claim.
+    power_state: PowerState = PowerState.UNKNOWN
     #: Per-dimension confidence.  ``None`` means no dimension was derived, which
     #: is honest; a consumer must not read ``None`` as a low score.
     confidence_dimensions: ConfidenceVector | None = None

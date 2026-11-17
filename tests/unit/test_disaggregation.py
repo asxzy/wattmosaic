@@ -24,6 +24,7 @@ from wattmosaic_engine.contracts import (
     DeviceModelVersion,
     DeviceState,
     DeviceTopology,
+    MeasurementBasis,
     ModelStatus,
     ModelType,
     Phase,
@@ -1581,6 +1582,66 @@ def test_a_residual_with_no_transition_is_reported_not_fabricated():
     # It is a diagnostic, never an ambiguity: there is nothing to confuse.
     assert batch.diagnostics["ambiguity"]["ambiguous"] is False
     assert batch.reconciliation.unknown_residual_w == pytest.approx(1000.0, abs=50.0)
+
+
+def test_four_state_label_matches_source_and_basis():
+    """The label is one of four, derived from source and basis, total and pure.
+
+    ``Source`` is authoritative about how the value was obtained;
+    ``MeasurementBasis`` is consulted only when the source claims nothing, so
+    the label can never disagree with the result.  The guarantees are the ones
+    the ordering in ``power_state_for`` exists to provide.
+    """
+    from wattmosaic_engine.contracts import PowerState, power_state_for
+
+    states = {state.value for state in PowerState}
+    assert states == {"measured", "estimated", "allocated", "unknown"}
+
+    # Always one of the four, for every (source, basis) pair: total.
+    for source in Source:
+        for basis in MeasurementBasis:
+            label = power_state_for(source, basis)
+            assert label in PowerState
+            assert label.value in states
+
+    # An INFERRED value is never measured -- even when the basis claims a CT.
+    for basis in MeasurementBasis:
+        assert power_state_for(Source.INFERRED, basis) is PowerState.ALLOCATED
+    assert (
+        power_state_for(Source.INFERRED, MeasurementBasis.CT_MEASURED)
+        is not PowerState.MEASURED
+    )
+
+    # Unattributed is never estimated, and is unknown.
+    assert power_state_for(Source.UNKNOWN, MeasurementBasis.UNKNOWN) is PowerState.UNKNOWN
+    assert (
+        power_state_for(Source.UNKNOWN, MeasurementBasis.UNKNOWN)
+        is not PowerState.ESTIMATED
+    )
+
+    # A model estimate or a declared prior is estimated, whatever the basis says.
+    assert (
+        power_state_for(Source.MODEL_ESTIMATED, MeasurementBasis.UNKNOWN)
+        is PowerState.ESTIMATED
+    )
+    assert (
+        power_state_for(Source.CONFIGURED_PRIOR, MeasurementBasis.UNKNOWN)
+        is PowerState.ESTIMATED
+    )
+    # A direct measurement is measured.
+    assert (
+        power_state_for(Source.DIRECT_MEASURED, MeasurementBasis.UNKNOWN)
+        is PowerState.MEASURED
+    )
+    # With no source claim, the basis decides.
+    assert (
+        power_state_for(Source.UNKNOWN, MeasurementBasis.CT_MEASURED)
+        is PowerState.MEASURED
+    )
+    assert (
+        power_state_for(Source.UNKNOWN, MeasurementBasis.ESTIMATED_APPLIANCE_TOTAL)
+        is PowerState.ESTIMATED
+    )
 
 
 # --------------------------------------------------------------------------- #

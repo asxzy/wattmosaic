@@ -265,6 +265,10 @@
           "$ref": "#/$defs/MeasurementBasis",
           "default": "unknown"
         },
+        "power_state": {
+          "$ref": "#/$defs/PowerState",
+          "default": "unknown"
+        },
         "confidence_dimensions": {
           "anyOf": [
             {
@@ -343,6 +347,17 @@
         "unknown"
       ],
       "title": "PowerBehavior",
+      "type": "string"
+    },
+    "PowerState": {
+      "description": "The four-state provenance label of a device power value.\n\nThis is a *different axis* from ``Source`` and ``MeasurementBasis`` and\nmust never be conflated with either.  ``Source`` records **how the value was\nobtained** (measurement hierarchy) and ``MeasurementBasis`` records **what\nkind of instrument produced the watts**; ``PowerState`` records **what kind\nof value it is** to a reader.  ``10-ui-and-user-experience-spec.md`` \u00a77.1's\n``inferred -> ESTIMATED`` entry is the ``STRINGS`` label for the ``Source``\nvalue -- a different axis -- and does not conflict with\n``06-device-and-load-model-spec.md`` \u00a73.3, which is operative here.\n\nExactly one member per value; a result carries no second, prose label.",
+      "enum": [
+        "measured",
+        "estimated",
+        "allocated",
+        "unknown"
+      ],
+      "title": "PowerState",
       "type": "string"
     },
     "QualityStatus": {

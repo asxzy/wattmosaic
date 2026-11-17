@@ -21,7 +21,9 @@ the behaviour that was wrong, not just the shape of the fix.
 from __future__ import annotations
 
 import importlib.util
+import sqlite3
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -30,6 +32,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 GATEWAY_PATH = REPO_ROOT / "addon" / "gateway.py"
 
 from wattmosaic_engine.config.settings import EngineConfig, _with_default_port  # noqa: E402
+from wattmosaic_engine.storage.database import Database  # noqa: E402
 
 
 def _load_gateway(monkeypatch: pytest.MonkeyPatch, *, api_token: str):
@@ -226,3 +229,77 @@ def test_healthcheck_timing_fits_the_supervisor_window() -> None:
         f"worst-case time to a terminal health state is {worst_case}s; the "
         "Supervisor gives up waiting after 120s"
     )
+
+
+# --------------------------------------------------------------------------- #
+# The runtime boundary: one process, one SQLite file, no new dependency
+# --------------------------------------------------------------------------- #
+
+
+def test_one_process_one_database(tmp_path: Path) -> None:
+    """REQ-FOUNDATION-004: the target adds no dependency, DB, service or bus.
+
+    The engine is one process with one writer.  ``EngineConfig`` resolves a
+    single ``database_path`` (env ``WM_DATABASE_PATH``, default
+    ``data/wattmosaic.db``); ``Database`` opens that path once for writing and
+    a short-lived read-only ``_reader`` on **the same file**, never a second
+    database.  ``PRAGMA database_list`` proves both connections point at one
+    file, and ``query_only`` proves the reader cannot write.
+    """
+    db_path = tmp_path / "wattmosaic.db"
+    cfg = EngineConfig.from_env(
+        {"WM_DATABASE_PATH": str(db_path), "WM_HA_TOKEN": "not-used"},
+        dotenv_path=tmp_path / "absent.env",
+    )
+    assert cfg.database_path == str(db_path)
+    # The default resolves to the one conventional file, relative to the repo.
+    assert EngineConfig().database_path == "data/wattmosaic.db"
+
+    db = Database(cfg.database_path)
+    try:
+        # The writer's own connection.
+        writer_files = {
+            Path(row[2]).resolve()
+            for row in db._conn.execute("PRAGMA database_list").fetchall()
+            if row[2]
+        }
+        assert writer_files == {db_path.resolve()}
+
+        # The short-lived reader: same file, and read-only by enforcement.
+        with db._reader() as reader:
+            reader_files = {
+                Path(row[2]).resolve()
+                for row in reader.execute("PRAGMA database_list").fetchall()
+                if row[2]
+            }
+            assert reader_files == {db_path.resolve()}
+            assert reader.execute("PRAGMA query_only").fetchone()[0] == 1
+            with pytest.raises(sqlite3.OperationalError):
+                reader.execute("CREATE TABLE writer_must_not_be_able_to_write (id INTEGER)")
+    finally:
+        db.close()
+
+    # No second database file: the directory holds the one file (plus SQLite's
+    # WAL sidecars for that same file, never a different name).
+    assert db_path.exists()
+    names = {p.name for p in tmp_path.iterdir()}
+    assert names <= {db_path.name, f"{db_path.name}-wal", f"{db_path.name}-shm"}
+
+
+def test_no_new_runtime_dependency() -> None:
+    """``[project].dependencies`` is the explicit six; nothing else ships.
+
+    Read from the repository file, so a dependency added anywhere else (a new
+    import, an optional extra promoted to runtime) fails here.  The list is
+    literal on purpose: a rename, a reorder or an addition is a visible diff.
+    """
+    pyproject = REPO_ROOT / "pyproject.toml"
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    assert data["project"]["dependencies"] == [
+        "pydantic>=2.6,<3",
+        "aiohttp>=3.9,<4",
+        "websockets>=12,<16",
+        "numpy>=1.26,<3",
+        "scipy>=1.11,<2",
+        "PyYAML>=6,<7",
+    ]

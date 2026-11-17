@@ -35,14 +35,17 @@ import numpy as np
 from wattmosaic_engine.contracts import (
     CONTRACT_VERSION,
     InferenceResult,
+    MeasurementBasis,
     MonitoringLevel,
     PowerBehavior,
+    PowerState,
     QualityStatus,
     Reconciliation,
     Source,
     StageStatus,
     Topology,
     TopologyStatus,
+    power_state_for,
 )
 from wattmosaic_engine.device_links import STATE_OVERRIDES_KEY
 from wattmosaic_engine.disaggregation.confidence import (
@@ -1456,6 +1459,14 @@ class DisaggregationEngine:
             result.power_behavior = (
                 behavior.value if hasattr(behavior, "value") else str(behavior)
             )
+            # Derived, never independently settable: the label follows the
+            # source and the basis, so it cannot disagree with how the value
+            # was obtained.  ``use_enum_values`` coerces only on validation,
+            # so re-read both axes through the house ``Enum(...)`` idiom before
+            # deriving, and assign the member (``model_dump`` emits the string).
+            result.power_state = power_state_for(
+                Source(result.source), MeasurementBasis(result.measurement_basis)
+            )
             result.tier_reasons = [*config_notes, *reasons]
             return result
 
@@ -2307,6 +2318,7 @@ class DisaggregationEngine:
                 "actual_power_accounted_in": "Reconciliation.unknown_residual_w",
             },
             confidence_is_calibrated=False,
+            power_state=PowerState.UNKNOWN,
         )
 
     def _fallback_result(self, device_id: str, at: datetime, exc: Exception) -> InferenceResult:
@@ -2323,6 +2335,7 @@ class DisaggregationEngine:
                 "power_w_is_placeholder": True,
             },
             confidence_is_calibrated=False,
+            power_state=PowerState.UNKNOWN,
         )
 
 
