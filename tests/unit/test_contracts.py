@@ -12,6 +12,7 @@ import sqlite3
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from pydantic import ValidationError
@@ -157,6 +158,154 @@ def test_measurement_rejects_non_finite() -> None:
             value=float("inf"),
             state_timestamp=datetime.now(UTC),
         )
+
+
+#: The contract's unit whitelist (spec 03 §1.1).  ``Measurement.unit`` is a
+#: ``Literal``, so this list and the annotation must agree; the test below reads
+#: the annotation rather than restating it, which is what makes the pair a guard.
+MEASUREMENT_UNITS: tuple[str, ...] = ("W", "kW", "kWh", "Wh")
+
+#: Models that carry an electrical observation.  ``CTChannel.nominal_voltage`` is
+#: the one voltage-named field in the contract and is a declared constant, not a
+#: measurement (spec 03 §4.2); see ``DECLARED_CONSTANT_FIELDS``.
+MEASUREMENT_SHAPED_MODELS: tuple[type, ...] = (
+    Measurement,
+    CTChannel,
+    DeviceTopology,
+    InferenceResult,
+    Reconciliation,
+    ResidualPower,
+)
+
+_UNMEASURABLE_FIELD = re.compile(
+    r"(?:^|_)(?:"
+    r"voltage|volt|volts|v|"
+    r"current|current_a|amp|amps|ampere|amperes|ampere_rms|rms_current|a|"
+    r"power_factor|pf|"
+    r"reactive|reactive_power|reactive_var|var|vars|"
+    r"apparent|apparent_power|apparent_va|va|vas|"
+    r"frequency|frequency_hz|freq|hz"
+    r")(?:$|_)",
+    re.IGNORECASE,
+)
+
+
+def _measurement(unit: str) -> Measurement:
+    return Measurement(
+        entity_id="sensor.x",
+        ct_id="c",
+        value=10.0,
+        unit=unit,  # type: ignore[arg-type]
+        state_timestamp=datetime.now(UTC),
+    )
+
+
+def test_measurement_unit_whitelist() -> None:
+    """Only W/kW/kWh/Wh are accepted -- no V, A, PF, VAR, VA or Hz.
+
+    The annotation is read from the model, not restated here: if anyone widens
+    the ``Literal`` (say, to admit a computed amperage) this fails at the
+    whitelist assertion rather than silently following the code.
+    """
+    annotation = Measurement.model_fields["unit"].annotation
+    assert get_args(annotation) == MEASUREMENT_UNITS
+
+    for unit in MEASUREMENT_UNITS:
+        assert _measurement(unit).unit == unit
+
+    for unit in ("V", "A", "var", "Hz"):
+        with pytest.raises(ValidationError):
+            _measurement(unit)
+
+
+#: The single voltage-named contract field.  Spec 03 §4.2/§9 establishes it as a
+#: *declared constant* on a current-only channel, never a measurement of an
+#: instant, so it is explicitly not an unmeasurable-quantity field: the rule is
+#: that such quantities have **no** representation, and this one has exactly one
+#: and it is a rating, not an observation.
+DECLARED_CONSTANT_FIELDS: frozenset[str] = frozenset({"nominal_voltage"})
+
+
+@pytest.mark.parametrize("model", MEASUREMENT_SHAPED_MODELS, ids=lambda m: m.__name__)
+def test_no_unmeasurable_quantity_field(model: type) -> None:
+    """No voltage/current/PF/reactive/apparent/frequency field may appear.
+
+    Reflection over ``model_fields`` is the point: adding such a field later
+    fails here instead of reaching the wire unnoticed (spec 03 §4.3).
+    """
+    offenders = sorted(
+        name
+        for name in model.model_fields
+        if _UNMEASURABLE_FIELD.search(name) and name not in DECLARED_CONSTANT_FIELDS
+    )
+    assert offenders == [], f"{model.__name__} exposes unmeasurable fields: {offenders}"
+    # The allowlist itself must stay honest: a declared constant is only ever a
+    # declared constant, and any widening has to be justified in the spec first.
+    assert set(CTChannel.model_fields) >= DECLARED_CONSTANT_FIELDS
+    assert set(DECLARED_CONSTANT_FIELDS) == {"nominal_voltage"}
+
+
+def test_phase_is_declared_per_reader_and_defaults_to_unknown() -> None:
+    """Phase is a declaration on the reader, never inferred from a reading.
+
+    ``CTChannel.phase`` defaults to ``UNKNOWN`` and no validator fills it from
+    a sample; the coefficient table consumes it as declared.
+    """
+    default_channel = CTChannel(ct_id="c", entity_id="sensor.c")
+    assert Phase(default_channel.phase) is Phase.UNKNOWN
+    assert Phase(DeviceTopology(device_id="d").phase) is Phase.UNKNOWN
+
+    declared = CTChannel(ct_id="c", entity_id="sensor.c", phase=Phase.L1)
+    assert declared.phase == Phase.L1.value
+    assert set(Phase) == {
+        Phase.L1,
+        Phase.L2,
+        Phase.BOTH,
+        Phase.UNKNOWN,
+    }
+
+
+def test_measurement_polarity_applied_once_and_sign_preserved() -> None:
+    """The polarity sign is applied exactly once and never clamped.
+
+    * an inverted reader's negative raw reading is negated once, so a reversed
+      clamp reports its true positive magnitude rather than a second flip;
+    * applying ``effective_power_w`` again does not flip the sign back, because
+      the result is a plain number and the correction lives on the model;
+    * a ``NORMAL``-polarity negative reading stays negative -- reverse flow and
+      a mis-declared polarity are observations, not zero.
+    """
+    inverted = Measurement(
+        entity_id="sensor.x",
+        ct_id="c",
+        value=-350.0,
+        polarization=Polarity.INVERTED,
+        state_timestamp=datetime.now(UTC),
+    )
+    assert inverted.effective_power_w() == 350.0
+    # A second call is idempotent: the correction is one multiplication, so the
+    # sign never flips back on repeated evaluation.
+    assert inverted.effective_power_w() == inverted.effective_power_w()
+    # The inverted declaration applied to a positive reading gives a negative
+    # effective value -- no clamp-to-zero path can produce that.
+    assert (
+        Measurement(
+            entity_id="sensor.x",
+            ct_id="c",
+            value=350.0,
+            polarization=Polarity.INVERTED,
+            state_timestamp=datetime.now(UTC),
+        ).effective_power_w()
+        == -350.0
+    )
+
+    normal_negative = Measurement(
+        entity_id="sensor.x",
+        ct_id="c",
+        value=-420.0,
+        state_timestamp=datetime.now(UTC),
+    )
+    assert normal_negative.effective_power_w() == -420.0
 
 
 def test_confidence_bounds() -> None:

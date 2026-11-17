@@ -469,6 +469,33 @@ def test_phase_coefficients_l1_l2_both():
     # ... and never applied to single-phase loads.
     assert graph_asym.phase_coefficient("l1_load", Phase.L2) == 0.0
 
+    # ``UNKNOWN`` is a declaration, not an absence of one: on the device's own
+    # row it yields the whole device (a halved undeclared load would fabricate a
+    # missing leg).  A device with no attribution CT at all stays UNKNOWN, and
+    # there a *containing* shared row applies the declared split, because that
+    # row's total must be apportioned somehow.
+    graph_orphan = build_graph(
+        Topology(
+            channels=[_ch("shared", parent="m_l1")],
+            devices=[
+                DeviceTopology(device_id="orphan", branch_ct_ids=[], phase=Phase.UNKNOWN)
+            ],
+            status=TopologyStatus.CONFIRMED,
+        )
+    )
+    assert graph_orphan.device_phase("orphan") == Phase.UNKNOWN
+    assert graph_orphan.phase_coefficient("orphan", Phase.L1, solo=True) == 1.0
+    assert graph_orphan.phase_coefficient(
+        "orphan", Phase.L1, solo=False
+    ) == pytest.approx(0.5)
+    assert graph_orphan.phase_coefficient(
+        "orphan", Phase.L2, solo=False
+    ) == pytest.approx(0.5)
+
+    # A double-pole device observed on separate L1/L2 rows carries its total on
+    # each leg only as the declared split: x_j is always the whole device.
+    assert graph_asym.phase_coefficient("dryer", Phase.BOTH) == 1.0
+
 
 def test_double_pole_split_across_separate_l1_l2_rows():
     topo = Topology(

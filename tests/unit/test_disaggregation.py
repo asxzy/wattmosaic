@@ -521,6 +521,33 @@ def test_11_reversed_ct_polarity():
     batch2 = run(topo, raw_window, states("heater"))
     assert batch2.get("heater").power_w == pytest.approx(350.0, abs=1.0)
 
+    # The guarantee is not just "a positive number comes out": a clamping
+    # implementation would also produce +350 here (it clamps the -350 first).
+    # This asserts the sign was *negated once*, by checking the same declaration
+    # on a genuinely positive reading produces a negative effective value --
+    # which no clamp-to-zero path can do.
+    inverted_positive = Measurement(
+        entity_id="sensor.x",
+        ct_id="c",
+        value=350.0,
+        state_timestamp=T0,
+        polarization=Polarity.INVERTED,
+    )
+    assert inverted_positive.effective_power_w() == -350.0
+    # ``signed_w`` applies the same correction exactly once and never clamps, so
+    # an inverted positive reading is reported as reverse flow.
+    assert (
+        ChannelReading(
+            channel_id="c", value_w=350.0, polarization=Polarity.INVERTED
+        ).signed_w()
+        == -350.0
+    )
+    # A ``NORMAL``-polarity negative reading stays negative: it is an
+    # observation (export or a wrong declaration), never "no load".
+    assert (
+        ChannelReading(channel_id="c", value_w=-350.0).signed_w() == -350.0
+    )
+
 
 # --------------------------------------------------------------------------- #
 # 12-14: missing, delayed, stale
