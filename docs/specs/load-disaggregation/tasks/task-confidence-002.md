@@ -1,5 +1,7 @@
 # TASK-CONFIDENCE-002 — Live confidence dimensions and per-edge evidence
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-CONFIDENCE-002`
 **Title.** Live confidence dimensions and per-edge evidence
 **Status.** `NOT_STARTED`

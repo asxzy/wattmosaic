@@ -1,5 +1,5 @@
 {
-  "contract_version": "2.0.0",
+  "contract_version": "2.1.0",
   "schemas": {
     "measurement": "measurement.json",
     "ct_channel": "ct_channel.json",
@@ -15,6 +15,16 @@
     "inference_result": "inference_result.json",
     "reconciliation": "reconciliation.json",
     "data_quality_report": "data_quality_report.json",
+    "topology_edge": "topology_edge.json",
+    "topology_version": "topology_version.json",
+    "residual_decomposition_record": "residual_decomposition_record.json",
+    "unknown_load_profile": "unknown_load_profile.json",
+    "device_reader_mapping_cell": "device_reader_mapping_cell.json",
+    "configuration_change_event": "configuration_change_event.json",
+    "event_evidence_record": "event_evidence_record.json",
+    "storage_health_report": "storage_health_report.json",
+    "unknown_residual_event": "unknown_residual_event.json",
+    "residual_baseline_change": "residual_baseline_change.json",
     "health_response": "health_response.json",
     "snapshot_response": "snapshot_response.json",
     "error_response": "error_response.json",

@@ -1,6 +1,6 @@
 # Measurement Topology — Specification
 
-Status: additive delta over the built topology subsystem; every existing behaviour is cited `file:line`, every new behaviour is marked `MISSING` with a locally-scoped gap ID.
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION** — additive delta over the built topology subsystem; every existing behaviour is cited `file:line`, every new behaviour is marked `MISSING` with a locally-scoped gap ID.
 
 Citation convention: calls about the **built system** cite `file:line` in the repository. Calls about **contracts fixed by a sibling specification** cite that specification by document and contract name, because those documents are authored concurrently and are not line-verified against the implementation. Every such call is marked `EXISTS as specified` so it is never confused with a line-verified implementation claim.
 

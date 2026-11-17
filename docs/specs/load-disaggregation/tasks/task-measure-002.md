@@ -1,5 +1,7 @@
 # TASK-MEASURE-002 — Leg pairs, reverse flow and the reader declaration surface
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-MEASURE-002`
 **Title.** Leg pairs, reverse flow and the reader declaration surface
 **Status.** `NOT_STARTED`

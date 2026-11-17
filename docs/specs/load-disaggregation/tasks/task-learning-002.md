@@ -1,5 +1,7 @@
 # TASK-LEARNING-002 — Promotion, factor timing and measurement precedence
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-LEARNING-002`
 **Title.** Promotion, factor timing and measurement precedence
 **Status.** `NOT_STARTED`

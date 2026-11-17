@@ -1,5 +1,7 @@
 # TASK-FOUNDATION-001 — Specification status and the additive contract workflow
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-FOUNDATION-001`
 **Title.** Specification status and the additive contract workflow
 **Status.** `NOT_STARTED`

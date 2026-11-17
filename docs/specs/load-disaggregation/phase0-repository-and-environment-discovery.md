@@ -1,6 +1,6 @@
 # Phase 0 — Repository and Environment Discovery
 
-**Status:** Phase 0 discovery output — repository architecture summary and implementation constraints
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION** — Phase 0 discovery output — repository architecture summary and implementation constraints
 **Date:** 2026-11-16
 **Baseline:** branch `main`, HEAD `612e1233c2665c206d0a3fdc8a4fbc4ed531df01`, engine version `0.2.1-dev.36`, `CONTRACT_VERSION = "2.0.0"` (`engine/wattmosaic_engine/contracts.py:32`), SQLite schema `LATEST_VERSION = 11` (`engine/wattmosaic_engine/storage/migrations.py:792`).
 

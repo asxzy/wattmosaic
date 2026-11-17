@@ -541,4 +541,4 @@ def test_reconciliation_fields_are_additive_with_zero_defaults():
 def test_contract_version_is_2_0_0():
     from wattmosaic_engine import contracts
 
-    assert contracts.CONTRACT_VERSION == "2.0.0"
+    assert contracts.CONTRACT_VERSION == "2.1.0"

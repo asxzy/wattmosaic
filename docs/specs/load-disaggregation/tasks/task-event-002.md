@@ -1,5 +1,7 @@
 # TASK-EVENT-002 — Cross-reader vector, late data, duplicates and incomplete groups
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-EVENT-002`
 **Title.** Cross-reader vector, late data, duplicates and incomplete groups
 **Status.** `NOT_STARTED`

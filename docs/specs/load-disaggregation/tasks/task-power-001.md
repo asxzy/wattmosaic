@@ -1,5 +1,7 @@
 # TASK-POWER-001 — Load-shape class and the model-version surface
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-POWER-001`
 **Title.** Load-shape class and the model-version surface
 **Status.** `NOT_STARTED`

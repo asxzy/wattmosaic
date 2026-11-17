@@ -24,6 +24,69 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
+#: The specification set whose declared status the ``spec_status`` gate checks.
+SPEC_DIR = ROOT / "docs" / "specs" / "load-disaggregation"
+
+#: The token every file of the set must carry on its first status line.
+SPEC_STATUS_TOKEN = "SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION"
+
+
+def _first_status_line(path: Path) -> str | None:
+    """The first non-blank, non-heading line of a specification file.
+
+    A specification file opens with its title, a blank line, then its one-line
+    status and purpose line (``docs/specs/retire-dedicated-ct-concept/README.md:3``
+    is the house pattern).  The status line is what carries the token, so the
+    check must look there and not anywhere in the file: a token buried in the
+    body states a *fact about the set*, not the file's own declared status.
+    """
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        text = line.strip()
+        if not text:
+            continue
+        if text.startswith("#"):
+            continue  # the title; the status line follows it
+        return text
+    return None
+
+
+def check_spec_status() -> int:
+    """Fail when a specification file does not carry the declared status.
+
+    Exits non-zero and names every offending file.  A file that drops the token
+    has silently lost its declared status, which is exactly the defect the
+    token was introduced to make impossible: the set reads as approved while
+    one of its files is not.
+    """
+    if not SPEC_DIR.is_dir():
+        print(f"spec_status: {SPEC_DIR} does not exist", file=sys.stderr)
+        return 1
+    files = sorted(SPEC_DIR.rglob("*.md"))
+    if not files:
+        print(f"spec_status: no specification files under {SPEC_DIR}", file=sys.stderr)
+        return 1
+    offenders: list[str] = []
+    for path in files:
+        status = _first_status_line(path)
+        if status is None or SPEC_STATUS_TOKEN not in status:
+            rel = path.relative_to(ROOT).as_posix()
+            offenders.append(rel)
+    if offenders:
+        print(
+            f"spec_status: {len(offenders)} of {len(files)} specification files "
+            f"do not carry '{SPEC_STATUS_TOKEN}' on their first status line:",
+            file=sys.stderr,
+        )
+        for rel in offenders:
+            print(f"  {rel}", file=sys.stderr)
+        return 1
+    print(f"spec_status: {len(files)} specification files carry the status token")
+    return 0
+
 
 @dataclass
 class Gate:
@@ -105,6 +168,11 @@ def _run(gate: Gate) -> Gate:
 def gates() -> list[Gate]:
     return [
         Gate("contract_schema_sync", ["python", "tools/dev/export_schemas.py"]),
+        # Every file of the specification set must carry the declared status on
+        # its first status line.  A file that drops the token reads as approved
+        # while it is not, and the set's own requirement (REQ-FOUNDATION-001)
+        # is the thing that says so -- so the gate is executable, not prose.
+        Gate("spec_status", ["python", "tools/dev/verify.py", "--check-spec-status"]),
         Gate("secret_scan", ["python", "tools/dev/check_secrets.py"]),
         # CI lints before it tests.  Without this gate the harness could report
         # "all required gates pass" for a tree CI then rejects on style, which
@@ -184,7 +252,19 @@ def main() -> int:
     ap.add_argument("--json", default="data/verification.json")
     ap.add_argument("--md", default="docs/verification_report.md")
     ap.add_argument("--only", nargs="*", default=None)
+    # The ``spec_status`` gate is a check that lives in this module, so it runs
+    # as a subprocess of this module.  A gate that is a plain function call
+    # would not be a gate: it could not report its own exit code, and the
+    # harness would record a verdict it never observed.
+    ap.add_argument(
+        "--check-spec-status",
+        action="store_true",
+        help="check the specification status token and exit",
+    )
     args = ap.parse_args()
+
+    if args.check_spec_status:
+        return check_spec_status()
 
     results: list[Gate] = []
     for gate in gates():

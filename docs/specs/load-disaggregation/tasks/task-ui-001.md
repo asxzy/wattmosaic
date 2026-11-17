@@ -1,5 +1,7 @@
 # TASK-UI-001 — Panel vocabulary: inventory, quality, the four-state label and the view states
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-UI-001`
 **Title.** Panel vocabulary: inventory, quality, the four-state label and the view states
 **Status.** `NOT_STARTED`

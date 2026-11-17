@@ -1,5 +1,7 @@
 # TASK-STORAGE-001 — Tier registry, retention and payload encoding
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-STORAGE-001`
 **Title.** Tier registry, retention and payload encoding
 **Status.** `NOT_STARTED`

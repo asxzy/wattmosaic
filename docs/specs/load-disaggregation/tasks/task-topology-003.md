@@ -1,5 +1,7 @@
 # TASK-TOPOLOGY-003 — Versioned topology, change detection and reconciliation
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-TOPOLOGY-003`
 **Title.** Versioned topology, change detection and reconciliation
 **Status.** `NOT_STARTED`

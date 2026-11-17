@@ -1,5 +1,7 @@
 # TASK-TOPOLOGY-002 — Containment evidence bar, violations and residual awareness
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-TOPOLOGY-002`
 **Title.** Containment evidence bar, violations and residual awareness
 **Status.** `NOT_STARTED`

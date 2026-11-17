@@ -1,5 +1,7 @@
 # TASK-FOUNDATION-002 — Runtime boundary, the four-state label and one owner per wave
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-FOUNDATION-002`
 **Title.** Runtime boundary, the four-state label and one owner per wave
 **Status.** `NOT_STARTED`

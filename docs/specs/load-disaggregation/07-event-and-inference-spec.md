@@ -1,6 +1,6 @@
 # 07 — Event and Inference Specification
 
-**Status:** specification for the load-disaggregation event and inference layer — what exists today, what is partial, and what must be built.
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION** — specification for the load-disaggregation event and inference layer — what exists today, what is partial, and what must be built.
 
 **Purpose:** to specify how events are ingested, correlated and converted into per-device load estimates, including simultaneity, automation groups, device response delays, replay, late and duplicate data, and the limits of identifiability.
 

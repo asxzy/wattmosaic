@@ -1,5 +1,7 @@
 # TASK-DEPLOY-002 — Deployment procedure, smoke tests, rollback and operational metrics
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-DEPLOY-002`
 **Title.** Deployment procedure, smoke tests, rollback and operational metrics
 **Status.** `NOT_STARTED`

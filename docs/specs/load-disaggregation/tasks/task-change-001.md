@@ -1,5 +1,7 @@
 # TASK-CHANGE-001 — Configuration events and the hypothesis lifecycle
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-CHANGE-001`
 **Title.** Configuration events and the hypothesis lifecycle
 **Status.** `NOT_STARTED`

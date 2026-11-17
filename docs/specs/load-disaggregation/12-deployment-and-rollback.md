@@ -1,6 +1,6 @@
 # 12 — Deployment and Rollback
 
-**Status:** Specification, in the approved specification set. **Scope:** how the load-disaggregation capability is built, shipped, backed up, smoke-tested, rolled back and monitored. **Owner:** Builder S-DEPLOY-3. **Date:** 2026-11-16.
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION** — Specification, in the approved specification set. **Scope:** how the load-disaggregation capability is built, shipped, backed up, smoke-tested, rolled back and monitored. **Owner:** Builder S-DEPLOY-3. **Date:** 2026-11-16.
 
 **Purpose.** Define the exact, repeatable procedure an operator follows to move the load-disaggregation capability from a source tree into a running WattMosaic deployment, and the exact procedure to reverse it. Every command in this document exists in the repository; every claim about the existing deployment mechanism cites `file:line`.
 

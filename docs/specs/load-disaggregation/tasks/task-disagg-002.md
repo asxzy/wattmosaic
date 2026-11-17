@@ -1,5 +1,7 @@
 # TASK-DISAGG-002 — No fabrication, single counting and the balance identity
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-DISAGG-002`
 **Title.** No fabrication, single counting and the balance identity
 **Status.** `NOT_STARTED`

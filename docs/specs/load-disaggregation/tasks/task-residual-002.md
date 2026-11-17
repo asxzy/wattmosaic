@@ -1,5 +1,7 @@
 # TASK-RESIDUAL-002 — Drift events, the unknown-residual hand-off and the non-redistribution guard
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-RESIDUAL-002`
 **Title.** Drift events, the unknown-residual hand-off and the non-redistribution guard
 **Status.** `NOT_STARTED`

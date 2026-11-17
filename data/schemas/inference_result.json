@@ -345,5 +345,5 @@
   "title": "InferenceResult",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/inference_result.json",
-  "x-contract-version": "2.0.0"
+  "x-contract-version": "2.1.0"
 }

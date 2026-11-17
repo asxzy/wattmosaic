@@ -1,5 +1,7 @@
 # TASK-POWER-002 — Measured-step attribution, non-HA devices, entity separation and declared bounds
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-POWER-002`
 **Title.** Measured-step attribution, non-HA devices, entity separation and declared bounds
 **Status.** `NOT_STARTED`

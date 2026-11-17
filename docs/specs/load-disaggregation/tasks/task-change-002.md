@@ -1,5 +1,7 @@
 # TASK-CHANGE-002 — Four version identifiers, immutable history, rollback and reconciliation
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-CHANGE-002`
 **Title.** Four version identifiers, immutable history, rollback and reconciliation
 **Status.** `NOT_STARTED`

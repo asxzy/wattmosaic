@@ -1,5 +1,7 @@
 # TASK-DISAGG-001 — Joint inference, identifiability and group estimates
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-DISAGG-001`
 **Title.** Joint inference, identifiability and group estimates
 **Status.** `NOT_STARTED`

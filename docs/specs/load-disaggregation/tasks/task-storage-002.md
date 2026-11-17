@@ -1,5 +1,7 @@
 # TASK-STORAGE-002 — Evidence immutability, batched writes, indexes and version identifiers
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-STORAGE-002`
 **Title.** Evidence immutability, batched writes, indexes and version identifiers
 **Status.** `NOT_STARTED`

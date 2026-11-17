@@ -89,7 +89,12 @@ is about to build should read `01` and `02` in that order.
 ## 4. Conventions this specification follows
 
 **Status header.** Every file opens with a one-line status and purpose line, in
-the style of `docs/specs/retire-dedicated-ct-concept/README.md:3`.
+the style of `docs/specs/retire-dedicated-ct-concept/README.md:3`. Every file
+of the set carries the token `SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION` on that
+first status line — all 55 files, the 18 in this folder and the 37 under
+`tasks/`. A file that drops the token is a defect the `spec_status` gate in
+`tools/dev/verify.py` names and fails on. The token never replaces the
+purpose text: the status line carries both, in that order.
 
 **Evidence.** Every factual claim about the *existing* system cites a
 `path:line` or names the existing document it comes from. A claim about the

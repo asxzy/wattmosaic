@@ -1,6 +1,6 @@
 # 15 — Implementation plan
 
-**PLAN_STATUS: APPROVED_FOR_IMPLEMENTATION** — 36 tasks in 5 dependency waves, with the
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION** — **PLAN_STATUS: APPROVED_FOR_IMPLEMENTATION** — 36 tasks in 5 dependency waves, with the
 parallelization rules, the one-file-one-owner matrix, the contract-freeze list,
 the acceptance gates, and the progress tracker that governs the build.
 

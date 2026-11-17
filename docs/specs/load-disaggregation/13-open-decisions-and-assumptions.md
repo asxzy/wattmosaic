@@ -1,6 +1,6 @@
 # 13 — Open Decisions and Assumptions
 
-**Status:** Register of everything the load-disaggregation specification set did **not** decide, plus the V1 defaults the implementation proceeds on. Two product decisions from `06-device-and-load-model-spec.md` have since been answered by the project owner and are recorded as `RESOLVED` (§2.4); a third owner decision — the Device↔Reader mapping module **is** built in V1 — closes `ASM-06` (§4); and the orchestrator's approval of the specification set closes `OD-38` (§3).
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION** — Register of everything the load-disaggregation specification set did **not** decide, plus the V1 defaults the implementation proceeds on. Two product decisions from `06-device-and-load-model-spec.md` have since been answered by the project owner and are recorded as `RESOLVED` (§2.4); a third owner decision — the Device↔Reader mapping module **is** built in V1 — closes `ASM-06` (§4); and the orchestrator's approval of the specification set closes `OD-38` (§3).
 
 ## 1. How to read this register
 

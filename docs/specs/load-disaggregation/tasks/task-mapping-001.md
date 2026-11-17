@@ -1,5 +1,7 @@
 # TASK-MAPPING-001 — The derived mapping projection
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-MAPPING-001`
 **Title.** The derived mapping projection
 **Status.** `NOT_STARTED`

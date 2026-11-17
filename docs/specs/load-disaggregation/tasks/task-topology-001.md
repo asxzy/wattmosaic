@@ -1,5 +1,7 @@
 # TASK-TOPOLOGY-001 — Typed edge contract and the lifecycle vocabulary
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-TOPOLOGY-001`
 **Title.** Typed edge contract and the lifecycle vocabulary
 **Status.** `NOT_STARTED`

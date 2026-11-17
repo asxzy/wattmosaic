@@ -1,5 +1,7 @@
 # TASK-STORAGE-003 — Recovery, migration safety and replay
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-STORAGE-003`
 **Title.** Recovery, migration safety and replay
 **Status.** `NOT_STARTED`

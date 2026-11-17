@@ -1,5 +1,7 @@
 # TASK-EVENT-001 — Event kinds, grouping, lag and window sizing
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-EVENT-001`
 **Title.** Event kinds, grouping, lag and window sizing
 **Status.** `NOT_STARTED`

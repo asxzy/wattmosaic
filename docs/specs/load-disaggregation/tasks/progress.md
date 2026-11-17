@@ -1,5 +1,7 @@
 # Progress tracker — load disaggregation implementation
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Single source of truth for task status.**
 
 **Rule.** A task is complete only after its acceptance criteria **and** its

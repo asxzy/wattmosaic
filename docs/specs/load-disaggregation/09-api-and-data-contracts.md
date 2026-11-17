@@ -1,6 +1,6 @@
 # 09 — API and Data Contracts
 
-> **Status:** Normative. **Contract version:** `2.0.0` (`engine/wattmosaic_engine/contracts.py:32`).
+> **SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION** — Normative. **Contract version:** `2.1.0` (`engine/wattmosaic_engine/contracts.py:32`).
 > **Purpose:** this document pins every name, shape, unit, nullability, version and error semantic that crosses a module boundary, so that builders working in parallel emit byte-compatible payloads instead of inventing their own.
 
 ## How to read this document
@@ -340,8 +340,8 @@ The three components of an unexplained power window plus an unknown-event refere
 | `noise_w` | `float` | **W** | **yes** | `None` | `REQUIRED` | `None` = noise component undeterminable |
 | `is_complete` | `bool` | — | no | `False` | `REQUIRED` | `True` only when all three components are present |
 | `unknown_event_id` | `str` | — | **yes** | `None` | `REQUIRED` | reference to the `UnknownResidualEvent.event_id` (§7.9) that explains the residual; `None` = not attributable |
-| `decomposition` | `ResidualDecomposition` (`models/residual_power.py:925`) | W | no | — | `REQUIRED` | the computed decomposition as produced by `ResidualAnalyzer.compute` (§3 F-05) |
-| `decomposition_scope` | `ResidualScope` (`models/residual_power.py:195`) | — | no | — | `REQUIRED` | reuse the existing type |
+| `decomposition` | `dict[str, Any]` — the **wire form** of `ResidualDecomposition` (`models/residual_power.py:925`) | W | no | — | `REQUIRED` | the computed decomposition as produced by `ResidualAnalyzer.compute` (§3 F-05), in the form the API serialises |
+| `decomposition_scope` | `dict[str, Any]` — the **wire form** of `ResidualScope` (`models/residual_power.py:195`) | — | no | — | `REQUIRED` | the existing type's shape, in the form the API serialises |
 | `kind` | `ResidualKind` (`contracts.py:238`) | — | no | — | `REQUIRED` | reuse the existing enum |
 | `confidence` | `ConfidenceVector` (`contracts.py:476`) | unitless | no | — | `REQUIRED` | never blended |
 | `basis` | `MeasurementBasis` (`contracts.py:186`) | — | no | `UNKNOWN` | `REQUIRED` | a residual is `ESTIMATED` unless directly measured |
@@ -350,6 +350,21 @@ The three components of an unexplained power window plus an unknown-event refere
 | `created_at` | `datetime` (UTC) | — | no | — | `REQUIRED` | |
 
 **Rule.** When `is_complete` is `True`, `baseline_w + dynamic_w + noise_w` must equal `total_residual_w` within the engine's stated tolerance. When `is_complete` is `False`, the components are individually `None` where undeterminable and are **not** back-filled to force the identity.
+
+#### 7.3.1 Deviation — `decomposition` and `decomposition_scope` carry the wire form, not the model dataclasses
+
+**Deviation.** The two fields above are typed as the **wire form** (`dict[str, Any]`) rather than importing `ResidualDecomposition` (`models/residual_power.py:925`) and `ResidualScope` (`models/residual_power.py:195`) from the model layer, and **the exported JSON Schema is the authority** (`data/schemas/residual_decomposition_record.json`): both properties export as `{"type": "object", "additionalProperties": true}`.
+
+**Rule.** The deviation is deliberate and has two causes, both of which are properties of the repository rather than of this contract:
+
+1. **The contract layer must not import from the model layer.** `docs/architecture.md:78-84` fixes the dependency direction as strictly downward and states that "`contracts.py` imports nothing from the package" — "`storage` imports only `contracts`" — "to keep the schema stable and testable in isolation". Importing `models.residual_power` from `contracts.py` would invert that rule.
+2. **The reverse edge is a circular import.** `models/__init__.py:21` imports `models.registry`, which imports `storage.database` (`models/registry.py:17`), which imports `contracts` (`storage/database.py:22`). A `contracts.py` → `models.residual_power` edge closes the cycle `contracts` → `models/__init__` → `models.registry` → `storage.database` → `contracts`, and the **storage layer stops being importable on its own**: `import wattmosaic_engine.storage` then raises `ImportError: cannot import name 'Database' from partially initialized module 'wattmosaic_engine.storage.database' (most likely due to a circular import)`, and so do `import wattmosaic_engine.storage.database` and `import wattmosaic_engine.storage.migrations`. That layer is the foundation of the engine: 39 test modules import `wattmosaic_engine.storage` (`tests/unit/test_contracts.py:48`, `tests/unit/test_migrations.py:60`, `tests/unit/test_learning.py:59`, `tests/unit/test_aggregation.py:34`, and 35 more) and 7 import `wattmosaic_engine.models` (`tests/unit/test_learning.py:56`, `tests/unit/test_residual_power.py:46`, `tests/unit/test_circuits.py:73`, and 4 more) — 39 in total, every one of them downstream of `storage.database`. The suite survives the cycle today only because collection happens to import a higher layer first; the storage layer's own entry point does not.
+
+**Rule.** The source dataclasses stay where they are — `ResidualDecomposition` at `models/residual_power.py:925` and `ResidualScope` at `models/residual_power.py:195` — so the mapping is discoverable from either side. A producer that holds a `ResidualDecomposition` or a `ResidualScope` **serialises it** and puts the resulting mapping in these fields; the mapping is what the API serialises, and the exported schema for the record is generated from these two fields.
+
+**Rule.** The wire form carries the fields of the source dataclasses as they are serialised. `decomposition` mirrors `ResidualDecomposition`: `timestamp`, `before_w`, `unexplained_w`, `explained_by_device_w`, `resolved`, `conflict`, `reason_code`, `detail`, `basis`, `quality_status` and `evidence`. `decomposition_scope` mirrors `ResidualScope`: `scope_id`, `ct_id`, `basis`, `multiplicity`, `is_nested_under`, `device_contributions`, `ct_ids`, `readings`, `contribution_bases`, `contribution_cts`, `conversions`, `explained_by_device_w`, `quality_status`, `window_w` and `unresolved_since`. The mapping is **not** validated field-by-field by this contract (`extra="forbid"` applies to the record's own fields, not to the contents of a free-form mapping); a producer that omits a key of the source dataclass produces a mapping that is missing it, and that is the producer's decision to make visible.
+
+**Rule.** The deviation is **additive and reversible**: no field of the record is removed, renamed, re-typed or made mandatory by it, and a payload written before the change still validates. Narrowing the two fields to the model dataclasses is a **major** contract change (P-12) and requires the import cycle to be broken first — it is not a change this specification set makes.
 
 ### 7.4 `UnknownLoadProfile`
 

@@ -1,5 +1,7 @@
 # TASK-MAPPING-002 — Unknown-load entries and the evidence-triggered refresh
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-MAPPING-002`
 **Title.** Unknown-load entries and the evidence-triggered refresh
 **Status.** `NOT_STARTED`

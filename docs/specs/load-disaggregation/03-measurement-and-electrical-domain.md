@@ -1,6 +1,6 @@
 # 03 — Measurement and Electrical Domain
 
-**Status:** Specification — measurement semantics, quantities, units, nullability, phase/leg rules and electrical-domain behaviour of the existing WattMosaic engine, with the deltas required to make the final system guarantee them.
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION** — Specification — measurement semantics, quantities, units, nullability, phase/leg rules and electrical-domain behaviour of the existing WattMosaic engine, with the deltas required to make the final system guarantee them.
 
 **Date:** 2026-11-16 · **Baseline:** branch `main`, HEAD `612e1233`, engine version `0.2.1-dev.36`, `CONTRACT_VERSION = "2.0.0"` (`engine/wattmosaic_engine/contracts.py:32`), SQLite schema `LATEST_VERSION = 11` (`engine/wattmosaic_engine/storage/migrations.py:792`).
 

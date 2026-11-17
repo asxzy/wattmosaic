@@ -94,10 +94,18 @@ mapping is in §4.
 
 - **Description.** This specification set carries `SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION`; the orchestrator's review gate has passed and every requirement in it is an implementation commitment.
 - **Priority.** MUST
-- **Rationale.** The brief asks for a specification of a "future-proof" system over a codebase that already implements much of it; committing to it before review would freeze choices the repository has not made (`docs/specs/retire-dedicated-ct-concept/README.md:3` is the house pattern). The review gate has now passed — every requirement is traced, every identifier resolves to one definition, the plan is internally consistent and executable, and no hard-rule violation was found — so the set is approved for implementation and the status is stated on every file that declares one.
-- **Acceptance criteria.** `README.md` states `SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION`; every file of this specification set that carries the status line repeats it in its first line, and no file in the set declares a draft status.
+- **Rationale.** The brief asks for a specification of a "future-proof" system over a codebase that already implements much of it; committing to it before review would freeze choices the repository has not made (`docs/specs/retire-dedicated-ct-concept/README.md:3` is the house pattern). The review gate has now passed — every requirement is traced, every identifier resolves to one definition, the plan is internally consistent and executable, and no hard-rule violation was found — so the set is approved for implementation and the status is stated on **every** file of the set.
+- **Acceptance criteria.** `README.md` states `SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION`; **every** file of this specification set — the 18 files in the folder root and the 37 files in `tasks/`, 55 in total at this checkout — carries the token `SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION` on its **first status line**, and no file in the set declares a draft status. The number 55 is the measured size of the set at this checkout, not a fixed constant: a file added to the set that carries the status line raises it.
 - **Dependencies.** —
-- **Verification.** `grep -o "SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION" docs/specs/load-disaggregation/*.md | wc -l` returns 8 at this checkout (README 1, `00` 1, `01` 4, `02` 1, `14` 1); the count is the measured size of the set, not a fixed constant — a file added to the set that carries the status line raises it.
+- **Verification.** The invariant is measured **per file**, by counting the files whose *first status line* carries the token — not by counting the token's occurrences across the set. The token also appears in body text (it states the status of the set, of a requirement or of a task), so a whole-file occurrence count is larger than the file count and grows with every legitimate in-body reference; `wc -l` over all matches therefore measures prose, not the invariant. The measure is:
+
+  ```bash
+  find docs/specs/load-disaggregation -name '*.md' | sort | while read -r f; do
+      awk '{ sub(/^[ \t]+/, ""); sub(/[ \t]+$/, "") } $0 == "" || $0 ~ /^#/ { next } { print; exit }' "$f"
+  done | grep -c 'SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION'
+  ```
+
+  It returns **55** at this checkout: one per file of the set (18 in the folder root, 37 under `tasks/`), each on its first status line. It is the same measure the `spec_status` gate applies — `python tools/dev/verify.py --check-spec-status` reads each file's first status line, fails and names every offending file when one does not carry the token, and prints the number of files that do (`spec_status: 55 specification files carry the status token`). A token that survives only as an in-body mention does **not** satisfy the requirement: the check reads the first status line, not the whole file.
 
 #### REQ-FOUNDATION-002 — Contract changes are additive and optional
 

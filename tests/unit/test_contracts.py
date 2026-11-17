@@ -24,6 +24,7 @@ from wattmosaic_engine.contracts import (
     CTChannel,
     CTType,
     DeviceConfiguration,
+    DeviceEvent,
     DeviceTopology,
     EventIsolation,
     HaEntityBinding,
@@ -63,7 +64,7 @@ def _export_schemas_module():
 
 def test_contract_version_is_2_0_0() -> None:
     """Removing contract enum values is a breaking change, so the major moves."""
-    assert contracts.CONTRACT_VERSION == "2.0.0"
+    assert contracts.CONTRACT_VERSION == "2.1.0"
 
 
 def test_schema_files_match_contract_version() -> None:
@@ -1001,3 +1002,224 @@ def test_a_1_5_0_reconciliation_payload_still_validates() -> None:
     payload = {"main_power_w": 1000.0, "unknown_residual_w": 400.0}
     rec = Reconciliation.model_validate(payload)
     assert rec.residual is None
+
+
+# --------------------------------------------------------------------------- #
+# The 2.1.0 additive change: a payload produced *before* it must still validate
+# --------------------------------------------------------------------------- #
+#
+# The 2.1.0 change added the ten §7 contracts, six enums and no field to any
+# pre-existing model.  "Additive" is only a claim until a payload that predates
+# the change is run through the new models, so the payload below is written
+# against the field set the *2.0.0* contract had: every key it carries is a key
+# ``git show ee85417:engine/wattmosaic_engine/contracts.py`` already declared.
+# Nothing in it is a 2.1.0 addition.
+#
+# The payload is deliberately the *shipped producer's* shape rather than a
+# hand-built minimal one: it is the wire form the engine has always written, so
+# a producer still running the old code produces exactly this.
+
+
+def _pre_change_payload() -> dict:
+    """A 2.0.0-era payload: every key existed in the 2.0.0 contract.
+
+    The shape mirrors ``data/examples/topology.example.json`` -- the example the
+    repository ships for exactly this purpose -- plus the inference and
+    reconciliation rows the engine wrote alongside it.
+    """
+    return {
+        "topology": {
+            "version": 1,
+            "status": "candidate",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "notes": ["written by the 2.0.0 producer"],
+            "channels": [
+                {
+                    "ct_id": "main_l1",
+                    "entity_id": "sensor.ct_panel_a_l1_power",
+                    "name": "Main L1",
+                    "ct_type": "main",
+                    "phase": "l1",
+                    "polarity": "normal",
+                    "enabled": True,
+                    "expected_interval_s": 15.0,
+                    "reliability": 0.95,
+                    "topology_status": "candidate",
+                    "metadata": {},
+                },
+                {
+                    "ct_id": "branch_fridge",
+                    "entity_id": "sensor.ct_fridge_power",
+                    "name": "Fridge",
+                    "ct_type": "branch",
+                    "phase": "l1",
+                    "parent_ct_id": "main_l1",
+                    "polarity": "normal",
+                    "enabled": True,
+                    "topology_status": "candidate",
+                    "metadata": {},
+                },
+            ],
+            "devices": [
+                {
+                    "device_id": "dev_fridge",
+                    "name": "Kitchen Fridge",
+                    "branch_ct_ids": ["branch_fridge"],
+                    "phase": "l1",
+                    "double_pole": False,
+                    "topology_status": "candidate",
+                    "metadata": {},
+                }
+            ],
+        },
+        "measurement": {
+            "entity_id": "sensor.ct_fridge_power",
+            "ct_id": "branch_fridge",
+            "value": 120.0,
+            "unit": "W",
+            "state_timestamp": "2026-01-01T00:00:15+00:00",
+            "quality": "good",
+            "repeated": False,
+            "polarization": "normal",
+            "sequence": 1,
+        },
+        "inference_result": {
+            "device_id": "dev_fridge",
+            "timestamp": "2026-01-01T00:00:30+00:00",
+            "power_w": 118.5,
+            "source": "inferred",
+            "confidence": 0.72,
+            "model_id": "binary_fridge",
+            "model_version": 3,
+            "operating_stage": "running",
+            "stage_status": "identified",
+            "sample_count": 12,
+            "quality_status": "good",
+            "measurement_age_seconds": 15.0,
+            "supporting_ct_channels": ["branch_fridge"],
+            "explanation": ["branch_power_increase"],
+            "provenance": {"window_s": 30},
+        },
+        "reconciliation": {
+            "timestamp": "2026-01-01T00:00:30+00:00",
+            "topology_version": 1,
+            "main_power_w": 1000.0,
+            "l1_power_w": 620.0,
+            "l2_power_w": 380.0,
+            "direct_measured_w": 300.0,
+            "inferred_w": 118.5,
+            "model_estimated_w": 0.0,
+            "configured_prior_w": 0.0,
+            "unknown_residual_w": 581.5,
+            "unmonitored_w": 581.5,
+            "meter_disagreement_w": 0.0,
+            "meter_spread_w": 0.0,
+            "meter_spread_exceeds_residual": False,
+            "reconciliation_error_w": 0.0,
+            "reconciliation_error_ratio": 0.0,
+            "accounted_fraction": 0.4185,
+            "measurement_uncertainty_w": 12.0,
+            "quality_status": "good",
+            "explanation": ["unattributed_load"],
+            "topology_confirmed": False,
+        },
+        "device_event": {
+            "event_id": "e1",
+            "device_id": "dev_fridge",
+            "entity_id": "switch.dev_fridge",
+            "event_type": "state_changed",
+            "previous_state": "off",
+            "new_state": "on",
+            "attributes": {"power_w": 118.5},
+            "occurred_at": "2026-01-01T00:00:10+00:00",
+            "received_at": "2026-01-01T00:00:11+00:00",
+        },
+    }
+
+
+def test_pre_change_payload_still_validates() -> None:
+    """A payload produced before the 2.1.0 change still validates.
+
+    This is the task's central criterion: the contract change is additive, so
+    a producer that has not been upgraded must keep working.  The payload is
+    built from the 2.0.0 field set only and is checked against **five** of the
+    pre-existing models, because "it still validates" proved against one model
+    says nothing about the others.
+    """
+    payload = _pre_change_payload()
+
+    topology = Topology.model_validate(payload["topology"])
+    assert [c.ct_id for c in topology.channels] == ["main_l1", "branch_fridge"]
+    assert topology.channel_map()["branch_fridge"].parent_ct_id == "main_l1"
+    assert topology.device_map()["dev_fridge"].branch_ct_ids == ["branch_fridge"]
+
+    measurement = Measurement.model_validate(payload["measurement"])
+    assert measurement.effective_power_w() == pytest.approx(120.0)
+
+    result = InferenceResult.model_validate(payload["inference_result"])
+    assert result.power_w == pytest.approx(118.5)
+    assert result.source == Source.INFERRED
+
+    reconciliation = Reconciliation.model_validate(payload["reconciliation"])
+    assert reconciliation.main_power_w == pytest.approx(1000.0)
+    assert reconciliation.unknown_residual_w == pytest.approx(581.5)
+
+    event = DeviceEvent.model_validate(payload["device_event"])
+    assert event.new_state == "on"
+
+
+def test_pre_change_payload_gains_no_new_required_field() -> None:
+    """The new models' defaults, not the payload, carry the new information.
+
+    Every field the 2.1.0 change added to a pre-existing model has a neutral
+    default, so a pre-change payload validates *and* the reader learns nothing
+    it did not state.  A field that had been made mandatory would break the
+    first assertion; a field that had been given a non-neutral default would
+    break this one.
+    """
+    payload = _pre_change_payload()
+    topology = Topology.model_validate(payload["topology"])
+    assert topology.circuits == []
+    assert topology.relations == []
+    assert topology.algorithm_version is None
+
+    measurement = Measurement.model_validate(payload["measurement"])
+    assert measurement.measurement_basis == MeasurementBasis.UNKNOWN
+    assert measurement.multiplier_applied == 1.0
+
+    result = InferenceResult.model_validate(payload["inference_result"])
+    assert result.measurement_basis == MeasurementBasis.UNKNOWN
+    assert result.confidence_dimensions is None
+    assert result.algorithm_version is None
+    assert result.record_id is None
+
+    reconciliation = Reconciliation.model_validate(payload["reconciliation"])
+    assert reconciliation.residual is None
+
+
+def test_a_pre_change_payload_that_was_already_invalid_is_still_invalid() -> None:
+    """Additive does not mean lenient.
+
+    The change must not have relaxed a pre-existing rule: a payload the 2.0.0
+    contract rejected -- a retired key, an out-of-range confidence -- must still
+    be rejected, or "additive" would be hiding a silent behaviour change.
+    """
+    payload = _pre_change_payload()
+
+    # A key the 2.0.0 contract retired: it is still forbidden.
+    retired = json.loads(json.dumps(payload["topology"]))
+    retired["devices"][0]["dedicated_ct_ids"] = ["main_l1"]
+    with pytest.raises(ValidationError):
+        Topology.model_validate(retired)
+
+    # A value the 2.0.0 contract bounded: it is still out of range.
+    out_of_range = json.loads(json.dumps(payload["inference_result"]))
+    out_of_range["confidence"] = 1.5
+    with pytest.raises(ValidationError):
+        InferenceResult.model_validate(out_of_range)
+
+    # A key the 2.0.0 contract did not define: it is still forbidden.
+    unknown_key = json.loads(json.dumps(payload["reconciliation"]))
+    unknown_key["not_a_field"] = 1
+    with pytest.raises(ValidationError):
+        Reconciliation.model_validate(unknown_key)

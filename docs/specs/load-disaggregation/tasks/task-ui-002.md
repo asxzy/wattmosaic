@@ -1,5 +1,7 @@
 # TASK-UI-002 — Panel views: topology, residual, model, mapping and identifiability
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-UI-002`
 **Title.** Panel views: topology, residual, model, mapping and identifiability
 **Status.** `NOT_STARTED`

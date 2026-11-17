@@ -1,6 +1,6 @@
 # 08 — Storage and Data Lifecycle
 
-**Status:** Specification. Defines the logical storage tiers, retention, aggregation, compression, indexing, replay and recovery rules for the load-disaggregation system, expressed over the existing single SQLite database.
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION** — Specification. Defines the logical storage tiers, retention, aggregation, compression, indexing, replay and recovery rules for the load-disaggregation system, expressed over the existing single SQLite database.
 
 **Purpose:** To state, in one place, what the system stores, for how long, in what shape, and what it must never store — so that future algorithm work can replay history without rewriting it.
 

@@ -1,5 +1,7 @@
 # TASK-LEARNING-001 — Sample intake, the rejection ledger and per-device thresholds
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-LEARNING-001`
 **Title.** Sample intake, the rejection ledger and per-device thresholds
 **Status.** `NOT_STARTED`

@@ -1,5 +1,7 @@
 # TASK-DEPLOY-001 — Build pipeline, option surface, startup migrations and backup
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-DEPLOY-001`
 **Title.** Build pipeline, option surface, startup migrations and backup
 **Status.** `NOT_STARTED`

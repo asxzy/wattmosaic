@@ -1,6 +1,6 @@
 # Interface Contracts (authoritative)
 
-**Contract version: `2.0.0`** — mirrors `engine/wattmosaic_engine/contracts.py`.
+**Contract version: `2.1.0`** — mirrors `engine/wattmosaic_engine/contracts.py`.
 
 `contracts.py` is the single source of truth. JSON schemas are exported from it to
 `data/schemas/` by `tools/dev/export_schemas.py`. No component may define a
@@ -194,7 +194,17 @@ than `stale_after` do not accrue energy.
 
 ## 5. Change protocol
 
-1. Bump `CONTRACT_VERSION` in `contracts.py`.
+1. Bump `CONTRACT_VERSION` in `contracts.py` (and in the integration's mirror,
+   `custom_components/wattmosaic/const.py`, in the same change).
 2. Regenerate `data/schemas/`.
 3. Update this document.
 4. Run `pytest tests/` — contract tests fail on mismatch.
+5. Run `python tools/dev/verify.py` — the `spec_status` gate fails and names
+   every specification file that does not carry
+   `SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION` on its first status line, and the
+   `contract_schema_sync` gate fails on schema drift.
+
+Steps 1–3 are the contract change itself; step 4 proves the additive
+compatibility rule (a payload written before the change still validates), and
+step 5 is the executable gate: the specification set and the contracts it
+describes cannot drift apart without a gate naming the file that drifted.

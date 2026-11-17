@@ -1,5 +1,7 @@
 # TASK-UI-003 — Panel evidence, version history, operator correction and storage health
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-UI-003`
 **Title.** Panel evidence, version history, operator correction and storage health
 **Status.** `NOT_STARTED`

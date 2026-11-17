@@ -1,5 +1,7 @@
 # TASK-TOPOLOGY-004 — Incomplete topology and the circuit scope
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-TOPOLOGY-004`
 **Title.** Incomplete topology and the circuit scope
 **Status.** `NOT_STARTED`

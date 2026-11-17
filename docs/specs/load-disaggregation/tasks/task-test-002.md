@@ -1,5 +1,7 @@
 # TASK-TEST-002 — API surface, replay and migration harnesses
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-TEST-002`
 **Title.** API surface, replay and migration harnesses
 **Status.** `NOT_STARTED`

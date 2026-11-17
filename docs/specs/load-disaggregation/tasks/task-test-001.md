@@ -1,5 +1,7 @@
 # TASK-TEST-001 — Unit-rule coverage, regression and negative verification
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-TEST-001`
 **Title.** Unit-rule coverage, regression and negative verification
 **Status.** `NOT_STARTED`

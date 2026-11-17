@@ -1,5 +1,7 @@
 # TASK-RESIDUAL-001 — Signed residual, decomposition, history and the unresolved state
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-RESIDUAL-001`
 **Title.** Signed residual, decomposition, history and the unresolved state
 **Status.** `NOT_STARTED`

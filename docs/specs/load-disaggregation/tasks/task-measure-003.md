@@ -1,5 +1,7 @@
 # TASK-MEASURE-003 — Timestamps, repeat suppression and cadence derivation
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-MEASURE-003`
 **Title.** Timestamps, repeat suppression and cadence derivation
 **Status.** `NOT_STARTED`

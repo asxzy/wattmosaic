@@ -1,0 +1,100 @@
+{
+  "$defs": {
+    "TopologyStatus": {
+      "enum": [
+        "candidate",
+        "confirmed",
+        "rejected"
+      ],
+      "title": "TopologyStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "A diffable, rollbackable snapshot of the edge set.\n\nRollback is append-only: a rollback creates a *new* version whose\n``parent_version_id`` names the version rolled back to and whose\n``rollback_of`` names the version it replaces.  History is never rewritten.",
+  "properties": {
+    "version_id": {
+      "title": "Version Id",
+      "type": "string"
+    },
+    "version_number": {
+      "title": "Version Number",
+      "type": "integer"
+    },
+    "parent_version_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Version Id"
+    },
+    "edge_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Edge Ids",
+      "type": "array"
+    },
+    "edge_count": {
+      "default": 0,
+      "title": "Edge Count",
+      "type": "integer"
+    },
+    "status": {
+      "$ref": "#/$defs/TopologyStatus",
+      "default": "candidate"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "created_by": {
+      "default": "",
+      "title": "Created By",
+      "type": "string"
+    },
+    "change_event_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Change Event Id"
+    },
+    "rollback_of": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Rollback Of"
+    },
+    "summary": {
+      "default": "",
+      "title": "Summary",
+      "type": "string"
+    }
+  },
+  "required": [
+    "version_id",
+    "version_number"
+  ],
+  "title": "TopologyVersion",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/topology_version.json",
+  "x-contract-version": "2.1.0"
+}

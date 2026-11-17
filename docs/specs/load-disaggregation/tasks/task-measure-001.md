@@ -1,5 +1,7 @@
 # TASK-MEASURE-001 — Measurable quantities, units, phase and polarity
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-MEASURE-001`
 **Title.** Measurable quantities, units, phase and polarity
 **Status.** `NOT_STARTED`

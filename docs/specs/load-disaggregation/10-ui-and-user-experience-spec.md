@@ -1,6 +1,6 @@
 # 10 — UI and User Experience Specification
 
-**Status:** Specification for the load-disaggregation panel, in the approved specification set. It plans UI capabilities only; it writes no code and changes no `addon/ui/*` file.
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION** — Specification for the load-disaggregation panel, in the approved specification set. It plans UI capabilities only; it writes no code and changes no `addon/ui/*` file.
 
 **Scope:** the static, CSP-safe, build-less vanilla-JS panel served by the gateway at `addon/ui/index.html`, `addon/ui/app.js` and `addon/ui/app.css`. It is the only user-facing surface of this project, so every user-visible capability of the disaggregation engine has to be reachable from it.
 

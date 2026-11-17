@@ -1,5 +1,7 @@
 # TASK-TEST-003 — The T01–T15 builders, the matrix reconciliation and the performance and accuracy harnesses
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-TEST-003`
 **Title.** The T01–T15 builders, the matrix reconciliation and the performance and accuracy harnesses
 **Status.** `NOT_STARTED`

@@ -1,5 +1,7 @@
 # TASK-CONFIDENCE-001 — Confidence dimensions, the calibration flag and tier monotonicity
 
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION**
+
 **Task ID.** `TASK-CONFIDENCE-001`
 **Title.** Confidence dimensions, the calibration flag and tier monotonicity
 **Status.** `NOT_STARTED`

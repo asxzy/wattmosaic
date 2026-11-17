@@ -1,6 +1,6 @@
 # 11 — Test and Validation Plan
 
-Status: specification for the load disaggregation workstream, in the approved specification set. Defines the unit, integration, synthetic, replay, regression, performance, migration and UI test layers with measurable acceptance criteria, and fixes the verification vehicle for the canonical T01–T15 scenario catalogue.
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION** — specification for the load disaggregation workstream, in the approved specification set. Defines the unit, integration, synthetic, replay, regression, performance, migration and UI test layers with measurable acceptance criteria, and fixes the verification vehicle for the canonical T01–T15 scenario catalogue.
 
 ---
 

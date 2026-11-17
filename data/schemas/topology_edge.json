@@ -1,0 +1,253 @@
+{
+  "$defs": {
+    "ConfidenceVector": {
+      "additionalProperties": false,
+      "description": "Independent confidence dimensions.\n\nDeliberately has **no** aggregate field, no ``__float__`` and no arithmetic:\na consumer that wants one number must say which dimension it means.  Merging\nthe six components into one weighted blend is the defect this model exists\nto stop repeating (see ``docs/assessment_gap_analysis.md`` G14).",
+      "properties": {
+        "power": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Power"
+        },
+        "ct_association": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ct Association"
+        },
+        "topology": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Topology"
+        },
+        "circuit_classification": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Circuit Classification"
+        },
+        "residual": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Residual"
+        },
+        "method": {
+          "default": "unavailable",
+          "title": "Method",
+          "type": "string"
+        }
+      },
+      "title": "ConfidenceVector",
+      "type": "object"
+    },
+    "EdgeLifecycle": {
+      "description": "The lifecycle of one topology edge (spec 09 \u00a77.1).\n\nA *new* vocabulary, separate from ``TopologyStatus``: ``TopologyStatus``\ndescribes an aggregate, this describes one edge, and an edge that is\n``UNDER_REVIEW`` does not make the whole topology suspect.",
+      "enum": [
+        "candidate",
+        "provisional",
+        "confirmed",
+        "suspected_change",
+        "under_review",
+        "conflicted",
+        "rejected",
+        "retired"
+      ],
+      "title": "EdgeLifecycle",
+      "type": "string"
+    },
+    "MeasurementBasis": {
+      "description": "What produced the watt value, independent of how much we trust it.\n\n``Source`` answers *\"how was the value obtained\"*; this answers *\"what kind\nof instrument produced the watts\"*.  A ``DIRECT_MEASURED`` result can be\n``FACTOR_ADJUSTED``, and a ``MODEL_ESTIMATED`` result can never be\n``CT_MEASURED``.",
+      "enum": [
+        "ct_measured",
+        "monitor_reported",
+        "factor_adjusted",
+        "estimated_appliance_total",
+        "unknown"
+      ],
+      "title": "MeasurementBasis",
+      "type": "string"
+    },
+    "RelationKind": {
+      "description": "The four electrical relations, which must never imply one another.\n\nStoring them in one typed edge is what keeps them separate: nothing can set\na parent pointer and thereby assert membership, and \"two CTs on one device\"\nstays a measurement overlap rather than becoming parenthood.",
+      "enum": [
+        "device_ct_association",
+        "ct_measurement_overlap",
+        "circuit_membership",
+        "electrical_parent_child"
+      ],
+      "title": "RelationKind",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One directed, time-scoped edge between two device/channel endpoints.\n\nThe diffable, lifecycle-bearing counterpart to ``TopologyRelation``: the\nrelation is the *assertion*, this is the edge as it holds over an interval,\nwith a version for optimistic concurrency.",
+  "properties": {
+    "edge_id": {
+      "title": "Edge Id",
+      "type": "string"
+    },
+    "from_device_id": {
+      "title": "From Device Id",
+      "type": "string"
+    },
+    "from_channel_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "From Channel Id"
+    },
+    "to_device_id": {
+      "title": "To Device Id",
+      "type": "string"
+    },
+    "to_channel_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "To Channel Id"
+    },
+    "relation_kind": {
+      "$ref": "#/$defs/RelationKind"
+    },
+    "circuit_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Circuit Id"
+    },
+    "lifecycle": {
+      "$ref": "#/$defs/EdgeLifecycle",
+      "default": "candidate"
+    },
+    "confidence": {
+      "$ref": "#/$defs/ConfidenceVector"
+    },
+    "basis": {
+      "$ref": "#/$defs/MeasurementBasis",
+      "default": "unknown"
+    },
+    "valid_from": {
+      "format": "date-time",
+      "title": "Valid From",
+      "type": "string"
+    },
+    "valid_until": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Valid Until"
+    },
+    "evidence_count": {
+      "default": 0,
+      "title": "Evidence Count",
+      "type": "integer"
+    },
+    "last_validated_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Last Validated At"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    },
+    "version": {
+      "default": 1,
+      "title": "Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "edge_id",
+    "from_device_id",
+    "to_device_id",
+    "relation_kind",
+    "valid_from"
+  ],
+  "title": "TopologyEdge",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/topology_edge.json",
+  "x-contract-version": "2.1.0"
+}

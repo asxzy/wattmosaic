@@ -1,6 +1,6 @@
 # 06 — Device and Load Model Domain
 
-**Status:** Specification — the device and load model domain: the five distinct entities, the power model classes, the power levels, the transition rule, and the lifecycle of a learned model.
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION** — Specification — the device and load model domain: the five distinct entities, the power model classes, the power levels, the transition rule, and the lifecycle of a learned model.
 
 **Date:** 2026-11-16 · **Baseline:** branch `main`, HEAD `612e1233`, `CONTRACT_VERSION = "2.0.0"` (`engine/wattmosaic_engine/contracts.py:32`), SQLite schema `LATEST_VERSION = 11` (`engine/wattmosaic_engine/storage/migrations.py:792`).
 
