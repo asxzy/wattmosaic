@@ -16,6 +16,8 @@
 #   database_path          -> WM_DATABASE_PATH
 #   retention_days_raw     -> WM_RETENTION_DAYS_RAW
 #   retention_days_aggregates -> WM_RETENTION_DAYS_AGGREGATES
+#   retention_days_evidence -> WM_RETENTION_DAYS_EVIDENCE (null = disabled)
+#   retention_days_versions -> WM_RETENTION_DAYS_VERSIONS (null = disabled)
 #   queue_max_size         -> WM_QUEUE_MAX_SIZE
 #   auto_placement         -> WM_AUTO_PLACEMENT
 
@@ -117,6 +119,11 @@ options:
   database_path: "/data/wattmosaic.db"
   retention_days_raw: 30
   retention_days_aggregates: 730
+  # L2/L4 horizons are opt-in. null disables pruning (the engine reads an empty
+  # WM_* value as None); set a day count to bound long-term evidence/versions.
+  # A set value must be at least retention_days_raw.
+  retention_days_evidence: null
+  retention_days_versions: null
   queue_max_size: 5000
   # Creates devices for fixtures whose circuit membership was learned from
   # observed co-movement (ADR-0024). This writes device configurations, so it is
@@ -139,5 +146,7 @@ schema:
   database_path: str
   retention_days_raw: "int(1,3650)"
   retention_days_aggregates: "int(30,36500)"
+  retention_days_evidence: "int(1,3650)?"
+  retention_days_versions: "int(1,3650)?"
   queue_max_size: "int(100,1000000)"
   auto_placement: bool

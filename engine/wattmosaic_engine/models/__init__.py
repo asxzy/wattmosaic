@@ -15,6 +15,7 @@ from .base import (
 )
 from .binary import BinaryDeviceModel
 from .composite import CompositeDeviceModel
+from .device_profile import DevicePowerProfile
 from .dimmable import DimmableDeviceModel
 from .multi_state import MultiStateDeviceModel
 from .protocols import ModelContextProtocol, SimpleReading, SimpleWindow, window_channels
@@ -41,6 +42,7 @@ __all__ = [
     "CompositeDeviceModel",
     "CycleSummary",
     "DeviceModel",
+    "DevicePowerProfile",
     "DimmableDeviceModel",
     "IncompatibleBasisError",
     "ModelContextProtocol",

@@ -602,3 +602,62 @@ def test_a_power_entity_cannot_overwrite_the_device_runtime_state(tmp_path) -> N
         ] == []
     finally:
         db.close()
+
+
+# --------------------------------------------------------------------------- #
+# Defect 5: an emitted event never named its kind
+# --------------------------------------------------------------------------- #
+def test_every_event_names_its_kind() -> None:
+    """Every ``DeviceEvent`` the source emits names exactly one of three kinds.
+
+    A stub event cannot carry stamped attributes, so the production funnel
+    ``HASource._emit_device_event`` is driven directly.  All three emission
+    paths (a normal state change, an availability flip and an entity removal)
+    funnel through it, so stamping there is what makes the guarantee hold for
+    every event rather than for the one path a test happened to exercise.
+    """
+    from wattmosaic_engine.disaggregation.isolation import (
+        EVENT_KINDS,
+        KIND_SOURCE_EVENT_TYPE,
+    )
+    from wattmosaic_engine.ingestion.ha_source import HASource
+
+    source = HASource("http://ha.local:8123", "token")
+    source._entity_meta = {"switch.pump": {"device_id": "dev_pump"}}
+    emitted = []
+
+    async def on_event(event) -> None:
+        emitted.append(event)
+
+    source._on_event = on_event
+    at = dt.datetime(2026, 1, 1, 12, 0, tzinfo=dt.UTC)
+
+    async def emit() -> None:
+        await source._emit_device_event(
+            "switch.pump",
+            {"state": "off", "attributes": {"brightness": 10}},
+            {"state": "on", "attributes": {"brightness": 200}},
+            at,
+        )
+        await source._emit_device_event(
+            "switch.pump",
+            {"state": "on", "attributes": {}},
+            {"state": "unavailable", "attributes": {}},
+            at + dt.timedelta(seconds=5),
+            event_type="availability",
+        )
+        await source._emit_device_event(
+            "switch.pump", {"state": "on", "attributes": {}}, None, at + dt.timedelta(seconds=9)
+        )
+
+    asyncio.run(emit())
+
+    assert len(emitted) == 3, emitted
+    for event in emitted:
+        assert event.attributes["event_kind"] in EVENT_KINDS
+        # HA is the producer here, so the kind is named by the source itself.
+        assert event.attributes["event_kind"] == "ha_driven"
+        assert event.attributes["event_kind_source"] == KIND_SOURCE_EVENT_TYPE
+        # Stamping is additive: the contract fields are untouched.
+        assert event.device_id == "dev_pump"
+        assert event.entity_id == "switch.pump"

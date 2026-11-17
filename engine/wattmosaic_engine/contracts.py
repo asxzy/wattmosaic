@@ -29,7 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from . import __version__ as ENGINE_VERSION
 
-CONTRACT_VERSION = "2.0.0"
+CONTRACT_VERSION = "2.1.0"
 
 
 def utcnow() -> datetime:
@@ -73,6 +73,79 @@ class Source(str, Enum):
     UNKNOWN = "unknown"
 
 
+class PowerState(str, Enum):
+    """The four-state provenance label of a device power value.
+
+    This is a *different axis* from ``Source`` and ``MeasurementBasis`` and
+    must never be conflated with either.  ``Source`` records **how the value was
+    obtained** (measurement hierarchy) and ``MeasurementBasis`` records **what
+    kind of instrument produced the watts**; ``PowerState`` records **what kind
+    of value it is** to a reader.  ``10-ui-and-user-experience-spec.md`` §7.1's
+    ``inferred -> ESTIMATED`` entry is the ``STRINGS`` label for the ``Source``
+    value -- a different axis -- and does not conflict with
+    ``06-device-and-load-model-spec.md`` §3.3, which is operative here.
+
+    Exactly one member per value; a result carries no second, prose label.
+    """
+
+    MEASURED = "measured"
+    """A real meter or CT reading produced the value."""
+
+    ESTIMATED = "estimated"
+    """A model reproduced it, or only a declared prior exists."""
+
+    ALLOCATED = "allocated"
+    """The solver allocated a share of a measured total; not a reading."""
+
+    UNKNOWN = "unknown"
+    """Neither axis says anything; no claim is made either way."""
+
+
+def power_state_for(source: Source, basis: MeasurementBasis) -> PowerState:
+    """Derive the one power-state label from a result's ``Source`` and basis.
+
+    ``Source`` is authoritative about *how* the value was obtained;
+    ``MeasurementBasis`` is a secondary refinement, consulted only when the
+    source makes no claim.  The label is therefore never independently
+    settable and cannot disagree with how the value was produced.
+
+    The ordering guarantees three properties:
+
+    * An ``INFERRED`` value can **never** be ``MEASURED`` -- the ``INFERRED``
+      branch precedes any basis consultation, so it holds even if a basis
+      claims ``CT_MEASURED``.
+    * An **unattributed** value is never ``ESTIMATED`` -- that path is
+      ``source=UNKNOWN, basis=UNKNOWN`` and falls to ``UNKNOWN``.  (The
+      solver's unknown-slack columns ``__unknown__:<ct_id>``
+      (``electrical/solver.py``) are diagnostic-only and never become device
+      results.)
+    * The function is **total** -- every ``(Source, MeasurementBasis)`` pair
+      returns one of the four values; none raises.
+
+    ``Source`` and ``PowerState`` are different axes: ``Source`` records how
+    the value was obtained; ``PowerState`` records what kind of value it is.
+    """
+    # 1. The source is authoritative about HOW the value was obtained.
+    if source == Source.INFERRED:
+        return PowerState.ALLOCATED  # the solver allocated a share of a shared row
+    if source in (Source.MODEL_ESTIMATED, Source.CONFIGURED_PRIOR):
+        return PowerState.ESTIMATED  # a model reproduced it, or only a declared prior exists
+    if source == Source.DIRECT_MEASURED:
+        return PowerState.MEASURED
+    # 2. The source claims nothing (Source.UNKNOWN). Fall through to the
+    #    basis, which records WHAT INSTRUMENT produced the value.
+    if basis in (
+        MeasurementBasis.CT_MEASURED,
+        MeasurementBasis.MONITOR_REPORTED,
+        MeasurementBasis.FACTOR_ADJUSTED,
+    ):
+        return PowerState.MEASURED
+    if basis == MeasurementBasis.ESTIMATED_APPLIANCE_TOTAL:
+        return PowerState.ESTIMATED
+    # 3. Neither axis says anything.
+    return PowerState.UNKNOWN
+
+
 class QualityStatus(str, Enum):
     GOOD = "good"
     DEGRADED = "degraded"
@@ -104,6 +177,97 @@ class ModelStatus(str, Enum):
     FROZEN = "frozen"
     ROLLED_BACK = "rolled_back"
     REJECTED = "rejected"
+
+
+class LoadShape(str, Enum):
+    """The load-shape class -- a separate axis from ``ModelType``.
+
+    ``ModelType`` names *model implementations* (``BINARY``, ``DIMMABLE``, ...)
+    and answers "what shape is the power law?".  ``LoadShape`` names *how a
+    device draws power* and answers "what is the character of the load?".
+    The two are not the same axis and neither substitutes for the other; a
+    device's ``ModelType`` may change as it is learned while its load shape is
+    a declared property of the appliance (spec ``06-...`` §4.1, ADR-0011's
+    four-axis rule).
+
+    This refines ``OD-45``'s field-only reading (an additive optional
+    ``power_model_class: str | None``).  A closed ``Enum`` is what makes
+    "never inferred from a device name" enforceable: a free string cannot be
+    validated, so a typo or a heuristic could smuggle a class in.  The
+    contract change stays additive and optional -- ``UNKNOWN`` is the neutral
+    default and no existing field is retyped.
+
+    Mapping onto the shipped taxonomy (spec ``06-...`` §4.1's table): the six
+    classes are the load-shape view of ``ModelType`` and ``PowerBehavior``.
+
+    * ``FIXED``     -- ``ModelType.BINARY`` / ``PowerBehavior.FIXED``
+    * ``ADJUSTABLE`` -- ``ModelType.DIMMABLE`` / ``PowerBehavior.VARIABLE``
+    * ``DYNAMIC``   -- ``ModelType.VARIABLE_SPEED`` / ``MULTI_STATE`` /
+      ``TIME_VARYING`` / ``PowerBehavior.VARIABLE`` or ``COMPLEX``
+    * ``DELAYED``   -- no ``ModelType`` member; a response delay is orthogonal
+      to the power law (``response_delay_s``, ``OD-47``)
+    * ``ALWAYS_ON`` -- no ``ModelType`` member; the absence of an OFF state
+      (``always_on``, ``OD-46``)
+    * ``UNKNOWN``   -- ``ModelType.RESIDUAL`` / ``PowerBehavior.UNKNOWN``
+
+    Rule: a load shape is **declared**, never inferred.  No code path derives
+    it from a device name, an entity id or any other naming surface.
+    """
+
+    FIXED = "fixed"
+    """Constant watts while running: a binary load on one level."""
+
+    ADJUSTABLE = "adjustable"
+    """Power follows a continuous control value; the response may be a curve."""
+
+    DYNAMIC = "dynamic"
+    """Power follows a discrete or time-varying programme, not one setting."""
+
+    DELAYED = "delayed"
+    """The control signal and the load are separated by a response delay."""
+
+    ALWAYS_ON = "always_on"
+    """There is no OFF state; the minimum power is the standby draw."""
+
+    UNKNOWN = "unknown"
+    """Not declared, or no model exists yet; no claim is made either way."""
+
+
+class PowerLevel(str, Enum):
+    """Which of a device's four power levels a published value belongs to.
+
+    ``06-device-and-load-model-spec.md`` §5.1 names four levels -- standby,
+    idle, active, transient -- and ``ExpectedPower`` carries the envelope
+    (``standby_w``, ``idle_w``, ``on_w``, ``startup_w`` / ``shutdown_w``).
+    This enum is the label a *published* value carries.
+
+    It is a **different axis** from ``PowerState`` and must never be conflated
+    with it.  ``PowerState`` is a *provenance* label (``measured`` /
+    ``estimated`` / ``allocated`` / ``unknown``) derived by ``power_state_for``
+    from ``Source`` and ``MeasurementBasis``; ``PowerLevel`` is the *operating
+    level* the number sits at.  A value can be both ``measured`` and
+    ``standby``: the two fields answer different questions and coexist on
+    ``InferenceResult``.
+
+    ``UNKNOWN`` is the neutral default, so a payload that does not name a level
+    reads as "not stated" rather than as a claim.
+    """
+
+    STANDBY = "standby"
+    """Off, or idle in a low-power state, but still connected to power."""
+
+    IDLE = "idle"
+    """On and reachable, but not doing work."""
+
+    ACTIVE = "active"
+    """Doing work -- the running level (``ExpectedPower.on_w``)."""
+
+    TRANSIENT = "transient"
+    """The start-up inrush or shutdown decay.  Never averaged into a
+    steady-state fit or the energy integral."""
+
+    UNKNOWN = "unknown"
+    """No level is named; the value is not claimed to be at any level."""
 
 
 class SampleRejection(str, Enum):
@@ -457,6 +621,153 @@ TIER_RANK: dict[ConfidenceTier, int] = {
 
 
 # --------------------------------------------------------------------------- #
+# Domain-scope enums for the new contracts (spec 09 §7)
+# --------------------------------------------------------------------------- #
+#
+# Every enum below is *new*: no existing enum gains a member, so no existing
+# member's meaning can shift (09 §4.6).  Each one is a separate vocabulary for
+# a separate question, and they are deliberately not folded together -- the
+# edge lifecycle is not the profile lifecycle is not the cell status is not the
+# change kind is not the change detection is not the observability.
+
+
+class EdgeLifecycle(str, Enum):
+    """The lifecycle of one topology edge (spec 09 §7.1).
+
+    A *new* vocabulary, separate from ``TopologyStatus``: ``TopologyStatus``
+    describes an aggregate, this describes one edge, and an edge that is
+    ``UNDER_REVIEW`` does not make the whole topology suspect.
+    """
+
+    CANDIDATE = "candidate"
+    """A proposal that has not yet been corroborated."""
+
+    PROVISIONAL = "provisional"
+    """Corroborated once; still short of the full evidence bar."""
+
+    CONFIRMED = "confirmed"
+    """The full evidence bar was met."""
+
+    SUSPECTED_CHANGE = "suspected_change"
+    """A persistent inconsistency suggests the edge no longer holds."""
+
+    UNDER_REVIEW = "under_review"
+    """A suspected change was queued for adjudication."""
+
+    CONFLICTED = "conflicted"
+    """Two mutually exclusive edges both have support."""
+
+    REJECTED = "rejected"
+    """The edge failed validation or was refused by an operator."""
+
+    RETIRED = "retired"
+    """The validity interval ended; the edge no longer describes reality."""
+
+
+class UnknownLoadLifecycle(str, Enum):
+    """The lifecycle of an unknown-load profile (spec 09 §7.4).
+
+    The **only** lifecycle vocabulary for an unknown load across the
+    specification set (05 §10.3).  There is deliberately no ``CONFIRMED``
+    state: the system may *propose* a name for an unknown load, and a proposal
+    is never auto-confirmed.
+    """
+
+    OBSERVING = "observing"
+    """The pattern is being observed but not yet characterised."""
+
+    CHARACTERISED = "characterised"
+    """The pattern recurs with a stable signature."""
+
+    CANDIDATE = "candidate"
+    """A name is proposed for the pattern; it awaits confirmation."""
+
+    RETIRED = "retired"
+    """The profile went unobserved past its retirement horizon."""
+
+
+class MappingObservability(str, Enum):
+    """How directly a reader observes a device (spec 09 §7.5)."""
+
+    DIRECT = "direct"
+    """The reader observes the device itself."""
+
+    DERIVED = "derived"
+    """The contribution is derived from the reader's own readings."""
+
+    INDIRECT = "indirect"
+    """The device is observed only through a shared conductor."""
+
+    UNKNOWN = "unknown"
+    """The observability was not established."""
+
+
+class MappingCellStatus(str, Enum):
+    """The freshness of one device/reader mapping cell (spec 09 §7.5)."""
+
+    VALID = "valid"
+    """The cell matches the current reader configuration and was validated."""
+
+    STALE = "stale"
+    """The reader configuration moved on since the cell was computed."""
+
+    INVALID = "invalid"
+    """The cell was invalidated by a reader removal."""
+
+    UNKNOWN = "unknown"
+    """The cell has never been validated."""
+
+
+class ConfigurationChangeKind(str, Enum):
+    """The nine kinds of configuration change (spec 09 §7.6).
+
+    Exactly nine members, and the set is not extensible: a residual baseline
+    drift is **not** a configuration change, so the change surface's
+    discriminator is a separate, wider vocabulary (09 §7.10).
+    """
+
+    SMART_PLUG_RELOCATION = "smart_plug_relocation"
+    """A smart plug was moved to a different reader."""
+
+    CT_READER_RELOCATION = "ct_reader_relocation"
+    """A CT reader was moved to a different conductor."""
+
+    READER_REPLACEMENT = "reader_replacement"
+    """A reader was replaced by another."""
+
+    CT_DIRECTION_CHANGE = "ct_direction_change"
+    """A reader's clamp direction was reversed."""
+
+    CALIBRATION_CHANGE = "calibration_change"
+    """A reader's calibration was corrected."""
+
+    CIRCUIT_RECONFIGURATION = "circuit_reconfiguration"
+    """The circuit a reader belongs to was reconfigured."""
+
+    READER_INSTALLATION = "reader_installation"
+    """A new reader was installed."""
+
+    READER_REMOVAL = "reader_removal"
+    """A reader was removed; its history is retained, not deleted."""
+
+    MEASUREMENT_SCOPE_CHANGE = "measurement_scope_change"
+    """The scope a reader measures changed."""
+
+
+class ChangeDetection(str, Enum):
+    """How a configuration change was learned (spec 09 §7.6)."""
+
+    DECLARED = "declared"
+    """The user stated it."""
+
+    OBSERVED = "observed"
+    """The engine saw it happen."""
+
+    INFERRED = "inferred"
+    """The engine concluded it from indirect evidence."""
+
+
+# --------------------------------------------------------------------------- #
 # Base
 # --------------------------------------------------------------------------- #
 
@@ -765,6 +1076,17 @@ class TopologyRelation(Model):
     Keeping the four kinds in one model is what stops them implying one another:
     a ``DEVICE_CT_ASSOCIATION`` cannot assert parenthood, and a duplicate CT is
     an overlap rather than a nested feed.
+
+    Two axes, never one
+    -------------------
+    ``kind`` is *which* of the four relations this is.  ``lifecycle`` (spec 09
+    §7.1, carried here as the same ``EdgeLifecycle`` vocabulary ``TopologyEdge``
+    uses) is *where the edge is in its life*.  They are deliberately separate:
+    a ``CANDIDATE`` edge may be any kind and a ``CONFIRMED`` edge may be any
+    kind, and neither field is ever derived from the other.  The three-member
+    ``TopologyStatus`` in ``status`` is the older aggregate vocabulary and is
+    retained unchanged for existing readers; ``lifecycle`` is additive, so a
+    payload written before it existed still validates.
     """
 
     relation_id: str
@@ -781,6 +1103,13 @@ class TopologyRelation(Model):
 
     status: TopologyStatus = TopologyStatus.CANDIDATE
     """Whether the relation is proposed or confirmed.  Never auto-confirm."""
+
+    #: The edge lifecycle (spec 09 §7.1).  Additive and defaulted, so a payload
+    #: written before it existed still validates; the default is ``CANDIDATE``
+    #: and is never auto-confirmed.  This is a *second* vocabulary from
+    #: ``status``: ``CANDIDATE`` / ``CONFIRMED`` / ``REJECTED`` there is the
+    #: older aggregate set, while these eight states describe one edge's life.
+    lifecycle: EdgeLifecycle = EdgeLifecycle.CANDIDATE
 
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     """Per-relation confidence -- deliberately not a device power score."""
@@ -805,6 +1134,41 @@ class TopologyRelation(Model):
 
     algorithm_version: str | None = None
     """The inference version that produced it, when inferred."""
+
+    @model_validator(mode="after")
+    def _lifecycle_is_not_confirmation(self) -> TopologyRelation:
+        """A lifecycle state may never *imply* that the edge is confirmed.
+
+        ``lifecycle`` and ``status`` answer different questions, so a caller may
+        set one without the other.  What may never happen is the lifecycle
+        silently doing the other's work: a ``CONFIRMED`` lifecycle on an edge
+        that still says ``CANDIDATE`` (or still asks for confirmation) would
+        present a proposal as fact.  The guard therefore requires agreement
+        about *establishedness* only -- not about vocabulary, and never about
+        ``kind``.  A ``CANDIDATE`` edge stays a candidate whatever its kind, and
+        a ``CONFIRMED`` lifecycle must be a confirmation the caller actually
+        declared.
+        """
+        lifecycle = EdgeLifecycle(self.lifecycle)
+        status = TopologyStatus(self.status)
+        established = lifecycle is EdgeLifecycle.CONFIRMED
+        if established and status is not TopologyStatus.CONFIRMED:
+            raise ValueError(
+                "a CONFIRMED edge lifecycle may not coexist with status="
+                f"{status.value!r}; a lifecycle state must not imply confirmation"
+            )
+        if established and self.requires_confirmation:
+            raise ValueError(
+                "a CONFIRMED edge lifecycle may not carry requires_confirmation=True; "
+                "a lifecycle state must not imply confirmation"
+            )
+        if status is TopologyStatus.CONFIRMED and not established:
+            raise ValueError(
+                "a CONFIRMED status may not coexist with lifecycle="
+                f"{lifecycle.value!r}; confirmation is a user act and must be "
+                "declared on both axes"
+            )
+        return self
 
     @model_validator(mode="wrap")
     @classmethod
@@ -1402,6 +1766,11 @@ class DeviceConfiguration(Model):
 
     # -- axis 3: power behaviour ------------------------------------------
     behavior: PowerBehavior = PowerBehavior.UNKNOWN
+    #: The load-shape class (``LoadShape``): a declared property of the
+    #: appliance, separate from ``ModelType`` and never inferred from a name.
+    #: ``UNKNOWN`` is the neutral default, so an undeclared device makes no
+    #: claim (spec ``06-...`` §4.5, ``OD-45`` as refined by ``LoadShape``).
+    load_shape: LoadShape = LoadShape.UNKNOWN
     expected: ExpectedPower = Field(default_factory=ExpectedPower)
     light: LightConfiguration | None = None
     controller: ControllerConfiguration | None = None
@@ -1663,6 +2032,11 @@ class InferenceResult(Model):
     #: interpreted without re-reading the configuration.
     monitoring_level: MonitoringLevel = MonitoringLevel.UNKNOWN
     power_behavior: PowerBehavior = PowerBehavior.UNKNOWN
+    #: The declared load-shape class (``LoadShape``), published with the value.
+    #: A separate axis from ``power_behavior`` and from ``model_id``'s
+    #: ``ModelType``; ``UNKNOWN`` when the device declared none.  Never derived
+    #: from a device name (spec ``06-...`` §4.5).
+    load_shape: LoadShape = LoadShape.UNKNOWN
     #: Why the tier is what it is, in the same style as ``explanation``.
     tier_reasons: list[str] = Field(default_factory=list)
     # Not a calibrated probability. Engineering score only.
@@ -1672,6 +2046,17 @@ class InferenceResult(Model):
     #: ``Source`` cannot: "factor-adjusted" is not "how obtained", it is "what
     #: produced the watts".
     measurement_basis: MeasurementBasis = MeasurementBasis.UNKNOWN
+    #: The four-state provenance label, derived from ``source`` and
+    #: ``measurement_basis`` by ``power_state_for`` and never independently
+    #: settable.  Optional with a neutral default so a pre-change payload
+    #: validates and reads as "unknown", not as a claim.
+    power_state: PowerState = PowerState.UNKNOWN
+    #: Which of the device's four power levels this value sits at (spec
+    #: ``06-...`` §5.1).  A separate axis from ``power_state`` above, which is
+    #: provenance: this one names the *operating level* (standby / idle /
+    #: active / transient).  The two coexist and answer different questions --
+    #: a value can be ``measured`` *and* ``standby``.  ``UNKNOWN`` is neutral.
+    power_level: PowerLevel = PowerLevel.UNKNOWN
     #: Per-dimension confidence.  ``None`` means no dimension was derived, which
     #: is honest; a consumer must not read ``None`` as a low score.
     confidence_dimensions: ConfidenceVector | None = None
@@ -1750,6 +2135,814 @@ class DataQualityReport(Model):
     overall_score: float = 0.0
     channels: dict[str, dict[str, Any]] = Field(default_factory=dict)
     issues: list[str] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------------- #
+# The ten new contracts (spec 09 §7)
+# --------------------------------------------------------------------------- #
+#
+# Every model below is *new*: no existing model gains, loses or changes a
+# field, so a payload written before this change still validates against it.
+#
+# Requiredness follows the ``Default`` column of 09 §7, not its ``Required``
+# column.  §7.0 defines ``Default`` as "value used when the field is absent
+# from a request", and §10.1 makes ``REQUIRED`` a *response*-presence
+# guarantee ("every REQUIRED field is present in every response"), so a
+# ``REQUIRED`` row with a stated default is still optional on the wire.  A
+# field is mandatory in the model only where §7 states no default and no
+# neutral value exists for it: identities, references, engine-known instants
+# and measured quantities.  Engine-written clocks carry the house default
+# (``utcnow``); a free-form string that §7 leaves open carries ``""`` so it
+# stays optional rather than becoming mandatory.
+#
+# The ten §8 response/request shapes (``TopologyDiff``, ``MappingView``,
+# ``MappingRollup``, ``IdentifiabilityView``, ``StorageTierRow``,
+# ``QueueDepthRow``, ``TopologyRollbackRequest``, ``TopologyRollbackResult``,
+# ``EventReplayRequest``, ``EventReplayResult``) are deliberately **not** here:
+# they are response-only projections assembled at the API boundary, they are
+# not schema models and they produce no exported JSON Schema (09 §7.0).
+# ``StorageHealthReport.tiers`` and ``.queues`` therefore carry the *wire
+# form* of those rows rather than a model of them.
+
+
+class TopologyEdge(Model):
+    """One directed, time-scoped edge between two device/channel endpoints.
+
+    The diffable, lifecycle-bearing counterpart to ``TopologyRelation``: the
+    relation is the *assertion*, this is the edge as it holds over an interval,
+    with a version for optimistic concurrency.
+    """
+
+    edge_id: str
+    """Opaque, stable, deterministic identity.  Never reused after ``RETIRED``."""
+
+    from_device_id: str
+    """The device the edge starts from."""
+
+    from_channel_id: str | None = None
+    """The channel the edge starts from; ``None`` = a device-level edge."""
+
+    to_device_id: str
+    """The device the edge points to."""
+
+    to_channel_id: str | None = None
+    """The channel the edge points to; ``None`` = a device-level edge."""
+
+    relation_kind: RelationKind
+    """Which of the four relations this is.  No new member is minted here."""
+
+    circuit_id: str | None = None
+    """The circuit this edge belongs to; ``None`` = not yet bound."""
+
+    lifecycle: EdgeLifecycle = EdgeLifecycle.CANDIDATE
+    """Where the edge is in its lifecycle.  Never auto-confirmed."""
+
+    confidence: ConfidenceVector = Field(default_factory=ConfidenceVector)
+    """Per-edge confidence.  Dimensions are never blended."""
+
+    basis: MeasurementBasis = MeasurementBasis.UNKNOWN
+    """``CT_MEASURED`` only when the edge was directly observed."""
+
+    valid_from: datetime
+    """Inclusive start of the interval; engine clock."""
+
+    valid_until: datetime | None = None
+    """Exclusive end of the interval; ``None`` = still current."""
+
+    evidence_count: int = 0
+    """The number of supporting observations."""
+
+    last_validated_at: datetime | None = None
+    """When the edge was last validated; ``None`` = never validated."""
+
+    created_at: datetime = Field(default_factory=utcnow)
+    """When the edge was first created."""
+
+    updated_at: datetime = Field(default_factory=utcnow)
+    """When the edge last changed."""
+
+    version: int = 1
+    """Row version for optimistic concurrency; increments on every update."""
+
+    @model_validator(mode="after")
+    def _retired_edges_carry_an_end(self) -> TopologyEdge:
+        """A closed edge must say *when* it closed.
+
+        ``REJECTED`` and ``RETIRED`` edges are terminal: without a
+        ``valid_until`` they describe an interval that never ends, which would
+        make the history undiffable.  The other six lifecycles may still be
+        current, so ``valid_until is None`` stays legal for them.
+        """
+        if (
+            EdgeLifecycle(self.lifecycle) in (EdgeLifecycle.REJECTED, EdgeLifecycle.RETIRED)
+            and self.valid_until is None
+        ):
+            raise ValueError(
+                f"a {EdgeLifecycle(self.lifecycle).value} edge must carry a "
+                "valid_until; the interval is what makes it closed"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _interval_is_forward(self) -> TopologyEdge:
+        if self.valid_until is not None and self.valid_until <= self.valid_from:
+            raise ValueError(
+                "valid_until must be strictly after valid_from; an empty "
+                "interval covers no reading"
+            )
+        return self
+
+
+class TopologyVersion(Model):
+    """A diffable, rollbackable snapshot of the edge set.
+
+    Rollback is append-only: a rollback creates a *new* version whose
+    ``parent_version_id`` names the version rolled back to and whose
+    ``rollback_of`` names the version it replaces.  History is never rewritten.
+    """
+
+    version_id: str
+    """Opaque identity; never reused."""
+
+    version_number: int
+    """Monotonically increasing per topology; never reused after a rollback."""
+
+    parent_version_id: str | None = None
+    """The version this one descends from; ``None`` = the first version."""
+
+    edge_ids: list[str] = Field(default_factory=list)
+    """The complete edge set of this version, ordered by ``edge_id``."""
+
+    edge_count: int = 0
+    """Redundant with ``edge_ids``, for cheap display."""
+
+    status: TopologyStatus = TopologyStatus.CANDIDATE
+    """The lifecycle of this version.  No new status member is minted here."""
+
+    created_at: datetime = Field(default_factory=utcnow)
+    """When the version was created; engine clock."""
+
+    created_by: str = ""
+    """Who created the version.
+
+    One of ``scheduler``, ``ha_service``, ``user``, ``replay``.  Empty means
+    "not stated": the field stays optional so a version written before this
+    contract existed still validates.
+    """
+
+    change_event_id: str | None = None
+    """The configuration change that produced this version, if any."""
+
+    rollback_of: str | None = None
+    """The version this one superseded via rollback; ``None`` = normal creation."""
+
+    summary: str = ""
+    """Human text, never parsed."""
+
+
+class ResidualDecompositionRecord(Model):
+    """The three components of an unexplained power window, plus its event.
+
+    The three components are the residual model's own split (``05-…`` §3): an
+    always-on baseline, a cycling dynamic part and a noise part.  When
+    ``is_complete`` is ``True`` the three sum to ``total_residual_w``; when it
+    is ``False`` the undeterminable components stay ``None`` and are **never**
+    back-filled to force the identity.
+
+    ``decomposition`` and ``decomposition_scope`` carry the **wire form** (a
+    plain mapping) rather than the ``models/residual_power.py`` dataclasses.
+    The contract layer must not import from the model layer
+    (``docs/architecture.md:78-84``): ``models`` imports ``contracts``, so the
+    reverse edge would close an import cycle and break every module that
+    imports ``wattmosaic_engine.storage`` first.  The mapping is what the API
+    serialises; the source dataclasses are ``ResidualDecomposition``
+    (``models/residual_power.py:925``) and ``ResidualScope``
+    (``models/residual_power.py:195``).
+    """
+
+    record_id: str
+    """Opaque identity."""
+
+    window_start: datetime
+    """Inclusive start of the window; engine clock."""
+
+    window_end: datetime
+    """Exclusive end of the window; engine clock."""
+
+    total_residual_w: float
+    """Total unexplained power over the window, in W."""
+
+    baseline_w: float | None = None
+    """The always-on part, in W; ``None`` = no baseline model available."""
+
+    dynamic_w: float | None = None
+    """The cycling part, in W; ``None`` = dynamic component undeterminable."""
+
+    noise_w: float | None = None
+    """The noise part, in W; ``None`` = noise component undeterminable."""
+
+    is_complete: bool = False
+    """``True`` only when all three components are present."""
+
+    unknown_event_id: str | None = None
+    """The ``UnknownResidualEvent.event_id`` (§7.9) that explains the residual.
+
+    ``None`` = not attributable.  This is a plain id, not an embedded object:
+    the event is a separate record with its own lifecycle.
+    """
+
+    decomposition: dict[str, Any]
+    """The computed decomposition, in wire form.
+
+    Mirrors ``ResidualDecomposition`` (``models/residual_power.py:925``) as it
+    is serialised: ``before_w``, ``unexplained_w``, ``explained_by_device_w``,
+    ``resolved``, ``conflict``, ``reason_code``, ``basis``, ``quality_status``
+    and ``evidence``.
+    """
+
+    decomposition_scope: dict[str, Any]
+    """The scope the decomposition was computed on, in wire form.
+
+    Mirrors ``ResidualScope`` (``models/residual_power.py:195``) as it is
+    serialised: ``scope_id``, ``ct_id``, ``basis``, ``multiplicity``,
+    ``ct_ids`` and the device contributions.
+    """
+
+    kind: ResidualKind
+    """The sign of the residual.  Reuses the existing enum."""
+
+    confidence: ConfidenceVector = Field(default_factory=ConfidenceVector)
+    """Per-dimension confidence.  Never blended."""
+
+    basis: MeasurementBasis = MeasurementBasis.UNKNOWN
+    """A residual is ``ESTIMATED`` unless directly measured."""
+
+    quality: QualityStatus = QualityStatus.GOOD
+    """The quality of the inputs the decomposition was computed from."""
+
+    rejected_samples: int = 0
+    """Samples dropped inside the window."""
+
+    created_at: datetime = Field(default_factory=utcnow)
+    """When the engine persisted the record; engine clock."""
+
+    @model_validator(mode="after")
+    def _window_is_forward(self) -> ResidualDecompositionRecord:
+        if self.window_end < self.window_start:
+            raise ValueError("window_end must not precede window_start")
+        return self
+
+    @model_validator(mode="after")
+    def _complete_records_carry_every_component(self) -> ResidualDecompositionRecord:
+        """``is_complete`` is a claim about the three components.
+
+        It is ``True`` only when all three are present, so a complete record
+        that leaves one ``None`` is stating something untrue about itself.
+
+        The *sum* identity (``baseline_w + dynamic_w + noise_w ==
+        total_residual_w``) is a rule of the residual model rather than a
+        shape rule, and its tolerance is the engine's, not the contract's; it
+        is therefore checked where the residual is computed, not here.
+        """
+        if not self.is_complete:
+            return self
+        if self.baseline_w is None or self.dynamic_w is None or self.noise_w is None:
+            raise ValueError(
+                "a complete decomposition must carry baseline_w, dynamic_w and "
+                "noise_w; is_complete=True states that all three are present"
+            )
+        return self
+
+
+class UnknownLoadProfile(Model):
+    """A recurring, un-attributed load signature with an explicit lifecycle.
+
+    A *projection* over the residual evidence, never a replacement for it: the
+    residual stays the authoritative total and a profile is never presented as
+    an identified device.  A retired profile is retained, never deleted.
+    """
+
+    profile_id: str
+    """Opaque identity; never reused."""
+
+    label: str = ""
+    """User-facing text, never parsed by the engine.
+
+    A **proposed** name, never a confirmed one.
+    """
+
+    lifecycle: UnknownLoadLifecycle = UnknownLoadLifecycle.OBSERVING
+    """Where the profile is in its lifecycle."""
+
+    signature: list[float] = Field(default_factory=list)
+    """Normalised daily profile; ``[]`` = no signature computed yet."""
+
+    scope_id: str
+    """The scope the pattern was observed on."""
+
+    reader_id: str
+    """The canonical ``ct_id`` of the reader the pattern was observed on."""
+
+    first_seen_at: datetime
+    """When the pattern was first seen; engine clock."""
+
+    last_seen_at: datetime
+    """When the pattern was last seen; engine clock, ``>= first_seen_at``."""
+
+    event_count: int = 0
+    """The number of qualifying runs."""
+
+    mean_power_w: float | None = None
+    """Mean power of the pattern; ``None`` = not yet estimated."""
+
+    peak_power_w: float | None = None
+    """Peak power of the pattern; ``None`` = not yet estimated."""
+
+    median_duration_s: float | None = None
+    """Median duration of a qualifying run; ``None`` = not yet measured."""
+
+    retirement_horizon_s: float = 30 * 24 * 60 * 60.0
+    """The horizon after which an unobserved profile is retired (30 days)."""
+
+    promoted_device_id: str | None = None
+    """The device this profile was promoted to, if any.
+
+    A promoted identity is a **device reference**, never a lifecycle state.
+    """
+
+    requires_confirmation: bool = True
+    """``True`` while the profile is a proposal."""
+
+    confidence: ConfidenceVector = Field(default_factory=ConfidenceVector)
+    """Per-dimension confidence.  Never blended."""
+
+    basis: MeasurementBasis = MeasurementBasis.UNKNOWN
+    """A profile is never directly measured."""
+
+    evidence_event_ids: list[str] = Field(default_factory=list)
+    """The unknown-residual events that built this profile."""
+
+    created_at: datetime = Field(default_factory=utcnow)
+    """When the profile was created."""
+
+    updated_at: datetime = Field(default_factory=utcnow)
+    """When the profile last changed."""
+
+    version: int = 1
+    """Row version."""
+
+    @model_validator(mode="after")
+    def _last_seen_is_not_before_first_seen(self) -> UnknownLoadProfile:
+        if self.last_seen_at < self.first_seen_at:
+            raise ValueError("last_seen_at must not precede first_seen_at")
+        return self
+
+
+class DeviceReaderMappingCell(Model):
+    """One cell of the device/reader mapping matrix.
+
+    How much a reader contributes to a device, with the bounds and the
+    observability that make the number honest.
+    """
+
+    device_id: str
+    """The device the cell is about."""
+
+    reader_id: str
+    """The reader/channel the cell is about."""
+
+    reader_configuration_version: str
+    """The reader configuration this cell was computed against."""
+
+    observability: MappingObservability = MappingObservability.UNKNOWN
+    """How directly the reader observes the device."""
+
+    estimated_contribution_w: float | None = None
+    """The estimated contribution; ``None`` = not estimated."""
+
+    min_contribution_w: float | None = None
+    """The lower bound; ``None`` = no lower bound established."""
+
+    max_contribution_w: float | None = None
+    """The upper bound; ``None`` = no upper bound established."""
+
+    confidence: ConfidenceVector = Field(default_factory=ConfidenceVector)
+    """Per-dimension confidence.  Never blended."""
+
+    evidence_count: int = 0
+    """The number of supporting observations."""
+
+    last_validated_at: datetime | None = None
+    """When the cell was last validated; ``None`` = never validated."""
+
+    version: int = 1
+    """Row version; increments when the cell is recomputed."""
+
+    status: MappingCellStatus = MappingCellStatus.UNKNOWN
+    """The freshness of the cell."""
+
+    basis: MeasurementBasis = MeasurementBasis.UNKNOWN
+    """How the contribution was obtained."""
+
+    @model_validator(mode="after")
+    def _bounds_bracket_the_estimate(self) -> DeviceReaderMappingCell:
+        estimate = self.estimated_contribution_w
+        low = self.min_contribution_w
+        high = self.max_contribution_w
+        if low is not None and high is not None and low > high:
+            raise ValueError(
+                f"min_contribution_w ({low}) must not exceed max_contribution_w "
+                f"({high})"
+            )
+        if estimate is not None:
+            if low is not None and estimate < low:
+                raise ValueError(
+                    f"estimated_contribution_w ({estimate}) is below "
+                    f"min_contribution_w ({low})"
+                )
+            if high is not None and estimate > high:
+                raise ValueError(
+                    f"estimated_contribution_w ({estimate}) is above "
+                    f"max_contribution_w ({high})"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _unknown_observability_carries_no_estimate(self) -> DeviceReaderMappingCell:
+        if MappingObservability(self.observability) is MappingObservability.UNKNOWN:
+            stated = [
+                value
+                for value in (
+                    self.estimated_contribution_w,
+                    self.min_contribution_w,
+                    self.max_contribution_w,
+                )
+                if value is not None
+            ]
+            if stated:
+                raise ValueError(
+                    "a cell with observability=UNKNOWN carries None for all "
+                    "three contribution fields"
+                )
+        return self
+
+
+class ConfigurationChangeEvent(Model):
+    """A recorded configuration change and its effect on the versions.
+
+    A change of kind ``READER_REMOVAL`` never deletes history: the affected
+    mapping cells move to ``INVALID`` and are retained.
+    """
+
+    change_id: str
+    """Opaque identity."""
+
+    kind: ConfigurationChangeKind
+    """Which of the nine kinds of change this is."""
+
+    detection: ChangeDetection = ChangeDetection.OBSERVED
+    """How the change was learned."""
+
+    occurred_at: datetime = Field(default_factory=utcnow)
+    """When the change happened; the HA clock where known, else the engine's."""
+
+    device_id: str | None = None
+    """The device the change is about; ``None`` = not device-specific."""
+
+    reader_id: str | None = None
+    """The reader the change is about; ``None`` = not reader-specific."""
+
+    from_reader_id: str | None = None
+    """The reader the load moved *from*; for relocation and replacement."""
+
+    to_reader_id: str | None = None
+    """The reader the load moved *to*; for relocation and replacement."""
+
+    reader_configuration_version: str = ""
+    """The reader configuration this change produced.
+
+    Empty means "not stated"; the field stays optional so a change recorded
+    before this contract existed still validates.
+    """
+
+    device_mapping_version: str = ""
+    """The device mapping this change produced."""
+
+    topology_version: str | None = None
+    """The topology the change produced; ``None`` = the topology did not move."""
+
+    reported_by: str = ""
+    """Who reported the change: ``ha``, ``user`` or ``scheduler``.
+
+    Empty means "not stated".
+    """
+
+    notes: str | None = None
+    """Free text, never parsed."""
+
+    evidence_event_ids: list[str] = Field(default_factory=list)
+    """The evidence records that support the change."""
+
+    created_at: datetime = Field(default_factory=utcnow)
+    """When the engine recorded the change."""
+
+    superseded_by: str | None = None
+    """A later change that replaces this one."""
+
+
+class EventEvidenceRecord(Model):
+    """An immutable, replay-sufficient record of one observed event.
+
+    The record is **immutable**: a correction is a new record with a new
+    ``event_id`` and a link in ``related_event_ids``.  No field of a stored
+    record is ever updated in place.
+    """
+
+    event_id: str
+    """The event's identity."""
+
+    entity_id: str
+    """The Home Assistant entity the event came from."""
+
+    device_id: str | None = None
+    """The device the event belongs to; ``None`` = not bound to a device."""
+
+    observed_at: datetime
+    """The HA ``last_updated`` of the state change."""
+
+    recorded_at: datetime = Field(default_factory=utcnow)
+    """When the engine persisted the record; engine clock."""
+
+    new_state: str | None = None
+    """The state the entity moved to."""
+
+    old_state: str | None = None
+    """The state the entity moved from."""
+
+    payload_hash: str = ""
+    """The sha1 of the canonical payload.
+
+    Deduplication uses this hash plus ``entity_id`` and ``observed_at``, never
+    ``event_id`` alone: the id derivation is still open, so the same state
+    change can arrive twice under two different ids.
+    """
+
+    payload: dict[str, Any] | None = None
+    """The raw (redacted) attribute snapshot; ``None`` = not retained."""
+
+    attributes: dict[str, float] | None = None
+    """Numeric attributes only."""
+
+    power_w: float | None = None
+    """The power the event carried; ``None`` = it carried none."""
+
+    quality: QualityStatus = QualityStatus.GOOD
+    """The quality of the observation."""
+
+    source: Source = Source.UNKNOWN
+    """How the observation was obtained."""
+
+    isolation: EventIsolation
+    """The isolation verdict.  Never recomputed by a consumer."""
+
+    confidence: ConfidenceVector = Field(default_factory=ConfidenceVector)
+    """Per-dimension confidence.  Never blended."""
+
+    related_event_ids: list[str] = Field(default_factory=list)
+    """Other events this record relates to."""
+
+    replay_sufficient: bool = False
+    """``True`` when the payload and the isolation verdict are enough to
+    recompute the downstream results."""
+
+    version: int = 1
+    """Row version; always ``1`` for a stored record, reserved for a future
+    schema revision."""
+
+
+class StorageHealthReport(Model):
+    """Per-tier row counts, timestamp extents, sizes, prune time and queue depth.
+
+    The report is assembled from the existing single SQLite database; it
+    proposes no new store and no new service.
+    """
+
+    generated_at: datetime = Field(default_factory=utcnow)
+    """When the report was generated; engine clock."""
+
+    schema_version: int
+    """The storage schema version."""
+
+    tiers: list[dict[str, Any]] = Field(default_factory=list)
+    """One row per tier, in wire form.
+
+    Each row carries ``tier`` (one of ``L1``/``L2``/``L3``/``L4``),
+    ``table_name``, ``row_count``, ``oldest_at``, ``newest_at`` and
+    ``size_bytes``.  The tier vocabulary is fixed by 08 §2; sub-classification
+    within a tier is carried by ``table_name``, never by a new tier name.
+
+    The row shape itself is the response-only ``StorageTierRow`` (§7.8.1),
+    which is deliberately **not** a schema model, so the row travels as a
+    plain mapping here.
+    """
+
+    db_size_bytes: int = 0
+    """The size of the database file."""
+
+    wal_size_bytes: int | None = None
+    """The size of the write-ahead log; ``None`` = not applicable or disabled."""
+
+    last_prune_at: datetime | None = None
+    """When the non-exempt tiers were last pruned; ``None`` = never pruned."""
+
+    pending_queue_depth: int = 0
+    """The total depth of all pending queues."""
+
+    queues: list[dict[str, Any]] = Field(default_factory=list)
+    """Per-queue detail, in wire form.
+
+    Each row carries ``name``, ``depth`` and ``oldest_at``.  The row shape
+    itself is the response-only ``QueueDepthRow`` (§7.8.2), which is
+    deliberately **not** a schema model.
+    """
+
+    audit_algorithm_version: str = "disagg@2.0"
+    """The audit computation the report was produced with."""
+
+    degraded: bool = False
+    """``True`` when a tier is behind or a queue is growing."""
+
+    issues: list[str] = Field(default_factory=list)
+    """Machine-readable issue codes; free text belongs in ``detail``."""
+
+
+class UnknownResidualEvent(Model):
+    """A sustained, sigma-relative departure of a reader's residual.
+
+    The evidence record of an unknown residual event.  The record is
+    *complete*: a reader can recompute the threshold, the duration and the
+    decision from it without re-reading the raw samples.
+    """
+
+    event_id: str
+    """Content-addressed over the run's identity.
+
+    A replayed window produces the same id and never duplicates the event.
+    """
+
+    scope_id: str
+    """The scope the event was observed on."""
+
+    reader_id: str
+    """The canonical ``ct_id`` of the reader."""
+
+    window_start: datetime
+    """The run's first observation, inclusive; engine clock."""
+
+    window_end: datetime
+    """The run's last observation, exclusive; engine clock."""
+
+    window: list[float] = Field(default_factory=list)
+    """The residual observations in the run, oldest first, in W.
+
+    ``[]`` = the observations were not retained.
+    """
+
+    baseline_w: float | None = None
+    """The baseline in force at the run's start; ``None`` = none was in force."""
+
+    dynamic_w: float | None = None
+    """The run's peak departure from the baseline; ``None`` = not established."""
+
+    residual_w: float | None = None
+    """The residual at the run's peak; ``None`` = not established."""
+
+    noise_floor_w: float | None = None
+    """The sigma_r the threshold was applied against.
+
+    ``None`` = no measured noise floor, in which case no event is produced.
+    """
+
+    noise_source: str | None = None
+    """``measured_mad`` or ``row_mad``; ``None`` = not stated."""
+
+    threshold_w: float
+    """The threshold applied: ``max(k * sigma_r, absolute_floor_w)``."""
+
+    k: float = 3.0
+    """The sigma multiplier; configurable, default 3."""
+
+    min_duration_s: float
+    """The duration rule applied."""
+
+    observed_cadence_s: float | None = None
+    """The cadence the duration rule was derived from; ``None`` = not observed."""
+
+    estimator: str = "no_window_current_only"
+    """The estimator that produced the numbers.
+
+    ``median_of_window`` or ``no_window_current_only``.  The default is the
+    estimator the production path publishes today (``05-…`` §6.2).
+    """
+
+    basis: MeasurementBasis = MeasurementBasis.UNKNOWN
+    """The scope's basis."""
+
+    quality: QualityStatus = QualityStatus.GOOD
+    """The quality of the inputs."""
+
+    contract_version: str = CONTRACT_VERSION
+    """The contract the record was written against."""
+
+    topology_version: str = ""
+    """The topology the record was produced under."""
+
+    algorithm_version: str = ""
+    """The derivation that produced it, e.g. ``residual@1``."""
+
+    recorded_at: datetime = Field(default_factory=utcnow)
+    """When the engine persisted the record; engine clock."""
+
+    @model_validator(mode="after")
+    def _window_is_forward(self) -> UnknownResidualEvent:
+        if self.window_end < self.window_start:
+            raise ValueError("window_end must not precede window_start")
+        return self
+
+
+class ResidualBaselineChange(Model):
+    """A slow, persistent movement of a reader's residual baseline.
+
+    A drift is recorded as a new, versioned observation: the previously stored
+    residual points are never rewritten and a published baseline is never
+    mutated in place.
+    """
+
+    change_id: str
+    """Opaque identity, in the same identity space as a configuration change."""
+
+    scope_id: str
+    """The scope whose baseline moved."""
+
+    reader_id: str
+    """The canonical ``ct_id`` of the reader."""
+
+    previous_baseline_w: float | None = None
+    """The baseline before the move; ``None`` = none was in force."""
+
+    new_baseline_w: float | None = None
+    """The baseline after the move; ``None`` = not established."""
+
+    delta_w: float | None = None
+    """``new_baseline_w - previous_baseline_w``; ``None`` = not established."""
+
+    direction: str
+    """``UP`` or ``DOWN``; the sign of the move."""
+
+    window_count: int = 0
+    """The number of consecutive windows in the same direction."""
+
+    window_samples: int = 0
+    """The number of observations the baseline was based on."""
+
+    window_start: datetime
+    """The start of the drift window, inclusive; engine clock."""
+
+    window_end: datetime
+    """The end of the drift window, exclusive; engine clock."""
+
+    noise_floor_w: float | None = None
+    """The sigma_r in force when the drift was detected."""
+
+    estimator: str = "no_window_current_only"
+    """The estimator that produced the numbers.
+
+    ``median_of_window`` or ``no_window_current_only``.
+    """
+
+    basis: MeasurementBasis = MeasurementBasis.UNKNOWN
+    """The scope's basis."""
+
+    quality: QualityStatus = QualityStatus.GOOD
+    """The quality of the inputs."""
+
+    contract_version: str = CONTRACT_VERSION
+    """The contract the record was written against."""
+
+    topology_version: str = ""
+    """The topology the record was produced under."""
+
+    algorithm_version: str = ""
+    """The derivation that produced it."""
+
+    recorded_at: datetime = Field(default_factory=utcnow)
+    """When the engine persisted the record; engine clock."""
+
+    @model_validator(mode="after")
+    def _window_is_forward(self) -> ResidualBaselineChange:
+        if self.window_end < self.window_start:
+            raise ValueError("window_end must not precede window_start")
+        return self
 
 
 # --------------------------------------------------------------------------- #

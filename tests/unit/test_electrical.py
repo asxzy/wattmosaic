@@ -7,6 +7,8 @@ file.  No test relies on a stub implementation.
 from __future__ import annotations
 
 import dataclasses
+import random
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
@@ -18,7 +20,9 @@ from wattmosaic_engine.contracts import (
     Phase,
     Polarity,
     QualityStatus,
+    RelationKind,
     Topology,
+    TopologyRelation,
     TopologyStatus,
 )
 from wattmosaic_engine.disaggregation import DisaggregationEngine
@@ -36,6 +40,7 @@ from wattmosaic_engine.electrical import (
     main_power_w,
     solve_constrained_nnls,
 )
+from wattmosaic_engine.electrical.hierarchy import HierarchyFinder
 from wattmosaic_engine.electrical.topology import build_graph
 from wattmosaic_engine.electrical.window import ChannelReading
 
@@ -468,6 +473,33 @@ def test_phase_coefficients_l1_l2_both():
     assert graph_asym.phase_coefficient("dryer", Phase.L2) == pytest.approx(0.3)
     # ... and never applied to single-phase loads.
     assert graph_asym.phase_coefficient("l1_load", Phase.L2) == 0.0
+
+    # ``UNKNOWN`` is a declaration, not an absence of one: on the device's own
+    # row it yields the whole device (a halved undeclared load would fabricate a
+    # missing leg).  A device with no attribution CT at all stays UNKNOWN, and
+    # there a *containing* shared row applies the declared split, because that
+    # row's total must be apportioned somehow.
+    graph_orphan = build_graph(
+        Topology(
+            channels=[_ch("shared", parent="m_l1")],
+            devices=[
+                DeviceTopology(device_id="orphan", branch_ct_ids=[], phase=Phase.UNKNOWN)
+            ],
+            status=TopologyStatus.CONFIRMED,
+        )
+    )
+    assert graph_orphan.device_phase("orphan") == Phase.UNKNOWN
+    assert graph_orphan.phase_coefficient("orphan", Phase.L1, solo=True) == 1.0
+    assert graph_orphan.phase_coefficient(
+        "orphan", Phase.L1, solo=False
+    ) == pytest.approx(0.5)
+    assert graph_orphan.phase_coefficient(
+        "orphan", Phase.L2, solo=False
+    ) == pytest.approx(0.5)
+
+    # A double-pole device observed on separate L1/L2 rows carries its total on
+    # each leg only as the declared split: x_j is always the whole device.
+    assert graph_asym.phase_coefficient("dryer", Phase.BOTH) == 1.0
 
 
 def test_double_pole_split_across_separate_l1_l2_rows():
@@ -1578,3 +1610,151 @@ def test_a_configured_skew_limit_reaches_the_engine():
     assert strict_batch.diagnostics["excluded_rows"]["ct_tub_l1"].startswith(
         "leg_skew_exceeded"
     )
+
+
+# --------------------------------------------------------------------------- #
+# TASK-TOPOLOGY-002 -- nested children and alias chains contribute once
+# --------------------------------------------------------------------------- #
+
+
+def _association(device_id: str, ct_id: str) -> TopologyRelation:
+    return TopologyRelation(
+        relation_id=f"dca_{device_id}|{ct_id}",
+        kind=RelationKind.DEVICE_CT_ASSOCIATION,
+        subject_id=device_id,
+        object_id=ct_id,
+    )
+
+
+def _two_regime_pair(
+    *,
+    high_parent: float,
+    low_parent: float,
+    high_child: float,
+    low_child: float,
+    seed: int = 7,
+    n: int = 240,
+) -> tuple[list[float], list[float]]:
+    """A child genuinely inside a parent across two distinct load regimes.
+
+    The remainder is large at every instant, so the pair is not read as one
+    conductor with a factor; both regimes carry enough samples to satisfy the
+    operating-condition bar.
+    """
+    rng = random.Random(seed)
+    parent: list[float] = []
+    child: list[float] = []
+    for index in range(n):
+        high = index >= n // 2
+        level = (high_child if high else low_child) + rng.uniform(0.0, 40.0)
+        child.append(level)
+        parent.append(
+            (high_parent if high else low_parent) + level + rng.uniform(0.0, 60.0)
+        )
+    return parent, child
+
+
+def _containment_evidence(
+    devices: Sequence[str], cts: tuple[str, ...] = ("ct_child", "ct_branch")
+) -> list[TopologyRelation]:
+    """Association relations placing every device on every named CT."""
+    return [_association(device, ct_id) for device in devices for ct_id in cts]
+
+
+def test_nested_children_contribute_once() -> None:
+    """A child seen by two readers of one conductor is one contribution.
+
+    ``d_shared`` responds through ``ct_child`` *and* its alias ``ct_child_b``
+    (the same wire measured twice); ``d_a``/``d_b`` see the genuinely distinct
+    pair ``(ct_child, ct_branch)``.  The independence bar counts distinct
+    electrical contributions, so the ``(ct_child, ct_branch)`` edge cites exactly
+    two devices -- never three -- and no edge is proposed for the alias pair.
+    """
+    child_series, _ = _two_regime_pair(
+        high_parent=9000.0, low_parent=4000.0, high_child=2600.0, low_child=1100.0
+    )
+    _, branch_only = _two_regime_pair(
+        high_parent=8500.0,
+        low_parent=3800.0,
+        high_child=900.0,
+        low_child=350.0,
+        seed=21,
+    )
+    relations = _containment_evidence(["d_a", "d_b"]) + [
+        _association("d_shared", "ct_child"),
+        _association("d_shared", "ct_child_b"),
+    ]
+    channels = {
+        "ct_child": {"ct_id": "ct_child"},
+        "ct_child_b": {"ct_id": "ct_child_b", "alias_of_ct_id": "ct_child"},
+        "ct_branch": {"ct_id": "ct_branch"},
+    }
+    series = {
+        "ct_child": child_series,
+        "ct_child_b": [value * 1.01 for value in child_series],
+        "ct_branch": branch_only,
+    }
+
+    finder = HierarchyFinder()
+    found = finder.infer(relations, [], series=series, channels=channels)
+
+    nesting = [
+        r for r in found if RelationKind(r.kind) is RelationKind.ELECTRICAL_PARENT_CHILD
+    ]
+    assert {(r.subject_id, r.object_id) for r in nesting} == {("ct_branch", "ct_child")}
+    edge = nesting[0]
+    assert edge.evidence["independent_devices"] == 2
+    assert sorted(edge.evidence["devices"]) == ["d_a", "d_b"]
+
+    # The unwired counting would also pair ct_child with its own alias and
+    # refuse that pair as insufficient; the alias is resolved before counting.
+    assert "ct_child|ct_child_b" not in finder.report["refused"]
+    assert finder.report.get("reason") is None
+
+
+def test_alias_chain_contributes_once() -> None:
+    """``a -> b -> c`` is one wire; it contributes one reading, not three.
+
+    ``d_shared`` is observed through every link of the chain, which resolves to
+    the single canonical channel ``cc``.  The independence bar therefore counts
+    the chain once alongside the genuine ``ct_branch`` contribution, and the
+    chain's internal pairs are never treated as candidates.
+    """
+    parent_series, _ = _two_regime_pair(
+        high_parent=9000.0, low_parent=4000.0, high_child=2600.0, low_child=1100.0
+    )
+    _, branch_only = _two_regime_pair(
+        high_parent=8500.0,
+        low_parent=3800.0,
+        high_child=900.0,
+        low_child=350.0,
+        seed=21,
+    )
+    relations = _containment_evidence(["d_a", "d_b"], ("cc", "ct_branch")) + [
+        _association("d_shared", "ca"),
+        _association("d_shared", "cb"),
+        _association("d_shared", "cc"),
+    ]
+    channels = {
+        "ca": {"ct_id": "ca", "alias_of_ct_id": "cb"},
+        "cb": {"ct_id": "cb", "alias_of_ct_id": "cc"},
+        "cc": {"ct_id": "cc"},
+        "ct_branch": {"ct_id": "ct_branch"},
+    }
+    series = {
+        "ca": parent_series,
+        "cb": [value * 1.005 for value in parent_series],
+        "cc": parent_series,
+        "ct_branch": branch_only,
+    }
+
+    finder = HierarchyFinder()
+    found = finder.infer(relations, [], series=series, channels=channels)
+
+    nesting = [
+        r for r in found if RelationKind(r.kind) is RelationKind.ELECTRICAL_PARENT_CHILD
+    ]
+    assert {(r.subject_id, r.object_id) for r in nesting} == {("ct_branch", "cc")}
+    assert nesting[0].evidence["independent_devices"] == 2
+    assert sorted(nesting[0].evidence["devices"]) == ["d_a", "d_b"]
+    assert finder.report.get("reason") is None

@@ -33,9 +33,11 @@ from wattmosaic_engine.contracts import (
     HaConnectivity,
     LightConfiguration,
     LightType,
+    LoadShape,
     MonitoringLevel,
     Phase,
     PowerBehavior,
+    PowerLevel,
     Source,
     Topology,
 )
@@ -796,3 +798,69 @@ def test_tiers_are_persisted_in_the_result_contract() -> None:
     assert payload["monitoring_level"] == "shared"
     assert payload["tier_reasons"]
     assert payload["confidence_is_calibrated"] is False
+
+
+# --------------------------------------------------------------------------- #
+# T08: the load-shape axis (TASK-POWER-001)
+# --------------------------------------------------------------------------- #
+def test_load_shape_class_is_published() -> None:
+    """T08: the declared load shape rides on the published result."""
+    projected = _with(
+        [
+            DeviceConfiguration(
+                device_id="water_heater",
+                load_shape=LoadShape.ALWAYS_ON,
+                expected=ExpectedPower(on_w=4500.0),
+            )
+        ]
+    )
+    batch = _infer(projected, {"main_l1": 4500.0, "ct_water_heater": 4500.0}, {"water_heater": "on"})
+    result = batch.get("water_heater")
+    assert result.load_shape == LoadShape.ALWAYS_ON.value
+    assert result.model_dump(mode="json")["load_shape"] == "always_on"
+
+
+def test_load_shape_is_never_derived_from_a_device_name() -> None:
+    """A suggestive name alone never sets the load-shape axis."""
+    # A device called "always_on..." with no declaration must stay UNKNOWN.
+    topology = Topology(
+        channels=[
+            CTChannel(ct_id="main_l1", entity_id="sensor.main", ct_type=CTType.MAIN, phase=Phase.L1),
+        ],
+        devices=[DeviceTopology(device_id="always_on_pump", name="always_on", phase=Phase.L1)],
+    )
+    result = _infer(topology, {"main_l1": 100.0}, {"always_on_pump": "on"}).get("always_on_pump")
+    assert result.load_shape == LoadShape.UNKNOWN.value
+
+    # The six shapes are a closed axis separate from PowerBehavior/ModelType.
+    assert {shape.value for shape in LoadShape} == {
+        "fixed", "adjustable", "dynamic", "delayed", "always_on", "unknown",
+    }
+
+
+def test_published_power_names_its_level_distinct_from_power_state() -> None:
+    """power_level is the operating level; power_state stays provenance."""
+    projected = _with(
+        [
+            DeviceConfiguration(
+                device_id="water_heater",
+                expected=ExpectedPower(
+                    standby_w=50.0, idle_w=100.0, on_w=4500.0, startup_w=9000.0
+                ),
+            )
+        ]
+    )
+    active = _infer(
+        projected, {"main_l1": 4500.0, "ct_water_heater": 4500.0}, {"water_heater": "on"}
+    ).get("water_heater")
+    assert active.power_level == PowerLevel.ACTIVE.value
+    assert active.power_state != PowerLevel.ACTIVE.value  # provenance, not level
+
+    standby = _infer(
+        projected, {"main_l1": 50.0, "ct_water_heater": 50.0}, {"water_heater": "on"}
+    ).get("water_heater")
+    assert standby.power_level == PowerLevel.STANDBY.value
+
+    # No declaration -> the honest UNKNOWN fallback, never a guess.
+    plain = _infer(_topology(), {"main_l1": 100.0}, {}).get("lamp")
+    assert plain.power_level == PowerLevel.UNKNOWN.value

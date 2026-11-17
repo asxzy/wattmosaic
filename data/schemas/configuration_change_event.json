@@ -1,0 +1,169 @@
+{
+  "$defs": {
+    "ChangeDetection": {
+      "description": "How a configuration change was learned (spec 09 \u00a77.6).",
+      "enum": [
+        "declared",
+        "observed",
+        "inferred"
+      ],
+      "title": "ChangeDetection",
+      "type": "string"
+    },
+    "ConfigurationChangeKind": {
+      "description": "The nine kinds of configuration change (spec 09 \u00a77.6).\n\nExactly nine members, and the set is not extensible: a residual baseline\ndrift is **not** a configuration change, so the change surface's\ndiscriminator is a separate, wider vocabulary (09 \u00a77.10).",
+      "enum": [
+        "smart_plug_relocation",
+        "ct_reader_relocation",
+        "reader_replacement",
+        "ct_direction_change",
+        "calibration_change",
+        "circuit_reconfiguration",
+        "reader_installation",
+        "reader_removal",
+        "measurement_scope_change"
+      ],
+      "title": "ConfigurationChangeKind",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "A recorded configuration change and its effect on the versions.\n\nA change of kind ``READER_REMOVAL`` never deletes history: the affected\nmapping cells move to ``INVALID`` and are retained.",
+  "properties": {
+    "change_id": {
+      "title": "Change Id",
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/$defs/ConfigurationChangeKind"
+    },
+    "detection": {
+      "$ref": "#/$defs/ChangeDetection",
+      "default": "observed"
+    },
+    "occurred_at": {
+      "format": "date-time",
+      "title": "Occurred At",
+      "type": "string"
+    },
+    "device_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Device Id"
+    },
+    "reader_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reader Id"
+    },
+    "from_reader_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "From Reader Id"
+    },
+    "to_reader_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "To Reader Id"
+    },
+    "reader_configuration_version": {
+      "default": "",
+      "title": "Reader Configuration Version",
+      "type": "string"
+    },
+    "device_mapping_version": {
+      "default": "",
+      "title": "Device Mapping Version",
+      "type": "string"
+    },
+    "topology_version": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Topology Version"
+    },
+    "reported_by": {
+      "default": "",
+      "title": "Reported By",
+      "type": "string"
+    },
+    "notes": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Notes"
+    },
+    "evidence_event_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Evidence Event Ids",
+      "type": "array"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "superseded_by": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Superseded By"
+    }
+  },
+  "required": [
+    "change_id",
+    "kind"
+  ],
+  "title": "ConfigurationChangeEvent",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/configuration_change_event.json",
+  "x-contract-version": "2.1.0"
+}

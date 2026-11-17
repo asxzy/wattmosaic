@@ -46,6 +46,7 @@ from wattmosaic_engine.contracts import (
     CircuitClass,
     CTChannel,
     CTType,
+    EdgeLifecycle,
     IsolationStatus,
     MeasurementFactor,
     Phase,
@@ -212,6 +213,18 @@ def edge(child: str, parent: str, **kwargs: Any) -> TopologyRelation:
         "status": kwargs.pop("status", TopologyStatus.CANDIDATE),
         "declared_by": kwargs.pop("declared_by", "inference"),
     }
+    # A CONFIRMED status is a user act and must be declared on the lifecycle axis
+    # too: the contract refuses the half-declared shape (spec 09 §7.1).  Only an
+    # explicit caller value is honoured; the defaults below fill in the rest of
+    # the confirmation, never an omission.
+    if payload["status"] is TopologyStatus.CONFIRMED:
+        payload.setdefault(
+            "lifecycle", kwargs.pop("lifecycle", EdgeLifecycle.CONFIRMED)
+        )
+        payload.setdefault(
+            "requires_confirmation",
+            kwargs.pop("requires_confirmation", False),
+        )
     payload.update(kwargs)
     return TopologyRelation(**payload)
 
@@ -533,7 +546,10 @@ def test_alias_channels_never_produce_an_edge() -> None:
         channels=channels(ct_alias="ct_sub"),
     )
     assert pairs(found) == set()
-    assert finder.report["refused"]["ct_alias|ct_sub"] == "alias_of_same_conductor"
+    # Both devices resolve to the one canonical conductor, so there is no pair to
+    # refuse at all: the alias contributes once and never becomes a candidate.
+    assert finder.report["refused"] == {}
+    assert finder.report.get("reason") is None
 
 
 def test_declared_user_edge_beats_a_conflicting_inference() -> None:
@@ -987,6 +1003,100 @@ def test_main_subpanel_stratum_never_turns_a_shared_device_into_a_parent() -> No
     ]
     merged = finder.merge(declared, found)
     assert pairs(merged) == {("ct_sub_l1", "ct_main_l1")}
+
+
+# --------------------------------------------------------------------------- #
+# TASK-TOPOLOGY-002 -- the containment evidence bar, pinned by name
+# --------------------------------------------------------------------------- #
+
+
+def test_a_single_coincident_response_yields_overlap_only() -> None:
+    """One device on two CTs is an overlap, never a containment edge.
+
+    The response evidence is as strong as it can be: both CTs move together.
+    That is exactly the Hot Tub shape, and it still cannot place one conductor
+    inside the other -- a series of nested-looking readings is supplied to prove
+    the refusal is about the evidence, not the arithmetic.
+    """
+    n = 240
+    series = {
+        "ct_a": [5000.0 + index for index in range(n)],
+        "ct_b": [900.0 + index for index in range(n)],
+    }
+    relations = association_relations({"only_device": {"ct_a": 0.5, "ct_b": 0.5}})
+
+    finder = HierarchyFinder()
+    overlaps = finder.overlaps(relations)
+    found = finder.infer(relations, [], series=series)
+
+    assert len(overlaps) == 1
+    assert RelationKind(overlaps[0].kind) is RelationKind.CT_MEASUREMENT_OVERLAP
+    assert overlaps[0].evidence["implies_parenthood"] is False
+    assert overlaps[0].evidence["independent_devices"] == 1
+    assert pairs(found) == set()
+    assert finder.report["refused"]["ct_a|ct_b"] == "insufficient_independent_devices"
+
+
+def test_residual_evidence_alone_cannot_promote_an_edge() -> None:
+    """A residual history is corroborating context; it cannot create an edge.
+
+    The parent's unexplained remainder is exactly what an unobserved load
+    contributes, so it is recorded and published elsewhere -- but ``infer``
+    declines both the empty-relations case and the relations-without-series case,
+    and never turns the residual into a parent/child relation.
+    """
+    residual_history = [
+        {
+            "timestamp": (T0 + timedelta(minutes=15 * index)).isoformat(),
+            "residual_w": 400.0,
+            "resolved": False,
+        }
+        for index in range(3)
+    ]
+    finder = HierarchyFinder()
+    found = finder.infer([], [], residual_history=residual_history)
+    assert found == []
+    assert finder.report["reason"] == "no_device_evidence"
+
+    relations = association_relations(
+        {"device_a": {"ct_a": 0.5, "ct_b": 0.5}, "device_b": {"ct_a": 0.5, "ct_b": 0.5}}
+    )
+    blocked_finder = HierarchyFinder()
+    blocked = blocked_finder.infer(relations, [], residual_history=residual_history)
+    assert blocked == []
+    # No measurement scope either: residual alone is not a substitute for it.
+    assert blocked_finder.report["reason"] == "no_measurement_scope_evidence"
+
+
+def test_violation_within_tolerance_is_recorded_not_raised() -> None:
+    """A child that exceeds its parent a little is a recorded violation, not a refusal.
+
+    Two instants exceed the parent by 40 W (past ``VIOLATION_TOL_W``), which is
+    2/240 = 0.0083 of comparable instants -- well inside
+    ``max_power_violation_frac = 0.02``.  The edge survives and publishes the
+    violation; nothing raises.
+    """
+    n = 240
+    parent = [(5000.0 if index >= n // 2 else 2000.0) for index in range(n)]
+    child = [(900.0 if index >= n // 2 else 350.0) for index in range(n)]
+    child[10] = parent[10] + 40.0
+    child[11] = parent[11] + 40.0
+    relations = association_relations(
+        {
+            "device_a": {"ct_a": 0.5, "ct_b": 0.5},
+            "device_b": {"ct_a": 0.4, "ct_b": 0.6},
+        }
+    )
+
+    finder = HierarchyFinder()
+    found = finder.infer(relations, [], series={"ct_a": parent, "ct_b": child})
+
+    assert pairs(found) == {("ct_b", "ct_a")}
+    evidence = found[0].evidence
+    assert evidence["power_violation_frac"] == pytest.approx(round(2 / 240, 6))
+    assert evidence["power_violation_pct"] == pytest.approx(round(100.0 * 2 / 240, 3))
+    assert evidence["power_violation_frac"] <= finder.config.max_power_violation_frac
+    assert evidence["comparable_instants"] == n
 
 
 def test_ct_type_and_name_are_never_used_as_evidence() -> None:

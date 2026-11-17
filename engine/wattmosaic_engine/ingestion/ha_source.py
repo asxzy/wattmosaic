@@ -48,6 +48,7 @@ from ..contracts import (
     QualityStatus,
     utcnow,
 )
+from ..disaggregation.isolation import EVENT_KIND_HA, KIND_SOURCE_EVENT_TYPE
 from .correlation import level_from_attributes
 from .normalize import (
     canonical_unit,
@@ -1181,7 +1182,14 @@ class HASource:
             # not an event.  A changed level is kept, because it is the only way
             # inference learns how much a dimmer draws after it has been dimmed.
             return
-        attributes = new_state.get("attributes") if isinstance(new_state, dict) else None
+        raw_attributes = new_state.get("attributes") if isinstance(new_state, dict) else None
+        attributes: dict[str, Any] = dict(raw_attributes) if isinstance(raw_attributes, dict) else {}
+        # Every event names its own kind (spec 07 §2).  The kind is *stamped* at
+        # production rather than left to downstream inference: this is the only
+        # path that knows the observation came from Home Assistant.  Additive
+        # attribute keys only -- ``DeviceEvent``'s contract fields are untouched.
+        attributes["event_kind"] = EVENT_KIND_HA
+        attributes["event_kind_source"] = KIND_SOURCE_EVENT_TYPE
         event = DeviceEvent(
             event_id=str(uuid.uuid4()),
             device_id=device_id,
@@ -1189,7 +1197,7 @@ class HASource:
             event_type=event_type,  # type: ignore[arg-type]
             previous_state=None if old_value is None else str(old_value),
             new_state=None if new_value is None else str(new_value),
-            attributes=attributes if isinstance(attributes, dict) else {},
+            attributes=attributes,
             occurred_at=occurred_at,
             received_at=utcnow(),
         )

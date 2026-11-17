@@ -43,7 +43,9 @@ from ..contracts import (
     utcnow,
     validate_factor_intervals,
 )
-from .migrations import AUDIT_TABLES, LATEST_VERSION, apply_migrations, current_version
+from .migrations import LATEST_VERSION, apply_migrations, current_version
+from .payload import decode_payload, encode_if_worthwhile
+from .tiers import AGGREGATE_HORIZON, TABLE_TIERS, prunable_tables, table_tiers
 
 
 def iso(dt: datetime | None) -> str | None:
@@ -253,9 +255,15 @@ class Database:
                             json.dumps(dev.metadata), now,
                         ),
                     )
+                # A topology snapshot is the largest JSON document in the schema
+                # (37 302 bytes on the reference install, 3 151 compressed), so
+                # it is the one column compression pays on.  The decoder reads
+                # both forms, so an older row loads unchanged.
+                snapshot = json.dumps(topology.model_dump(mode="json"), default=str)
+                stored_snapshot, _ = encode_if_worthwhile(snapshot)
                 cur = self._conn.execute(
                     "INSERT INTO topology_versions(created_at, status, payload_json, note) VALUES(?,?,?,?)",
-                    (now, topology.status, json.dumps(topology.model_dump(mode="json"), default=str), note),
+                    (now, topology.status, stored_snapshot, note),
                 )
                 version = int(cur.lastrowid or 0)
                 self._conn.execute("COMMIT")
@@ -354,7 +362,9 @@ class Database:
                     [
                         (
                             str(config.device_id),
-                            json.dumps(config.model_dump(mode="json")),
+                            encode_if_worthwhile(
+                                json.dumps(config.model_dump(mode="json"))
+                            )[0],
                             now,
                         )
                         for config in configurations.devices
@@ -406,7 +416,7 @@ class Database:
         updated_at: datetime | None = None
         for row in rows:
             try:
-                config = DeviceConfiguration.model_validate(json.loads(row["payload_json"]))
+                config = DeviceConfiguration.model_validate(decode_payload(row["payload_json"]))
             except Exception:  # noqa: BLE001 - one corrupt row must not break loading
                 continue
             devices.append(config)
@@ -435,7 +445,7 @@ class Database:
         if row is None:
             return None
         try:
-            return DeviceConfiguration.model_validate(json.loads(row["payload_json"]))
+            return DeviceConfiguration.model_validate(decode_payload(row["payload_json"]))
         except Exception:  # noqa: BLE001 - corrupt rows are reported as absent
             return None
 
@@ -1302,15 +1312,22 @@ class Database:
             )
 
     def prune(self, raw_days: int = 30, aggregate_days: int = 730) -> dict[str, int]:
-        """Delete raw samples past their horizon; never delete audit state.
+        """Delete rows past their horizon; never delete long-term state.
 
-        ``inference_results``/``reconciliation_results`` stay on the raw horizon:
-        they are per-cycle telemetry, and existing readers depend on that.  The
-        tables in ``AUDIT_TABLES`` are *not* raw samples -- they are the versioned
-        history itself (an inference record, a factor interval, a typed relation,
-        an entity binding, a circuit, a residual observation).  Applying the raw
-        horizon to them would delete the very history they exist to keep, so they
-        are reported with a count of ``0`` and left untouched.
+        Which tables are pruned, by which timestamp column and on which horizon,
+        is read from :func:`wattmosaic_engine.storage.tiers.prunable_tables`
+        rather than restated here, so the registry is the one declaration the
+        retention policy reads (`REQ-STORAGE-001`).  The registry's horizon is
+        authoritative for a table: a table classified in one tier but shipped on
+        another keeps the shipped horizon (``device_events``, see the registry).
+
+        Every table in the registry that the pass does not delete is **reported
+        with a count of ``0`` and left untouched**, so "deleted nothing" is
+        visible rather than merely absent.
+
+        The signature and its defaults are unchanged: ``main.py``'s maintenance
+        loop still calls ``prune(retention_days_raw, retention_days_aggregates)``
+        and gets exactly the behaviour it had before.
         """
         now = utcnow()
         raw_cutoff = iso(now - timedelta(days=raw_days))
@@ -1319,24 +1336,15 @@ class Database:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
-                for table, col in (
-                    ("ct_samples", "received_at"),
-                    ("inference_results", "timestamp"),
-                    ("device_events", "occurred_at"),
-                    ("device_state_samples", "received_at"),
-                    ("data_quality_events", "timestamp"),
-                    ("system_events", "timestamp"),
-                    ("reconciliation_results", "timestamp"),
-                ):
-                    cur = self._conn.execute(f"DELETE FROM {table} WHERE {col} < ?", (raw_cutoff,))
+                for table, col, horizon in prunable_tables():
+                    cutoff = agg_cutoff if horizon == AGGREGATE_HORIZON else raw_cutoff
+                    cur = self._conn.execute(f"DELETE FROM {table} WHERE {col} < ?", (cutoff,))
                     removed[table] = cur.rowcount
-                # Audit state: exempt by construction.  Explicitly reported as 0
-                # so "deleted nothing" is visible rather than merely absent.
-                for table in AUDIT_TABLES:
-                    removed[table] = 0
-                for table in ("power_aggregates", "energy_aggregates"):
-                    cur = self._conn.execute(f"DELETE FROM {table} WHERE bucket_start < ?", (agg_cutoff,))
-                    removed[table] = cur.rowcount
+                # Exempt state: every registered table the pass did not delete is
+                # named here with a count of 0.
+                for table in TABLE_TIERS:
+                    if table not in removed:
+                        removed[table] = 0
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
@@ -1377,6 +1385,13 @@ class Database:
             "latest_schema_version": LATEST_VERSION,
             "counts": counts,
             "size_bytes": self.path.stat().st_size if self.path.exists() else 0,
+            # The published tier classification, so a consumer of ``GET /status``
+            # reads one registry rather than re-deriving tiers per table.
+            # ``09-api-and-data-contracts.md`` §7.8.1 fixes the vocabulary:
+            # one row per tier, ``tier`` in L1-L4, sub-classification by
+            # ``table_name``.  This is the listing the API wave should call --
+            # see ``storage/tiers.py::table_tiers`` -- not a second registry.
+            "tiers": table_tiers(),
         }
 
 

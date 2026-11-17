@@ -357,6 +357,21 @@
       "title": "DeviceTopology",
       "type": "object"
     },
+    "EdgeLifecycle": {
+      "description": "The lifecycle of one topology edge (spec 09 \u00a77.1).\n\nA *new* vocabulary, separate from ``TopologyStatus``: ``TopologyStatus``\ndescribes an aggregate, this describes one edge, and an edge that is\n``UNDER_REVIEW`` does not make the whole topology suspect.",
+      "enum": [
+        "candidate",
+        "provisional",
+        "confirmed",
+        "suspected_change",
+        "under_review",
+        "conflicted",
+        "rejected",
+        "retired"
+      ],
+      "title": "EdgeLifecycle",
+      "type": "string"
+    },
     "MeasurementBasis": {
       "description": "What produced the watt value, independent of how much we trust it.\n\n``Source`` answers *\"how was the value obtained\"*; this answers *\"what kind\nof instrument produced the watts\"*.  A ``DIRECT_MEASURED`` result can be\n``FACTOR_ADJUSTED``, and a ``MODEL_ESTIMATED`` result can never be\n``CT_MEASURED``.",
       "enum": [
@@ -400,7 +415,7 @@
     },
     "TopologyRelation": {
       "additionalProperties": false,
-      "description": "One typed edge between two electrical objects.\n\nKeeping the four kinds in one model is what stops them implying one another:\na ``DEVICE_CT_ASSOCIATION`` cannot assert parenthood, and a duplicate CT is\nan overlap rather than a nested feed.",
+      "description": "One typed edge between two electrical objects.\n\nKeeping the four kinds in one model is what stops them implying one another:\na ``DEVICE_CT_ASSOCIATION`` cannot assert parenthood, and a duplicate CT is\nan overlap rather than a nested feed.\n\nTwo axes, never one\n-------------------\n``kind`` is *which* of the four relations this is.  ``lifecycle`` (spec 09\n\u00a77.1, carried here as the same ``EdgeLifecycle`` vocabulary ``TopologyEdge``\nuses) is *where the edge is in its life*.  They are deliberately separate:\na ``CANDIDATE`` edge may be any kind and a ``CONFIRMED`` edge may be any\nkind, and neither field is ever derived from the other.  The three-member\n``TopologyStatus`` in ``status`` is the older aggregate vocabulary and is\nretained unchanged for existing readers; ``lifecycle`` is additive, so a\npayload written before it existed still validates.",
       "properties": {
         "relation_id": {
           "title": "Relation Id",
@@ -419,6 +434,10 @@
         },
         "status": {
           "$ref": "#/$defs/TopologyStatus",
+          "default": "candidate"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/EdgeLifecycle",
           "default": "candidate"
         },
         "confidence": {
@@ -586,5 +605,5 @@
   "title": "Topology",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/topology.json",
-  "x-contract-version": "2.0.0"
+  "x-contract-version": "2.1.0"
 }

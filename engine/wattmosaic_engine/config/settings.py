@@ -28,6 +28,23 @@ ISOLATION_TIMING_KEYS: tuple[str, ...] = (
     "power_window_s",
 )
 
+#: Accepted range for the L1 raw-sample horizon, in days.  ``REQ-STORAGE-002``
+#: states a 7-14 d band; ``OD-31`` (13-open-decisions-and-assumptions.md §3)
+#: keeps the shipped 30 d default and requires the validator to be a **superset**
+#: of ``{7, 14, 30}``.  This is that superset: the documented band is accepted,
+#: so is the shipped default, and anything outside 1-90 is refused at startup.
+#: The requirement text is referred back for rewording rather than narrowing
+#: the validator, which would refuse the configuration the engine ships with.
+RETENTION_DAYS_RAW_RANGE: tuple[int, int] = (1, 90)
+
+#: Accepted range for the L3 aggregate horizon, in days.
+RETENTION_DAYS_AGGREGATES_RANGE: tuple[int, int] = (30, 36500)
+
+#: Accepted range for an explicit L2/L4 horizon.  ``None`` disables it; a set
+#: value must be at least as long as the raw horizon, because evidence that does
+#: not outlive the raw window it explains cannot be audited.
+RETENTION_DAYS_HORIZON_MIN = 1
+
 #: Default stamped onto every audit artifact.  The analysis pass owns the
 #: constant (``disaggregation.audit.DEFAULT_ALGORITHM_VERSION``); importing that
 #: module from configuration would invert the dependency, so the value is
@@ -148,11 +165,28 @@ class EngineConfig:
 
     # Storage
     database_path: str = "data/wattmosaic.db"
+    #: L1 raw-sample horizon, in days.  The shipped default stays 30 (spec §2.1,
+    #: ``OD-67``).  ``REQ-STORAGE-002`` asks for a 7-14 d band and ``OD-31``
+    #: requires the validator to be a superset of ``{7, 14, 30}``, so the
+    #: accepted range is 1-90 rather than the literal 7-14; see
+    #: :data:`RETENTION_DAYS_RAW_RANGE`.
     retention_days_raw: int = 30
+    #: L3 aggregate horizon, in days.
     retention_days_aggregates: int = 730
+    #: L2 event-evidence horizon.  ``None`` means disabled: evidence is
+    #: long-term and only an explicit operator action bounds it (spec §3.1).
+    retention_days_evidence: int | None = None
+    #: L4 version-history horizon.  ``None`` means disabled, for the same reason.
+    retention_days_versions: int | None = None
 
     # Behaviour
     learning_enabled: bool = True
+    #: How often a CT reader publishes a *new state*, in seconds.  This is the
+    #: last-resort fallback used when the aligner has no usable observed
+    #: history; it is **not** a measurement and must never be presented as one
+    #: (spec 03 §6.2).  ``WM_DEFAULT_SAMPLE_INTERVAL_S`` overrides it.  The
+    #: audited median for the reference install is 15.7 s, which the aligner
+    #: derives per channel from its own history rather than from this key.
     default_sample_interval_s: float = 10.0
     stale_after_s: float = 120.0
     inference_interval_s: float = 5.0
@@ -259,7 +293,21 @@ class EngineConfig:
         cfg.retention_days_aggregates = int(
             get("WM_RETENTION_DAYS_AGGREGATES", default=str(cfg.retention_days_aggregates)) or 730
         )
+        # An empty value means "disabled" and is read as None, so an operator
+        # can turn the horizon off from the App without a sentinel number.
+        evidence_raw = get(
+            "WM_RETENTION_DAYS_EVIDENCE", default=str(cfg.retention_days_evidence or "")
+        )
+        cfg.retention_days_evidence = int(evidence_raw) if evidence_raw else None
+        versions_raw = get(
+            "WM_RETENTION_DAYS_VERSIONS", default=str(cfg.retention_days_versions or "")
+        )
+        cfg.retention_days_versions = int(versions_raw) if versions_raw else None
         cfg.learning_enabled = _bool(get("WM_LEARNING_ENABLED"), True)
+        cfg.default_sample_interval_s = float(
+            get("WM_DEFAULT_SAMPLE_INTERVAL_S", default=str(cfg.default_sample_interval_s))
+            or cfg.default_sample_interval_s
+        )
         cfg.stale_after_s = float(get("WM_STALE_AFTER_S", default=str(cfg.stale_after_s)) or 120)
         cfg.inference_interval_s = float(
             get("WM_INFERENCE_INTERVAL_S", default=str(cfg.inference_interval_s)) or 5
@@ -339,8 +387,40 @@ class EngineConfig:
             problems.append("api_port out of range")
         if self.inference_interval_s <= 0:
             problems.append("inference_interval_s must be positive")
+        if self.default_sample_interval_s <= 0:
+            problems.append("default_sample_interval_s must be positive")
         if self.queue_max_size < 100:
             problems.append("queue_max_size too small")
+        raw_low, raw_high = RETENTION_DAYS_RAW_RANGE
+        if not raw_low <= self.retention_days_raw <= raw_high:
+            problems.append(
+                f"retention_days_raw must be in {raw_low}-{raw_high} "
+                f"(got {self.retention_days_raw})"
+            )
+        agg_low, agg_high = RETENTION_DAYS_AGGREGATES_RANGE
+        if not agg_low <= self.retention_days_aggregates <= agg_high:
+            problems.append(
+                f"retention_days_aggregates must be in {agg_low}-{agg_high} "
+                f"(got {self.retention_days_aggregates})"
+            )
+        for name, horizon in (
+            ("retention_days_evidence", self.retention_days_evidence),
+            ("retention_days_versions", self.retention_days_versions),
+        ):
+            if horizon is None:
+                continue
+            if horizon < RETENTION_DAYS_HORIZON_MIN:
+                problems.append(
+                    f"{name} must be at least {RETENTION_DAYS_HORIZON_MIN} "
+                    f"or unset (got {horizon})"
+                )
+            elif horizon < self.retention_days_raw:
+                problems.append(
+                    f"{name} ({horizon}) must not be shorter than "
+                    f"retention_days_raw ({self.retention_days_raw}): evidence "
+                    "that does not outlive the raw window it explains cannot "
+                    "be audited"
+                )
         if self.history_lookback_s <= 0:
             problems.append("history_lookback_s must be positive")
         if self.analysis_offset_s < 0:
@@ -424,9 +504,14 @@ class EngineConfig:
             "api_port": self.api_port,
             "api_token": ("***" if self.api_token else ""),
             "database_path": self.database_path,
+            "retention_days_raw": self.retention_days_raw,
+            "retention_days_aggregates": self.retention_days_aggregates,
+            "retention_days_evidence": self.retention_days_evidence,
+            "retention_days_versions": self.retention_days_versions,
             "learning_enabled": self.learning_enabled,
             "auto_placement": self.auto_placement,
             "stale_after_s": self.stale_after_s,
+            "default_sample_interval_s": self.default_sample_interval_s,
             "inference_interval_s": self.inference_interval_s,
             "log_level": self.log_level,
             "history_lookback_s": self.history_lookback_s,

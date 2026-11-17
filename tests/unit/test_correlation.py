@@ -40,11 +40,13 @@ from wattmosaic_engine.ingestion.correlation import (
     CorrelationReport,
     CtCandidate,
     EntityObservation,
+    ReaderDeclaration,
     correlate,
     estimate_row_noise,
     level_from_attributes,
     observations_from_history,
     parse_history_payload,
+    publish_reader_declarations,
 )
 
 T0 = datetime(2026, 11, 8, 3, 0, tzinfo=UTC)
@@ -178,18 +180,78 @@ def _co_toggling_pair(
     return observations
 
 
+def _co_toggling_device_events(*, offset_s: float):
+    """The same co-toggling pair as emitted ``DeviceEvent`` rows.
+
+    ``EntityObservation`` carries no group id, so the grouping claim has to be
+    asserted on the event shape the isolation layer actually reads.  Both
+    fixtures change within ``GROUP_PROXIMITY_S`` and neither declares an
+    automation id, so they are one *candidate* simultaneity group.
+
+    Only the one physical scene is emitted: two simultaneous changes are one
+    cause, which is exactly the claim under test.  Repeating the scene three
+    times would produce three separate groups and would not prove "one group,
+    one credit" at all.
+    """
+    from wattmosaic_engine.contracts import DeviceEvent
+
+    events = []
+    at = T0
+    for position, entity_id in enumerate(("light.gym_pot_lights", "light.gym_sauna_lights")):
+        shifted = at + timedelta(seconds=offset_s if position else 0.0)
+        events.append(
+            DeviceEvent(
+                event_id=f"{entity_id}@{shifted.isoformat()}",
+                device_id=entity_id,
+                entity_id=entity_id,
+                event_type="state_changed",
+                previous_state="off",
+                new_state="on",
+                attributes={},
+                occurred_at=shifted,
+                received_at=shifted,
+            )
+        )
+    return events
+
+
 def test_fixtures_switched_by_one_scene_are_withheld_not_counted_twice() -> None:
     """Two lights on one row that always toggle together are one event.
 
     Each sees the row rise by both loads, so each would be credited the whole
     step and the row would be counted twice.  Neither is placed; both are
     reported so the user can declare the wiring by hand.
+
+    "One group, one credit" is asserted on the emitted device events rather
+    than on ``EntityObservation``: the observation carries no group id, so the
+    group is the only place the grouping exists.  The two fixtures switch within
+    ``GROUP_PROXIMITY_S`` of each other with no declared automation id, so they
+    form exactly one candidate simultaneity group -- one physical change, never
+    two independent credits.
     """
+    from wattmosaic_engine.disaggregation.isolation import group_events
+
     report = _correlate(_co_toggling_pair(offset_s=0.5, watts_each=40.0))
 
     assert report.candidates == ()
     assert report.unresolved["light.gym_pot_lights"].startswith("co_toggles_with_another_fixture_on_ct1")
     assert report.unresolved["light.gym_sauna_lights"].startswith("co_toggles_with_another_fixture_on_ct1")
+
+    events = _co_toggling_device_events(offset_s=0.5)
+    groups = group_events(events)
+
+    assert len(groups) == 1, [group.as_dict() for group in groups]
+    group = groups[0]
+    assert group.kind == "simultaneous"
+    assert group.size == 2
+    assert set(group.device_ids) == {
+        "light.gym_pot_lights",
+        "light.gym_sauna_lights",
+    }
+    # Both entity events of the pair are members of that one group, and no
+    # event is left out or double-counted into a second group.
+    assert len(group.member_event_ids) == 2
+    assert len({event.entity_id for event in events}) == 2
 
 
 def test_fixtures_sharing_a_row_but_switching_independently_are_both_placed() -> None:
@@ -1761,3 +1823,133 @@ def test_the_pairing_pass_is_what_made_discovery_slow() -> None:
         "the transition/reading pairing is not using a binary search; a nested "
         "scan over rows x readings is back"
     )
+
+
+# --------------------------------------------------------------------------- #
+# The reader declaration surface (TASK-MEASURE-002)
+#
+# ``publish_reader_declarations`` is the shape the API wave consumes: one value
+# object per *enabled* reader, carrying the reader's own declarations rather than
+# a measurement.  The three fields are declared constants from ``CTChannel``;
+# a ``None`` is an honest "never declared", never a default, because a consumer
+# that cannot tell declared from invented cannot honour either.
+# --------------------------------------------------------------------------- #
+
+
+def _declaration_topology() -> Topology:
+    """Two declared readers, in topology order, plus a channel that declares nothing.
+
+    The declared reader carries all three fields and a non-default reliability
+    (0.9, not the contract's 1.0) so a test that would pass on a hard-coded
+    default still has to read the channel.
+    """
+    return Topology(
+        version=1,
+        status=TopologyStatus.CONFIRMED,
+        channels=[
+            CTChannel(
+                ct_id="main_l1",
+                entity_id="sensor.main_l1",
+                ct_type=CTType.MAIN,
+                phase=Phase.L1,
+                resolution_w=1.0,
+                expected_interval_s=15.7,
+                reliability=0.9,
+            ),
+            CTChannel(
+                ct_id="ct_branch",
+                entity_id="sensor.ct_branch",
+                ct_type=CTType.BRANCH,
+                phase=Phase.L1,
+            ),
+        ],
+    )
+
+
+def test_reader_declaration_is_published() -> None:
+    """One declaration per enabled reader, in topology order, with its own values."""
+    from wattmosaic_engine.ingestion import ReaderDeclaration as IngestedReaderDeclaration
+    from wattmosaic_engine.ingestion import (
+        publish_reader_declarations as ingested_publish,
+    )
+
+    assert IngestedReaderDeclaration is ReaderDeclaration
+    assert ingested_publish is publish_reader_declarations
+
+    topology = _declaration_topology()
+    declarations = publish_reader_declarations(topology)
+
+    # One per enabled channel, in the topology's declared order -- no sorting.
+    assert [d.ct_id for d in declarations] == ["main_l1", "ct_branch"]
+    declared = declarations[0]
+    assert isinstance(declared, ReaderDeclaration)
+    # The reader's own declarations, carried verbatim -- not a default and not
+    # a value derived from a sample.
+    assert declared.resolution_w == pytest.approx(1.0)
+    assert declared.reliability == pytest.approx(0.9)
+    assert declared.expected_interval_s == pytest.approx(15.7)
+    assert declared.is_declared is True
+    assert declared.phase == Phase.L1.value
+    assert declared.polarity == "Polarity.NORMAL"
+    assert declared.enabled is True
+
+    # A channel that declares no resolution or interval is still published, with
+    # those fields ``None`` rather than filled in.  ``reliability`` is the one
+    # field with a contract default (1.0), and it is carried verbatim -- the
+    # declaration surface reports what the channel says, never a fabricated
+    # absence, so a consumer can distinguish "declares no resolution" from
+    # "declares 1 W".
+    undeclared = declarations[1]
+    assert undeclared.is_declared is False
+    assert undeclared.resolution_w is None
+    assert undeclared.expected_interval_s is None
+    assert undeclared.reliability == pytest.approx(1.0)
+    assert undeclared.as_dict()["resolution_w"] is None
+
+    # A partial declaration is honest per field, not all-or-nothing: an absent
+    # reliability is reported as ``None`` even though the contract default is
+    # 1.0, and ``is_declared`` is False until all three are present.
+    partial = ReaderDeclaration(
+        ct_id="ct_partial",
+        resolution_w=None,
+        reliability=None,
+        expected_interval_s=15.7,
+        phase="UNKNOWN",
+        polarity="Polarity.NORMAL",
+    )
+    assert partial.is_declared is False
+    assert partial.as_dict() == {
+        "ct_id": "ct_partial",
+        "resolution_w": None,
+        "reliability": None,
+        "expected_interval_s": 15.7,
+        "phase": "UNKNOWN",
+        "polarity": "Polarity.NORMAL",
+        "enabled": True,
+    }
+
+
+def test_a_disabled_reader_publishes_no_declaration() -> None:
+    """A reader the engine will not read must not be presented as one."""
+    topology = _declaration_topology().model_copy(
+        update={
+            "channels": [
+                _declaration_topology().channels[0],
+                _declaration_topology().channels[1].model_copy(update={"enabled": False}),
+            ]
+        }
+    )
+
+    declarations = publish_reader_declarations(topology)
+
+    assert [d.ct_id for d in declarations] == ["main_l1"]
+    assert declarations[0].enabled is True
+
+
+def test_the_published_declaration_round_trips_through_json() -> None:
+    """The surface the API consumes is the dict, so it must serialise as-is."""
+    import json
+
+    payload = [d.as_dict() for d in publish_reader_declarations(_declaration_topology())]
+
+    assert json.loads(json.dumps(payload))[0]["reliability"] == pytest.approx(0.9)

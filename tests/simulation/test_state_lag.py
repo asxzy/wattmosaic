@@ -29,9 +29,15 @@ What these tests pin
 
 from __future__ import annotations
 
-from datetime import datetime
+from collections import deque
+from datetime import UTC, datetime, timedelta
 
 import pytest
+from wattmosaic_engine.contracts import (
+    InferenceResult,
+    MeasurementBasis,
+    Source,
+)
 
 from tests.simulation.metrics import EngineAdapter
 from tools.simulator import HouseholdScenario, SimulatorConfig
@@ -329,3 +335,144 @@ def test_withheld_load_is_preserved_as_residual_never_fabricated(aligned) -> Non
         "the lagged run never produced a state/measurement disagreement; the "
         "fixture no longer exercises the hazard"
     )
+
+
+# --------------------------------------------------------------------------- #
+# REQ-EVENT-003 — a response beyond max_lag_s is withheld, not assumed
+# --------------------------------------------------------------------------- #
+
+
+def test_response_beyond_max_lag_is_withheld() -> None:
+    """A response at or beyond ``max_lag_s`` is refused with ``lag_exceeded``.
+
+    This is the audit path's own rule (``AssociationFinder._classify``), not
+    the engine's: the pass observes a verdict and searches the CT response over
+    ``0..max_lag_s``, and a crossing that lands at or past the bound is a
+    refusal rather than support.  At the bound the response is
+    indistinguishable from silence, so the comparison is deliberately ``>=``
+    and the boundary value is never accepted.
+
+    The simulation fixture's 60 s ``state_lag_s`` scenario is the physical
+    origin of the hazard (a state stream that reports an old state), and the
+    same refusal is then shown on ``AuditPass`` so the reason is visible on the
+    production path rather than only in a unit of the finder.
+    """
+    from wattmosaic_engine.contracts import IsolationStatus
+    from wattmosaic_engine.disaggregation.association import (
+        REASON_LAG_EXCEEDED,
+        AssociationConfig,
+        AssociationFinder,
+    )
+    from wattmosaic_engine.disaggregation.audit import AuditConfig, AuditPass
+    from wattmosaic_engine.disaggregation.isolation import EventIsolation
+
+    at = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    verdict = EventIsolation(
+        status=IsolationStatus.ISOLATED,
+        event_id=f"{DEVICE}@{at.isoformat()}",
+        device_id=DEVICE,
+        entity_id=ENTITY,
+        occurred_at=at,
+        received_at=at,
+        analysis_offset_s=0.0,
+        isolation_window_s=30.0,
+        window_start=at,
+        window_end=at + timedelta(seconds=30),
+        reason="isolated",
+        evidence={},
+    )
+    ct_id = "ct_main_water_heater_l1"
+    before = [
+        {
+            "state_timestamp": (at - timedelta(seconds=15.0 * (3 - i))).isoformat(),
+            "value_w": 1000.0,
+            "ct_id": ct_id,
+        }
+        for i in range(3)
+    ]
+    # The CT only moves at the 75 s sample, and enough 6000 W points follow that
+    # the after-window median is 6000 W (a 5000 W step).  The crossing lands at
+    # 60 s -- the sentinel for "no usable crossing" -- and so is refused.  A
+    # shorter window kept the median at baseline, made the delta zero, and never
+    # reached the lag rule at all.
+    after = [
+        {
+            "state_timestamp": (at + timedelta(seconds=15.0 * i)).isoformat(),
+            "value_w": 1000.0 if i < 5 else 6000.0,
+            "ct_id": ct_id,
+        }
+        for i in range(11)
+    ]
+
+    finder = AssociationFinder(AssociationConfig(max_lag_s=LAG_S, lag_step_s=15.0))
+    observations = finder.observe(verdict, before, after, [], device_delta_w=5000.0)
+    assert observations, "the fixture produced no observation at all"
+    assert all(item.lag_s == pytest.approx(LAG_S) for item in observations)
+    assert finder.analyze(observations) == []
+    assert finder.withheld(observations)[DEVICE][REASON_LAG_EXCEEDED] >= 1
+
+    # A crossing *at* the bound is refused too, never accepted as support.
+    boundary = AssociationFinder(AssociationConfig(max_lag_s=45.0, lag_step_s=15.0))
+    boundary_after = [
+        {
+            "state_timestamp": (at + timedelta(seconds=15.0 * i)).isoformat(),
+            "value_w": 1000.0 if i < 3 else 6000.0,
+            "ct_id": ct_id,
+        }
+        for i in range(7)
+    ]
+    boundary_observations = boundary.observe(
+        verdict, before, boundary_after, [], device_delta_w=5000.0
+    )
+    assert boundary_observations
+    assert boundary.analyze(boundary_observations) == []
+    assert boundary.withheld(boundary_observations)[DEVICE][REASON_LAG_EXCEEDED] >= 1
+
+    # And the same refusal is what the audit pass publishes, so the reason is
+    # not only a unit-level counter.  Drive the production path with a device
+    # baseline at 1000 W before the event and a CT series that first crosses the
+    # half-step at 65 s -- beyond the 60 s max_lag_s.  The pass measures the CT
+    # step over 0..power_window_s, so the window must be wide enough to contain
+    # the late crossing (180 s), and the event is given time to mature.
+    topology = build_real_home_topology().to_contract_topology()
+    pass_ = AuditPass(config=AuditConfig(power_window_s=180.0))
+    pass_._power_history[DEVICE] = deque([(at - timedelta(seconds=30), 1000.0)])
+    pass_._override_histories = {
+        ct_id: [
+            (at + timedelta(seconds=5 * i), 6000.0 if i >= 13 else 1000.0)
+            for i in range(-36, 37)
+        ]
+    }
+    settled = InferenceResult(
+        device_id=DEVICE,
+        timestamp=at + timedelta(seconds=30),
+        power_w=6000.0,
+        source=Source.DIRECT_MEASURED,
+        confidence=0.9,
+        measurement_basis=MeasurementBasis.CT_MEASURED,
+    )
+    report = pass_.analyze(
+        _Window(at=at, readings={ct_id: 6000.0}),
+        topology=topology,
+        results=[settled],
+        events=[
+            {
+                "device_id": DEVICE,
+                "entity_id": ENTITY,
+                "new_state": "off",
+                "occurred_at": at,
+            }
+        ],
+        now=at + timedelta(minutes=10),
+    )
+    assert report.stages["association"]["withheld"][DEVICE][REASON_LAG_EXCEEDED] >= 1
+
+
+class _Window:
+    """The minimum ``AuditPass.analyze`` reads: an instant and its readings."""
+
+    __slots__ = ("at", "readings")
+
+    def __init__(self, at: datetime, readings: dict[str, float]) -> None:
+        self.at = at
+        self.readings = readings

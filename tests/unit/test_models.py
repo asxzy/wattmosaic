@@ -23,14 +23,17 @@ import pytest
 from wattmosaic_engine.contracts import (
     DeviceModelParameters,
     DeviceModelVersion,
+    ExpectedPower,
     ModelStatus,
     ModelType,
     OperatingStage,
+    PowerLevel,
     StageStatus,
 )
 from wattmosaic_engine.models import (
     BinaryDeviceModel,
     CompositeDeviceModel,
+    DevicePowerProfile,
     DimmableDeviceModel,
     MultiStateDeviceModel,
     ResidualDeviceModel,
@@ -236,6 +239,28 @@ def test_binary_model_median_ignores_inrush_outlier() -> None:
 
     # One 9 kW inrush sample must not drag the steady-state estimate.
     assert model.predict({"state": "on"}) == pytest.approx(1500.0)
+
+    # A device power profile keeps the inrush out of the steady-state number.
+    # The 9 kW start-up bound is a transient, never an operating level.
+    profile = DevicePowerProfile.from_expected(
+        "lamp", ExpectedPower(on_w=1500.0, standby_w=0.0, startup_w=9000.0)
+    )
+    assert profile.operating_w() == pytest.approx(1500.0)
+    assert profile.level_for(9000.0) == PowerLevel.TRANSIENT
+    assert profile.level_for(1500.0) == PowerLevel.ACTIVE
+    assert profile.is_steady_state(9000.0) is False
+    assert profile.is_steady_state(1500.0) is True
+
+    # Integrating only steady-state points excludes the inrush entirely: the
+    # energy of a 1500 W load over ten 1 s steps is 15000 J, not the ~45 kJ an
+    # included 9 kW spike would produce.
+    steady = [(BASE_TIME + timedelta(seconds=i), 1500.0) for i in range(11)]
+    assert trapezoidal_energy_kwh(steady) == pytest.approx(15000.0 / 3_600_000.0)
+    with_inrush = list(steady)
+    with_inrush[5] = (BASE_TIME + timedelta(seconds=5), 9000.0)
+    assert trapezoidal_energy_kwh(with_inrush) > trapezoidal_energy_kwh(steady)
+    # The gap is at the aggregator (it integrates every published sample); the
+    # profile/operating_w path is where a caller opts into the steady state.
 
 
 def test_binary_confidence_drops_without_state_evidence() -> None:

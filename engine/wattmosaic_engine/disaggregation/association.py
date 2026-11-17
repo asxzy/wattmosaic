@@ -126,6 +126,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from wattmosaic_engine.contracts import (
+    EdgeLifecycle,
     IsolationStatus,
     MeasurementBasis,
     RelationKind,
@@ -163,6 +164,54 @@ NOISE_SIGMAS = 3.0
 APPLIANCE_TOTAL_BASES = frozenset(
     {MeasurementBasis.FACTOR_ADJUSTED.value, MeasurementBasis.MONITOR_REPORTED.value}
 )
+
+#: The product-facing readings of ``RelationKind`` (spec 04 §2, REQ-TOPO-001).
+#:
+#: A **single-valued** map: every ``RelationKind`` has exactly one name and no
+#: name names two kinds, so a reader can render the product vocabulary from the
+#: stored kind without a second lookup table that could drift.  It is *not* a
+#: second kind axis and is never consulted to choose, combine or promote a kind:
+#: the spec's four product names sit on the four existing members.
+#:
+#: ``PAIRED_LEG`` / ``CORRELATED`` are the one honest overlap.  Both are
+#: *readings* of ``DEVICE_CT_ASSOCIATION``: spec 04 §2 maps each onto that
+#: member and says each "sits beside" it, ``CORRELATED`` being the weaker
+#: (coincident activity only, never device identity).  They are not two stored
+#: kinds, so this map cannot name both without becoming two-valued.  The map
+#: therefore names the *stronger* reading (``PAIRED_LEG``, the one the stored
+#: kind actually asserts) and ``relation_kind_name`` is the single resolution
+#: point.  Distinguishing the two readings needs evidence the stored kind does
+#: not carry (phase for ``PAIRED_LEG``, coincidence-only for ``CORRELATED``);
+#: that is gap ``G-TOPO-003``, out of scope here, and is not invented as a
+#: second kind.  ``CONTAINS`` cannot imply ``SHARED_LOAD`` by derivation.
+RELATION_KIND_NAMES: dict[RelationKind, str] = {
+    RelationKind.ELECTRICAL_PARENT_CHILD: "CONTAINS",
+    RelationKind.CT_MEASUREMENT_OVERLAP: "SHARED_LOAD",
+    RelationKind.DEVICE_CT_ASSOCIATION: "PAIRED_LEG",
+    RelationKind.CIRCUIT_MEMBERSHIP: "CIRCUIT_MEMBERSHIP",
+}
+
+
+def relation_kind_name(kind: RelationKind | str) -> str:
+    """Resolve one edge to exactly one product-facing relation name.
+
+    ``relation_kind_name(kind) -> str`` takes a :class:`RelationKind` (or its
+    stored string value) and returns the single product-facing name of
+    REQ-TOPO-001 for it: ``CONTAINS``, ``SHARED_LOAD``, ``PAIRED_LEG`` or
+    ``CIRCUIT_MEMBERSHIP``.  It is a *rendering* of the stored ``kind``, never
+    a second kind axis: it chooses nothing, combines nothing and promotes
+    nothing, and the four kinds stay non-implying.
+
+    Raises ``KeyError`` for a value outside ``RelationKind``, which is the
+    contract's own refusal rather than a silent fallback -- an unknown kind
+    must not be rendered as a name it does not have.
+
+    ``PAIRED_LEG`` is the resolution for ``DEVICE_CT_ASSOCIATION``.  The spec's
+    ``CORRELATED`` is a second *reading* of the same stored member, not a
+    distinct kind (see :data:`RELATION_KIND_NAMES`); a consumer that needs the
+    weaker reading must ask the evidence, not this function.
+    """
+    return RELATION_KIND_NAMES[RelationKind(kind)]
 
 VERDICT_SUPPORTED = "supported"
 VERDICT_SPLIT = "split"
@@ -1106,6 +1155,20 @@ class AssociationFinder:
             "algorithm_version": self.config.algorithm_version,
             "config": self.config.as_metadata(),
             "isolation": {"clean_status": IsolationStatus.ISOLATED.value, "rule": "isolated_only"},
+            # REQ-TOPO-006: an association is a statement about *matched responses*.
+            # A parent's unexplained remainder is corroborating context for a
+            # containment hypothesis, never a way to manufacture one, so it is
+            # named here rather than left implied by the absence of a contradiction.
+            "residual_evidence": {
+                "role": "corroborating_only",
+                "promotes_edge": False,
+                "note": (
+                    "a device response observed on this CT supports the "
+                    "association; the parent's unexplained residual may "
+                    "corroborate a containment hypothesis but cannot promote "
+                    "an edge on its own"
+                ),
+            },
         }
         if split_with:
             evidence["split_with"] = split_with
@@ -1135,6 +1198,9 @@ class AssociationFinder:
             subject_id=candidate.device_id,
             object_id=candidate.ct_id,
             status=TopologyStatus.CANDIDATE,
+            # Explicit, never the default: an inferred edge is a proposal, and
+            # the lifecycle says so independently of ``status``.
+            lifecycle=EdgeLifecycle.CANDIDATE,
             confidence=confidence,
             evidence=evidence,
             requires_confirmation=True,
@@ -1197,6 +1263,10 @@ class AssociationFinder:
             subject_id=relation.subject_id,
             object_id=relation.object_id,
             status=TopologyStatus.REJECTED,
+            # A withdrawn edge is terminal on the lifecycle axis too, so a
+            # reader filtering on ``lifecycle`` excludes it rather than
+            # re-deriving that from ``status``.
+            lifecycle=EdgeLifecycle.REJECTED,
             confidence=relation.confidence,
             evidence=payload,
             requires_confirmation=relation.requires_confirmation,
@@ -1275,10 +1345,12 @@ __all__ = [
     "AMBIGUOUS_MULTIPLIER",
     "MAX_CONFIDENCE",
     "MAD_TO_SIGMA",
+    "RELATION_KIND_NAMES",
     "SINGLE_EVENT_CAP",
     "SPLIT_MULTIPLIER",
     "AssociationConfig",
     "AssociationFinder",
     "Observation",
     "persist",
+    "relation_kind_name",
 ]

@@ -11,10 +11,25 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ..contracts import Measurement, QualityStatus, utcnow
+from ..electrical.window import DEFAULT_CADENCE_S, clamp_cadence
 
 DEFAULT_MAX_AGE_S = 180.0
 DEFAULT_MAX_SAMPLES_PER_CHANNEL = 600
 MAD_TO_SIGMA = 1.4826
+
+#: Where a resolved cadence came from.  ``observed_history`` is the only source
+#: that is a measurement of this installation; ``configured_default`` is the
+#: documented fallback for a reader with no usable history.  A publication that
+#: does not say which one it used cannot be audited, so the source travels with
+#: the value.
+CADENCE_SOURCE_OBSERVED = "observed_history"
+CADENCE_SOURCE_DEFAULT = "configured_default"
+
+#: How many observed inter-sample gaps a channel must contribute before its
+#: own cadence is published.  One gap is a single coincidence; two is the
+#: smallest sample that can show a *spacing*.  Below this the channel falls
+#: back to the configured default and says so.
+MIN_CADENCE_INTERVALS = 2
 
 # Quality ordering used when deciding how usable a channel is.
 _QUALITY_RANK = {
@@ -338,15 +353,105 @@ class AlignedWindow:
 
 
 @dataclass(frozen=True, slots=True)
+class ResolvedCadence:
+    """A sampling cadence paired with the source that produced it.
+
+    The number alone cannot be audited: ``15.7`` is a measurement of this
+    installation when it came from a channel's own history and a documented
+    fallback when it did not.  A consumer sizing an event window must be able to
+    tell those apart, so the source travels with the value.
+    """
+
+    seconds: float
+    source: str
+    #: How many observed inter-sample gaps the value was derived from.
+    #: ``0`` means no usable history, which is exactly the fallback case.
+    intervals: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"seconds": self.seconds, "source": self.source, "intervals": self.intervals}
+
+
+def resolve_channel_cadence(
+    entries: Iterable[_Entry],
+    *,
+    default: float = DEFAULT_CADENCE_S,
+) -> ResolvedCadence:
+    """Resolve one channel's cadence from its own observed history.
+
+    The median of the strictly positive gaps between consecutive *arrival*
+    times is the channel's observed cadence; it is clamped into the documented
+    ``[MIN_CADENCE_S, MAX_CADENCE_S]`` band so one pathological gap cannot
+    produce a minutes-long window.  A channel with fewer than
+    :data:`MIN_CADENCE_INTERVALS` observed gaps has not shown a repeatable
+    spacing, so it gets the configured default labelled ``configured_default``
+    rather than a number presented as an observation.
+
+    ``entries`` must be time-ordered, which every caller's buffer is.
+    """
+    ordered = list(entries)
+    intervals = [
+        (b.received_at - a.received_at).total_seconds()
+        for a, b in zip(ordered, ordered[1:], strict=False)
+        if b.received_at >= a.received_at
+    ]
+    intervals = [i for i in intervals if i > 0]
+    if len(intervals) < MIN_CADENCE_INTERVALS:
+        return ResolvedCadence(seconds=clamp_cadence(default), source=CADENCE_SOURCE_DEFAULT, intervals=0)
+    return ResolvedCadence(
+        seconds=clamp_cadence(median(intervals) or default),
+        source=CADENCE_SOURCE_OBSERVED,
+        intervals=len(intervals),
+    )
+
+
+def resolve_topology_cadence(
+    per_channel: Mapping[str, ResolvedCadence],
+    *,
+    default: float = DEFAULT_CADENCE_S,
+) -> ResolvedCadence:
+    """Resolve one cadence for the whole topology from the per-channel results.
+
+    Only channels that actually observed their cadence contribute; a channel
+    on the configured default must not be allowed to vote, or a topology of
+    mostly-unknown readers would silently publish a default as if it were
+    measured.  With no observing channel at all the result is the default,
+    labelled ``configured_default``.
+    """
+    observed = [c.seconds for c in per_channel.values() if c.source == CADENCE_SOURCE_OBSERVED]
+    if not observed:
+        return ResolvedCadence(seconds=clamp_cadence(default), source=CADENCE_SOURCE_DEFAULT, intervals=0)
+    observed.sort()
+    return ResolvedCadence(
+        seconds=clamp_cadence(median(observed) or default),
+        source=CADENCE_SOURCE_OBSERVED,
+        intervals=sum(c.intervals for c in per_channel.values() if c.source == CADENCE_SOURCE_OBSERVED),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class ChannelHealth:
     """Observed update characteristics for one channel."""
 
     channel: str
     entity_id: str | None = None
     sample_count: int = 0
+    #: How many of ``sample_count`` were genuinely new measurements.  A repeat
+    #: still updates the current value and is still counted in ``sample_count``,
+    #: but it is not new evidence, so it never advances this counter.  The
+    #: difference between the two is the audit signal: a reader that reports
+    #: often while its value never moves is being polled, not measured.
+    evidence_count: int = 0
     repeat_count: int = 0
     repeat_ratio: float = 0.0
     interval_median_s: float | None = None
+    #: ``LearningCollector.cadence_from_health`` reads ``median_interval_s`` /
+    #: ``median_s`` / ``expected_interval_s`` off a health record, and the
+    #: aligner's own field is ``interval_median_s``, so the learning cadence
+    #: silently never followed the observed history.  This alias publishes the
+    #: *same* interval sample under the name that consumer reads; it is never a
+    #: second estimate.
+    median_interval_s: float | None = None
     interval_p95_s: float | None = None
     interval_max_s: float | None = None
     interval_min_s: float | None = None
@@ -365,9 +470,11 @@ class ChannelHealth:
             "channel": self.channel,
             "entity_id": self.entity_id,
             "sample_count": self.sample_count,
+            "evidence_count": self.evidence_count,
             "repeat_count": self.repeat_count,
             "repeat_ratio": self.repeat_ratio,
             "interval_median_s": self.interval_median_s,
+            "median_interval_s": self.median_interval_s,
             "interval_p95_s": self.interval_p95_s,
             "interval_max_s": self.interval_max_s,
             "interval_min_s": self.interval_min_s,
@@ -727,9 +834,11 @@ class SampleAligner:
             channel=name,
             entity_id=last.entity_id,
             sample_count=len(entries),
+            evidence_count=sum(1 for e in entries if not e.repeated),
             repeat_count=repeat_count,
             repeat_ratio=repeat_count / len(entries),
             interval_median_s=med_interval,
+            median_interval_s=med_interval,
             interval_p95_s=p95(intervals),
             interval_max_s=max(intervals) if intervals else None,
             interval_min_s=min(intervals) if intervals else None,
@@ -743,6 +852,25 @@ class SampleAligner:
             stale=missing,
             quality=quality,
         )
+
+    def channel_cadence(self, channel: str) -> ResolvedCadence:
+        """The cadence this channel's own history shows, with its source."""
+        with self._lock:
+            buf = self._buffers.get(channel)
+            return resolve_channel_cadence(buf or ())
+
+    def topology_cadence(self) -> tuple[ResolvedCadence, dict[str, ResolvedCadence]]:
+        """One cadence for the topology, plus the per-channel resolutions.
+
+        The per-channel results are returned so a consumer can see *which*
+        readers were actually observed rather than only the merged number.  A
+        channel with no usable history is reported as ``configured_default`` and
+        is excluded from the merge.
+        """
+        with self._lock:
+            snapshot = {name: list(buf) for name, buf in self._buffers.items()}
+        per_channel = {name: resolve_channel_cadence(entries) for name, entries in snapshot.items()}
+        return resolve_topology_cadence(per_channel), per_channel
 
     def energy_health(
         self, now: datetime | None = None, stale_after_s: float | None = None
@@ -856,6 +984,8 @@ class SampleAligner:
 
 
 __all__ = [
+    "CADENCE_SOURCE_DEFAULT",
+    "CADENCE_SOURCE_OBSERVED",
     "AlignedChannel",
     "AlignedWindow",
     "ChannelHealth",
@@ -864,9 +994,13 @@ __all__ = [
     "EnergyChannel",
     "EnergyHealth",
     "EnergyWindow",
+    "MIN_CADENCE_INTERVALS",
+    "ResolvedCadence",
     "SampleAligner",
     "median",
     "p95",
     "percentile",
+    "resolve_channel_cadence",
+    "resolve_topology_cadence",
     "robust_noise_mad",
 ]

@@ -405,6 +405,19 @@
       "title": "LightType",
       "type": "string"
     },
+    "LoadShape": {
+      "description": "The load-shape class -- a separate axis from ``ModelType``.\n\n``ModelType`` names *model implementations* (``BINARY``, ``DIMMABLE``, ...)\nand answers \"what shape is the power law?\".  ``LoadShape`` names *how a\ndevice draws power* and answers \"what is the character of the load?\".\nThe two are not the same axis and neither substitutes for the other; a\ndevice's ``ModelType`` may change as it is learned while its load shape is\na declared property of the appliance (spec ``06-...`` \u00a74.1, ADR-0011's\nfour-axis rule).\n\nThis refines ``OD-45``'s field-only reading (an additive optional\n``power_model_class: str | None``).  A closed ``Enum`` is what makes\n\"never inferred from a device name\" enforceable: a free string cannot be\nvalidated, so a typo or a heuristic could smuggle a class in.  The\ncontract change stays additive and optional -- ``UNKNOWN`` is the neutral\ndefault and no existing field is retyped.\n\nMapping onto the shipped taxonomy (spec ``06-...`` \u00a74.1's table): the six\nclasses are the load-shape view of ``ModelType`` and ``PowerBehavior``.\n\n* ``FIXED``     -- ``ModelType.BINARY`` / ``PowerBehavior.FIXED``\n* ``ADJUSTABLE`` -- ``ModelType.DIMMABLE`` / ``PowerBehavior.VARIABLE``\n* ``DYNAMIC``   -- ``ModelType.VARIABLE_SPEED`` / ``MULTI_STATE`` /\n  ``TIME_VARYING`` / ``PowerBehavior.VARIABLE`` or ``COMPLEX``\n* ``DELAYED``   -- no ``ModelType`` member; a response delay is orthogonal\n  to the power law (``response_delay_s``, ``OD-47``)\n* ``ALWAYS_ON`` -- no ``ModelType`` member; the absence of an OFF state\n  (``always_on``, ``OD-46``)\n* ``UNKNOWN``   -- ``ModelType.RESIDUAL`` / ``PowerBehavior.UNKNOWN``\n\nRule: a load shape is **declared**, never inferred.  No code path derives\nit from a device name, an entity id or any other naming surface.",
+      "enum": [
+        "fixed",
+        "adjustable",
+        "dynamic",
+        "delayed",
+        "always_on",
+        "unknown"
+      ],
+      "title": "LoadShape",
+      "type": "string"
+    },
     "MonitoringLevel": {
       "description": "Axis 2 \u2014 how closely does the electrical tree observe the device?",
       "enum": [
@@ -479,6 +492,10 @@
       "$ref": "#/$defs/PowerBehavior",
       "default": "unknown"
     },
+    "load_shape": {
+      "$ref": "#/$defs/LoadShape",
+      "default": "unknown"
+    },
     "expected": {
       "$ref": "#/$defs/ExpectedPower"
     },
@@ -536,5 +553,5 @@
   "title": "DeviceConfiguration",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/device_configuration.json",
-  "x-contract-version": "2.0.0"
+  "x-contract-version": "2.1.0"
 }

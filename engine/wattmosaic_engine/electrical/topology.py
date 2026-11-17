@@ -25,15 +25,21 @@ values exactly once, never from a sum of CT rows.
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Any
 
 from wattmosaic_engine.contracts import (
     CTChannel,
     CTType,
     DeviceTopology,
+    EdgeLifecycle,
     Phase,
     Topology,
+    TopologyRelation,
     TopologyStatus,
 )
 from wattmosaic_engine.electrical.factors import FactorRegistry, scale_reading
@@ -705,3 +711,480 @@ def build_graph(
     factors: FactorRegistry | None = None,
 ) -> TopologyGraph:
     return TopologyGraph(topology, phase_split_l1=phase_split_l1, factors=factors)
+
+
+# --------------------------------------------------------------------------- #
+# The versioned edge set (spec 04 §11; API contract 09 §7.2)
+# --------------------------------------------------------------------------- #
+#
+# ``TopologyVersion`` in ``contracts.py`` is the fixed *wire* shape: an opaque
+# ``version_id``, a ``version_number``, ``parent_version_id``, the ordered
+# ``edge_ids`` and metadata.  This module owns the computation that produces it
+# and the diff between two of them.  Nothing here stores rows -- ``storage`` owns
+# the table -- so the same functions serve a live pass, a stored read and a test.
+
+#: Fields of a ``TopologyRelation`` that participate in a content diff.
+#: ``relation_id`` is excluded because it is the identity being compared; the
+#: clock fields are excluded because a new assertion written later about the same
+#: endpoints is not a change to what was asserted.
+_RELATION_DIFF_FIELDS = (
+    "kind",
+    "subject_id",
+    "object_id",
+    "status",
+    "lifecycle",
+    "confidence",
+    "evidence",
+    "requires_confirmation",
+    "declared_by",
+)
+
+#: The three states of one edge in a diff.  A plain string, not a new enum: the
+#: vocabulary is fixed by the API spec's ``TopologyDiff`` and a new member would
+# have to be minted there first.
+DIFF_ADDED = "added"
+DIFF_REMOVED = "removed"
+DIFF_CHANGED = "changed"
+
+
+@dataclass(frozen=True, slots=True)
+class EdgeView:
+    """One edge of a version, reduced to exactly what a diff compares.
+
+    Deliberately not ``TopologyRelation``: a diff must not depend on the whole
+    relation object (its clocks, its free-form ``evidence`` prose), only on the
+    comparable content.  ``id`` is carried separately from ``content`` so two
+    relations with the same endpoints but different ids cannot accidentally
+    compare equal.
+    """
+
+    id: str
+    kind: str
+    subject_id: str
+    object_id: str
+    status: str
+    lifecycle: str
+    confidence: float | None
+    evidence: Mapping[str, Any]
+    requires_confirmation: bool
+    declared_by: str
+
+    @property
+    def key(self) -> tuple[str, str, str]:
+        """The endpoints and kind that identify this edge within a version."""
+        return (self.kind, self.subject_id, self.object_id)
+
+    @classmethod
+    def from_relation(cls, relation: TopologyRelation) -> EdgeView:
+        return cls(
+            id=str(relation.relation_id),
+            kind=_enum_text(relation.kind),
+            subject_id=str(relation.subject_id),
+            object_id=str(relation.object_id),
+            status=_enum_text(relation.status),
+            lifecycle=_enum_text(getattr(relation, "lifecycle", EdgeLifecycle.CANDIDATE)),
+            confidence=None if relation.confidence is None else float(relation.confidence),
+            evidence=dict(relation.evidence or {}),
+            requires_confirmation=bool(relation.requires_confirmation),
+            declared_by=str(relation.declared_by),
+        )
+
+    def content(self) -> tuple[Any, ...]:
+        """The comparable content, in a stable field order."""
+        return (
+            self.kind,
+            self.subject_id,
+            self.object_id,
+            self.status,
+            self.lifecycle,
+            self.confidence,
+            _stable_json(self.evidence),
+            self.requires_confirmation,
+            self.declared_by,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class EdgeChange:
+    """One edge present in both versions whose comparable content moved."""
+
+    edge_id: str
+    kind: str
+    subject_id: str
+    object_id: str
+    changed_fields: tuple[str, ...]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "edge_id": self.edge_id,
+            "kind": self.kind,
+            "subject_id": self.subject_id,
+            "object_id": self.object_id,
+            "changed_fields": list(self.changed_fields),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TopologyVersionRecord:
+    """A computed topology version: identity, time, status, parent and diff.
+
+    Satisfies the ``TopologyVersion`` contract of ``09 §7.2`` field for field:
+    ``version_id``, ``version_number``, ``parent_version_id``, ``status``,
+    ``created_at``, ``created_by``, ``change_event_id``, ``rollback_of``,
+    ``summary`` and ``edge_ids``.  Two members are additive, because the task
+    requires them and the contract has no such field:
+
+    * ``edges`` -- the complete edge set, so a previous version stays readable
+      from its own row without a join;
+    * ``diff`` -- the comparison against ``parent_version_id``, so a consumer
+      never has to re-derive it.
+
+    ``edge_count`` mirrors the contract's redundant count.
+    """
+
+    version_id: str
+    version_number: int
+    parent_version_id: str | None
+    status: str
+    created_at: datetime
+    created_by: str
+    summary: str
+    #: The complete edge set of this version, ordered by ``edge_id``.
+    edges: tuple[EdgeView, ...] = ()
+    #: The diff against :attr:`parent_version_id`; ``None`` = no parent.
+    diff: TopologyDiff | None = None
+    change_event_id: str | None = None
+    rollback_of: str | None = None
+
+    @property
+    def edge_ids(self) -> tuple[str, ...]:
+        return tuple(edge.id for edge in self.edges)
+
+    @property
+    def edge_count(self) -> int:
+        return len(self.edges)
+
+    def edge_set(self) -> dict[str, EdgeView]:
+        """The edge set indexed by ``edge_id``."""
+        return {edge.id: edge for edge in self.edges}
+
+
+@dataclass(frozen=True, slots=True)
+class TopologyDiff:
+    """The added / removed / changed edges between two versions.
+
+    The wire shape of ``TopologyDiff`` in ``09 §8.1`` minus the two endpoint
+    ``TopologyVersion`` objects, which the route supplies from its own lookups.
+    """
+
+    added: tuple[EdgeView, ...] = ()
+    removed: tuple[EdgeView, ...] = ()
+    changed: tuple[EdgeChange, ...] = ()
+
+    @property
+    def added_count(self) -> int:
+        return len(self.added)
+
+    @property
+    def removed_count(self) -> int:
+        return len(self.removed)
+
+    @property
+    def changed_count(self) -> int:
+        return len(self.changed)
+
+    @property
+    def changed_fields(self) -> tuple[str, ...]:
+        """Sorted union of every field name that differed across ``changed``."""
+        names: set[str] = set()
+        for change in self.changed:
+            names.update(change.changed_fields)
+        return tuple(sorted(names))
+
+    @property
+    def is_empty(self) -> bool:
+        return not (self.added or self.removed or self.changed)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "added_edges": [_view_dict(edge) for edge in self.added],
+            "removed_edges": [_view_dict(edge) for edge in self.removed],
+            "changed_edges": [change.as_dict() for change in self.changed],
+            "changed_fields": list(self.changed_fields),
+            "added_count": self.added_count,
+            "removed_count": self.removed_count,
+            "changed_count": self.changed_count,
+        }
+
+
+def version_id_for(version_number: int) -> str:
+    """Opaque ``tv-<zero-padded sequence>``; never reused after a rollback."""
+    return f"tv-{int(version_number):08d}"
+
+
+def _enum_text(value: Any) -> str:
+    return str(getattr(value, "value", value))
+
+
+def _stable_json(value: Any) -> str:
+    """Deterministic JSON for a free-form mapping, so equal content hashes equal."""
+    return json.dumps(value, sort_keys=True, default=str, separators=(",", ":"))
+
+
+def _edge_key(relation: TopologyRelation) -> tuple[str, str, str]:
+    return (
+        _enum_text(relation.kind),
+        str(relation.subject_id),
+        str(relation.object_id),
+    )
+
+
+def diff_topologies(
+    old: Topology,
+    new: Topology,
+) -> TopologyDiff:
+    """Diff the typed relation set of two topologies.
+
+    Deterministic: edges are compared by ``(kind, subject, object)``, each side
+    is indexed once, and every output is sorted by that key.  Two runs over the
+    same inputs produce byte-identical output.
+    """
+    old_edges = {_edge_key(rel): EdgeView.from_relation(rel) for rel in old.relations}
+    new_edges = {_edge_key(rel): EdgeView.from_relation(rel) for rel in new.relations}
+
+    added: list[EdgeView] = []
+    removed: list[EdgeView] = []
+    changed: list[EdgeChange] = []
+
+    for key in sorted(set(old_edges) | set(new_edges)):
+        before = old_edges.get(key)
+        after = new_edges.get(key)
+        if before is None and after is not None:
+            added.append(after)
+        elif after is None and before is not None:
+            removed.append(before)
+        elif before is not None and after is not None and before.content() != after.content():
+            fields = tuple(
+                name
+                for name, left, right in zip(
+                    _RELATION_DIFF_FIELDS, before.content(), after.content(), strict=True
+                )
+                if left != right
+            )
+            changed.append(
+                EdgeChange(
+                    edge_id=after.id,
+                    kind=key[0],
+                    subject_id=key[1],
+                    object_id=key[2],
+                    changed_fields=fields,
+                )
+            )
+
+    return TopologyDiff(
+        added=tuple(sorted(added, key=lambda e: e.key)),
+        removed=tuple(sorted(removed, key=lambda e: e.key)),
+        changed=tuple(sorted(changed, key=lambda e: (e.kind, e.subject_id, e.object_id))),
+    )
+
+
+def _view_dict(view: EdgeView) -> dict[str, Any]:
+    return {
+        "edge_id": view.id,
+        "kind": view.kind,
+        "subject_id": view.subject_id,
+        "object_id": view.object_id,
+        "status": view.status,
+        "lifecycle": view.lifecycle,
+        "confidence": view.confidence,
+        "evidence": dict(view.evidence),
+        "requires_confirmation": view.requires_confirmation,
+        "declared_by": view.declared_by,
+    }
+
+
+def make_version(
+    *,
+    version_number: int,
+    topology: Topology,
+    status: TopologyStatus | None = None,
+    parent: TopologyVersionRecord | None = None,
+    parent_topology: Topology | None = None,
+    created_at: datetime | None = None,
+    created_by: str = "",
+    summary: str = "",
+    change_event_id: str | None = None,
+    rollback_of: str | None = None,
+) -> TopologyVersionRecord:
+    """Build one version record from a topology and its predecessor.
+
+    The edge set is taken from ``topology.relations`` ordered by ``relation_id``
+    (the contract's ordering).  The diff is computed against ``parent_topology``
+    when supplied; otherwise it is derived from the parent record's edge set via
+    :func:`diff_edge_sets`.
+    """
+    created = created_at or datetime.now(UTC)
+    edges = tuple(
+        EdgeView.from_relation(rel)
+        for rel in sorted(topology.relations, key=lambda rel: str(rel.relation_id))
+    )
+    diff: TopologyDiff | None = None
+    if parent is not None:
+        if parent_topology is not None:
+            diff = diff_topologies(parent_topology, topology)
+        else:
+            diff = diff_edge_sets(parent.edge_set(), {edge.id: edge for edge in edges})
+    return TopologyVersionRecord(
+        version_id=version_id_for(int(version_number)),
+        version_number=int(version_number),
+        parent_version_id=None if parent is None else parent.version_id,
+        status=_enum_text(status if status is not None else topology.status),
+        created_at=created,
+        created_by=created_by,
+        summary=summary,
+        change_event_id=change_event_id,
+        rollback_of=rollback_of,
+        edges=edges,
+        diff=diff,
+    )
+
+
+def diff_edge_sets(
+    old: Mapping[str, EdgeView],
+    new: Mapping[str, EdgeView],
+) -> TopologyDiff:
+    """Diff two indexed edge sets by ``edge_id``.
+
+    Used when only the stored edge lists are available (a historical version
+    read back from the payload table), where the endpoints are not re-derivable
+    from a ``Topology`` object.  ``old``/``new`` map ``edge_id -> EdgeView``.
+    """
+    added: list[EdgeView] = []
+    removed: list[EdgeView] = []
+    changed: list[EdgeChange] = []
+    for edge_id in sorted(set(old) | set(new)):
+        before = old.get(edge_id)
+        after = new.get(edge_id)
+        if before is None and after is not None:
+            added.append(after)
+        elif after is None and before is not None:
+            removed.append(before)
+        elif before is not None and after is not None and before.content() != after.content():
+            changed.append(
+                EdgeChange(
+                    edge_id=edge_id,
+                    kind=after.kind,
+                    subject_id=after.subject_id,
+                    object_id=after.object_id,
+                    changed_fields=tuple(
+                        name
+                        for name, left, right in zip(
+                            _RELATION_DIFF_FIELDS,
+                            before.content(),
+                            after.content(),
+                            strict=True,
+                        )
+                        if left != right
+                    ),
+                )
+            )
+    return TopologyDiff(
+        added=tuple(sorted(added, key=lambda e: e.key)),
+        removed=tuple(sorted(removed, key=lambda e: e.key)),
+        changed=tuple(sorted(changed, key=lambda e: (e.kind, e.subject_id, e.object_id))),
+    )
+
+
+def digest_edge_set(relations: Sequence[TopologyRelation]) -> str:
+    """Content digest of an ordered edge set, for cheap equality checks.
+
+    Uses the same comparable content as :func:`diff_topologies`, so two versions
+    with different ``relation_id`` spellings of the same assertions hash equal --
+    which is the point: a re-stamped id is not a topology change.
+    """
+    payload = [
+        [
+            _enum_text(rel.kind),
+            str(rel.subject_id),
+            str(rel.object_id),
+            _enum_text(rel.status),
+            _enum_text(getattr(rel, "lifecycle", EdgeLifecycle.CANDIDATE)),
+            None if rel.confidence is None else round(float(rel.confidence), 6),
+            _stable_json(dict(rel.evidence or {})),
+            bool(rel.requires_confirmation),
+            str(rel.declared_by),
+        ]
+        for rel in sorted(relations, key=lambda rel: (str(rel.relation_id)))
+    ]
+    return hashlib.sha256(_stable_json(payload).encode("utf-8")).hexdigest()
+
+
+def edge_views_from_payload(payload: Mapping[str, Any]) -> dict[str, EdgeView]:
+    """Rebuild the indexed edge set of a stored version payload.
+
+    Accepts either the relation-shaped rows a ``Topology`` payload carries or
+    the ``EdgeView``-shaped rows the version store writes, so both forms read
+    through one path.
+    """
+    out: dict[str, EdgeView] = {}
+    for row in payload.get("relations") or []:
+        relation_id = str(row.get("relation_id") or row.get("edge_id") or "")
+        if not relation_id:
+            continue
+        out[relation_id] = EdgeView(
+            id=relation_id,
+            kind=str(row.get("kind") or ""),
+            subject_id=str(row.get("subject_id") or ""),
+            object_id=str(row.get("object_id") or ""),
+            status=str(row.get("status") or "candidate"),
+            lifecycle=str(row.get("lifecycle") or "candidate"),
+            confidence=(
+                None
+                if row.get("confidence") is None
+                else float(row["confidence"])
+            ),
+            evidence=dict(row.get("evidence") or {}),
+            requires_confirmation=bool(row.get("requires_confirmation", True)),
+            declared_by=str(row.get("declared_by") or "user"),
+        )
+    return out
+
+
+#: Every name this module publicly exports.  ``__all__`` is the module's public
+#: surface, so a name that was exported before this one existed must stay in it:
+#: a ``from ... import *`` or a static check that trusts ``__all__`` must not
+#: silently lose ``Discipline``, ``TopologyGraph`` or ``build_graph``.  The
+#: imported re-exports are listed too, because they are public names of this
+#: module exactly as they were before ``__all__`` was introduced.
+__all__ = [
+    # pre-existing public surface (unchanged by the versioned-edge-set work)
+    "CTChannel",
+    "CTType",
+    "DeviceTopology",
+    "Discipline",
+    "FactorRegistry",
+    "Phase",
+    "Topology",
+    "TopologyGraph",
+    "TopologyStatus",
+    "annotations",
+    "build_graph",
+    "dataclass",
+    "datetime",
+    "field",
+    "scale_reading",
+    # the versioned edge set (spec 04 §11; API contract 09 §7.2/§8.1)
+    "DIFF_ADDED",
+    "DIFF_CHANGED",
+    "DIFF_REMOVED",
+    "EdgeChange",
+    "EdgeView",
+    "TopologyDiff",
+    "TopologyVersionRecord",
+    "diff_edge_sets",
+    "diff_topologies",
+    "digest_edge_set",
+    "edge_views_from_payload",
+    "make_version",
+    "version_id_for",
+]

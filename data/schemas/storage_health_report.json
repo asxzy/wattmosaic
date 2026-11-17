@@ -1,0 +1,90 @@
+{
+  "additionalProperties": false,
+  "description": "Per-tier row counts, timestamp extents, sizes, prune time and queue depth.\n\nThe report is assembled from the existing single SQLite database; it\nproposes no new store and no new service.",
+  "properties": {
+    "generated_at": {
+      "format": "date-time",
+      "title": "Generated At",
+      "type": "string"
+    },
+    "schema_version": {
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "tiers": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Tiers",
+      "type": "array"
+    },
+    "db_size_bytes": {
+      "default": 0,
+      "title": "Db Size Bytes",
+      "type": "integer"
+    },
+    "wal_size_bytes": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Wal Size Bytes"
+    },
+    "last_prune_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Last Prune At"
+    },
+    "pending_queue_depth": {
+      "default": 0,
+      "title": "Pending Queue Depth",
+      "type": "integer"
+    },
+    "queues": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Queues",
+      "type": "array"
+    },
+    "audit_algorithm_version": {
+      "default": "disagg@2.0",
+      "title": "Audit Algorithm Version",
+      "type": "string"
+    },
+    "degraded": {
+      "default": false,
+      "title": "Degraded",
+      "type": "boolean"
+    },
+    "issues": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Issues",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version"
+  ],
+  "title": "StorageHealthReport",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/storage_health_report.json",
+  "x-contract-version": "2.1.0"
+}

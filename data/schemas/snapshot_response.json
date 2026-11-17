@@ -249,6 +249,10 @@
           "$ref": "#/$defs/PowerBehavior",
           "default": "unknown"
         },
+        "load_shape": {
+          "$ref": "#/$defs/LoadShape",
+          "default": "unknown"
+        },
         "tier_reasons": {
           "items": {
             "type": "string"
@@ -263,6 +267,14 @@
         },
         "measurement_basis": {
           "$ref": "#/$defs/MeasurementBasis",
+          "default": "unknown"
+        },
+        "power_state": {
+          "$ref": "#/$defs/PowerState",
+          "default": "unknown"
+        },
+        "power_level": {
+          "$ref": "#/$defs/PowerLevel",
           "default": "unknown"
         },
         "confidence_dimensions": {
@@ -311,6 +323,19 @@
       "title": "InferenceResult",
       "type": "object"
     },
+    "LoadShape": {
+      "description": "The load-shape class -- a separate axis from ``ModelType``.\n\n``ModelType`` names *model implementations* (``BINARY``, ``DIMMABLE``, ...)\nand answers \"what shape is the power law?\".  ``LoadShape`` names *how a\ndevice draws power* and answers \"what is the character of the load?\".\nThe two are not the same axis and neither substitutes for the other; a\ndevice's ``ModelType`` may change as it is learned while its load shape is\na declared property of the appliance (spec ``06-...`` \u00a74.1, ADR-0011's\nfour-axis rule).\n\nThis refines ``OD-45``'s field-only reading (an additive optional\n``power_model_class: str | None``).  A closed ``Enum`` is what makes\n\"never inferred from a device name\" enforceable: a free string cannot be\nvalidated, so a typo or a heuristic could smuggle a class in.  The\ncontract change stays additive and optional -- ``UNKNOWN`` is the neutral\ndefault and no existing field is retyped.\n\nMapping onto the shipped taxonomy (spec ``06-...`` \u00a74.1's table): the six\nclasses are the load-shape view of ``ModelType`` and ``PowerBehavior``.\n\n* ``FIXED``     -- ``ModelType.BINARY`` / ``PowerBehavior.FIXED``\n* ``ADJUSTABLE`` -- ``ModelType.DIMMABLE`` / ``PowerBehavior.VARIABLE``\n* ``DYNAMIC``   -- ``ModelType.VARIABLE_SPEED`` / ``MULTI_STATE`` /\n  ``TIME_VARYING`` / ``PowerBehavior.VARIABLE`` or ``COMPLEX``\n* ``DELAYED``   -- no ``ModelType`` member; a response delay is orthogonal\n  to the power law (``response_delay_s``, ``OD-47``)\n* ``ALWAYS_ON`` -- no ``ModelType`` member; the absence of an OFF state\n  (``always_on``, ``OD-46``)\n* ``UNKNOWN``   -- ``ModelType.RESIDUAL`` / ``PowerBehavior.UNKNOWN``\n\nRule: a load shape is **declared**, never inferred.  No code path derives\nit from a device name, an entity id or any other naming surface.",
+      "enum": [
+        "fixed",
+        "adjustable",
+        "dynamic",
+        "delayed",
+        "always_on",
+        "unknown"
+      ],
+      "title": "LoadShape",
+      "type": "string"
+    },
     "MeasurementBasis": {
       "description": "What produced the watt value, independent of how much we trust it.\n\n``Source`` answers *\"how was the value obtained\"*; this answers *\"what kind\nof instrument produced the watts\"*.  A ``DIRECT_MEASURED`` result can be\n``FACTOR_ADJUSTED``, and a ``MODEL_ESTIMATED`` result can never be\n``CT_MEASURED``.",
       "enum": [
@@ -343,6 +368,29 @@
         "unknown"
       ],
       "title": "PowerBehavior",
+      "type": "string"
+    },
+    "PowerLevel": {
+      "description": "Which of a device's four power levels a published value belongs to.\n\n``06-device-and-load-model-spec.md`` \u00a75.1 names four levels -- standby,\nidle, active, transient -- and ``ExpectedPower`` carries the envelope\n(``standby_w``, ``idle_w``, ``on_w``, ``startup_w`` / ``shutdown_w``).\nThis enum is the label a *published* value carries.\n\nIt is a **different axis** from ``PowerState`` and must never be conflated\nwith it.  ``PowerState`` is a *provenance* label (``measured`` /\n``estimated`` / ``allocated`` / ``unknown``) derived by ``power_state_for``\nfrom ``Source`` and ``MeasurementBasis``; ``PowerLevel`` is the *operating\nlevel* the number sits at.  A value can be both ``measured`` and\n``standby``: the two fields answer different questions and coexist on\n``InferenceResult``.\n\n``UNKNOWN`` is the neutral default, so a payload that does not name a level\nreads as \"not stated\" rather than as a claim.",
+      "enum": [
+        "standby",
+        "idle",
+        "active",
+        "transient",
+        "unknown"
+      ],
+      "title": "PowerLevel",
+      "type": "string"
+    },
+    "PowerState": {
+      "description": "The four-state provenance label of a device power value.\n\nThis is a *different axis* from ``Source`` and ``MeasurementBasis`` and\nmust never be conflated with either.  ``Source`` records **how the value was\nobtained** (measurement hierarchy) and ``MeasurementBasis`` records **what\nkind of instrument produced the watts**; ``PowerState`` records **what kind\nof value it is** to a reader.  ``10-ui-and-user-experience-spec.md`` \u00a77.1's\n``inferred -> ESTIMATED`` entry is the ``STRINGS`` label for the ``Source``\nvalue -- a different axis -- and does not conflict with\n``06-device-and-load-model-spec.md`` \u00a73.3, which is operative here.\n\nExactly one member per value; a result carries no second, prose label.",
+      "enum": [
+        "measured",
+        "estimated",
+        "allocated",
+        "unknown"
+      ],
+      "title": "PowerState",
       "type": "string"
     },
     "QualityStatus": {
@@ -636,5 +684,5 @@
   "title": "SnapshotResponse",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/snapshot_response.json",
-  "x-contract-version": "2.0.0"
+  "x-contract-version": "2.1.0"
 }

@@ -69,6 +69,7 @@ import numpy as np
 
 from wattmosaic_engine.contracts import (
     CTChannel,
+    EdgeLifecycle,
     MeasurementBasis,
     RelationKind,
     TopologyRelation,
@@ -398,6 +399,11 @@ def _construct_rejected(payload: dict[str, Any], evidence: dict[str, Any]) -> To
         subject_id=str(payload.get("subject_id") or ""),
         object_id=str(payload.get("object_id") or ""),
         status=TopologyStatus.REJECTED,
+        # Terminal on the lifecycle axis as well, so a reader that filters on
+        # ``lifecycle`` sees the rejection without re-deriving it from
+        # ``status``.  ``model_construct`` skips validation, but the field is
+        # still set: this is the one producer that must not rely on a default.
+        lifecycle=EdgeLifecycle.REJECTED,
         confidence=None,
         evidence=dict(evidence),
         requires_confirmation=True,
@@ -413,7 +419,11 @@ def _reject(relation: TopologyRelation, evidence: dict[str, Any]) -> TopologyRel
     payload = dict(relation.evidence)
     payload.update(evidence)
     return relation.model_copy(
-        update={"status": TopologyStatus.REJECTED, "evidence": payload}
+        update={
+            "status": TopologyStatus.REJECTED,
+            "lifecycle": EdgeLifecycle.REJECTED,
+            "evidence": payload,
+        }
     )
 
 
@@ -468,8 +478,17 @@ def _declared_pairs(declared: Sequence[Any]) -> set[tuple[str, str]]:
     return pairs
 
 
-def _association_devices(relations: Sequence[Any]) -> dict[str, list[str]]:
-    """Device -> CTs that respond to it, from WP5 association relations only."""
+def _association_devices(
+    relations: Sequence[Any],
+    channels: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, list[str]]:
+    """Device -> CTs that respond to it, from WP5 association relations only.
+
+    ``channels`` resolves alias chains so a device read by two channels that are
+    one conductor contributes **one** reading, not two.  Without it every
+    observation counts, which would let the same device meet the independence
+    bar twice through one wire.
+    """
     by_device: dict[str, list[str]] = {}
     for item in relations:
         payload = _payload(item)
@@ -477,6 +496,8 @@ def _association_devices(relations: Sequence[Any]) -> dict[str, list[str]]:
             continue
         device = str(payload["subject_id"])
         ct_id = str(payload["object_id"])
+        if channels:
+            ct_id = _resolve_alias(ct_id, channels)
         by_device.setdefault(device, [])
         if ct_id not in by_device[device]:
             by_device[device].append(ct_id)
@@ -547,6 +568,9 @@ class HierarchyFinder:
                     subject_id=first,
                     object_id=second,
                     status=TopologyStatus.CANDIDATE,
+                    # An overlap is a proposal about two CTs, never a fact;
+                    # the lifecycle states that independently of ``status``.
+                    lifecycle=EdgeLifecycle.CANDIDATE,
                     evidence={
                         "implies_parenthood": False,
                         "devices": sorted(devices),
@@ -589,7 +613,13 @@ class HierarchyFinder:
         report["algorithm_version"] = self.config.algorithm_version
         self._report = report
 
-        by_device = _association_devices(relations)
+        # The channel map is built *before* the device->CT index so that a
+        # device read by two channels of one conductor (an alias chain) counts
+        # as one electrical contribution, not two.  Channels that carry no
+        # declaration are still admitted from the series below.
+        channel_map = _normalise_channels(channels)
+
+        by_device = _association_devices(relations, channel_map)
         if not by_device:
             report["reason"] = "no_device_evidence"
             report["explanation"] = (
@@ -612,7 +642,6 @@ class HierarchyFinder:
             )
             return []
 
-        channel_map = _normalise_channels(channels)
         for ct_id in series_map:
             channel_map.setdefault(ct_id, {"ct_id": ct_id})
 
@@ -842,6 +871,10 @@ class HierarchyFinder:
             subject_id=geometry.child_ct_id,
             object_id=geometry.parent_ct_id,
             status=TopologyStatus.CANDIDATE,
+            # A containment edge is the strongest claim here, and it is still
+            # only a proposal: the lifecycle says so independently of
+            # ``status``, and only a user may move it to ``CONFIRMED``.
+            lifecycle=EdgeLifecycle.CANDIDATE,
             evidence={
                 "devices": list(devices),
                 "independent_devices": len(devices),

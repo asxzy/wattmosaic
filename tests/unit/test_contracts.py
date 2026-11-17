@@ -12,6 +12,7 @@ import sqlite3
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from pydantic import ValidationError
@@ -24,7 +25,9 @@ from wattmosaic_engine.contracts import (
     CTChannel,
     CTType,
     DeviceConfiguration,
+    DeviceEvent,
     DeviceTopology,
+    EdgeLifecycle,
     EventIsolation,
     HaEntityBinding,
     HaEntityRole,
@@ -63,7 +66,7 @@ def _export_schemas_module():
 
 def test_contract_version_is_2_0_0() -> None:
     """Removing contract enum values is a breaking change, so the major moves."""
-    assert contracts.CONTRACT_VERSION == "2.0.0"
+    assert contracts.CONTRACT_VERSION == "2.1.0"
 
 
 def test_schema_files_match_contract_version() -> None:
@@ -156,6 +159,154 @@ def test_measurement_rejects_non_finite() -> None:
             value=float("inf"),
             state_timestamp=datetime.now(UTC),
         )
+
+
+#: The contract's unit whitelist (spec 03 §1.1).  ``Measurement.unit`` is a
+#: ``Literal``, so this list and the annotation must agree; the test below reads
+#: the annotation rather than restating it, which is what makes the pair a guard.
+MEASUREMENT_UNITS: tuple[str, ...] = ("W", "kW", "kWh", "Wh")
+
+#: Models that carry an electrical observation.  ``CTChannel.nominal_voltage`` is
+#: the one voltage-named field in the contract and is a declared constant, not a
+#: measurement (spec 03 §4.2); see ``DECLARED_CONSTANT_FIELDS``.
+MEASUREMENT_SHAPED_MODELS: tuple[type, ...] = (
+    Measurement,
+    CTChannel,
+    DeviceTopology,
+    InferenceResult,
+    Reconciliation,
+    ResidualPower,
+)
+
+_UNMEASURABLE_FIELD = re.compile(
+    r"(?:^|_)(?:"
+    r"voltage|volt|volts|v|"
+    r"current|current_a|amp|amps|ampere|amperes|ampere_rms|rms_current|a|"
+    r"power_factor|pf|"
+    r"reactive|reactive_power|reactive_var|var|vars|"
+    r"apparent|apparent_power|apparent_va|va|vas|"
+    r"frequency|frequency_hz|freq|hz"
+    r")(?:$|_)",
+    re.IGNORECASE,
+)
+
+
+def _measurement(unit: str) -> Measurement:
+    return Measurement(
+        entity_id="sensor.x",
+        ct_id="c",
+        value=10.0,
+        unit=unit,  # type: ignore[arg-type]
+        state_timestamp=datetime.now(UTC),
+    )
+
+
+def test_measurement_unit_whitelist() -> None:
+    """Only W/kW/kWh/Wh are accepted -- no V, A, PF, VAR, VA or Hz.
+
+    The annotation is read from the model, not restated here: if anyone widens
+    the ``Literal`` (say, to admit a computed amperage) this fails at the
+    whitelist assertion rather than silently following the code.
+    """
+    annotation = Measurement.model_fields["unit"].annotation
+    assert get_args(annotation) == MEASUREMENT_UNITS
+
+    for unit in MEASUREMENT_UNITS:
+        assert _measurement(unit).unit == unit
+
+    for unit in ("V", "A", "var", "Hz"):
+        with pytest.raises(ValidationError):
+            _measurement(unit)
+
+
+#: The single voltage-named contract field.  Spec 03 §4.2/§9 establishes it as a
+#: *declared constant* on a current-only channel, never a measurement of an
+#: instant, so it is explicitly not an unmeasurable-quantity field: the rule is
+#: that such quantities have **no** representation, and this one has exactly one
+#: and it is a rating, not an observation.
+DECLARED_CONSTANT_FIELDS: frozenset[str] = frozenset({"nominal_voltage"})
+
+
+@pytest.mark.parametrize("model", MEASUREMENT_SHAPED_MODELS, ids=lambda m: m.__name__)
+def test_no_unmeasurable_quantity_field(model: type) -> None:
+    """No voltage/current/PF/reactive/apparent/frequency field may appear.
+
+    Reflection over ``model_fields`` is the point: adding such a field later
+    fails here instead of reaching the wire unnoticed (spec 03 §4.3).
+    """
+    offenders = sorted(
+        name
+        for name in model.model_fields
+        if _UNMEASURABLE_FIELD.search(name) and name not in DECLARED_CONSTANT_FIELDS
+    )
+    assert offenders == [], f"{model.__name__} exposes unmeasurable fields: {offenders}"
+    # The allowlist itself must stay honest: a declared constant is only ever a
+    # declared constant, and any widening has to be justified in the spec first.
+    assert set(CTChannel.model_fields) >= DECLARED_CONSTANT_FIELDS
+    assert set(DECLARED_CONSTANT_FIELDS) == {"nominal_voltage"}
+
+
+def test_phase_is_declared_per_reader_and_defaults_to_unknown() -> None:
+    """Phase is a declaration on the reader, never inferred from a reading.
+
+    ``CTChannel.phase`` defaults to ``UNKNOWN`` and no validator fills it from
+    a sample; the coefficient table consumes it as declared.
+    """
+    default_channel = CTChannel(ct_id="c", entity_id="sensor.c")
+    assert Phase(default_channel.phase) is Phase.UNKNOWN
+    assert Phase(DeviceTopology(device_id="d").phase) is Phase.UNKNOWN
+
+    declared = CTChannel(ct_id="c", entity_id="sensor.c", phase=Phase.L1)
+    assert declared.phase == Phase.L1.value
+    assert set(Phase) == {
+        Phase.L1,
+        Phase.L2,
+        Phase.BOTH,
+        Phase.UNKNOWN,
+    }
+
+
+def test_measurement_polarity_applied_once_and_sign_preserved() -> None:
+    """The polarity sign is applied exactly once and never clamped.
+
+    * an inverted reader's negative raw reading is negated once, so a reversed
+      clamp reports its true positive magnitude rather than a second flip;
+    * applying ``effective_power_w`` again does not flip the sign back, because
+      the result is a plain number and the correction lives on the model;
+    * a ``NORMAL``-polarity negative reading stays negative -- reverse flow and
+      a mis-declared polarity are observations, not zero.
+    """
+    inverted = Measurement(
+        entity_id="sensor.x",
+        ct_id="c",
+        value=-350.0,
+        polarization=Polarity.INVERTED,
+        state_timestamp=datetime.now(UTC),
+    )
+    assert inverted.effective_power_w() == 350.0
+    # A second call is idempotent: the correction is one multiplication, so the
+    # sign never flips back on repeated evaluation.
+    assert inverted.effective_power_w() == inverted.effective_power_w()
+    # The inverted declaration applied to a positive reading gives a negative
+    # effective value -- no clamp-to-zero path can produce that.
+    assert (
+        Measurement(
+            entity_id="sensor.x",
+            ct_id="c",
+            value=350.0,
+            polarization=Polarity.INVERTED,
+            state_timestamp=datetime.now(UTC),
+        ).effective_power_w()
+        == -350.0
+    )
+
+    normal_negative = Measurement(
+        entity_id="sensor.x",
+        ct_id="c",
+        value=-420.0,
+        state_timestamp=datetime.now(UTC),
+    )
+    assert normal_negative.effective_power_w() == -420.0
 
 
 def test_confidence_bounds() -> None:
@@ -600,6 +751,8 @@ def test_new_enums_round_trip_through_the_models() -> None:
         subject_id="d1",
         object_id="ct1",
         status=TopologyStatus.CONFIRMED,
+        lifecycle=EdgeLifecycle.CONFIRMED,
+        requires_confirmation=False,
         confidence=0.8,
         declared_by="inference",
     )
@@ -1001,3 +1154,246 @@ def test_a_1_5_0_reconciliation_payload_still_validates() -> None:
     payload = {"main_power_w": 1000.0, "unknown_residual_w": 400.0}
     rec = Reconciliation.model_validate(payload)
     assert rec.residual is None
+
+
+# --------------------------------------------------------------------------- #
+# The 2.1.0 additive change: a payload produced *before* it must still validate
+# --------------------------------------------------------------------------- #
+#
+# The 2.1.0 change added the ten §7 contracts, six enums and no field to any
+# pre-existing model.  "Additive" is only a claim until a payload that predates
+# the change is run through the new models, so the payload below is written
+# against the field set the *2.0.0* contract had: every key it carries is a key
+# ``git show ee85417:engine/wattmosaic_engine/contracts.py`` already declared.
+# Nothing in it is a 2.1.0 addition.
+#
+# The payload is deliberately the *shipped producer's* shape rather than a
+# hand-built minimal one: it is the wire form the engine has always written, so
+# a producer still running the old code produces exactly this.
+
+
+def _pre_change_payload() -> dict:
+    """A 2.0.0-era payload: every key existed in the 2.0.0 contract.
+
+    The shape mirrors ``data/examples/topology.example.json`` -- the example the
+    repository ships for exactly this purpose -- plus the inference and
+    reconciliation rows the engine wrote alongside it.
+    """
+    return {
+        "topology": {
+            "version": 1,
+            "status": "candidate",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "notes": ["written by the 2.0.0 producer"],
+            "channels": [
+                {
+                    "ct_id": "main_l1",
+                    "entity_id": "sensor.ct_panel_a_l1_power",
+                    "name": "Main L1",
+                    "ct_type": "main",
+                    "phase": "l1",
+                    "polarity": "normal",
+                    "enabled": True,
+                    "expected_interval_s": 15.0,
+                    "reliability": 0.95,
+                    "topology_status": "candidate",
+                    "metadata": {},
+                },
+                {
+                    "ct_id": "branch_fridge",
+                    "entity_id": "sensor.ct_fridge_power",
+                    "name": "Fridge",
+                    "ct_type": "branch",
+                    "phase": "l1",
+                    "parent_ct_id": "main_l1",
+                    "polarity": "normal",
+                    "enabled": True,
+                    "topology_status": "candidate",
+                    "metadata": {},
+                },
+            ],
+            "devices": [
+                {
+                    "device_id": "dev_fridge",
+                    "name": "Kitchen Fridge",
+                    "branch_ct_ids": ["branch_fridge"],
+                    "phase": "l1",
+                    "double_pole": False,
+                    "topology_status": "candidate",
+                    "metadata": {},
+                }
+            ],
+        },
+        "measurement": {
+            "entity_id": "sensor.ct_fridge_power",
+            "ct_id": "branch_fridge",
+            "value": 120.0,
+            "unit": "W",
+            "state_timestamp": "2026-01-01T00:00:15+00:00",
+            "quality": "good",
+            "repeated": False,
+            "polarization": "normal",
+            "sequence": 1,
+        },
+        "inference_result": {
+            "device_id": "dev_fridge",
+            "timestamp": "2026-01-01T00:00:30+00:00",
+            "power_w": 118.5,
+            "source": "inferred",
+            "confidence": 0.72,
+            "model_id": "binary_fridge",
+            "model_version": 3,
+            "operating_stage": "running",
+            "stage_status": "identified",
+            "sample_count": 12,
+            "quality_status": "good",
+            "measurement_age_seconds": 15.0,
+            "supporting_ct_channels": ["branch_fridge"],
+            "explanation": ["branch_power_increase"],
+            "provenance": {"window_s": 30},
+        },
+        "reconciliation": {
+            "timestamp": "2026-01-01T00:00:30+00:00",
+            "topology_version": 1,
+            "main_power_w": 1000.0,
+            "l1_power_w": 620.0,
+            "l2_power_w": 380.0,
+            "direct_measured_w": 300.0,
+            "inferred_w": 118.5,
+            "model_estimated_w": 0.0,
+            "configured_prior_w": 0.0,
+            "unknown_residual_w": 581.5,
+            "unmonitored_w": 581.5,
+            "meter_disagreement_w": 0.0,
+            "meter_spread_w": 0.0,
+            "meter_spread_exceeds_residual": False,
+            "reconciliation_error_w": 0.0,
+            "reconciliation_error_ratio": 0.0,
+            "accounted_fraction": 0.4185,
+            "measurement_uncertainty_w": 12.0,
+            "quality_status": "good",
+            "explanation": ["unattributed_load"],
+            "topology_confirmed": False,
+        },
+        "device_event": {
+            "event_id": "e1",
+            "device_id": "dev_fridge",
+            "entity_id": "switch.dev_fridge",
+            "event_type": "state_changed",
+            "previous_state": "off",
+            "new_state": "on",
+            "attributes": {"power_w": 118.5},
+            "occurred_at": "2026-01-01T00:00:10+00:00",
+            "received_at": "2026-01-01T00:00:11+00:00",
+        },
+    }
+
+
+def test_pre_change_payload_still_validates() -> None:
+    """A payload produced before the 2.1.0 change still validates.
+
+    This is the task's central criterion: the contract change is additive, so
+    a producer that has not been upgraded must keep working.  The payload is
+    built from the 2.0.0 field set only and is checked against **five** of the
+    pre-existing models, because "it still validates" proved against one model
+    says nothing about the others.
+    """
+    payload = _pre_change_payload()
+
+    topology = Topology.model_validate(payload["topology"])
+    assert [c.ct_id for c in topology.channels] == ["main_l1", "branch_fridge"]
+    assert topology.channel_map()["branch_fridge"].parent_ct_id == "main_l1"
+    assert topology.device_map()["dev_fridge"].branch_ct_ids == ["branch_fridge"]
+
+    measurement = Measurement.model_validate(payload["measurement"])
+    assert measurement.effective_power_w() == pytest.approx(120.0)
+
+    result = InferenceResult.model_validate(payload["inference_result"])
+    assert result.power_w == pytest.approx(118.5)
+    assert result.source == Source.INFERRED
+
+    reconciliation = Reconciliation.model_validate(payload["reconciliation"])
+    assert reconciliation.main_power_w == pytest.approx(1000.0)
+    assert reconciliation.unknown_residual_w == pytest.approx(581.5)
+
+    event = DeviceEvent.model_validate(payload["device_event"])
+    assert event.new_state == "on"
+
+
+def test_pre_change_payload_gains_no_new_required_field() -> None:
+    """The new models' defaults, not the payload, carry the new information.
+
+    Every field the 2.1.0 change added to a pre-existing model has a neutral
+    default, so a pre-change payload validates *and* the reader learns nothing
+    it did not state.  A field that had been made mandatory would break the
+    first assertion; a field that had been given a non-neutral default would
+    break this one.
+    """
+    payload = _pre_change_payload()
+    topology = Topology.model_validate(payload["topology"])
+    assert topology.circuits == []
+    assert topology.relations == []
+    assert topology.algorithm_version is None
+
+    measurement = Measurement.model_validate(payload["measurement"])
+    assert measurement.measurement_basis == MeasurementBasis.UNKNOWN
+    assert measurement.multiplier_applied == 1.0
+
+    result = InferenceResult.model_validate(payload["inference_result"])
+    assert result.measurement_basis == MeasurementBasis.UNKNOWN
+    assert result.confidence_dimensions is None
+    assert result.algorithm_version is None
+    assert result.record_id is None
+
+    reconciliation = Reconciliation.model_validate(payload["reconciliation"])
+    assert reconciliation.residual is None
+
+
+def test_a_topology_relation_without_lifecycle_still_validates() -> None:
+    """The lifecycle field is additive-and-optional, so 2.0.0 payloads survive.
+
+    ``lifecycle`` was added to ``TopologyRelation`` without bumping
+    ``CONTRACT_VERSION``: it is a second vocabulary from ``status``, not a
+    replacement, and it must have a neutral default.  A payload written before
+    it existed therefore still validates *and* resolves to the proposal state
+    -- never to a confirmation the writer never declared.  This is the property
+    that justifies leaving the version at 2.1.0.
+    """
+    payload = {
+        "relation_id": "r1",
+        "kind": "device_ct_association",
+        "subject_id": "d1",
+        "object_id": "ct1",
+    }
+    relation = TopologyRelation.model_validate(payload)
+    assert relation.lifecycle is EdgeLifecycle.CANDIDATE
+    assert EdgeLifecycle(relation.lifecycle) is not EdgeLifecycle.CONFIRMED
+    assert relation.requires_confirmation is True
+
+
+def test_a_pre_change_payload_that_was_already_invalid_is_still_invalid() -> None:
+    """Additive does not mean lenient.
+
+    The change must not have relaxed a pre-existing rule: a payload the 2.0.0
+    contract rejected -- a retired key, an out-of-range confidence -- must still
+    be rejected, or "additive" would be hiding a silent behaviour change.
+    """
+    payload = _pre_change_payload()
+
+    # A key the 2.0.0 contract retired: it is still forbidden.
+    retired = json.loads(json.dumps(payload["topology"]))
+    retired["devices"][0]["dedicated_ct_ids"] = ["main_l1"]
+    with pytest.raises(ValidationError):
+        Topology.model_validate(retired)
+
+    # A value the 2.0.0 contract bounded: it is still out of range.
+    out_of_range = json.loads(json.dumps(payload["inference_result"]))
+    out_of_range["confidence"] = 1.5
+    with pytest.raises(ValidationError):
+        InferenceResult.model_validate(out_of_range)
+
+    # A key the 2.0.0 contract did not define: it is still forbidden.
+    unknown_key = json.loads(json.dumps(payload["reconciliation"]))
+    unknown_key["not_a_field"] = 1
+    with pytest.raises(ValidationError):
+        Reconciliation.model_validate(unknown_key)
