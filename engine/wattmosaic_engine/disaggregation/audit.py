@@ -147,6 +147,10 @@ class AuditConfig:
     event_max_age_s: float = 1800.0
     min_baseline_samples: int = 3
     min_event_samples: int = 3
+    #: How many persisted residual observations feed the production baseline
+    #: window (oldest-first, last N).  A robust median needs at least 8 samples;
+    #: a shorter window is a configuration error, not a silently weak estimate.
+    residual_window_samples: int = 32
     algorithm_version: str = DEFAULT_ALGORITHM_VERSION
     #: ``device_class label -> timing overrides`` (middle isolation layer).  The
     #: class and per-device layers are what make "one fixed duration is optimal
@@ -184,6 +188,11 @@ class AuditConfig:
             raise ValueError("algorithm_version must not be empty")
         if float(self.event_max_age_s) <= 0.0:
             raise ValueError("event_max_age_s must be positive")
+        if isinstance(self.residual_window_samples, bool) or int(
+            self.residual_window_samples
+        ) < 8:
+            raise ValueError("residual_window_samples must be an integer >= 8")
+        object.__setattr__(self, "residual_window_samples", int(self.residual_window_samples))
         for name, layers in (
             ("isolation_by_class", self.isolation_by_class),
             ("isolation_by_device", self.isolation_by_device),
@@ -248,6 +257,9 @@ class AuditConfig:
             isolation_by_class=layers("isolation_by_class"),
             isolation_by_device=layers("isolation_by_device"),
             isolation_device_classes=classes("isolation_device_classes"),
+            residual_window_samples=int(
+                getattr(settings, "residual_window_samples", 32) or 32
+            ),
             write_isolation=enabled and flag("audit_isolation_enabled", True),
             write_association=enabled and flag("audit_association_enabled", True),
             write_circuits=enabled and flag("audit_circuits_enabled", True),
@@ -701,6 +713,10 @@ class AuditPass:
         #: Per-device inferred-power points, so an event's step can be measured
         #: against the value *at the event* rather than the previous cycle's.
         self._power_history: dict[str, deque[tuple[datetime, float]]] = {}
+        #: Per-channel measured noise floors published on the live window, used
+        #: as optional residual noise metadata.  Empty on a stored-history pass
+        #: or a direct ``_residuals`` call, which keeps the fields honest (None).
+        self._window_noise_floors: Mapping[str, float] = {}
         #: Association evidence, kept across passes so ``min_events`` (>= 2) is
         #: reachable at all.  Indexed by (device, event, CT) so re-observing the
         #: same event cannot count twice.
@@ -1784,6 +1800,11 @@ class AuditPass:
         if not circuits:
             return {}
         analyzer = ResidualAnalyzer(graph)
+        # Read the persisted residual window once per pass (oldest-first).  The
+        # residual_power table has no scope column, so the window is the last N
+        # observations of the install; with no history it stays empty and the
+        # analyzer honestly reports no_window_current_only, never a zero baseline.
+        window_w, window_meta = self._residual_window()
         out: dict[str, ResidualPower] = {}
         for circuit in circuits:
             ct_ids = [str(ct_id) for ct_id in circuit.ct_ids]
@@ -1805,11 +1826,15 @@ class AuditPass:
                 if str(device_id) in circuit.device_ids
                 and _enum_text(result.source) != Source.UNKNOWN.value
             }
+            noise_floor = self._window_noise_floors.get(ct_id)
             scope = ResidualScope(
                 scope_id=f"scope:{circuit.circuit_id}",
                 ct_id=ct_id,
                 basis=basis,
                 device_contributions=contributions,
+                window_w=window_w,
+                noise_floor_w=noise_floor,
+                noise_source="measured_mad" if noise_floor is not None else None,
             )
             try:
                 attempt = analyzer.try_compute(scope, float(reading), now=at)
@@ -1827,6 +1852,14 @@ class AuditPass:
             report.refused.pop(f"residual:{circuit.circuit_id}", None)
         values = [out[key] for key in sorted(out)]
         report.counts["residuals"] = len(values)
+        # Every scope shares one window, so the estimator is the same for all;
+        # publish it from the analyzer's last successful computation.
+        report.stages["residual"] = {
+            **window_meta,
+            "baseline_estimator": (
+                str(analyzer.last_evidence.get("baseline_estimator")) if out else None
+            ),
+        }
         # Recorded on the report, not only counted: the API serves the last
         # pass's residuals and a pass that counted them without keeping them
         # would report "160 residuals" and hand back an empty list.
@@ -2162,7 +2195,70 @@ class AuditPass:
                     except (TypeError, ValueError):
                         continue
         self._readings = readings
+        self._window_noise_floors = self._noise_floors_from_window(window)
         return readings
+
+    @staticmethod
+    def _noise_floors_from_window(window: Any) -> Mapping[str, float]:
+        """Per-channel measured noise floors published on the live window.
+
+        ``main.py`` publishes the quality layer's per-Reader MAD as
+        ``metadata["channel_noise_floor_w"]``.  Absent on a stored-history pass
+        or a hand-built window, this is empty and the residual's noise fields
+        stay ``None`` -- never a fabricated ``0.0``.
+        """
+        metadata = getattr(window, "metadata", None)
+        if not isinstance(metadata, Mapping):
+            return {}
+        raw = metadata.get("channel_noise_floor_w")
+        if not isinstance(raw, Mapping):
+            return {}
+        floors: dict[str, float] = {}
+        for ct_id, value in raw.items():
+            try:
+                floor = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(floor) and floor > 0.0:
+                floors[str(ct_id)] = floor
+        return floors
+
+    def _residual_window(self) -> tuple[tuple[float, ...], dict[str, Any]]:
+        """The last N persisted residual observations, oldest first.
+
+        The audit pass's real handle is ``self.database.residual_history()``;
+        it returns rows **newest first**, so the slice is reversed before it is
+        handed to ``ResidualScope.window_w`` (which is oldest-first).  ``N`` is
+        ``config.residual_window_samples`` (default 32, min 8).
+
+        The ``residual_power`` table has no scope/channel column, so a window
+        cannot be filtered per scope without a schema migration (out of scope);
+        it is the last N residual observations of the install.  A missing handle,
+        a read failure, or fewer than the configured minimum of observations all
+        yield an empty window -- the honest ``no_window_current_only`` state,
+        never a fabricated zero baseline.
+        """
+        database = self.database
+        n = int(self.config.residual_window_samples)
+        if database is None:
+            return (), {"source": "no_database", "samples": 0}
+        history = getattr(database, "residual_history", None)
+        if not callable(history):
+            return (), {"source": "no_history_handle", "samples": 0}
+        try:
+            rows = list(history(limit=n))
+        except Exception as exc:  # noqa: BLE001 - a read failure is not fatal
+            return (), {"source": "read_error", "error": f"{type(exc).__name__}: {exc}", "samples": 0}
+        # ``residual_history`` is newest-first; reverse to oldest-first.
+        values = [
+            float(row["residual_w"])
+            for row in reversed(rows)
+            if _float_or_none(row.get("residual_w")) is not None
+            and math.isfinite(float(row["residual_w"]))
+        ][-n:]
+        if len(values) < 8:
+            return (), {"source": "insufficient_history", "samples": len(values)}
+        return tuple(values), {"source": "persisted_history", "samples": len(values)}
 
 
 @dataclass(frozen=True, slots=True)

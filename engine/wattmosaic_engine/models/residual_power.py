@@ -243,6 +243,17 @@ class ResidualScope:
     unresolved_since: datetime | None = None
     """When this scope's residual was first seen unexplained."""
 
+    noise_w: float | None = None
+    """Observed noise part of the residual (W), when determinable.  ``None`` is
+    honest absence, never a fabricated ``0.0`` (spec ``01-…`` G-01)."""
+
+    noise_floor_w: float | None = None
+    """Measured noise floor the noise part was derived against (W), e.g. the
+    quality layer's per-channel MAD.  ``None`` when no floor was measured."""
+
+    noise_source: str | None = None
+    """How ``noise_w`` was derived (e.g. ``"measured_mad"``).  Free text."""
+
     def __post_init__(self) -> None:
         if not str(self.scope_id).strip():
             raise ValueError("scope_id must be non-empty")
@@ -273,6 +284,17 @@ class ResidualScope:
             self, "conversions", {str(k): float(v) for k, v in self.conversions.items()}
         )
         object.__setattr__(self, "explained_by_device_w", dict(self.explained_by_device_w))
+        # Noise metadata is additive and optional: a stated value is validated
+        # as finite, and an absent one stays ``None`` (never a fabricated 0.0).
+        for name in ("noise_w", "noise_floor_w"):
+            value = getattr(self, name)
+            if value is not None:
+                number = float(value)
+                if not math.isfinite(number):
+                    raise ValueError(f"{name} must be finite")
+                object.__setattr__(self, name, number)
+        if self.noise_source is not None:
+            object.__setattr__(self, "noise_source", str(self.noise_source))
         if self.ct_ids and len(self.ct_ids) != self.multiplicity:
             raise ValueError(
                 "ct_ids must list every raw CT of the scope: "
@@ -446,6 +468,9 @@ class ResidualAnalyzer:
             basis=scope.basis,
             baseline_w=baseline_w,
             dynamic_w=dynamic_w,
+            noise_w=scope.noise_w,
+            noise_floor_w=scope.noise_floor_w,
+            noise_source=scope.noise_source,
         )
         evidence["known_load_w"] = known
         evidence["residual_w"] = residual_w

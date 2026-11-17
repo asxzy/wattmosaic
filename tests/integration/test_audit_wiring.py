@@ -30,8 +30,11 @@ from wattmosaic_engine.contracts import (
     InferenceResult,
     IsolationStatus,
     MeasurementBasis,
+    QualityStatus,
+    ResidualPower,
     Source,
     TopologyRelation,
+    derived_residual_kind,
 )
 from wattmosaic_engine.disaggregation import audit as audit_module
 from wattmosaic_engine.disaggregation.audit import (
@@ -1020,21 +1023,30 @@ def test_every_ref_resolves_when_records_and_verdicts_are_both_written(database)
 # --------------------------------------------------------------------------- #
 # TASK-RESIDUAL-001 -- the production residual path publishes the decomposition
 # --------------------------------------------------------------------------- #
-def test_the_production_residual_carries_the_decomposition() -> None:
-    """The audit pass's residual is a published, decomposed point.
+def test_the_production_residual_carries_the_decomposition(database) -> None:
+    """The audit pass's residual is a real, median-windowed decomposition.
 
-    ``AuditPass._residuals`` builds the ``ResidualScope`` for a single-CT
-    circuit and computes through ``ResidualAnalyzer``, so the residual that
-    reaches storage carries ``baseline_w``/``dynamic_w`` and the identity holds
-    there -- not only in a unit test that builds the scope by hand.
-
-    The production pass supplies no ``window_w`` (``G75``), so the estimator is
-    ``no_window_current_only`` and ``dynamic_w`` is exactly ``0.0``.  That is the
-    honest answer for a pass with no residual history yet: the split is
-    degenerate, not absent, and the identity still holds.
+    ``AuditPass._residuals`` now reads the persisted ``residual_power`` history
+    (oldest-first) into ``ResidualScope.window_w``, so the baseline estimator is
+    ``median_of_window`` and ``dynamic_w`` is non-degenerate -- not the stale
+    ``no_window_current_only`` / ``dynamic_w == 0.0`` pin.  The signed identity
+    still holds, and where no history exists the honest no-window state remains.
     """
     at = dt.datetime(2026, 1, 1, 12, 0, tzinfo=dt.UTC)
-    pass_ = AuditPass(None, config=AuditConfig())
+    # Seed a persisted residual history whose median differs from the current
+    # residual, so a real window produces a non-zero dynamic component.
+    window = [100.0, 110.0, 120.0, 130.0, 140.0, 150.0, 160.0, 170.0, 180.0, 200.0]
+    for index, watts in enumerate(window):
+        residual = ResidualPower(
+            residual_w=watts,
+            kind=derived_residual_kind(watts),
+            quality_status=QualityStatus.GOOD,
+            basis=MeasurementBasis.CT_MEASURED,
+        )
+        database.insert_residual_power(
+            residual, timestamp=at - dt.timedelta(seconds=len(window) - index)
+        )
+    pass_ = AuditPass(database, config=AuditConfig())
 
     class Scope:
         circuit_id = "circuit:one_ct"
@@ -1059,11 +1071,31 @@ def test_the_production_residual_carries_the_decomposition() -> None:
     assert residual.baseline_w + residual.dynamic_w == pytest.approx(
         residual.residual_w, abs=1e-9
     )
-    # No window in the production path today: the split is current-only.
-    assert residual.baseline_w == pytest.approx(residual.residual_w)
-    assert residual.dynamic_w == pytest.approx(0.0, abs=1e-9)
+    # A produced window yields a real median estimator and a non-degenerate
+    # dynamic residual (current 1200 W minus the window median 145 W).
+    assert report.stages["residual"]["source"] == "persisted_history"
+    assert report.stages["residual"]["baseline_estimator"] == "median_of_window"
+    assert residual.baseline_w == pytest.approx(145.0)
+    assert residual.dynamic_w == pytest.approx(residual.residual_w - 145.0)
+    assert residual.dynamic_w != pytest.approx(0.0, abs=1e-9)
     assert residual.resolved is False
     assert residual.unresolved_since == at
+
+    # With no history at all, the honest no-window state is preserved: the
+    # split is current-only, never a fabricated zero baseline.
+    empty_pass = AuditPass(None, config=AuditConfig())
+    empty_report = audit_module.AuditReport(at=at)
+    no_window = empty_pass._residuals(
+        [Scope()],  # type: ignore[list-item]
+        None,
+        audit_module.FactorRegistry(),
+        {},
+        {"ct_l1": 1200.0},
+        at,
+        empty_report,
+    )["circuit:one_ct"]
+    assert no_window.baseline_w == pytest.approx(no_window.residual_w)
+    assert no_window.dynamic_w == pytest.approx(0.0, abs=1e-9)
 
 
 def test_a_negative_production_residual_is_not_clamped() -> None:
