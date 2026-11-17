@@ -664,9 +664,17 @@ def test_16_unidentifiable_concurrent_loads_are_ambiguous_not_fabricated():
     for did in ("d0", "d1"):
         result = batch.get(did)
         assert result.source == Source.UNKNOWN
+        # No member is handed a fabricated watt: the value stays a placeholder.
         assert result.power_w == 0.0
+        assert result.provenance.get("power_w_is_placeholder") is True
         assert "ambiguous_concurrent_events" in result.explanation
         assert result.confidence <= 0.25
+        # A group range is published on every member so a consumer knows the
+        # honest envelope of the sum without a split.  No model/config here, so
+        # only the row's 500 W establishes a cap; the floor is an honest zero.
+        assert result.group_members == ["d0", "d1"]
+        assert result.min_w is not None and result.max_w is not None
+        assert 0.0 <= result.min_w <= result.max_w <= 500.0
     # The 500 W is preserved, not split.
     assert batch.reconciliation.unknown_residual_w == pytest.approx(500.0, abs=1.0)
     assert batch.reconciliation.inferred_w == pytest.approx(0.0)
@@ -1010,6 +1018,65 @@ def test_16c_ambiguous_concurrent_loads_with_models_stay_unknown():
     assert batch.diagnostics["ambiguity"]["ambiguous"] is True
     assert batch.get("d0").source == Source.UNKNOWN
     assert batch.get("d1").source == Source.UNKNOWN
+    assert batch.reconciliation.unknown_residual_w == pytest.approx(500.0, abs=1.0)
+
+
+def test_ambiguous_group_publishes_min_and_max():
+    """Stated model powers give the group a floor; the row gives it a cap.
+
+    Two inseparable devices declare 300 W and 200 W on-power.  The group's
+    honest floor is the larger stated on-power (300 W), not a per-device split,
+    and the cap is bounded by the shared row's measured 500 W.  Both members
+    still carry a 0.0 placeholder watt.
+    """
+    topo = shared_branch_topo(2)
+    win = window(
+        {"main_l1": 500.0, "main_l2": 0.0, "branch_shared": 500.0},
+        previous_states={"d0": "off", "d1": "off"},
+        transitions=[
+            dict(device_id="d0", previous_state="off", new_state="on"),
+            dict(device_id="d1", previous_state="off", new_state="on"),
+        ],
+    )
+    batch = run(
+        topo,
+        win,
+        states("d0", "d1"),
+        registry([model("d0", on_w=300.0), model("d1", on_w=200.0)]),
+    )
+    for did in ("d0", "d1"):
+        result = batch.get(did)
+        assert result.group_members == ["d0", "d1"]
+        assert result.min_w == pytest.approx(300.0)
+        assert result.max_w is not None
+        assert result.min_w <= result.max_w <= 500.0
+        # Still no per-device watt — the range is of the group's sum only.
+        assert result.power_w == 0.0
+        assert result.source == Source.UNKNOWN
+
+
+def test_unknown_slack_is_never_assigned_to_a_device():
+    """Unexplained power on a shared branch must never be credited to a member.
+
+    With one shared row at 500 W and two inseparable devices, the solver's
+    unknown slack absorbs the observation.  Each member's ``power_w`` stays a
+    0.0 placeholder; the 500 W lives only in the reconciliation residual and in
+    the group's published range.
+    """
+    topo = shared_branch_topo(2)
+    win = window(
+        {"main_l1": 500.0, "main_l2": 0.0, "branch_shared": 500.0},
+        previous_states={"d0": "off", "d1": "off"},
+        transitions=[
+            dict(device_id="d0", previous_state="off", new_state="on"),
+            dict(device_id="d1", previous_state="off", new_state="on"),
+        ],
+    )
+    batch = run(topo, win, states("d0", "d1"))
+    total_dev_w = sum(r.power_w for r in batch.results)
+    # Slack power is not distributed: no device carries any of the 500 W.
+    assert total_dev_w == pytest.approx(0.0)
+    assert batch.diagnostics["unknown_slack"]
     assert batch.reconciliation.unknown_residual_w == pytest.approx(500.0, abs=1.0)
 
 

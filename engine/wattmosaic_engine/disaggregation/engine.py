@@ -904,6 +904,30 @@ class DisaggregationEngine:
                 result = self._fallback_result(did, coerced.at, exc)
             results.append(result)
 
+        # Publish the honest range of each inseparable group on its member
+        # results.  This attaches min_w/max_w/group_members only — no member's
+        # power_w is touched, so the unknown/slack stays unattributed.
+        ambiguity = diagnostics["ambiguity"]
+        if ambiguity["ambiguous"]:
+            by_id = {r.device_id: r for r in results}
+            for members in ambiguity["groups"]:
+                min_w, max_w = self._group_bounds(
+                    members,
+                    matrix=matrix,
+                    window=coerced,
+                    models=models_by_device,
+                    states=all_states,
+                    configs=configs,
+                    active_rows=system.get("active_rows", []),
+                )
+                for did in members:
+                    member_result = by_id.get(did)
+                    if member_result is None:
+                        continue
+                    member_result.group_members = sorted(members)
+                    member_result.min_w = min_w
+                    member_result.max_w = max_w
+
         self._bound_configured_priors_by_row(graph, coerced, results, diagnostics)
         reconciliation = self._reconcile(
             graph, coerced, results, matrix, diagnostics
@@ -1594,6 +1618,89 @@ class DisaggregationEngine:
             diagnostics["warnings"].append("ambiguous_concurrent_events")
         _ = graph
         return ambiguous
+
+    @staticmethod
+    def _group_bounds(
+        members: Sequence[str],
+        *,
+        matrix: MeasurementMatrix,
+        window: CoercedWindow,
+        models: Mapping[str, ModelView | None],
+        states: Mapping[str, str | None],
+        configs: Mapping[str, EffectiveConfig],
+        active_rows: Sequence[str],
+    ) -> tuple[float | None, float | None]:
+        """Honest floor and cap of an inseparable group's *sum*.
+
+        An ambiguous group is only observable through the total on its shared
+        attribution row, never through a per-device value.  ``min_w`` is the
+        largest wattage the members' own stated on-power says the group must
+        draw (clamped >= 0; zero when no on-power is stated).  ``max_w`` is that
+        shared row's measured capacity clipped by the members' stated upper
+        bounds.  No per-device watt is computed here: the caller attaches the
+        range to every member, whose ``power_w`` stays a 0.0 placeholder.
+        ``(None, None)`` means no evidence established a meaningful range.
+        """
+        active = set(active_rows)
+        floors: list[float] = []
+        stated_caps: list[float] = []
+        for did in members:
+            view = models.get(did)
+            cfg = configs.get(did)
+            floor = 0.0
+            if view is not None and view.params.on_power_w is not None:
+                floor = max(floor, max(float(view.params.on_power_w), 0.0))
+            if cfg is not None and cfg.expected_on_w is not None:
+                floor = max(floor, max(float(cfg.expected_on_w), 0.0))
+            # A device positively OFF is pinned at zero by an explicit state
+            # constraint, so it cannot raise the group's floor.
+            if _is_off(states.get(did)):
+                floor = 0.0
+            floors.append(floor)
+            cap: float | None = None
+            if view is not None and view.upper_bound_w is not None:
+                cap = max(float(view.upper_bound_w), 0.0)
+            if cfg is not None and cfg.config_ceiling_w is not None:
+                ceiling = max(float(cfg.config_ceiling_w), 0.0)
+                cap = ceiling if cap is None else min(cap, ceiling)
+            if cap is not None:
+                stated_caps.append(cap)
+
+        # Capacity of the tightest active attribution row that sees every member.
+        capacities: list[float] = []
+        for cid in matrix.row_channel_ids:
+            if cid not in active:
+                continue
+            row = matrix.row_index(cid)
+            if row is None:
+                continue
+            cols = [matrix.col_index(did) for did in members]
+            if any(col is None or abs(float(matrix.A[row, col])) <= 0.0 for col in cols):
+                continue
+            reading = window.readings.get(cid)
+            if reading is None:
+                continue
+            value = reading.signed_w()
+            if value is None:
+                continue
+            capacities.append(max(0.0, abs(float(value))))
+
+        upper: list[float] = list(stated_caps)
+        row_capacity = min(capacities) if capacities else None
+        if row_capacity is not None:
+            upper.append(row_capacity)
+        max_w = min(upper) if upper else None
+        min_w = max(floors) if any(f > 0.0 for f in floors) else None
+        if min_w is None and max_w is None:
+            return None, None
+        if min_w is None:
+            min_w = 0.0
+        if max_w is None:
+            max_w = min_w
+        # A stated floor can never exceed the cap; contradictory user evidence
+        # must resolve to the interval, not to an impossible range.
+        max_w = max(max_w, min_w)
+        return round(min_w, 6), round(max_w, 6)
 
     # ------------------------------------------------------------------ #
     # Per-device hierarchy
