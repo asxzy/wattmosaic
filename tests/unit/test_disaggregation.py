@@ -949,6 +949,14 @@ def test_event_history_produces_detected_step():
 
 
 def test_negative_export_is_preserved_in_reconciliation():
+    """A negative main reading is export: the sign survives every step.
+
+    Pinned from the live probe (``main_l1 = -400``): the total, the L1 phase
+    and the residual are all ``-400`` and ``has_export`` is true.  The residual
+    is asserted signed rather than ``abs()``-compared because a clamp anywhere
+    on the path would still produce a *positive* total that looks plausible --
+    it is the sign of the residual that proves no clamp ran.
+    """
     topo = separate_branch_topo()
     win = window(
         {
@@ -960,9 +968,24 @@ def test_negative_export_is_preserved_in_reconciliation():
             "ct_tv": 0.0,
         }
     )
-    batch = run(topo, win, states("lights", "fridge", "washer", "tv", lights="off", fridge="off", washer="off", tv="off"))
-    assert batch.reconciliation.main_power_w == pytest.approx(-400.0)
-    assert "negative_power_export_preserved" in batch.reconciliation.explanation
+    batch = run(
+        topo,
+        win,
+        states("lights", "fridge", "washer", "tv", lights="off", fridge="off", washer="off", tv="off"),
+    )
+    recon = batch.reconciliation
+    assert recon.main_power_w == pytest.approx(-400.0)
+    assert recon.l1_power_w == pytest.approx(-400.0)
+    assert recon.l2_power_w == pytest.approx(0.0)
+    # The residual keeps the sign: nothing on the path clamps a negative to zero.
+    assert recon.unknown_residual_w == pytest.approx(-400.0, abs=0.01)
+    assert recon.unknown_residual_w < 0.0
+    # The main diagnostic itself reports export rather than hiding it.
+    assert batch.diagnostics["main_power"]["has_export"] is True
+    assert "negative_power_export_preserved" in recon.explanation
+    # And the negative reading is never reported as a positive power anywhere.
+    assert recon.main_power_w == -abs(recon.main_power_w)
+    assert all(r.power_w >= 0.0 for r in batch.results)
 
 
 def test_16c_ambiguous_concurrent_loads_with_models_stay_unknown():
@@ -1186,16 +1209,32 @@ def test_a_pair_with_one_stale_leg_is_excluded_entirely():
     )
     batch = run(topo, win, states("tub"))
     excluded = batch.diagnostics["excluded_rows"]
-    assert "ct_tub_l1" in excluded and "ct_tub_l2" in excluded
+    # Both legs, not either: an "or" here would pass on a half-pair.
+    assert "ct_tub_l1" in excluded
+    assert "ct_tub_l2" in excluded
+    # The reason names the missing partner, so an operator can see which leg
+    # was stale -- a silent drop would look like a sensor fault.
     assert excluded["ct_tub_l1"].startswith("partial_leg_measurement")
-    # The live leg must not define the device on its own.
-    assert batch.get("tub").power_w != pytest.approx(1200.0)
-    # Nothing from the pair may be averaged into 600 W either.
-    assert "ct_tub_l1" not in batch.diagnostics["solver"].get("active_rows", []) or True
+    assert "ct_tub_l2" in excluded["ct_tub_l1"]
+    # Neither leg is a live row: a half-pair must not reach the solver.
+    active = batch.diagnostics["active_rows"]
+    assert "ct_tub_l1" not in active
+    assert "ct_tub_l2" not in active
+    # The live leg must not define the device on its own: it is left
+    # unattributed rather than reported as the load.
+    tub = batch.get("tub")
+    assert tub.source == Source.UNKNOWN
+    assert tub.power_w == 0.0
 
 
 def test_a_pair_whose_legs_were_sampled_far_apart_is_excluded():
-    """Two legs polled 90 s apart describe two different instants."""
+    """Two legs polled 90 s apart describe two different instants.
+
+    The pair is atomic: ``ct_tub_l1`` and ``ct_tub_l2`` must *both* be excluded,
+    with a reason that names the skew.  A half-pair is never used, so neither
+    leg may remain an active row and the device must not be attributed a value
+    computed from one leg.
+    """
     topo = _paired_leg_topo()
     win = window(
         {"main_l1": 2600.0, "main_l2": 2400.0, "ct_tub_l1": 1300.0, "ct_tub_l2": 1200.0},
@@ -1204,10 +1243,47 @@ def test_a_pair_whose_legs_were_sampled_far_apart_is_excluded():
     )
     batch = run(topo, win, states("tub"))
     excluded = batch.diagnostics["excluded_rows"]
-    assert "ct_tub_l1" in excluded or "ct_tub_l2" in excluded
-    assert any(
-        str(reason).startswith("leg_skew_exceeded") for reason in excluded.values()
+    # Both legs, not either: an "or" here would pass on a half-pair.
+    assert "ct_tub_l1" in excluded
+    assert "ct_tub_l2" in excluded
+    # The reason names the skew and both legs, so an operator can see which
+    # pair was dropped and why -- a silent drop would look like a sensor fault.
+    reason = excluded["ct_tub_l1"]
+    assert reason.startswith("leg_skew_exceeded")
+    assert "ct_tub_l1" in reason and "ct_tub_l2" in reason
+    assert excluded["ct_tub_l2"] == reason
+    # Neither leg is a live row: a half-pair must not reach the solver.
+    active = batch.diagnostics["active_rows"]
+    assert "ct_tub_l1" not in active
+    assert "ct_tub_l2" not in active
+    # The device is left unattributed, not attributed half of one leg.  The
+    # stale-leg scenario above shows a 1200 W live leg would otherwise solve to
+    # 1200 W; here it must not.
+    tub = batch.get("tub")
+    assert tub.source == Source.UNKNOWN
+    assert tub.power_w == 0.0
+
+
+def test_a_pair_sampled_within_tolerance_is_used():
+    """The inverse: the exclusion must not fire on a healthy pair.
+
+    A suite that only checked exclusion would pass on an implementation that
+    excludes every pair, so this pins that a pair polled within
+    ``max_leg_skew_s`` is used and sums to the full device power.
+    """
+    topo = _paired_leg_topo()
+    win = window(
+        {"main_l1": 1300.0, "main_l2": 1200.0, "ct_tub_l1": 1300.0, "ct_tub_l2": 1200.0},
+        ages={"ct_tub_l1": 1.0, "ct_tub_l2": 5.0},
     )
+    batch = run(topo, win, states("tub"))
+    assert batch.diagnostics["excluded_rows"] == {}
+    active = batch.diagnostics["active_rows"]
+    assert "ct_tub_l1" in active
+    assert "ct_tub_l2" in active
+    # Both legs are used, so the device is the full 2500 W rather than half.
+    assert batch.get("tub").power_w == pytest.approx(2500.0, rel=0.02)
+    assert batch.get("tub").power_w > 2000.0
 
 
 def test_a_fresh_paired_leg_pair_still_solves():

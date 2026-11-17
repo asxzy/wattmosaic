@@ -60,6 +60,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from wattmosaic_engine.contracts import CTChannel, Topology
+
 #: A row must move by at least this multiple of its own quiet-period noise to
 #: count as having responded to a switch.
 MIN_RESPONSE_SIGMAS = 6.0
@@ -249,6 +251,119 @@ class CorrelationReport:
         for candidate in self.candidates:
             out.setdefault(candidate.ct_id, []).append(candidate)
         return out
+
+
+@dataclass(slots=True, frozen=True)
+class ReaderDeclaration:
+    """What one reader declares about itself, and nothing else.
+
+    These are **declared constants**, not measurements: they come from
+    :class:`~wattmosaic_engine.contracts.CTChannel` and are never derived from
+    a sample (``03-measurement-and-electrical-domain.md`` §10.2).  Publishing
+    them together is the point -- a consumer that knows a reader's resolution
+    and reliability can interpret its watts, and one that does not must not
+    pretend to.
+
+    A ``None`` field means the reader never declared that property.  It is
+    reported as absent rather than filled with a default, because a default
+    would be a claim nobody made: ``reliability`` is the one field with a
+    contract default (``1.0``), and it is carried through verbatim.
+    """
+
+    ct_id: str
+    #: Declared resolution in watts, or ``None`` when the reader declares none.
+    resolution_w: float | None
+    #: Declared reliability in ``(0, 1]``, or ``None`` when the reader declares
+    #: none.  The contract default is ``1.0``; the value is carried verbatim and
+    #: never clamped here, because clamping is a decision a consumer makes with
+    #: the declaration in hand, not something to bake into the publication.
+    reliability: float | None
+    #: Declared expected sample interval in seconds, or ``None``.
+    expected_interval_s: float | None
+    #: Declared phase, carried so a consumer can group legs without re-reading
+    #: the topology.  ``UNKNOWN`` is a real declaration, not an absence.
+    phase: str
+    #: Declared polarity; ``INVERTED`` means the reader's raw sign is reversed.
+    polarity: str
+    #: Whether the reader is currently enabled.  A disabled reader publishes no
+    #: declaration at all (see :func:`publish_reader_declarations`), so this is
+    #: always ``True`` for a returned object; it is carried so the record is
+    #: self-describing and so a caller that pre-filters channels itself still
+    #: sees the flag it filtered on.
+    enabled: bool = True
+
+    @property
+    def is_declared(self) -> bool:
+        """True when every one of the three declaration fields is present."""
+        return (
+            self.resolution_w is not None
+            and self.reliability is not None
+            and self.expected_interval_s is not None
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        """JSON-ready form, with ``None`` preserved as ``None``.
+
+        ``None`` is deliberately *not* dropped: an API consumer must be able to
+        distinguish "this reader declares no resolution" from "this field was
+        omitted by an older producer".
+        """
+        return {
+            "ct_id": self.ct_id,
+            "resolution_w": self.resolution_w,
+            "reliability": self.reliability,
+            "expected_interval_s": self.expected_interval_s,
+            "phase": self.phase,
+            "polarity": self.polarity,
+            "enabled": self.enabled,
+        }
+
+
+def publish_reader_declarations(topology: Topology) -> list[ReaderDeclaration]:
+    """One :class:`ReaderDeclaration` per **enabled** reader, in topology order.
+
+    Pure and read-only: it walks ``topology.channels`` and returns a value
+    object per channel, in the order the topology lists them.  Order is
+    deterministic because the topology's channel order is the declared order;
+    no sorting is imposed, so a consumer sees the configuration exactly as it
+    was written.
+
+    A channel that is ``enabled=False`` yields no declaration at all.  This is
+    the same rule the engine uses for rows: a disabled reader is not part of
+    the measurement system, so publishing it would present a reader the engine
+    will not read.
+
+    A channel missing one of the three declared fields is still published, with
+    that field ``None``.  The declaration surface is a *report*; filling in a
+    missing resolution would invent one, and a consumer that cannot tell
+    "declared" from "invented" cannot honour either.
+    """
+    out: list[ReaderDeclaration] = []
+    for channel in topology.channels:
+        if not channel.enabled:
+            continue
+        out.append(_declaration_from_channel(channel))
+    return out
+
+
+def _declaration_from_channel(channel: CTChannel) -> ReaderDeclaration:
+    """Project one ``CTChannel`` onto the declaration surface.
+
+    ``reliability`` has a contract default (``1.0``), so ``getattr`` with a
+    ``None`` default would turn a channel that legitimately carries ``None``
+    into ``1.0``.  Reading the attribute directly keeps an absent declaration
+    absent; the contract default is the topology's business, not this
+    projection's.
+    """
+    return ReaderDeclaration(
+        ct_id=channel.ct_id,
+        resolution_w=channel.resolution_w,
+        reliability=getattr(channel, "reliability", None),
+        expected_interval_s=channel.expected_interval_s,
+        phase=str(channel.phase),
+        polarity=str(channel.polarity),
+        enabled=bool(channel.enabled),
+    )
 
 
 def _state_is_on(state: object) -> bool | None:
@@ -996,9 +1111,11 @@ __all__ = [
     "MIN_RESPONSE_SIGMAS",
     "MIN_RESPONSE_W",
     "MIN_SPECIFICITY_Z",
+    "ReaderDeclaration",
     "correlate",
     "estimate_row_noise",
     "level_from_attributes",
     "observations_from_history",
     "parse_history_payload",
+    "publish_reader_declarations",
 ]

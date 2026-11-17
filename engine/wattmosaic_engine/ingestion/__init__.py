@@ -8,6 +8,7 @@ Public API
 ``compute_backoff``     Jittered exponential reconnect delay.
 """
 
+from .correlation import ReaderDeclaration, publish_reader_declarations
 from .ha_source import (
     BACKOFF_BASE_S,
     BACKOFF_MAX_S,
@@ -30,8 +31,10 @@ __all__ = [
     "ENERGY_UNITS",
     "HASource",
     "POWER_UNITS",
+    "ReaderDeclaration",
     "compute_backoff",
     "entity_allowed",
     "normalize_unit",
     "parse_state_timestamp",
+    "publish_reader_declarations",
 ]
