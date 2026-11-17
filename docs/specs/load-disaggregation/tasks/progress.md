@@ -30,24 +30,24 @@ status column.
 
 | Task ID | Title | Requirement IDs | Wave | Segment | Status | Owner | Last updated | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `TASK-FOUNDATION-001` | Specification status and the additive contract workflow | `REQ-FOUNDATION-001`, `REQ-FOUNDATION-002`, `REQ-FOUNDATION-003` | 0 | 0.1 | `NOT_STARTED` | — | 2026-11-16 | `OD-38` RESOLVED — the specification set is approved; the task still starts `NOT_STARTED` |
-| `TASK-FOUNDATION-002` | Runtime boundary, the four-state label and one owner per wave | `REQ-FOUNDATION-004`, `REQ-FOUNDATION-005`, `REQ-FOUNDATION-006` | 0 | 0.2 | `NOT_STARTED` | — | 2026-11-16 | `OD-38` RESOLVED — the specification set is approved |
-| `TASK-TEST-001` | Unit-rule coverage, regression and negative verification | `REQ-TEST-001`, `REQ-TEST-006`, `REQ-TEST-007` | 0 (continuous) | continuous | `NOT_STARTED` | — | 2026-11-16 | The verification vehicle for every wave |
-| `TASK-MEASURE-001` | Measurable quantities, units, phase and polarity | `REQ-MEASURE-001`, `REQ-MEASURE-002`, `REQ-MEASURE-003`, `REQ-MEASURE-004` | 1 | 1.1 | `NOT_STARTED` | — | 2026-11-16 | — |
-| `TASK-MEASURE-002` | Leg pairs, reverse flow and the reader declaration surface | `REQ-MEASURE-005`, `REQ-MEASURE-006`, `REQ-MEASURE-007` | 1 | 1.2 | `NOT_STARTED` | — | 2026-11-16 | — |
-| `TASK-MEASURE-003` | Timestamps, repeat suppression and cadence derivation | `REQ-MEASURE-008`, `REQ-MEASURE-009`, `REQ-MEASURE-010` | 1 | 1.2 | `NOT_STARTED` | — | 2026-11-16 | — |
-| `TASK-RESIDUAL-001` | Signed residual, decomposition, history and the unresolved state | `REQ-RESIDUAL-001`, `REQ-RESIDUAL-002`, `REQ-RESIDUAL-003`, `REQ-RESIDUAL-004`, `REQ-RESIDUAL-008` | 1 | 1.4 | `NOT_STARTED` | — | 2026-11-16 | — |
-| `TASK-STORAGE-001` | Tier registry, retention and payload encoding | `REQ-STORAGE-001`, `REQ-STORAGE-002`, `REQ-STORAGE-008`, `REQ-STORAGE-009` | 1 | 1.3 | `NOT_STARTED` | — | 2026-11-16 | Carries the `OD-31` assumption |
-| `TASK-TOPOLOGY-001` | Typed edge contract and the lifecycle vocabulary | `REQ-TOPO-001`, `REQ-TOPO-002` | 2 | 2.1 | `NOT_STARTED` | — | 2026-11-16 | — |
-| `TASK-TOPOLOGY-002` | Containment evidence bar, violations and residual awareness | `REQ-TOPO-003`, `REQ-TOPO-004`, `REQ-TOPO-005`, `REQ-TOPO-006`, `REQ-TOPO-007` | 2 | 2.2 | `NOT_STARTED` | — | 2026-11-16 | — |
-| `TASK-TOPOLOGY-003` | Versioned topology, change detection and reconciliation | `REQ-TOPO-008`, `REQ-TOPO-009` | 2 | 2.2 | `NOT_STARTED` | — | 2026-11-16 | — |
-| `TASK-TOPOLOGY-004` | Incomplete topology and the circuit scope | `REQ-TOPO-010`, `REQ-TOPO-011` | 2 | 2.3 | `NOT_STARTED` | — | 2026-11-16 | — |
-| `TASK-EVENT-001` | Event kinds, grouping, lag and window sizing | `REQ-EVENT-001`, `REQ-EVENT-002`, `REQ-EVENT-003`, `REQ-EVENT-004` | 2 | 2.3 | `NOT_STARTED` | — | 2026-11-16 | — |
-| `TASK-EVENT-002` | Cross-reader vector, late data, duplicates and incomplete groups | `REQ-EVENT-005`, `REQ-EVENT-006`, `REQ-EVENT-007`, `REQ-EVENT-008`, `REQ-EVENT-009` | 2 | 2.4 | `NOT_STARTED` | — | 2026-11-16 | — |
-| `TASK-DISAGG-001` | Joint inference, identifiability and group estimates | `REQ-DISAGG-001`, `REQ-DISAGG-002`, `REQ-DISAGG-003`, `REQ-DISAGG-004` | 2 | 2.2 | `NOT_STARTED` | — | 2026-11-16 | — |
-| `TASK-DISAGG-002` | No fabrication, single counting and the balance identity | `REQ-DISAGG-005`, `REQ-DISAGG-006`, `REQ-DISAGG-007` | 2 | 2.4 | `NOT_STARTED` | — | 2026-11-16 | — |
-| `TASK-POWER-001` | Load-shape class and the model-version surface | `REQ-POWER-001`, `REQ-POWER-002`, `REQ-POWER-004`, `REQ-POWER-008` | 2 | 2.2 | `NOT_STARTED` | — | 2026-11-16 | — |
-| `TASK-POWER-002` | Measured-step attribution, non-HA devices, entity separation and declared bounds | `REQ-POWER-003`, `REQ-POWER-005`, `REQ-POWER-006`, `REQ-POWER-007` | 2 | 2.5 | `NOT_STARTED` | — | 2026-11-16 | — |
+| `TASK-FOUNDATION-001` | Specification status and the additive contract workflow | `REQ-FOUNDATION-001`, `REQ-FOUNDATION-002`, `REQ-FOUNDATION-003` | 0 | 0.1 | `VERIFIED` | — | 2026-11-17 | Landed in `bfb9938`: CONTRACT_VERSION 2.0.0→2.1.0, 10 new contracts + 6 enums, schemas regenerated, `spec_status` gate added; tests + no schema drift verified at 4cd3545 |
+| `TASK-FOUNDATION-002` | Runtime boundary, the four-state label and one owner per wave | `REQ-FOUNDATION-004`, `REQ-FOUNDATION-005`, `REQ-FOUNDATION-006` | 0 | 0.2 | `VERIFIED` | — | 2026-11-17 | Landed in `f5889b4`: four-state PowerState label, power_state_for derivation; runtime-boundary tests passed at 4cd3545 |
+| `TASK-TEST-001` | Unit-rule coverage, regression and negative verification | `REQ-TEST-001`, `REQ-TEST-006`, `REQ-TEST-007` | 0 (continuous) | continuous | `IN_PROGRESS` | — | 2026-11-17 | Continuous verification vehicle — no single owning commit; gates ran throughout the implementation phase and final verification at 4cd3545 is green. Kept IN_PROGRESS as an ongoing vehicle. |
+| `TASK-MEASURE-001` | Measurable quantities, units, phase and polarity | `REQ-MEASURE-001`, `REQ-MEASURE-002`, `REQ-MEASURE-003`, `REQ-MEASURE-004` | 1 | 1.1 | `VERIFIED` | — | 2026-11-17 | Landed in `cd71d4e`: unit whitelist, no-unmeasurable-field, phase declaration and polarity tests (behaviour already existed; tests pin it) |
+| `TASK-MEASURE-002` | Leg pairs, reverse flow and the reader declaration surface | `REQ-MEASURE-005`, `REQ-MEASURE-006`, `REQ-MEASURE-007` | 1 | 1.2 | `VERIFIED` | — | 2026-11-17 | Landed in `415ef9e`: leg-pair atomicity tests, publish_reader_declarations helper, reverse-flow sign preserved |
+| `TASK-MEASURE-003` | Timestamps, repeat suppression and cadence derivation | `REQ-MEASURE-008`, `REQ-MEASURE-009`, `REQ-MEASURE-010` | 1 | 1.2 | `VERIFIED` | — | 2026-11-17 | Landed in `76af12d`: resolved cadence with source, static 2 s gate (tools/dev/check_cadence.py), 3 tests; cadence-default ruling recorded in `15c9a3f` (docs) |
+| `TASK-RESIDUAL-001` | Signed residual, decomposition, history and the unresolved state | `REQ-RESIDUAL-001`, `REQ-RESIDUAL-002`, `REQ-RESIDUAL-003`, `REQ-RESIDUAL-004`, `REQ-RESIDUAL-008` | 1 | 1.4 | `VERIFIED` | — | 2026-11-17 | Landed in `14f7b20`: signed-residual, decomposition, unresolved-is-null tests + API route test |
+| `TASK-STORAGE-001` | Tier registry, retention and payload encoding | `REQ-STORAGE-001`, `REQ-STORAGE-002`, `REQ-STORAGE-008`, `REQ-STORAGE-009` | 1 | 1.3 | `VERIFIED` | — | 2026-11-17 | Landed in `31f01b2`: four-tier registry, per-tier retention, additive payload codec, tier-aware prune (carries the `OD-31` assumption) |
+| `TASK-TOPOLOGY-001` | Typed edge contract and the lifecycle vocabulary | `REQ-TOPO-001`, `REQ-TOPO-002` | 2 | 2.1 | `VERIFIED` | — | 2026-11-17 | Landed in `74b686d`: typed edge + explicit lifecycle; TopologyRelation.lifecycle; relation_kind_name |
+| `TASK-TOPOLOGY-002` | Containment evidence bar, violations and residual awareness | `REQ-TOPO-003`, `REQ-TOPO-004`, `REQ-TOPO-005`, `REQ-TOPO-006`, `REQ-TOPO-007` | 2 | 2.2 | `VERIFIED` | — | 2026-11-17 | Landed in `036ffbc`: containment evidence bar, once-only contribution, residual corroborating marker |
+| `TASK-TOPOLOGY-003` | Versioned topology, change detection and reconciliation | `REQ-TOPO-008`, `REQ-TOPO-009` | 2 | 2.2 | `IN_REVIEW` | — | 2026-11-17 | PARTIAL — landed in `4bac434`: versioned topology object + deterministic diff, previous payload byte-identical, records keep version. Automatic change detection/reconciliation and `ConfigurationChangeEvent` storage deferred; do NOT mark VERIFIED. |
+| `TASK-TOPOLOGY-004` | Incomplete topology and the circuit scope | `REQ-TOPO-010`, `REQ-TOPO-011` | 2 | 2.3 | `NOT_STARTED` | — | 2026-11-17 | Not attempted in the implementation phase (no commit) |
+| `TASK-EVENT-001` | Event kinds, grouping, lag and window sizing | `REQ-EVENT-001`, `REQ-EVENT-002`, `REQ-EVENT-003`, `REQ-EVENT-004` | 2 | 2.3 | `VERIFIED` | — | 2026-11-17 | Landed in `8ee3973`: event kinds, grouping, lag_exceeded, cadence-derived window on audit path |
+| `TASK-EVENT-002` | Cross-reader vector, late data, duplicates and incomplete groups | `REQ-EVENT-005`, `REQ-EVENT-006`, `REQ-EVENT-007`, `REQ-EVENT-008`, `REQ-EVENT-009` | 2 | 2.4 | `NOT_STARTED` | — | 2026-11-17 | Not attempted in the implementation phase (no commit) |
+| `TASK-DISAGG-001` | Joint inference, identifiability and group estimates | `REQ-DISAGG-001`, `REQ-DISAGG-002`, `REQ-DISAGG-003`, `REQ-DISAGG-004` | 2 | 2.2 | `FAILED` | — | 2026-11-17 | Attempted and reverted: ambiguous group emitted a fabricated per-device watt (250 W), violating REQ-DISAGG-005. Work in stash@{0}. Requires correct min_w/max_w with no per-device value. |
+| `TASK-DISAGG-002` | No fabrication, single counting and the balance identity | `REQ-DISAGG-005`, `REQ-DISAGG-006`, `REQ-DISAGG-007` | 2 | 2.4 | `NOT_STARTED` | — | 2026-11-17 | Not attempted (no additional work beyond TASK-DISAGG-001, which was reverted) |
+| `TASK-POWER-001` | Load-shape class and the model-version surface | `REQ-POWER-001`, `REQ-POWER-002`, `REQ-POWER-004`, `REQ-POWER-008` | 2 | 2.2 | `VERIFIED` | — | 2026-11-17 | Landed in `8b70933`: LoadShape/PowerLevel enums, DevicePowerProfile, power_level publication, model versions |
+| `TASK-POWER-002` | Measured-step attribution, non-HA devices, entity separation and declared bounds | `REQ-POWER-003`, `REQ-POWER-005`, `REQ-POWER-006`, `REQ-POWER-007` | 2 | 2.5 | `NOT_STARTED` | — | 2026-11-17 | Not attempted in the implementation phase (no commit) |
 | `TASK-RESIDUAL-002` | Drift events, the unknown-residual hand-off and the non-redistribution guard | `REQ-RESIDUAL-005`, `REQ-RESIDUAL-006`, `REQ-RESIDUAL-007` | 3 | 3.2 | `NOT_STARTED` | — | 2026-11-16 | — |
 | `TASK-STORAGE-002` | Evidence immutability, batched writes, indexes and version identifiers | `REQ-STORAGE-003`, `REQ-STORAGE-004`, `REQ-STORAGE-005`, `REQ-STORAGE-006`, `REQ-STORAGE-007` | 3 | 3.1 | `NOT_STARTED` | — | 2026-11-16 | — |
 | `TASK-STORAGE-003` | Recovery, migration safety and replay | `REQ-STORAGE-010`, `REQ-STORAGE-011`, `REQ-STORAGE-012` | 3 | 3.6 | `NOT_STARTED` | — | 2026-11-16 | — |
@@ -84,12 +84,12 @@ runs alongside every wave.
 
 | Wave | Content | `NOT_STARTED` | `READY` | `IN_PROGRESS` | `BLOCKED` | `IN_REVIEW` | `VERIFIED` | `FAILED` | Total |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 0 | Contract and process foundation | 3 | 0 | 0 | 0 | 0 | 0 | 0 | 3 |
-| 1 | Measurement, residual and storage substrate | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 5 |
-| 2 | Topology, events and the disaggregation core | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 10 |
+| 0 | Contract and process foundation | 0 | 0 | 1 | 0 | 0 | 2 | 0 | 3 |
+| 1 | Measurement, residual and storage substrate | 0 | 0 | 0 | 0 | 0 | 5 | 0 | 5 |
+| 2 | Topology, events and the disaggregation core | 4 | 0 | 0 | 0 | 1 | 4 | 1 | 10 |
 | 3 | Analysis, learning, mapping and change | 11 | 0 | 0 | 0 | 0 | 0 | 0 | 11 |
 | 4 | Panel, deployment and the end-to-end harnesses | 7 | 0 | 0 | 0 | 0 | 0 | 0 | 7 |
-| **All** | — | **36** | **0** | **0** | **0** | **0** | **0** | **0** | **36** |
+| **All** | — | **22** | **0** | **1** | **0** | **1** | **11** | **1** | **36** |
 
 **Rule.** The seven status columns sum to the wave total. A row that does not
 balance is an error in this tracker and is corrected in the same change.
@@ -170,6 +170,64 @@ in the same change that updates the plan and this tracker.
 | --- | --- | --- | --- |
 | 2026-11-16 | Tracker created; all 36 tasks set to `NOT_STARTED`; blockers section created and left empty | builder | the plan and the task files were produced in the same change; no implementation has started |
 | 2026-11-16 | Wave and segment labels reconciled with the plan; a `Segment` column added to §1 | builder | 16 task files carried a stale segment label, and a seventeenth (`task-storage-002.md`) named another task's segment in its blocker note; the plan's §2 and §4.3 mapping is authoritative. No task ID, requirement ID, dependency, acceptance criterion, test requirement or status changed. |
+| 2026-11-17 | Task statuses reconciled with the implementation record; §4.2 verification evidence and §4.3 deferred work added | builder | Documentation-only reconciliation after the implementation phase: 11 tasks set to `VERIFIED` with commit evidence, `TASK-TOPOLOGY-003` to `IN_REVIEW` (partial), `TASK-TEST-001` to `IN_PROGRESS` (continuous vehicle), `TASK-DISAGG-001` to `FAILED` (reverted fabrication), and 22 tasks left `NOT_STARTED`. Wave counts and the traceability matrix reconciled in the same change. No task ID, requirement ID or status vocabulary changed. |
+
+---
+
+### 4.2 Verification evidence
+
+Final verification at HEAD `4cd3545` (all green). These are the orchestrator's
+recorded gate results for the implementation phase; the seven results are
+reproduced verbatim.
+
+| Gate | Command | Result |
+| --- | --- | --- |
+| Unit + integration suite | `pytest tests/unit tests/integration -o addopts="" -q` | 2678 passed, 15 skipped |
+| Simulation suite | `pytest tests/simulation -o addopts="" -q` | 122 passed, 9 errors (pre-existing `test_real_topology.py`), 0 failures |
+| Lint | `ruff check engine tools tests` | all checks passed |
+| Type check | `mypy engine/wattmosaic_engine` | 109 errors (baseline) |
+| Schema sync | `export_schemas.py` + `git diff --exit-code data/schemas` | no drift |
+| Secret scan | `check_secrets.py` | clean |
+| Addon validation | `validate_addon.sh --no-build` | 71 passed, 0 failed, 3 skipped |
+
+**Rule.** `VERIFIED` requires an orchestrator-run test log
+(`docs/agent_assignments.md:26-28`); a builder's self-report never sets it.
+The commit SHAs in the Notes column of §1 identify the delivery that landed
+each task; the gate results above are the verification evidence.
+
+### 4.3 Deferred work
+
+The implementation phase ended with the following tasks still `NOT_STARTED`
+(22) or otherwise incomplete (`TASK-TOPOLOGY-003` `IN_REVIEW`,
+`TASK-DISAGG-001` `FAILED`). No code landed for the `NOT_STARTED` tasks; they
+carry no commit evidence and no matrix `PASS`.
+
+| Task | Wave | Blocking reason |
+| --- | --- | --- |
+| `TASK-TOPOLOGY-004` | 2 | Not attempted in the implementation phase |
+| `TASK-EVENT-002` | 2 | Not attempted in the implementation phase |
+| `TASK-DISAGG-002` | 2 | No additional work beyond `TASK-DISAGG-001`, which was reverted |
+| `TASK-POWER-002` | 2 | Not attempted in the implementation phase |
+| `TASK-TOPOLOGY-003` (partial) | 2 | `IN_REVIEW`: version object/diff landed in `4bac434`; automatic change detection/reconciliation and `ConfigurationChangeEvent` storage deferred |
+| `TASK-DISAGG-001` | 2 | `FAILED`: implementation reverted for a fabricated 250 W per-device value; work in `stash@{0}`; requires correct `min_w`/`max_w` with no per-device value |
+| `TASK-RESIDUAL-002` | 3 | Not attempted in the implementation phase |
+| `TASK-STORAGE-002` | 3 | Not attempted in the implementation phase |
+| `TASK-STORAGE-003` | 3 | Not attempted in the implementation phase |
+| `TASK-LEARNING-001` | 3 | Not attempted in the implementation phase |
+| `TASK-LEARNING-002` | 3 | Not attempted in the implementation phase |
+| `TASK-CONFIDENCE-001` | 3 | Not attempted in the implementation phase |
+| `TASK-CONFIDENCE-002` | 3 | Not attempted in the implementation phase |
+| `TASK-MAPPING-001` | 3 | Not attempted in the implementation phase |
+| `TASK-MAPPING-002` | 3 | Not attempted in the implementation phase |
+| `TASK-CHANGE-001` | 3 | Not attempted in the implementation phase |
+| `TASK-CHANGE-002` | 3 | Not attempted in the implementation phase |
+| `TASK-UI-001` | 4 | Not attempted in the implementation phase |
+| `TASK-UI-002` | 4 | Not attempted in the implementation phase |
+| `TASK-UI-003` | 4 | Not attempted in the implementation phase |
+| `TASK-DEPLOY-001` | 4 | Not attempted in the implementation phase |
+| `TASK-DEPLOY-002` | 4 | Not attempted in the implementation phase |
+| `TASK-TEST-002` | 4 | Not attempted in the implementation phase |
+| `TASK-TEST-003` | 4 | Not attempted in the implementation phase |
 
 ---
 

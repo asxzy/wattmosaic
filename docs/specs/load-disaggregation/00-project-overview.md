@@ -3,6 +3,15 @@
 **SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION** — project goals, scope, the interfaces
 that must survive, and the risks the target system carries.
 
+**Implementation status (2026-11-17).** Specification approved; Wave 0 complete;
+Wave 1 complete; Wave 2 partially complete — topology, events, device models,
+residual and storage landed, versioned topology is partial (`IN_REVIEW`), and
+joint inference was reverted (`FAILED`, fabricated per-device watt). Waves 3–4
+not started. Final verification at HEAD `4cd3545` is green (2678 unit+integration
+passing, 122 simulation passed with 9 pre-existing errors, ruff clean, mypy at
+the 109-error baseline, no schema drift, secret scan clean, addon validation
+passing). See `tasks/progress.md` for authoritative per-task status.
+
 ---
 
 ## 1. The problem this specification addresses

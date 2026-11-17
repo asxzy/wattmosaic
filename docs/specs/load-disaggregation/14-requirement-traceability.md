@@ -9,8 +9,16 @@ location, a test and a verification result.
 verification method, and the stable task-ID list that
 `15-implementation-plan.md` reuses.
 
-**What this document is not.** Evidence of completion. Nothing in the target
-system is implemented. Every row's `Verification Result` is `NOT RUN`.
+**Post-implementation status (2026-11-17).** This matrix now records the
+verified outcomes of the implementation phase. Requirements whose task landed
+in a commit and whose named automated vehicle passed at HEAD `4cd3545` carry
+`PASS (orchestrator gate, <commit-sha>)`; requirements in deferred or reverted
+tasks, or whose only vehicle is a manual review, remain `NOT RUN`. See §1 and
+§9 for the current state.
+
+**What this document is not.** Evidence of completion for the tasks that did
+not land. Requirements in deferred, partial or reverted tasks have no commit
+and their `Verification Result` stays `NOT RUN`.
 
 ---
 
@@ -23,8 +31,8 @@ system is implemented. Every row's `Verification Result` is `NOT RUN`.
 | Decision source | [`13-open-decisions-and-assumptions.md`](13-open-decisions-and-assumptions.md) — `OD-01` … `OD-38`, `ASM-01` … `ASM-07` |
 | Requirements traced | 130 of 130 — no requirement appears twice and none is absent |
 | Tasks defined | 36 |
-| Implementation state | none — every task is `NOT_STARTED` |
-| Verification state | none — every row is `NOT RUN` |
+| Implementation state | post-implementation — 11 tasks `VERIFIED`, 1 partial (`TASK-TOPOLOGY-003`, `IN_REVIEW`), 1 reverted (`TASK-DISAGG-001`, `FAILED`), 22 `NOT_STARTED`, 1 continuous (`TASK-TEST-001`, `IN_PROGRESS`) |
+| Verification state | 39 rows `PASS` (orchestrator gate, commit-sha), 91 rows `NOT RUN` (deferred, partial, reverted or manual-only) |
 
 **Rule.** This matrix is a plan. A row is not a claim that anything exists.
 
@@ -123,7 +131,8 @@ the smallest carries two.
 
 ### 4.2 The task list — 36 tasks
 
-Status is `NOT_STARTED` for every task.
+Statuses below are post-implementation (2026-11-17); see `tasks/progress.md`
+for the authoritative per-task status and commit evidence.
 
 | Task ID | Title | Requirements covered | Proposed files/modules | Depends on | Status | Acceptance summary |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -224,11 +233,11 @@ locations are **proposed**; `(new)` marks a module that does not exist yet.
 
 | Requirement | Architecture component | Task ID | Code location | Test ID | Verification result |
 | --- | --- | --- | --- | --- | --- |
-| `REQ-FOUNDATION-001` — The specification set carries one declared status | Specification set — status header | `TASK-FOUNDATION-001` | `docs/specs/load-disaggregation/README.md`; `tools/dev/verify.py` | `GATE-spec_status` (new) | `NOT RUN` |
-| `REQ-FOUNDATION-002` — Contract changes are additive and optional | Contract layer — `contracts.py` | `TASK-FOUNDATION-001` | `engine/wattmosaic_engine/contracts.py`; `data/schemas/` | `UT-contracts::test_pre_change_payload_still_validates` (new) | `NOT RUN` |
-| `REQ-FOUNDATION-003` — The contract change workflow is followed exactly | Contract workflow — schema generator and gate | `TASK-FOUNDATION-001` | `tools/dev/export_schemas.py`; `docs/interface_contracts.md`; `engine/wattmosaic_engine/contracts.py` | `GATE-contract_schema_sync` | `NOT RUN` |
-| `REQ-FOUNDATION-004` — No new runtime dependency, database, service or message bus | Process boundary — engine process and SQLite file | `TASK-FOUNDATION-002` | `pyproject.toml`; `engine/wattmosaic_engine/main.py`; `engine/wattmosaic_engine/storage/database.py` | `UT-app-startup::test_one_process_one_database` (new) | `NOT RUN` |
-| `REQ-FOUNDATION-005` — The four power states are used strictly | Contract layer — `Source` and `MeasurementBasis` | `TASK-FOUNDATION-002` | `engine/wattmosaic_engine/contracts.py`; `engine/wattmosaic_engine/disaggregation/engine.py` | `UT-disaggregation::test_four_state_label_matches_source_and_basis` (new) | `NOT RUN` |
+| `REQ-FOUNDATION-001` — The specification set carries one declared status | Specification set — status header | `TASK-FOUNDATION-001` | `docs/specs/load-disaggregation/README.md`; `tools/dev/verify.py` | `GATE-spec_status` (new) | `PASS (orchestrator gate, bfb9938)` |
+| `REQ-FOUNDATION-002` — Contract changes are additive and optional | Contract layer — `contracts.py` | `TASK-FOUNDATION-001` | `engine/wattmosaic_engine/contracts.py`; `data/schemas/` | `UT-contracts::test_pre_change_payload_still_validates` (new) | `PASS (orchestrator gate, bfb9938)` |
+| `REQ-FOUNDATION-003` — The contract change workflow is followed exactly | Contract workflow — schema generator and gate | `TASK-FOUNDATION-001` | `tools/dev/export_schemas.py`; `docs/interface_contracts.md`; `engine/wattmosaic_engine/contracts.py` | `GATE-contract_schema_sync` | `PASS (orchestrator gate, bfb9938)` |
+| `REQ-FOUNDATION-004` — No new runtime dependency, database, service or message bus | Process boundary — engine process and SQLite file | `TASK-FOUNDATION-002` | `pyproject.toml`; `engine/wattmosaic_engine/main.py`; `engine/wattmosaic_engine/storage/database.py` | `UT-app-startup::test_one_process_one_database` (new) | `PASS (orchestrator gate, f5889b4)` |
+| `REQ-FOUNDATION-005` — The four power states are used strictly | Contract layer — `Source` and `MeasurementBasis` | `TASK-FOUNDATION-002` | `engine/wattmosaic_engine/contracts.py`; `engine/wattmosaic_engine/disaggregation/engine.py` | `UT-disaggregation::test_four_state_label_matches_source_and_basis` (new) | `PASS (orchestrator gate, f5889b4)` |
 | `REQ-FOUNDATION-006` — One file, one owner, per wave | Wave ownership — implementation plan | `TASK-FOUNDATION-002` | `docs/implementation_plan_v2.md`; `docs/specs/load-disaggregation/15-implementation-plan.md` (new — sibling agent) | `MANUAL-wave-ownership-review` | `NOT RUN` |
 
 ### 7.2 Measurement semantics — 10 requirements
@@ -238,16 +247,16 @@ Scenario vehicles: `T13` (leg pairs), `T14` (missing and delayed data),
 
 | Requirement | Architecture component | Task ID | Code location | Test ID | Verification result |
 | --- | --- | --- | --- | --- | --- |
-| `REQ-MEASURE-001` — Only active power and cumulative energy are measurable | Contract layer — `Measurement`, `MeasurementBasis` | `TASK-MEASURE-001` | `engine/wattmosaic_engine/contracts.py`; `engine/wattmosaic_engine/ingestion/normalize.py` | `UT-contracts::test_measurement_unit_whitelist` (new) | `NOT RUN` |
-| `REQ-MEASURE-002` — Unmeasurable electrical quantities are never synthesised | Contract layer — `Measurement` | `TASK-MEASURE-001` | `engine/wattmosaic_engine/contracts.py`; `addon/ui/app.js` | `UT-contracts::test_no_unmeasurable_quantity_field` (new) | `NOT RUN` |
-| `REQ-MEASURE-003` — Phase is a declared property of a reader, never inferred | Electrical — phase coefficients | `TASK-MEASURE-001` | `engine/wattmosaic_engine/contracts.py`; `engine/wattmosaic_engine/electrical/factors.py` | `UT-electrical::test_phase_coefficients_l1_l2_both` | `NOT RUN` |
-| `REQ-MEASURE-004` — Polarity is preserved, signed and never clamped | Ingestion — normalisation and correlation | `TASK-MEASURE-001` | `engine/wattmosaic_engine/ingestion/normalize.py`; `engine/wattmosaic_engine/ingestion/correlation.py` | `T15` · `UT-disaggregation::test_11_reversed_ct_polarity` | `NOT RUN` |
-| `REQ-MEASURE-005` — A leg pair is usable only as a pair | Disaggregation — leg-pair exclusion | `TASK-MEASURE-002` | `engine/wattmosaic_engine/disaggregation/engine.py` | `T13` · `UT-disaggregation::test_a_pair_whose_legs_were_sampled_far_apart_is_excluded` | `NOT RUN` |
-| `REQ-MEASURE-006` — Reverse and bidirectional power flow is preserved | Electrical — `MeasurementMatrix` | `TASK-MEASURE-002` | `engine/wattmosaic_engine/electrical/matrix.py`; `engine/wattmosaic_engine/disaggregation/engine.py` | `T15` · `UT-disaggregation::test_negative_export_is_preserved_in_reconciliation` | `NOT RUN` |
-| `REQ-MEASURE-007` — Resolution, reliability and expected interval travel with the reader | Contract layer — `CTChannel` | `TASK-MEASURE-002` | `engine/wattmosaic_engine/contracts.py`; `engine/wattmosaic_engine/api/server.py` | `UT-correlation::test_reader_declaration_is_published` (new) | `NOT RUN` |
-| `REQ-MEASURE-008` — Three timestamps, one staleness definition | Synchronization — `SampleAligner` | `TASK-MEASURE-003` | `engine/wattmosaic_engine/synchronization/`; `engine/wattmosaic_engine/config/settings.py` | `UT-synchronization::test_window_age_uses_state_timestamp_not_arrival` | `NOT RUN` |
-| `REQ-MEASURE-009` — A repeated value is not new evidence | Ingestion — `HASource` | `TASK-MEASURE-003` | `engine/wattmosaic_engine/ingestion/ha_source.py`; `engine/wattmosaic_engine/storage/database.py` | `UT-event-intake::test_a_repeated_state_is_not_a_transition` | `NOT RUN` |
-| `REQ-MEASURE-010` — Cadence is measured, never assumed at two seconds | Synchronization — `ChannelHealth` | `TASK-MEASURE-003` | `engine/wattmosaic_engine/synchronization/`; `engine/wattmosaic_engine/config/settings.py` | `T14` · `UT-synchronization::test_cadence_is_derived_from_observed_history_not_hardcoded` | `NOT RUN` |
+| `REQ-MEASURE-001` — Only active power and cumulative energy are measurable | Contract layer — `Measurement`, `MeasurementBasis` | `TASK-MEASURE-001` | `engine/wattmosaic_engine/contracts.py`; `engine/wattmosaic_engine/ingestion/normalize.py` | `UT-contracts::test_measurement_unit_whitelist` (new) | `PASS (orchestrator gate, cd71d4e)` |
+| `REQ-MEASURE-002` — Unmeasurable electrical quantities are never synthesised | Contract layer — `Measurement` | `TASK-MEASURE-001` | `engine/wattmosaic_engine/contracts.py`; `addon/ui/app.js` | `UT-contracts::test_no_unmeasurable_quantity_field` (new) | `PASS (orchestrator gate, cd71d4e)` |
+| `REQ-MEASURE-003` — Phase is a declared property of a reader, never inferred | Electrical — phase coefficients | `TASK-MEASURE-001` | `engine/wattmosaic_engine/contracts.py`; `engine/wattmosaic_engine/electrical/factors.py` | `UT-electrical::test_phase_coefficients_l1_l2_both` | `PASS (orchestrator gate, cd71d4e)` |
+| `REQ-MEASURE-004` — Polarity is preserved, signed and never clamped | Ingestion — normalisation and correlation | `TASK-MEASURE-001` | `engine/wattmosaic_engine/ingestion/normalize.py`; `engine/wattmosaic_engine/ingestion/correlation.py` | `T15` · `UT-disaggregation::test_11_reversed_ct_polarity` | `PASS (orchestrator gate, cd71d4e)` |
+| `REQ-MEASURE-005` — A leg pair is usable only as a pair | Disaggregation — leg-pair exclusion | `TASK-MEASURE-002` | `engine/wattmosaic_engine/disaggregation/engine.py` | `T13` · `UT-disaggregation::test_a_pair_whose_legs_were_sampled_far_apart_is_excluded` | `PASS (orchestrator gate, 415ef9e)` |
+| `REQ-MEASURE-006` — Reverse and bidirectional power flow is preserved | Electrical — `MeasurementMatrix` | `TASK-MEASURE-002` | `engine/wattmosaic_engine/electrical/matrix.py`; `engine/wattmosaic_engine/disaggregation/engine.py` | `T15` · `UT-disaggregation::test_negative_export_is_preserved_in_reconciliation` | `PASS (orchestrator gate, 415ef9e)` |
+| `REQ-MEASURE-007` — Resolution, reliability and expected interval travel with the reader | Contract layer — `CTChannel` | `TASK-MEASURE-002` | `engine/wattmosaic_engine/contracts.py`; `engine/wattmosaic_engine/api/server.py` | `UT-correlation::test_reader_declaration_is_published` (new) | `PASS (orchestrator gate, 415ef9e)` |
+| `REQ-MEASURE-008` — Three timestamps, one staleness definition | Synchronization — `SampleAligner` | `TASK-MEASURE-003` | `engine/wattmosaic_engine/synchronization/`; `engine/wattmosaic_engine/config/settings.py` | `UT-synchronization::test_window_age_uses_state_timestamp_not_arrival` | `PASS (orchestrator gate, 76af12d)` |
+| `REQ-MEASURE-009` — A repeated value is not new evidence | Ingestion — `HASource` | `TASK-MEASURE-003` | `engine/wattmosaic_engine/ingestion/ha_source.py`; `engine/wattmosaic_engine/storage/database.py` | `UT-event-intake::test_a_repeated_state_is_not_a_transition` | `PASS (orchestrator gate, 76af12d)` |
+| `REQ-MEASURE-010` — Cadence is measured, never assumed at two seconds | Synchronization — `ChannelHealth` | `TASK-MEASURE-003` | `engine/wattmosaic_engine/synchronization/`; `engine/wattmosaic_engine/config/settings.py` | `T14` · `UT-synchronization::test_cadence_is_derived_from_observed_history_not_hardcoded` | `PASS (orchestrator gate, 76af12d)` |
 
 ### 7.3 Measurement topology — 11 requirements
 
@@ -256,14 +265,14 @@ Scenario vehicles: `T01`, `T02` (containment), `T03` (unobserved parent load),
 
 | Requirement | Architecture component | Task ID | Code location | Test ID | Verification result |
 | --- | --- | --- | --- | --- | --- |
-| `REQ-TOPO-001` — The relationship set is typed and the kinds never imply each other | Contract layer — `TopologyRelation`, `RelationKind` | `TASK-TOPOLOGY-001` | `engine/wattmosaic_engine/contracts.py`; `engine/wattmosaic_engine/disaggregation/association.py` | `T13` · `UT-association::test_relation_kind_is_single_and_typed` (new) | `NOT RUN` |
-| `REQ-TOPO-002` — An edge has a lifecycle, and the lifecycle never implies confirmation | Disaggregation — `AssociationFinder` | `TASK-TOPOLOGY-001` | `engine/wattmosaic_engine/contracts.py`; `engine/wattmosaic_engine/disaggregation/association.py` | `T12` · `UT-association::test_edge_lifecycle_states` (new) | `NOT RUN` |
-| `REQ-TOPO-003` — Parent and child are treated asymmetrically | Electrical — `MeasurementMatrix` | `TASK-TOPOLOGY-002` | `engine/wattmosaic_engine/electrical/matrix.py`; `engine/wattmosaic_engine/disaggregation/engine.py` | `T01`, `T02` · `UT-disaggregation::test_07_nested_branch_ct_does_not_double_count` | `NOT RUN` |
-| `REQ-TOPO-004` — A child-to-parent correlation is containment evidence only when repeated and validated | Electrical — `HierarchyFinder` | `TASK-TOPOLOGY-002` | `engine/wattmosaic_engine/electrical/hierarchy.py` | `T01` · `UT-hierarchy::test_hot_tub_equal_deltas_yield_overlap_only` | `NOT RUN` |
-| `REQ-TOPO-005` — Exact parent–child power conservation is never enforced | Electrical — `HierarchyFinder` | `TASK-TOPOLOGY-002` | `engine/wattmosaic_engine/electrical/hierarchy.py` | `T03` · `UT-hierarchy::test_violation_within_tolerance_is_recorded` (new) | `NOT RUN` |
-| `REQ-TOPO-006` — Edge inference is residual-aware | Electrical — `HierarchyFinder` | `TASK-TOPOLOGY-002` | `engine/wattmosaic_engine/electrical/hierarchy.py`; `engine/wattmosaic_engine/models/residual_power.py` | `T03` · `UT-residual-power::test_residual_only_evidence_does_not_promote` (new) | `NOT RUN` |
-| `REQ-TOPO-007` — Nested children cannot be counted twice | Electrical — `MeasurementMatrix` | `TASK-TOPOLOGY-002` | `engine/wattmosaic_engine/electrical/matrix.py` | `T02`, `T06` · `UT-electrical::test_three_level_nesting_sums_only_the_root` | `NOT RUN` |
-| `REQ-TOPO-008` — Topology is a versioned object with diffing and rollback | Electrical — `TopologyGraph` and the version store | `TASK-TOPOLOGY-003` | `engine/wattmosaic_engine/electrical/topology.py`; `engine/wattmosaic_engine/storage/database.py` | `T11`, `T12` · `UT-topology-persistence::test_topology_version_diff` (new) | `NOT RUN` |
+| `REQ-TOPO-001` — The relationship set is typed and the kinds never imply each other | Contract layer — `TopologyRelation`, `RelationKind` | `TASK-TOPOLOGY-001` | `engine/wattmosaic_engine/contracts.py`; `engine/wattmosaic_engine/disaggregation/association.py` | `T13` · `UT-association::test_relation_kind_is_single_and_typed` (new) | `PASS (orchestrator gate, 74b686d)` |
+| `REQ-TOPO-002` — An edge has a lifecycle, and the lifecycle never implies confirmation | Disaggregation — `AssociationFinder` | `TASK-TOPOLOGY-001` | `engine/wattmosaic_engine/contracts.py`; `engine/wattmosaic_engine/disaggregation/association.py` | `T12` · `UT-association::test_edge_lifecycle_states` (new) | `PASS (orchestrator gate, 74b686d)` |
+| `REQ-TOPO-003` — Parent and child are treated asymmetrically | Electrical — `MeasurementMatrix` | `TASK-TOPOLOGY-002` | `engine/wattmosaic_engine/electrical/matrix.py`; `engine/wattmosaic_engine/disaggregation/engine.py` | `T01`, `T02` · `UT-disaggregation::test_07_nested_branch_ct_does_not_double_count` | `PASS (orchestrator gate, 036ffbc)` |
+| `REQ-TOPO-004` — A child-to-parent correlation is containment evidence only when repeated and validated | Electrical — `HierarchyFinder` | `TASK-TOPOLOGY-002` | `engine/wattmosaic_engine/electrical/hierarchy.py` | `T01` · `UT-hierarchy::test_hot_tub_equal_deltas_yield_overlap_only` | `PASS (orchestrator gate, 036ffbc)` |
+| `REQ-TOPO-005` — Exact parent–child power conservation is never enforced | Electrical — `HierarchyFinder` | `TASK-TOPOLOGY-002` | `engine/wattmosaic_engine/electrical/hierarchy.py` | `T03` · `UT-hierarchy::test_violation_within_tolerance_is_recorded` (new) | `PASS (orchestrator gate, 036ffbc)` |
+| `REQ-TOPO-006` — Edge inference is residual-aware | Electrical — `HierarchyFinder` | `TASK-TOPOLOGY-002` | `engine/wattmosaic_engine/electrical/hierarchy.py`; `engine/wattmosaic_engine/models/residual_power.py` | `T03` · `UT-residual-power::test_residual_only_evidence_does_not_promote` (new) | `PASS (orchestrator gate, 036ffbc)` |
+| `REQ-TOPO-007` — Nested children cannot be counted twice | Electrical — `MeasurementMatrix` | `TASK-TOPOLOGY-002` | `engine/wattmosaic_engine/electrical/matrix.py` | `T02`, `T06` · `UT-electrical::test_three_level_nesting_sums_only_the_root` | `PASS (orchestrator gate, 036ffbc)` |
+| `REQ-TOPO-008` — Topology is a versioned object with diffing and rollback | Electrical — `TopologyGraph` and the version store | `TASK-TOPOLOGY-003` | `engine/wattmosaic_engine/electrical/topology.py`; `engine/wattmosaic_engine/storage/database.py` | `T11`, `T12` · `UT-topology-persistence::test_topology_version_diff` (new) | `PASS (orchestrator gate, 4bac434)` |
 | `REQ-TOPO-009` — Topology change is detected and reconciled | Disaggregation — `AuditPass` | `TASK-TOPOLOGY-003` | `engine/wattmosaic_engine/disaggregation/audit.py`; `engine/wattmosaic_engine/storage/migrations.py` | `T11`, `T12` · `UT-inference-records::test_records_keep_their_topology_version` (new) | `NOT RUN` |
 | `REQ-TOPO-010` — The topology graph may be incomplete | Disaggregation — `CircuitClassifier` | `TASK-TOPOLOGY-004` | `engine/wattmosaic_engine/disaggregation/circuits.py`; `engine/wattmosaic_engine/api/server.py` | `UT-topology-bootstrap::test_incomplete_topology_still_loads` (new) | `NOT RUN` |
 | `REQ-TOPO-011` — A circuit is an electrical scope with its own identity and class | Disaggregation — `CircuitClassifier` | `TASK-TOPOLOGY-004` | `engine/wattmosaic_engine/disaggregation/circuits.py`; `engine/wattmosaic_engine/api/server.py` | `UT-circuits::test_circuit_class_status_and_member_sets` (new) | `NOT RUN` |
@@ -275,14 +284,14 @@ discovery), `T15` (bidirectional power).
 
 | Requirement | Architecture component | Task ID | Code location | Test ID | Verification result |
 | --- | --- | --- | --- | --- | --- |
-| `REQ-RESIDUAL-001` — The signed residual is the only subtraction | Models — `ResidualAnalyzer` | `TASK-RESIDUAL-001` | `engine/wattmosaic_engine/models/residual_power.py` | `T15` · `UT-residual-power::test_signed_residual_is_never_clamped` (new) | `NOT RUN` |
-| `REQ-RESIDUAL-002` — A residual decomposes into baseline, dynamic and noise | Models — `ResidualAnalyzer` | `TASK-RESIDUAL-001` | `engine/wattmosaic_engine/models/residual_power.py` | `T03` · `UT-residual-power::test_baseline_plus_dynamic_equals_residual` (new) | `NOT RUN` |
-| `REQ-RESIDUAL-003` — A residual is first-class data with history | Storage and API — residual read path | `TASK-RESIDUAL-001` | `engine/wattmosaic_engine/storage/database.py`; `engine/wattmosaic_engine/api/server.py`; `engine/wattmosaic_engine/api/facade.py` | `UT-api::test_residual_history_route` (new) | `NOT RUN` |
-| `REQ-RESIDUAL-004` — A residual may have its own operating pattern | Models — `ResidualTrend` | `TASK-RESIDUAL-001` | `engine/wattmosaic_engine/models/residual_power.py` | `T03`, `T10` · `UT-residual-power::test_residual_trend_publishes_its_pattern` (new) | `NOT RUN` |
+| `REQ-RESIDUAL-001` — The signed residual is the only subtraction | Models — `ResidualAnalyzer` | `TASK-RESIDUAL-001` | `engine/wattmosaic_engine/models/residual_power.py` | `T15` · `UT-residual-power::test_signed_residual_is_never_clamped` (new) | `PASS (orchestrator gate, 14f7b20)` |
+| `REQ-RESIDUAL-002` — A residual decomposes into baseline, dynamic and noise | Models — `ResidualAnalyzer` | `TASK-RESIDUAL-001` | `engine/wattmosaic_engine/models/residual_power.py` | `T03` · `UT-residual-power::test_baseline_plus_dynamic_equals_residual` (new) | `PASS (orchestrator gate, 14f7b20)` |
+| `REQ-RESIDUAL-003` — A residual is first-class data with history | Storage and API — residual read path | `TASK-RESIDUAL-001` | `engine/wattmosaic_engine/storage/database.py`; `engine/wattmosaic_engine/api/server.py`; `engine/wattmosaic_engine/api/facade.py` | `UT-api::test_residual_history_route` (new) | `PASS (orchestrator gate, 14f7b20)` |
+| `REQ-RESIDUAL-004` — A residual may have its own operating pattern | Models — `ResidualTrend` | `TASK-RESIDUAL-001` | `engine/wattmosaic_engine/models/residual_power.py` | `T03`, `T10` · `UT-residual-power::test_residual_trend_publishes_its_pattern` (new) | `PASS (orchestrator gate, 14f7b20)` |
 | `REQ-RESIDUAL-005` — Residual drift and change are detected and reported | Models — residual drift detector | `TASK-RESIDUAL-002` | `engine/wattmosaic_engine/models/residual_power.py`; `engine/wattmosaic_engine/disaggregation/events.py` | `UT-residual-power::test_residual_drift_emits_a_named_event` (new) | `NOT RUN` |
 | `REQ-RESIDUAL-006` — An unknown residual event is consumable by the learning system | Disaggregation to learning — unknown-residual event | `TASK-RESIDUAL-002` | `engine/wattmosaic_engine/disaggregation/events.py`; `engine/wattmosaic_engine/learning/pipeline.py` | `T10` · `UT-learning::test_unknown_residual_event_reaches_the_ledger` (new) | `NOT RUN` |
 | `REQ-RESIDUAL-007` — A residual is never redistributed onto devices | Disaggregation — `DisaggregationEngine` | `TASK-RESIDUAL-002` | `engine/wattmosaic_engine/disaggregation/engine.py` | `T04` · `IT-safety-invariants::test_residual_is_never_redistributed` | `NOT RUN` |
-| `REQ-RESIDUAL-008` — An unresolved residual never renders as zero | Models — `ResidualPower` | `TASK-RESIDUAL-001` | `engine/wattmosaic_engine/models/residual_power.py`; `engine/wattmosaic_engine/api/server.py` | `UT-residual-power::test_unresolved_residual_is_none_not_zero` (new) | `NOT RUN` |
+| `REQ-RESIDUAL-008` — An unresolved residual never renders as zero | Models — `ResidualPower` | `TASK-RESIDUAL-001` | `engine/wattmosaic_engine/models/residual_power.py`; `engine/wattmosaic_engine/api/server.py` | `UT-residual-power::test_unresolved_residual_is_none_not_zero` (new) | `PASS (orchestrator gate, 14f7b20)` |
 
 ### 7.5 Disaggregation — 7 requirements
 
@@ -306,14 +315,14 @@ power), `T10` (a device with no HA entity).
 
 | Requirement | Architecture component | Task ID | Code location | Test ID | Verification result |
 | --- | --- | --- | --- | --- | --- |
-| `REQ-POWER-001` — A device's power model has one named class | Contract layer — load-shape class | `TASK-POWER-001` | `engine/wattmosaic_engine/contracts.py`; `engine/wattmosaic_engine/models/registry.py` | `T08` · `UT-device-taxonomy::test_load_shape_class_is_published` (new) | `NOT RUN` |
-| `REQ-POWER-002` — Standby, idle, active and transient power are distinct | Models — device power profile | `TASK-POWER-001` | `engine/wattmosaic_engine/models/device_profile.py` (new); `engine/wattmosaic_engine/learning/pipeline.py` | `T04` · `UT-models::test_binary_model_median_ignores_inrush_outlier` | `NOT RUN` |
+| `REQ-POWER-001` — A device's power model has one named class | Contract layer — load-shape class | `TASK-POWER-001` | `engine/wattmosaic_engine/contracts.py`; `engine/wattmosaic_engine/models/registry.py` | `T08` · `UT-device-taxonomy::test_load_shape_class_is_published` (new) | `PASS (orchestrator gate, 8b70933)` |
+| `REQ-POWER-002` — Standby, idle, active and transient power are distinct | Models — device power profile | `TASK-POWER-001` | `engine/wattmosaic_engine/models/device_profile.py` (new); `engine/wattmosaic_engine/learning/pipeline.py` | `T04` · `UT-models::test_binary_model_median_ignores_inrush_outlier` | `PASS (orchestrator gate, 8b70933)` |
 | `REQ-POWER-003` — State-based models use the measured power difference | Disaggregation — device attachment | `TASK-POWER-002` | `engine/wattmosaic_engine/disaggregation/attachment.py` (new) | `T01` · `UT-disaggregation::test_01_single_device_activation` | `NOT RUN` |
-| `REQ-POWER-004` — An OFF device may still consume standby power | Models — device power profile | `TASK-POWER-001` | `engine/wattmosaic_engine/models/device_profile.py` (new); `engine/wattmosaic_engine/disaggregation/engine.py` | `T04` · `UT-disaggregation::test_17_standby_power_is_preserved` | `NOT RUN` |
+| `REQ-POWER-004` — An OFF device may still consume standby power | Models — device power profile | `TASK-POWER-001` | `engine/wattmosaic_engine/models/device_profile.py` (new); `engine/wattmosaic_engine/disaggregation/engine.py` | `T04` · `UT-disaggregation::test_17_standby_power_is_preserved` | `PASS (orchestrator gate, 8b70933)` |
 | `REQ-POWER-005` — A device with no Home Assistant integration is supported | Contract layer — `HaConnectivity` | `TASK-POWER-002` | `engine/wattmosaic_engine/contracts.py`; `engine/wattmosaic_engine/disaggregation/attachment.py` (new) | `T10` · `UT-device-taxonomy::test_device_without_an_entity_is_first_class` (new) | `NOT RUN` |
 | `REQ-POWER-006` — The five entities are never conflated | Contract layer — `HaEntityRole` | `TASK-POWER-002` | `engine/wattmosaic_engine/contracts.py`; `engine/wattmosaic_engine/api/server.py` | `UT-device-links::test_the_five_identities_stay_separate` (new) | `NOT RUN` |
 | `REQ-POWER-007` — A declared wattage bounds a shared row and is never relaxed | Disaggregation — row budget guard | `TASK-POWER-002` | `engine/wattmosaic_engine/disaggregation/attachment.py` (new); `engine/wattmosaic_engine/disaggregation/engine.py` | `UT-device-attachment::test_configured_priors_cannot_exceed_the_row_they_share` | `NOT RUN` |
-| `REQ-POWER-008` — Model versions are kept, promoted and reversible | Models — `DeviceModelVersion` and the registry | `TASK-POWER-001` | `engine/wattmosaic_engine/contracts.py`; `engine/wattmosaic_engine/models/registry.py`; `engine/wattmosaic_engine/storage/database.py` | `UT-models::test_registry_round_trips_persisted_model_and_estimates` | `NOT RUN` |
+| `REQ-POWER-008` — Model versions are kept, promoted and reversible | Models — `DeviceModelVersion` and the registry | `TASK-POWER-001` | `engine/wattmosaic_engine/contracts.py`; `engine/wattmosaic_engine/models/registry.py`; `engine/wattmosaic_engine/storage/database.py` | `UT-models::test_registry_round_trips_persisted_model_and_estimates` | `PASS (orchestrator gate, 8b70933)` |
 
 ### 7.7 Storage and lifecycle — 12 requirements
 
@@ -322,14 +331,14 @@ intact), `T12` (replay across a reader replacement).
 
 | Requirement | Architecture component | Task ID | Code location | Test ID | Verification result |
 | --- | --- | --- | --- | --- | --- |
-| `REQ-STORAGE-001` — Every persisted artefact belongs to a named tier | Storage — tier registry | `TASK-STORAGE-001` | `engine/wattmosaic_engine/storage/tiers.py` (new); `engine/wattmosaic_engine/storage/database.py` | `UT-storage-config::test_every_table_is_classified` (new) | `NOT RUN` |
-| `REQ-STORAGE-002` — Retention is configurable per tier and defaults are stated | Storage and config — retention | `TASK-STORAGE-001` | `engine/wattmosaic_engine/config/settings.py`; `engine/wattmosaic_engine/storage/tiers.py` (new); `addon/run.sh` | `UT-storage-config::test_raw_retention_range_is_enforced` (new) | `NOT RUN` |
+| `REQ-STORAGE-001` — Every persisted artefact belongs to a named tier | Storage — tier registry | `TASK-STORAGE-001` | `engine/wattmosaic_engine/storage/tiers.py` (new); `engine/wattmosaic_engine/storage/database.py` | `UT-storage-config::test_every_table_is_classified` (new) | `PASS (orchestrator gate, 31f01b2)` |
+| `REQ-STORAGE-002` — Retention is configurable per tier and defaults are stated | Storage and config — retention | `TASK-STORAGE-001` | `engine/wattmosaic_engine/config/settings.py`; `engine/wattmosaic_engine/storage/tiers.py` (new); `addon/run.sh` | `UT-storage-config::test_raw_retention_range_is_enforced` (new) | `PASS (orchestrator gate, 31f01b2)` |
 | `REQ-STORAGE-003` — Event evidence is immutable | Storage — append-only evidence | `TASK-STORAGE-002` | `engine/wattmosaic_engine/storage/database.py`; `engine/wattmosaic_engine/storage/migrations.py` | `UT-inference-records::test_evidence_rows_are_append_only` (new) | `NOT RUN` |
 | `REQ-STORAGE-004` — Writes are batched | Storage — writer loop | `TASK-STORAGE-002` | `engine/wattmosaic_engine/storage/database.py`; `engine/wattmosaic_engine/main.py` | `UT-health-probe-cost::test_flush_batches_one_transaction_per_table` (new) | `NOT RUN` |
 | `REQ-STORAGE-005` — A new model or topology version never deletes historical evidence | Storage — `AUDIT_TABLES` exemption | `TASK-STORAGE-002` | `engine/wattmosaic_engine/storage/database.py`; `engine/wattmosaic_engine/storage/migrations.py` | `T10` · `UT-storage-config::test_audit_tables_are_exempt_from_prune` (new) | `NOT RUN` |
 | `REQ-STORAGE-006` — Time and entity access paths are indexed | Storage — migrations | `TASK-STORAGE-002` | `engine/wattmosaic_engine/storage/migrations.py` | `UT-storage-config::test_query_plan_uses_an_index` (new) | `NOT RUN` |
 | `REQ-STORAGE-007` — Records carry the versions that produced them | Storage — record columns | `TASK-STORAGE-002` | `engine/wattmosaic_engine/storage/migrations.py`; `engine/wattmosaic_engine/contracts.py` | `UT-inference-records::test_record_carries_all_four_versions` (new) | `NOT RUN` |
-| `REQ-STORAGE-008` — Payloads are compressed where it pays | Storage — payload encoding | `TASK-STORAGE-001` | `engine/wattmosaic_engine/storage/database.py`; `engine/wattmosaic_engine/storage/migrations.py` | `UT-storage-config::test_payload_round_trip_across_encodings` (new) | `NOT RUN` |
+| `REQ-STORAGE-008` — Payloads are compressed where it pays | Storage — payload encoding | `TASK-STORAGE-001` | `engine/wattmosaic_engine/storage/database.py`; `engine/wattmosaic_engine/storage/migrations.py` | `UT-storage-config::test_payload_round_trip_across_encodings` (new) | `PASS (orchestrator gate, 31f01b2)` |
 | `REQ-STORAGE-009` — Partitioning is used only where it is justified | Storage — partition decision | `TASK-STORAGE-001` | `engine/wattmosaic_engine/storage/tiers.py` (new); `docs/specs/load-disaggregation/12-deployment-and-rollback.md` | `MANUAL-partitioning-decision-review` | `NOT RUN` |
 | `REQ-STORAGE-010` — The engine recovers after a restart | Process lifecycle — startup | `TASK-STORAGE-003` | `engine/wattmosaic_engine/main.py`; `engine/wattmosaic_engine/storage/database.py` | `E2E-storage::test_restart_preserves_every_record_count` (new) | `NOT RUN` |
 | `REQ-STORAGE-011` — Migrations are forward-only, additive and idempotent | Storage — `MIGRATIONS` | `TASK-STORAGE-003` | `engine/wattmosaic_engine/storage/migrations.py` | `UT-migrations::test_migrations_are_idempotent` (new) | `NOT RUN` |
@@ -343,10 +352,10 @@ automation), `T09` (delayed response), `T10` (the unknown-residual kind),
 
 | Requirement | Architecture component | Task ID | Code location | Test ID | Verification result |
 | --- | --- | --- | --- | --- | --- |
-| `REQ-EVENT-001` — Every event is one of three kinds | Contract layer — `DeviceEvent` | `TASK-EVENT-001` | `engine/wattmosaic_engine/contracts.py`; `engine/wattmosaic_engine/disaggregation/events.py` | `T10` · `E2E-event-intake::test_every_event_names_its_kind` (new) | `NOT RUN` |
-| `REQ-EVENT-002` — An automation that changes several devices produces one group | Disaggregation — `EventIsolator` | `TASK-EVENT-001` | `engine/wattmosaic_engine/disaggregation/isolation.py`; `engine/wattmosaic_engine/disaggregation/events.py` | `T06` · `UT-correlation::test_fixtures_switched_by_one_scene_are_withheld_not_counted_twice` | `NOT RUN` |
-| `REQ-EVENT-003` — A device's response delay is measured, not assumed | Disaggregation — `AssociationFinder` | `TASK-EVENT-001` | `engine/wattmosaic_engine/disaggregation/association.py`; `engine/wattmosaic_engine/disaggregation/isolation.py` | `T09` · `UT-state-lag::test_response_beyond_max_lag_is_withheld` (new) | `NOT RUN` |
-| `REQ-EVENT-004` — Event windows are sized from the observed cadence | Disaggregation — `IsolationConfig` | `TASK-EVENT-001` | `engine/wattmosaic_engine/disaggregation/configuration.py`; `engine/wattmosaic_engine/disaggregation/isolation.py` | `UT-event-isolation::test_resolved_window_publishes_its_source` (new) | `NOT RUN` |
+| `REQ-EVENT-001` — Every event is one of three kinds | Contract layer — `DeviceEvent` | `TASK-EVENT-001` | `engine/wattmosaic_engine/contracts.py`; `engine/wattmosaic_engine/disaggregation/events.py` | `T10` · `E2E-event-intake::test_every_event_names_its_kind` (new) | `PASS (orchestrator gate, 8ee3973)` |
+| `REQ-EVENT-002` — An automation that changes several devices produces one group | Disaggregation — `EventIsolator` | `TASK-EVENT-001` | `engine/wattmosaic_engine/disaggregation/isolation.py`; `engine/wattmosaic_engine/disaggregation/events.py` | `T06` · `UT-correlation::test_fixtures_switched_by_one_scene_are_withheld_not_counted_twice` | `PASS (orchestrator gate, 8ee3973)` |
+| `REQ-EVENT-003` — A device's response delay is measured, not assumed | Disaggregation — `AssociationFinder` | `TASK-EVENT-001` | `engine/wattmosaic_engine/disaggregation/association.py`; `engine/wattmosaic_engine/disaggregation/isolation.py` | `T09` · `UT-state-lag::test_response_beyond_max_lag_is_withheld` (new) | `PASS (orchestrator gate, 8ee3973)` |
+| `REQ-EVENT-004` — Event windows are sized from the observed cadence | Disaggregation — `IsolationConfig` | `TASK-EVENT-001` | `engine/wattmosaic_engine/disaggregation/configuration.py`; `engine/wattmosaic_engine/disaggregation/isolation.py` | `UT-event-isolation::test_resolved_window_publishes_its_source` (new) | `PASS (orchestrator gate, 8ee3973)` |
 | `REQ-EVENT-005` — An event records its effect on every reader that saw it | Disaggregation — `EventIsolation` vector | `TASK-EVENT-002` | `engine/wattmosaic_engine/disaggregation/isolation.py`; `engine/wattmosaic_engine/ingestion/correlation.py` | `T01`, `T02` · `UT-correlation::test_event_publishes_its_cross_reader_vector` (new) | `NOT RUN` |
 | `REQ-EVENT-006` — Late-arriving data is classified, not dropped silently | Synchronization — out-of-order handling | `TASK-EVENT-002` | `engine/wattmosaic_engine/synchronization/`; `engine/wattmosaic_engine/disaggregation/isolation.py` | `T14` · `UT-synchronization::test_out_of_order_sampling_stays_ordered` | `NOT RUN` |
 | `REQ-EVENT-007` — A duplicate event is recognised and counted once | Ingestion and storage — event identity | `TASK-EVENT-002` | `engine/wattmosaic_engine/ingestion/ha_source.py`; `engine/wattmosaic_engine/storage/database.py` | `T12` · `E2E-event-intake::test_duplicate_event_is_counted_once` (new) | `NOT RUN` |
@@ -500,6 +509,29 @@ owner.
 
 **None.** All 130 requirements are traced to an owner and a verification
 method. No mapping has been invented and no requirement has been dropped.
+
+### 9.1a Deferred, partial and reverted work (post-implementation)
+
+The implementation phase ended with several tasks incomplete. Their rows in
+§7 stay `NOT RUN`: there is no commit and no orchestrator vehicle log for
+them. This is an honest record, not an oversight.
+
+| Task(s) | Status | Requirements that stay `NOT RUN` | Reason |
+| --- | --- | --- | --- |
+| `TASK-TOPOLOGY-003` (partial) | `IN_REVIEW` | `REQ-TOPO-009` | Version object and diff landed in `4bac434` (`REQ-TOPO-008` is `PASS`); automatic change detection/reconciliation and `ConfigurationChangeEvent` storage deferred |
+| `TASK-DISAGG-001` | `FAILED` | `REQ-DISAGG-001` … `REQ-DISAGG-004` | Implementation reverted: ambiguous group emitted a fabricated 250 W per-device value, violating REQ-DISAGG-005; work in `stash@{0}` |
+| `TASK-DISAGG-002` | `NOT_STARTED` | `REQ-DISAGG-005` … `REQ-DISAGG-007` | No additional work beyond `TASK-DISAGG-001`, which was reverted; no DISAGG requirement is marked `PASS` |
+| `TASK-TOPOLOGY-004` | `NOT_STARTED` | `REQ-TOPO-010`, `REQ-TOPO-011` | Deferred in the implementation phase (no commit) |
+| `TASK-EVENT-002` | `NOT_STARTED` | `REQ-EVENT-005` … `REQ-EVENT-009` | Deferred in the implementation phase (no commit) |
+| `TASK-POWER-002` | `NOT_STARTED` | `REQ-POWER-003`, `REQ-POWER-005` … `REQ-POWER-007` | Deferred in the implementation phase (no commit) |
+| Wave 3 (`TASK-RESIDUAL-002`, `TASK-STORAGE-002`/`003`, `TASK-LEARNING-001`/`002`, `TASK-CONFIDENCE-001`/`002`, `TASK-MAPPING-001`/`002`, `TASK-CHANGE-001`/`002`) | `NOT_STARTED` | `REQ-RESIDUAL-005` … `007`, `REQ-STORAGE-003` … `007`, `010` … `012`, `REQ-LEARNING-001` … `007`, `REQ-CONFIDENCE-001` … `007`, `REQ-MAPPING-001` … `007`, `REQ-CHANGE-001` … `007` | Deferred in the implementation phase (no commits) |
+| Wave 4 (`TASK-UI-001` … `003`, `TASK-DEPLOY-001`/`002`, `TASK-TEST-002`/`003`) | `NOT_STARTED` | `REQ-UI-001` … `013`, `REQ-DEPLOY-001` … `008`, `REQ-TEST-002` … `005`, `008` … `010` | Deferred in the implementation phase (no commits) |
+
+**Manual-only vehicles.** `REQ-FOUNDATION-006`, `REQ-STORAGE-009`,
+`REQ-DEPLOY-005`, `REQ-DEPLOY-007` and `REQ-TEST-001` remain `NOT RUN` because
+their named vehicle is a manual review or process artefact, not an
+orchestrator-run automated gate — even where the owning task otherwise
+landed. They are detailed in §9.2.
 
 ### 9.2 Weak verification — manual-only vehicles
 
