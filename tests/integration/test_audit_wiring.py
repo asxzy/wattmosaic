@@ -1125,3 +1125,130 @@ def test_a_negative_production_residual_is_not_clamped() -> None:
     assert residual.baseline_w == pytest.approx(-700.0)
     assert residual.dynamic_w == pytest.approx(0.0, abs=1e-9)
     assert residual.baseline_w + residual.dynamic_w == pytest.approx(-700.0)
+
+
+# --------------------------------------------------------------------------- #
+# TASK-RESIDUAL-004b -- residual verification on the production audit path
+# --------------------------------------------------------------------------- #
+def test_production_short_term_noise_is_reported(database) -> None:
+    """The audit pass carries the quality layer's per-channel MAD onto the residual.
+
+    Scenario (short-term noise) on the real path: ``main.py`` publishes
+    ``channel_noise_floor_w`` on the live window; ``observe_readings`` captures it
+    and ``_residuals`` passes it into the scope as ``noise_floor_w`` with source
+    ``measured_mad``.  The published residual must report that noise as a stated
+    value, never a fabricated ``0.0``; with no floor on the window the fields
+    stay honestly ``None``.
+    """
+    at = dt.datetime(2026, 1, 1, 12, 0, tzinfo=dt.UTC)
+
+    class Scope:
+        circuit_id = "circuit:one_ct"
+        ct_ids = ("ct_l1",)
+        device_ids = ()
+
+    class NoiseWindow:
+        """A live window carrying the measured per-channel noise floor."""
+
+        metadata = {"channel_noise_floor_w": {"ct_l1": 0.5}}
+
+    pass_ = AuditPass(database, config=AuditConfig())
+    pass_.observe_readings(NoiseWindow())
+    assert pass_._window_noise_floors.get("ct_l1") == pytest.approx(0.5)
+    # Seed a persisted window so the residual has a real median baseline.
+    window = [100.0, 110.0, 120.0, 130.0, 140.0, 150.0, 160.0, 170.0]
+    for index, watts in enumerate(window):
+        database.insert_residual_power(
+            ResidualPower(
+                residual_w=watts,
+                kind=derived_residual_kind(watts),
+                quality_status=QualityStatus.GOOD,
+                basis=MeasurementBasis.CT_MEASURED,
+            ),
+            timestamp=at - dt.timedelta(seconds=len(window) - index),
+        )
+    report = audit_module.AuditReport(at=at)
+    residual = pass_._residuals(
+        [Scope()],  # type: ignore[list-item]
+        None,
+        audit_module.FactorRegistry(),
+        {},
+        {"ct_l1": 300.0},
+        at,
+        report,
+    )["circuit:one_ct"]
+
+    # Decomposition is intact and the noise component is reported, not zeroed.
+    assert residual.baseline_w == pytest.approx(135.0)  # median of the window
+    assert residual.dynamic_w == pytest.approx(residual.residual_w - 135.0)
+    assert residual.noise_floor_w == pytest.approx(0.5)
+    assert residual.noise_source == "measured_mad"
+    # noise_w is honest absence on the production path (only the measured floor
+    # and its source are published); it is never a fabricated 0.0.
+    assert residual.noise_w is None
+    assert residual.baseline_w + residual.dynamic_w == pytest.approx(
+        residual.residual_w, abs=1e-9
+    )
+
+    # A hand-built window with no floor keeps the fields as None, never 0.0.
+    bare = AuditPass(None, config=AuditConfig())
+    bare.observe_readings(SimpleWindow(at=at, values={"ct_l1": 300.0}))
+    bare_report = audit_module.AuditReport(at=at)
+    no_noise = bare._residuals(
+        [Scope()],  # type: ignore[list-item]
+        None,
+        audit_module.FactorRegistry(),
+        {},
+        {"ct_l1": 300.0},
+        at,
+        bare_report,
+    )["circuit:one_ct"]
+    assert no_noise.noise_floor_w is None
+    assert no_noise.noise_source is None
+    assert no_noise.noise_w is None
+
+
+def test_production_missing_reader_is_no_window_not_zero() -> None:
+    """A scope with no current reading is refused, never computed as zero.
+
+    Scenario (missing reader data) on the real path: this extends the existing
+    ``REFUSED_NO_READING`` pin by asserting the *decomposition fields* of the
+    neighbour that IS computed with no history -- its estimator is
+    ``no_window_current_only`` with a non-zero current-only baseline, so a
+    missing reader can never be confused with a measured zero residual.
+    """
+    at = dt.datetime(2026, 1, 1, 12, 0, tzinfo=dt.UTC)
+    pass_ = AuditPass(None, config=AuditConfig())
+
+    class UnreadScope:
+        circuit_id = "circuit:unread"
+        ct_ids = ("ct_l1",)
+        device_ids = ()
+
+    class ReadScope:
+        circuit_id = "circuit:read"
+        ct_ids = ("ct_l2",)
+        device_ids = ()
+
+    report = audit_module.AuditReport(at=at)
+    computed = pass_._residuals(
+        [UnreadScope(), ReadScope()],  # type: ignore[list-item]
+        None,
+        audit_module.FactorRegistry(),
+        {},
+        {"ct_l2": 250.0},  # only ct_l2 has a reading
+        at,
+        report,
+    )
+
+    # Missing reader: refused, no residual object at all (not a zero one).
+    assert "circuit:unread" not in computed
+    assert report.refused["residual:circuit:unread"] == REFUSED_NO_READING
+    # Present reader with no persisted history: honest no-window, non-zero.
+    present = computed["circuit:read"]
+    assert present.residual_w == pytest.approx(250.0)
+    assert present.residual_w != pytest.approx(0.0, abs=1e-9)
+    assert present.baseline_w == pytest.approx(250.0)
+    assert present.dynamic_w == pytest.approx(0.0, abs=1e-9)
+    assert report.stages["residual"]["baseline_estimator"] == "no_window_current_only"
+    assert present.resolved is False

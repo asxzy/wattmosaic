@@ -302,3 +302,110 @@ def test_confidence_is_declared_uncalibrated_by_default() -> None:
         source=Source.INFERRED, confidence=0.99,
     )
     assert result.confidence_is_calibrated is False
+
+
+def test_residual_is_never_redistributed() -> None:
+    """A residual is a view of the balance, never a per-device allocation.
+
+    Scenario (T04 / REQ-RESIDUAL-007): build a real ``Reconciliation`` from the
+    engine, attach a computed, decomposed ``ResidualPower`` and assert that no
+    device-facing or aggregate field moves.  The unknown remainder stays the
+    authoritative total and no contract field can express "residual given to a
+    device".  Mutating any such write-back would move one of these fields.
+    """
+    from datetime import UTC, datetime
+
+    from wattmosaic_engine.contracts import (
+        CTChannel,
+        CTType,
+        DeviceTopology,
+        MeasurementBasis,
+        Phase,
+        Reconciliation,
+        Topology,
+        TopologyStatus,
+    )
+    from wattmosaic_engine.disaggregation import DisaggregationEngine
+    from wattmosaic_engine.electrical import ObservationWindow
+    from wattmosaic_engine.electrical.topology import build_graph
+    from wattmosaic_engine.models.residual_power import ResidualAnalyzer, ResidualScope
+
+    at = datetime(2026, 11, 7, 13, 20, tzinfo=UTC)
+
+    def chan(cid, ct_type, phase, *, alias=None, parent=None, device=None):
+        return CTChannel(
+            ct_id=cid,
+            entity_id=f"sensor.{cid}",
+            ct_type=ct_type,
+            phase=phase,
+            alias_of_ct_id=alias,
+            parent_ct_id=parent,
+            device_id=device,
+            topology_status=TopologyStatus.CONFIRMED,
+        )
+
+    topology = Topology(
+        version=4,
+        status=TopologyStatus.CONFIRMED,
+        channels=[
+            chan("feed_l1", CTType.MAIN, Phase.L1),
+            chan("panel_l1", CTType.MAIN, Phase.L1, alias="feed_l1"),
+            chan("ct_heater", CTType.BRANCH, Phase.L1, parent="feed_l1", device="heater"),
+        ],
+        devices=[
+            DeviceTopology(
+                device_id="heater",
+                branch_ct_ids=["ct_heater"],
+                phase=Phase.L1,
+                topology_status=TopologyStatus.CONFIRMED,
+            )
+        ],
+    )
+    window = ObservationWindow.from_values(
+        at,
+        {"feed_l1": 1000.0, "panel_l1": 651.1, "ct_heater": 833.6},
+        cadence_s=15.7,
+    )
+    reconciliation = DisaggregationEngine().infer(
+        window, device_states={}, models={}, topology=topology
+    ).reconciliation
+
+    analyzer = ResidualAnalyzer(topology=build_graph(topology))
+    scope = ResidualScope(
+        scope_id="whole_home",
+        ct_id="feed_l1",
+        basis=MeasurementBasis.CT_MEASURED,
+        device_contributions={"heater": reconciliation.inferred_w},
+        window_w=(190.0, 195.0, 200.0, 205.0, 210.0),
+    )
+    residual = analyzer.compute(scope, reconciliation.main_power_w, now=reconciliation.timestamp)
+    # It is a real, decomposed, signed residual -- not a fabricated zero.
+    assert residual.baseline_w == pytest.approx(200.0)
+    assert residual.dynamic_w == pytest.approx(residual.residual_w - 200.0)
+    assert residual.baseline_w + residual.dynamic_w == pytest.approx(
+        residual.residual_w, abs=1e-9
+    )
+
+    before = reconciliation.model_dump(mode="json")
+    attached = reconciliation.model_copy(update={"residual": residual})
+    after = attached.model_dump(mode="json")
+
+    # No device-facing or aggregate field moves because a residual existed.
+    for field in (
+        "direct_measured_w",
+        "inferred_w",
+        "model_estimated_w",
+        "configured_prior_w",
+        "main_power_w",
+        "meter_disagreement_w",
+        "unmonitored_w",
+        "unknown_residual_w",
+    ):
+        assert after[field] == pytest.approx(before[field], abs=1e-9)
+    assert attached.unknown_residual_w == pytest.approx(
+        reconciliation.unknown_residual_w, abs=1e-9
+    )
+    # The residual object is attached, yet no contract field can express giving
+    # it to a device -- the only new content is the residual itself.
+    assert after["residual"] is not None
+    assert not any("redistribut" in name for name in Reconciliation.model_fields)

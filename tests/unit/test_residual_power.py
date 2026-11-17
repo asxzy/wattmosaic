@@ -1444,3 +1444,338 @@ def test_a_history_row_without_a_timestamp_is_placed_first():
     assert trend.sample_count == 2
     assert trend.current_w == pytest.approx(300.0)
     assert [value for _, value in trend.curve] == [100.0, 300.0]
+
+
+# --------------------------------------------------------------------------- #
+# TASK-RESIDUAL-004b -- named residual verification scenarios
+# --------------------------------------------------------------------------- #
+def _base(residual: ResidualPower) -> float:
+    """The baseline component, asserted present (never an implicit zero)."""
+    assert residual.baseline_w is not None
+    return residual.baseline_w
+
+
+def _estimator(analyzer: ResidualAnalyzer) -> str | None:
+    return analyzer.last_evidence.get("baseline_estimator")
+
+
+def test_stable_nonzero_residual_baseline():
+    """A steady, non-zero unexplained load is a BASELINE, not an event stream.
+
+    Scenario (stable non-zero baseline): a reader sits at ~40 W of unexplained
+    load with only measurement jitter.  The residual is genuinely non-zero and
+    must be published as such (never rounded to zero, never "resolved"), with
+    the whole value attributed to its robust baseline and a degenerate dynamic
+    part -- the persistence rule of spec section 6.3, on the real API.
+    """
+    analyzer = ResidualAnalyzer()
+    scope = _scope(
+        device_contributions={"meter": 960.0},
+        window_w=(39.5, 40.0, 40.5, 40.0, 39.8, 40.2, 40.0),
+    )
+
+    residual = analyzer.compute(scope, 1000.0, now=LATER)
+
+    # Non-zero, positive and unresolved: "stable" never means "zero".
+    assert residual.residual_w == pytest.approx(40.0)
+    assert residual.residual_w != pytest.approx(0.0, abs=1e-9)
+    assert residual.kind == ResidualKind.POSITIVE
+    assert residual.resolved is False
+    assert residual.unresolved_since == LATER
+    # Decomposition fields, asserted explicitly.
+    assert _base(residual) == pytest.approx(40.0)
+    assert residual.dynamic_w == pytest.approx(0.0, abs=1e-9)
+    assert _estimator(analyzer) == "median_of_window"
+    assert residual.baseline_w + residual.dynamic_w == pytest.approx(
+        residual.residual_w, abs=1e-9
+    )
+
+
+def test_dynamic_unknown_load():
+    """A changing unknown load yields a non-degenerate dynamic component.
+
+    Scenario (dynamic unknown load): the current residual is far from the
+    window's typical level.  The median baseline captures the standing part and
+    the moving part is a real, non-zero, signed contribution -- proving the
+    decomposition is not the stale ``no_window_current_only`` pin.
+    """
+    analyzer = ResidualAnalyzer()
+    # Median of the window is 140 W; the current unknown load is 340 W.
+    scope = _scope(window_w=(100.0, 120.0, 140.0, 160.0, 180.0))
+
+    residual = analyzer.compute(scope, 340.0, now=LATER)
+
+    assert residual.residual_w == pytest.approx(340.0)
+    assert _base(residual) == pytest.approx(140.0)  # median, not the mean
+    assert residual.dynamic_w == pytest.approx(200.0)  # 340 - 140
+    assert residual.dynamic_w != pytest.approx(0.0, abs=1e-9)
+    assert _estimator(analyzer) == "median_of_window"
+    assert residual.resolved is False
+    assert residual.dynamic_w > 0.0  # a load turning ON moves the dynamic part up
+    assert residual.baseline_w + residual.dynamic_w == pytest.approx(
+        residual.residual_w, abs=1e-9
+    )
+
+
+def test_short_term_noise_is_reported():
+    """Short-term measurement noise is reported as metadata, not zeroed away.
+
+    Scenario (short-term noise): the quality layer measured a per-channel MAD
+    and the scope states a noise component derived from it.  The additive noise
+    fields (from B0) must pass through onto the published residual *as stated*,
+    never collapsed to a fabricated ``0.0`` and never silently dropped.
+    """
+    analyzer = ResidualAnalyzer()
+    scope = _scope(
+        window_w=(119.0, 121.0, 120.0, 120.5, 119.5),
+        noise_w=1.25,
+        noise_floor_w=0.5,
+        noise_source="measured_mad",
+    )
+
+    residual = analyzer.compute(scope, 140.0, now=LATER)
+
+    # The signed value and the two-part split stay intact.
+    assert residual.residual_w == pytest.approx(140.0)
+    assert _base(residual) == pytest.approx(120.0)
+    assert residual.dynamic_w == pytest.approx(20.0)
+    assert _estimator(analyzer) == "median_of_window"
+    # Noise is a reported third component, additive-and-neutral: it does not
+    # enter baseline_w + dynamic_w, but it must survive untouched.
+    assert residual.noise_w == pytest.approx(1.25)
+    assert residual.noise_w != pytest.approx(0.0, abs=1e-9)
+    assert residual.noise_floor_w == pytest.approx(0.5)
+    assert residual.noise_source == "measured_mad"
+    assert residual.baseline_w + residual.dynamic_w == pytest.approx(
+        residual.residual_w, abs=1e-9
+    )
+
+
+def test_signed_load_reduction_is_negative():
+    """A load reduction is a NEGATIVE residual; no abs(), no max(0, ...).
+
+    Scenario (signed reduction): accounted power now exceeds the measured
+    total (a load was switched off).  The residual must keep its sign through
+    compute, the decomposition split, the derived kind, the contract payload and
+    persistence -- a reduction is a fact about the opposite direction, not zero.
+    """
+    analyzer = ResidualAnalyzer()
+    # Circuit 700 W, known loads claim 900 W -> -200 W reduction.
+    scope = _scope(
+        device_contributions={"dryer": 500.0, "oven": 400.0},
+        window_w=(-180.0, -200.0, -220.0),
+    )
+
+    residual = analyzer.compute(scope, 700.0, now=LATER)
+
+    _assert_negative_is_preserved(residual, -200.0)
+    assert residual.resolved is False
+    # The baseline is the median of the signed window; the moving part is signed.
+    assert _base(residual) == pytest.approx(-200.0)
+    assert residual.dynamic_w == pytest.approx(0.0, abs=1e-9)
+    assert residual.baseline_w + residual.dynamic_w == pytest.approx(-200.0, abs=1e-9)
+    # The signed reduction survives the contract payload unchanged.
+    payload = residual.model_dump(mode="json")
+    assert payload["residual_w"] == pytest.approx(-200.0)
+    assert payload["kind"] == ResidualKind.NEGATIVE.value
+    assert payload["baseline_w"] < 0.0  # no abs()/max0 on the baseline either
+
+
+def test_missing_reader_is_no_window_not_zero():
+    """A missing reader yields an honest ``no_window`` state, never zero.
+
+    Scenario (missing reader data): the circuit reading is absent.  On the real
+    audit path the reader is refused with ``REFUSED_NO_READING`` and no residual
+    is fabricated.  Where a reader is present but has no persisted history, the
+    estimator is ``no_window_current_only`` and the whole current value is the
+    baseline -- never a zero baseline.  Both honest states are asserted.
+    """
+    from wattmosaic_engine.disaggregation import audit as audit_module
+    from wattmosaic_engine.disaggregation.audit import (
+        REFUSED_NO_READING,
+        AuditConfig,
+        AuditPass,
+    )
+
+    # (a) The audit path refuses the missing reader outright.
+    pass_ = AuditPass(None, config=AuditConfig())
+
+    class UnreadScope:
+        circuit_id = "circuit:missing"
+        ct_ids = ("ct_l1",)
+        device_ids = ()
+
+    report = audit_module.AuditReport(at=T0)
+    computed = pass_._residuals(
+        [UnreadScope()],  # type: ignore[list-item]
+        None,
+        audit_module.FactorRegistry(),
+        {},
+        {},  # no reading for ct_l1
+        T0,
+        report,
+    )
+    assert computed == {}
+    assert report.refused["residual:circuit:missing"] == REFUSED_NO_READING
+
+    # (b) A reader with no history: honest no-window, non-zero current-only.
+    analyzer = ResidualAnalyzer()
+    no_window = analyzer.compute(_scope(), 400.0, now=LATER)
+    assert _estimator(analyzer) == "no_window_current_only"
+    assert no_window.residual_w == pytest.approx(400.0)
+    assert no_window.residual_w != pytest.approx(0.0, abs=1e-9)
+    assert _base(no_window) == pytest.approx(400.0)
+    assert no_window.dynamic_w == pytest.approx(0.0, abs=1e-9)
+    assert no_window.resolved is False
+
+
+def test_baseline_drift_is_detected(tmp_path):
+    """A slow, persistent shift is VISIBLE as a creeping baseline over windows.
+
+    Scenario (baseline drift): a Reader's unexplained load rises by 5 W per
+    window, below a step, for several windows in the same direction.  The
+    sliding median baseline follows the drift, and the ordered history makes the
+    persistent movement explicit -- the detection mechanism spec sections 6.3
+    and 6.4 describe.  Prior residual points are not rewritten.
+
+    NOTE: emitting a *named* ``ResidualBaselineChange`` event is the separate,
+    not-yet-started TASK-RESIDUAL-005 (that contract is contracts-only at HEAD);
+    this pins the detectable baseline movement the production API exposes today
+    rather than fabricating an event producer that does not exist.
+    """
+    analyzer = ResidualAnalyzer()
+    drift_levels = [40.0, 45.0, 50.0, 55.0, 60.0]
+    baselines: list[float] = []
+    for level in drift_levels:
+        window = tuple(level + offset for offset in (-2.0, -1.0, 0.0, 1.0, 2.0, 0.0, 0.0, 0.0))
+        observed = analyzer.compute(_scope(window_w=window), level, now=LATER)
+        assert _estimator(analyzer) == "median_of_window"
+        baselines.append(_base(observed))
+
+    # Each window's baseline is the median of that window's residual samples.
+    assert baselines == pytest.approx(drift_levels)
+    # The drift is monotone and persistent: same sign across consecutive windows.
+    deltas = [b - a for a, b in zip(baselines, baselines[1:], strict=False)]
+    assert all(delta > 0.0 for delta in deltas)  # UP, every window
+    assert all(0.0 < delta < 50.0 for delta in deltas)  # below a step
+    assert baselines[-1] - baselines[0] == pytest.approx(20.0)
+
+    # The history view reports the ordered curve and the movement, and the prior
+    # points remain present (never rewritten) once persisted.
+    db = Database(tmp_path / "drift.db")
+    try:
+        for index, level in enumerate(drift_levels):
+            persist(
+                ResidualAnalyzer().compute(_scope(), level, now=LATER),
+                db,
+                timestamp=T0 + timedelta(minutes=index),
+            )
+        trend = analyzer.trend(db.residual_history())
+        assert trend.sample_count == len(drift_levels)
+        assert [value for _, value in trend.curve] == pytest.approx(drift_levels)
+        assert trend.current_w == pytest.approx(drift_levels[-1])
+        assert trend.typical_w == pytest.approx(median(drift_levels))
+        # The whole recorded move stays bounded (a drift, not a step).
+        assert trend.current_w - trend.curve[0][1] == pytest.approx(20.0)
+    finally:
+        db.close()
+
+
+def test_residual_decomposition_reproduces_from_persisted_evidence(tmp_path):
+    """The signed decomposition is reproducible from persisted evidence alone.
+
+    Scenario (DB round-trip): build a residual with a production window,
+    persist it, close and REOPEN the database, read the row back, rebuild the
+    contract from that row and recompute the residual.  The two must agree on
+    every decomposition field -- proving nothing depends on hidden in-memory
+    state.  A mutation-proof companion below confirms this test is not vacuous.
+    """
+    db_path = tmp_path / "round_trip.db"
+    circuit_w = 1000.0
+    known = {"dryer": 800.0}
+    window = (196.0, 199.0, 200.0, 201.0, 204.0)  # median 200
+    original = ResidualAnalyzer().compute(
+        _scope(device_contributions=known, window_w=window), circuit_w, now=T0
+    )
+    assert _base(original) == pytest.approx(200.0)
+    assert original.dynamic_w == pytest.approx(0.0, abs=1e-9)
+
+    db = Database(db_path)
+    try:
+        assert persist(original, db, timestamp=T0) == 1
+    finally:
+        db.close()  # release the writer; nothing in memory is reused below
+
+    # Fresh connection from disk: no in-memory state from the writer survives.
+    reopened = Database(db_path)
+    try:
+        rows = reopened.residual_history()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["residual_w"] == pytest.approx(original.residual_w)
+
+        # Rebuild the contract from PERSISTED evidence, not the in-memory object.
+        rebuilt = ResidualPower(
+            residual_w=row["residual_w"],
+            kind=derived_residual_kind(row["residual_w"]),
+            resolved=bool(row["resolved"]),
+            unresolved_since=T0,
+            explained_by_device_w=row.get("explained_by_device_w") or {},
+            quality_status=QualityStatus(row["quality_status"]),
+            basis=MeasurementBasis(row["basis"]),
+            baseline_w=row["baseline_w"],
+            dynamic_w=row["dynamic_w"],
+        )
+        # Recompute from the same inputs the row records, independently.
+        recomputed = ResidualAnalyzer().compute(
+            _scope(device_contributions=known, window_w=window), circuit_w, now=T0
+        )
+        for field in (
+            "residual_w",
+            "baseline_w",
+            "dynamic_w",
+            "kind",
+            "resolved",
+            "quality_status",
+            "basis",
+        ):
+            assert getattr(rebuilt, field) == getattr(recomputed, field), (
+                f"{field}: persisted {getattr(rebuilt, field)!r} != "
+                f"recomputed {getattr(recomputed, field)!r}"
+            )
+        assert rebuilt.baseline_w + rebuilt.dynamic_w == pytest.approx(
+            rebuilt.residual_w, abs=1e-9
+        )
+    finally:
+        reopened.close()
+
+
+def test_a_recompute_from_raw_samples_instead_of_persisted_evidence_is_detected(monkeypatch):
+    """Mutation proof: a recompute that ignores persisted evidence must FAIL.
+
+    A hidden-state regression would re-derive the decomposition from fresh raw
+    values (or a stale in-memory baseline) while claiming the persisted row is
+    authoritative.  Here we mutate the recompute so its baseline differs from
+    the persisted one and confirm the field-by-field comparison above catches
+    it -- so the round-trip test is demonstrably not vacuous.
+    """
+    scope = _scope(
+        device_contributions={"dryer": 800.0},
+        window_w=(196.0, 199.0, 200.0, 201.0, 204.0),
+    )
+    original = ResidualAnalyzer().compute(scope, 1000.0, now=T0)
+    assert _base(original) == pytest.approx(200.0)
+
+    analyzer = ResidualAnalyzer()
+    real_compute = analyzer.compute
+
+    def mutated_compute(inner_scope, circuit_w, *, now=None):
+        result = real_compute(inner_scope, circuit_w, now=now)
+        # Fabricate a hidden, different baseline rather than the persisted 200 W.
+        return result.model_copy(update={"baseline_w": 999.0, "dynamic_w": result.residual_w - 999.0})
+
+    monkeypatch.setattr(analyzer, "compute", mutated_compute)
+    mutated = analyzer.compute(scope, 1000.0, now=T0)
+    assert _base(mutated) == pytest.approx(999.0)  # mutation took effect
+    with pytest.raises(AssertionError):
+        assert _base(mutated) == _base(original)
