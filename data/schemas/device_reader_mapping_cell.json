@@ -84,12 +84,17 @@
       "type": "object"
     },
     "MappingCellStatus": {
-      "description": "The freshness of one device/reader mapping cell (spec 09 \u00a77.5).",
+      "description": "The state of one device/reader mapping cell (spec 09 \u00a77.5).\n\nThis is deliberately a *separate* vocabulary from ``EdgeLifecycle``: an\nedge's lifecycle describes a topology relation, while a cell's status\ndescribes the epistemic state of one matrix cell.  It is not folded into\n``EdgeLifecycle``, ``TopologyStatus`` or ``UnknownLoadLifecycle``.\n\nContract 2.3.0 adds five members (``LEARNING``, ``PROVISIONAL``,\n``CONFIRMED``, ``CONFLICTED``, ``NON_IDENTIFIABLE``) so the six-state\nvocabulary ``UNKNOWN`` / ``LEARNING`` / ``PROVISIONAL`` / ``CONFIRMED`` /\n``CONFLICTED`` / ``NON_IDENTIFIABLE`` is representable.  The four original\nmembers are kept so no existing member's meaning shifts.",
       "enum": [
         "valid",
         "stale",
         "invalid",
-        "unknown"
+        "unknown",
+        "learning",
+        "provisional",
+        "confirmed",
+        "conflicted",
+        "non_identifiable"
       ],
       "title": "MappingCellStatus",
       "type": "string"
@@ -206,6 +211,69 @@
     "basis": {
       "$ref": "#/$defs/MeasurementBasis",
       "default": "unknown"
+    },
+    "relation_type": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Relation Type"
+    },
+    "sources_used": {
+      "items": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "type": "object"
+      },
+      "title": "Sources Used",
+      "type": "array"
+    },
+    "model_version": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model Version"
+    },
+    "topology_version": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Topology Version"
+    },
+    "is_unknown_load": {
+      "default": false,
+      "title": "Is Unknown Load",
+      "type": "boolean"
+    },
+    "unknown_load_profile_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Unknown Load Profile Id"
     }
   },
   "required": [
@@ -216,5 +284,5 @@
   "title": "DeviceReaderMappingCell",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/device_reader_mapping_cell.json",
-  "x-contract-version": "2.2.0"
+  "x-contract-version": "2.3.0"
 }

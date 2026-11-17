@@ -155,7 +155,7 @@
       "default": "good"
     },
     "contract_version": {
-      "default": "2.2.0",
+      "default": "2.3.0",
       "title": "Contract Version",
       "type": "string"
     },
@@ -187,5 +187,5 @@
   "title": "UnknownResidualEvent",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/unknown_residual_event.json",
-  "x-contract-version": "2.2.0"
+  "x-contract-version": "2.3.0"
 }

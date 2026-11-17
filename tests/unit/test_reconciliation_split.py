@@ -543,4 +543,4 @@ def test_contract_version_matches_the_authoritative_constant():
 
     # Track the source of truth rather than a fresh stale literal so this pin
     # stays correct across additive contract bumps.
-    assert contracts.CONTRACT_VERSION == "2.2.0"
+    assert contracts.CONTRACT_VERSION == "2.3.0"

@@ -26,6 +26,7 @@ from wattmosaic_engine.contracts import (
     CTType,
     DeviceConfiguration,
     DeviceEvent,
+    DeviceReaderMappingCell,
     DeviceTopology,
     EdgeLifecycle,
     EventIsolation,
@@ -33,6 +34,7 @@ from wattmosaic_engine.contracts import (
     HaEntityRole,
     InferenceResult,
     IsolationStatus,
+    MappingCellStatus,
     Measurement,
     MeasurementBasis,
     Phase,
@@ -64,13 +66,13 @@ def _export_schemas_module():
     return module
 
 
-def test_contract_version_is_2_2_0() -> None:
+def test_contract_version_is_2_3_0() -> None:
     """The canonical pin: the authoritative version is the one this task bumped.
 
     Other version assertions compare against this exported constant so they
     stay correct across future additive bumps; the pin lives here.
     """
-    assert contracts.CONTRACT_VERSION == "2.2.0"
+    assert contracts.CONTRACT_VERSION == "2.3.0"
 
 
 def test_schema_files_match_contract_version() -> None:
@@ -1401,3 +1403,95 @@ def test_a_pre_change_payload_that_was_already_invalid_is_still_invalid() -> Non
     unknown_key["not_a_field"] = 1
     with pytest.raises(ValidationError):
         Reconciliation.model_validate(unknown_key)
+
+
+# --------------------------------------------------------------------------- #
+# The 2.3.0 additive change: the mapping cell represents the mapping matrix
+# --------------------------------------------------------------------------- #
+
+
+def _pre_2_3_mapping_cell_payload() -> dict:
+    """A 2.2.0-era mapping cell: only the fields that existed before 2.3.0."""
+    return {
+        "device_id": "dev_fridge",
+        "reader_id": "branch_fridge",
+        "reader_configuration_version": "rcv-1",
+        "observability": "direct",
+        "estimated_contribution_w": 118.5,
+        "min_contribution_w": 100.0,
+        "max_contribution_w": 140.0,
+        "evidence_count": 12,
+        "status": "valid",
+        "basis": "ct_measured",
+    }
+
+
+def test_mapping_cell_new_fields_round_trip() -> None:
+    """2.3.0 payloads with every new field survive a model round-trip."""
+    payload = {
+        **_pre_2_3_mapping_cell_payload(),
+        "relation_type": "one_to_many",
+        "sources_used": [
+            {"source": "topology", "reason": "containment_edge"},
+            {"source": "residual", "reason": "observed_contribution"},
+        ],
+        "model_version": 3,
+        "topology_version": "tv-2",
+        "is_unknown_load": False,
+        "unknown_load_profile_id": None,
+        "status": "learning",
+    }
+    cell = DeviceReaderMappingCell.model_validate(payload)
+    assert cell.relation_type == "one_to_many"
+    assert [entry["source"] for entry in cell.sources_used] == ["topology", "residual"]
+    assert cell.model_version == 3
+    assert cell.topology_version == "tv-2"
+    assert cell.is_unknown_load is False
+    # Model uses use_enum_values=True, so status is stored as its string value.
+    assert cell.status == MappingCellStatus.LEARNING.value
+
+    # Dumping and re-validating preserves every new field.
+    reloaded = DeviceReaderMappingCell.model_validate(cell.model_dump())
+    assert reloaded.model_dump() == cell.model_dump()
+
+
+def test_mapping_cell_pre_2_3_payload_gets_neutral_defaults() -> None:
+    """A payload written before 2.3.0 still validates and reads neutrally."""
+    cell = DeviceReaderMappingCell.model_validate(_pre_2_3_mapping_cell_payload())
+    assert cell.relation_type is None
+    assert cell.sources_used == []
+    assert cell.model_version is None
+    assert cell.topology_version is None
+    assert cell.is_unknown_load is False
+    assert cell.unknown_load_profile_id is None
+    # A frozen field's type is unchanged: device_id is still a required str.
+    assert isinstance(cell.device_id, str)
+
+
+def test_mapping_cell_unknown_load_marker_without_nullable_device_id() -> None:
+    """Unknown loads use the marker; device_id stays a required opaque str."""
+    payload = _pre_2_3_mapping_cell_payload()
+    payload["device_id"] = "unknown-load-7"
+    payload["is_unknown_load"] = True
+    payload["unknown_load_profile_id"] = "ulp-7"
+    payload["status"] = "non_identifiable"
+    cell = DeviceReaderMappingCell.model_validate(payload)
+    assert cell.is_unknown_load is True
+    assert cell.device_id == "unknown-load-7"
+    assert cell.unknown_load_profile_id == "ulp-7"
+    assert cell.status == MappingCellStatus.NON_IDENTIFIABLE.value
+
+
+def test_mapping_cell_status_has_the_six_state_vocabulary() -> None:
+    """The status enum carries the six-state vocabulary, additively."""
+    values = {member.value for member in MappingCellStatus}
+    assert {
+        "unknown",
+        "learning",
+        "provisional",
+        "confirmed",
+        "conflicted",
+        "non_identifiable",
+    } <= values
+    # Original members are retained.
+    assert {"valid", "stale", "invalid", "unknown"} <= values

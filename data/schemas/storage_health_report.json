@@ -86,5 +86,5 @@
   "title": "StorageHealthReport",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/storage_health_report.json",
-  "x-contract-version": "2.2.0"
+  "x-contract-version": "2.3.0"
 }

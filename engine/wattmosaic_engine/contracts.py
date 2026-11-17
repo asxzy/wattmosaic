@@ -29,7 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from . import __version__ as ENGINE_VERSION
 
-CONTRACT_VERSION = "2.2.0"
+CONTRACT_VERSION = "2.3.0"
 
 
 def utcnow() -> datetime:
@@ -703,7 +703,19 @@ class MappingObservability(str, Enum):
 
 
 class MappingCellStatus(str, Enum):
-    """The freshness of one device/reader mapping cell (spec 09 §7.5)."""
+    """The state of one device/reader mapping cell (spec 09 §7.5).
+
+    This is deliberately a *separate* vocabulary from ``EdgeLifecycle``: an
+    edge's lifecycle describes a topology relation, while a cell's status
+    describes the epistemic state of one matrix cell.  It is not folded into
+    ``EdgeLifecycle``, ``TopologyStatus`` or ``UnknownLoadLifecycle``.
+
+    Contract 2.3.0 adds five members (``LEARNING``, ``PROVISIONAL``,
+    ``CONFIRMED``, ``CONFLICTED``, ``NON_IDENTIFIABLE``) so the six-state
+    vocabulary ``UNKNOWN`` / ``LEARNING`` / ``PROVISIONAL`` / ``CONFIRMED`` /
+    ``CONFLICTED`` / ``NON_IDENTIFIABLE`` is representable.  The four original
+    members are kept so no existing member's meaning shifts.
+    """
 
     VALID = "valid"
     """The cell matches the current reader configuration and was validated."""
@@ -715,7 +727,22 @@ class MappingCellStatus(str, Enum):
     """The cell was invalidated by a reader removal."""
 
     UNKNOWN = "unknown"
-    """The cell has never been validated."""
+    """The cell has never been validated; nothing is asserted yet."""
+
+    LEARNING = "learning"
+    """The pairing is being learned; not enough evidence to assert it."""
+
+    PROVISIONAL = "provisional"
+    """Corroborated but short of the full evidence bar."""
+
+    CONFIRMED = "confirmed"
+    """The full evidence bar was met for this pairing."""
+
+    CONFLICTED = "conflicted"
+    """Two mutually exclusive attributions both have support."""
+
+    NON_IDENTIFIABLE = "non_identifiable"
+    """The reader cannot identify a device (e.g. a shared conductor)."""
 
 
 class ConfigurationChangeKind(str, Enum):
@@ -2575,6 +2602,52 @@ class DeviceReaderMappingCell(Model):
 
     basis: MeasurementBasis = MeasurementBasis.UNKNOWN
     """How the contribution was obtained."""
+
+    # -- contract 2.3.0 additions (additive/neutral, so 2.2.0 payloads validate) - #
+    relation_type: str | None = None
+    """The kind/cardinality of the device↔reader relation this cell realises.
+
+    Free text (e.g. ``"one_to_one"`` / ``"one_to_many"`` / ``"many_to_one"`` /
+    ``"many_to_many"``), never parsed by the engine.  ``None`` = not stated,
+    so a pre-change cell reads as "relation kind not published".
+    """
+
+    sources_used: list[dict[str, str]] = Field(default_factory=list)
+    """Source ledger naming every source consumed to compute this cell.
+
+    Each entry carries a ``source`` and a ``reason`` code, mirroring
+    ``InferenceResult.sources_used``.  Empty = no source named; distinct from
+    the field being absent.
+    """
+
+    model_version: int | None = None
+    """The device-model version used to compute the cell, if any.
+
+    ``None`` = no model contributed; a pre-change cell reads as "no model".
+    Mirrors ``InferenceResult.model_version``.
+    """
+
+    topology_version: str | None = None
+    """The topology the cell was computed against, if stated.
+
+    ``None`` = not stated; mirrors ``ConfigurationChangeEvent.topology_version``.
+    """
+
+    is_unknown_load: bool = False
+    """Explicit marker for a cell describing observed-but-unidentified load.
+
+    The contract deliberately does **not** retype the frozen ``device_id`` field
+    to ``str | None``.  For an unknown load, ``device_id`` stays a required
+    ``str`` and this marker is set; ``unknown_load_profile_id`` links to the
+    ``UnknownLoadProfile`` when one exists.  A pre-change cell defaults to
+    ``False`` and is unchanged.
+    """
+
+    unknown_load_profile_id: str | None = None
+    """The ``UnknownLoadProfile.profile_id`` for an unknown-load cell, if any.
+
+    ``None`` = no profile, or the cell is not an unknown load.
+    """
 
     @model_validator(mode="after")
     def _bounds_bracket_the_estimate(self) -> DeviceReaderMappingCell:

@@ -405,11 +405,11 @@ A recurring, un-attributed load signature with an explicit lifecycle.
 One cell of the device ↔ reader mapping matrix: how much a reader contributes to a device.
 
 `MappingObservability` (**new enum**): `DIRECT`, `DERIVED`, `INDIRECT`, `UNKNOWN`.
-`MappingCellStatus` (**new enum**): `VALID`, `STALE`, `INVALID`, `UNKNOWN`.
+`MappingCellStatus` (**new enum**): the original `VALID`, `STALE`, `INVALID`, `UNKNOWN` plus the five members added by the 2.3.0 amendment (below).
 
 | Field | Type | Unit | Null | Default | Required | Notes |
 |---|---|---|---|---|---|---|
-| `device_id` | `str` | — | no | — | `REQUIRED` | |
+| `device_id` | `str` | — | no | — | `REQUIRED` | For an unknown load (2026-11-17 amendment) this stays a required `str`; the unknown condition is carried by `is_unknown_load` (see below), so the frozen field is never retyped |
 | `reader_id` | `str` | — | no | — | `REQUIRED` | the CT reader / channel identifier |
 | `reader_configuration_version` | `str` | — | no | — | `REQUIRED` | §11 |
 | `observability` | `MappingObservability` | — | no | `UNKNOWN` | `REQUIRED` | |
@@ -422,11 +422,35 @@ One cell of the device ↔ reader mapping matrix: how much a reader contributes 
 | `version` | `int` | — | no | `1` | `REQUIRED` | row version; increments when the cell is recomputed |
 | `status` | `MappingCellStatus` | — | no | `UNKNOWN` | `REQUIRED` | `STALE` when the cell's `reader_configuration_version` differs from the current one (§11) |
 | `basis` | `MeasurementBasis` (`contracts.py:186`) | — | no | `UNKNOWN` | `REQUIRED` | |
+| `relation_type` | `str \| None` | — | **yes** | `None` | additive (2.3.0) | free-text relation kind/cardinality (`one_to_one` / `one_to_many` / `many_to_one` / `many_to_many`); never parsed |
+| `sources_used` | `list[dict[str, str]]` | — | no | `[]` | additive (2.3.0) | source ledger naming each consumed source with a `source` and `reason` code; empty = none named |
+| `model_version` | `int \| None` | — | **yes** | `None` | additive (2.3.0) | the device-model version used to compute the cell; `None` = no model contributed |
+| `topology_version` | `str \| None` | — | **yes** | `None` | additive (2.3.0) | the topology the cell was computed against; `None` = not stated |
+| `is_unknown_load` | `bool` | — | no | `False` | additive (2.3.0) | `True` = the cell describes observed-but-unidentified load; keeps `device_id` a required `str` |
+| `unknown_load_profile_id` | `str \| None` | — | **yes** | `None` | additive (2.3.0) | the `UnknownLoadProfile.profile_id` for an unknown-load cell, when one exists |
 
 **Rule.** When all three contribution fields are present, `min_contribution_w <= estimated_contribution_w <= max_contribution_w`. A cell with `observability = UNKNOWN` carries `None` for all three.
 
 **Rule.** A cell's `status` is derived from its `reader_configuration_version` and its `last_validated_at`:
 `VALID` when the cell's `reader_configuration_version` equals the current one (§11) **and** `last_validated_at` is not `None`; `STALE` when the versions differ; `INVALID` when the cell was invalidated by a `READER_REMOVAL` (§7.6); `UNKNOWN` before the cell has ever been validated.
+
+> **Completion sprint amendment (2026-11-17, contract 2.3.0) — SPEC CHANGE.** The
+> mapping-cell contract is extended additively so the Device-Reader Mapping
+> Matrix (REQ-MAPPING-001…007) can represent the fields its projection needs:
+> `relation_type`, `sources_used`, `model_version`, `topology_version`, an
+> explicit unknown-load marker (`is_unknown_load` plus the optional
+> `unknown_load_profile_id`) and the six-state status vocabulary. Every new
+> field is optional/neutral with a default, so every pre-2.3.0 payload still
+> validates and no pre-existing field is retyped. The six-state status
+> vocabulary is `UNKNOWN`, `LEARNING`, `PROVISIONAL`, `CONFIRMED`, `CONFLICTED`,
+> `NON_IDENTIFIABLE`; the four original `MappingCellStatus` members (`VALID`,
+> `STALE`, `INVALID`, `UNKNOWN`) are retained, so this is an additive enum
+> extension. `MappingCellStatus` remains deliberately **separate** from
+> `EdgeLifecycle` (§7.1) — a cell's epistemic state is not a topology edge's
+> lifecycle — and the cell status enum is **newly defined here** as that
+> separate vocabulary. Unknown loads stay named by `device_id` as an opaque
+> `str` plus `is_unknown_load = True` rather than a nullable `device_id`, so the
+> frozen field's type is unchanged.
 
 ### 7.6 `ConfigurationChangeEvent`
 

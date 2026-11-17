@@ -950,6 +950,11 @@ mapping is in §4.
 - **Acceptance criteria.** A cell response contains all nine fields; the min/max range is consistent with the estimate or explicitly `null` when the cell is not separable.
 - **Dependencies.** REQ-CONFIDENCE-006
 - **Verification.** `pytest tests/unit/test_api.py` — a new assertion on the matrix response shape.
+- **Amendment (2026-11-17, contract 2.3.0).** The cell's own state is published through
+  `MappingCellStatus`; its six-state vocabulary is `UNKNOWN`, `LEARNING`, `PROVISIONAL`,
+  `CONFIRMED`, `CONFLICTED`, `NON_IDENTIFIABLE`. The cell also carries `relation_type`,
+  `sources_used`, `model_version` and `topology_version` (see `09-…` §7.5). These are
+  additive/neutral fields; the original nine fields are unchanged.
 
 #### REQ-MAPPING-004 — Unknown loads and uncertain attribution appear in the matrix
 
@@ -957,6 +962,7 @@ mapping is in §4.
 - **Priority.** MUST
 - **Rationale.** "There is no explicit 'unknown load' entity in the contract" (`docs/electrical_model.md` §10); the gap is `G24`.
 - **Acceptance criteria.** A scope with unexplained consumption shows an unknown-load entry with its reader and its contribution; no unknown entry names a device.
+- **Amendment (2026-11-17, contract 2.3.0).** An unknown-load cell sets `is_unknown_load = True` and may link to `UnknownLoadProfile.profile_id` via `unknown_load_profile_id`; the frozen `device_id` field stays a required opaque `str` and is never retyped to nullable.
 - **Dependencies.** REQ-RESIDUAL-007, REQ-MAPPING-001
 - **Scenario.** `T04` and `T10` — `T04` extends matrix groups **E** (row `E6`) and **F** (rows `F1`, `F2`); `T10` is **new coverage**.
 - **Verification.** `pytest tests/unit/test_disaggregation.py::test_08_unknown_load_is_preserved_as_residual`; a new assertion that the matrix carries the unknown entry.
