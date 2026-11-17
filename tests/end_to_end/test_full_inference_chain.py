@@ -431,3 +431,154 @@ def _window(at: dt.datetime):
     from wattmosaic_engine.models.protocols import SimpleWindow
 
     return SimpleWindow(at=at, values={"ct_l1": 100.0})
+
+
+# --------------------------------------------------------------------------- #
+# Joint-inference source ledger (TASK-DISAGG-003 / REQ-DISAGG-001)
+# --------------------------------------------------------------------------- #
+def test_result_names_every_source_used_and_unused() -> None:
+    """Every result names all seven sources: used with evidence, unused with a code.
+
+    Two runs assert both halves of the ledger.  A window with a state transition,
+    two instrument bases, device levels, a model and an explicit residual-event
+    stream exercises the "used" side; a bare window exercises the "unused" side
+    with a concrete reason for every source that did not contribute.  The ledger
+    is additive: it changes no power estimate and no existing call argument.
+    """
+    from wattmosaic_engine.contracts import (
+        CTChannel,
+        CTType,
+        DeviceModelParameters,
+        DeviceModelVersion,
+        DeviceTopology,
+        MeasurementBasis,
+        ModelStatus,
+        ModelType,
+        Phase,
+        Polarity,
+        Topology,
+        TopologyStatus,
+    )
+    from wattmosaic_engine.disaggregation.engine import SOURCE_IDS, DisaggregationEngine
+    from wattmosaic_engine.electrical.window import ObservationWindow
+
+    at = dt.datetime(2026, 1, 1, 12, tzinfo=dt.UTC)
+
+    def channel(
+        ct_id: str,
+        *,
+        parent: str | None = None,
+        basis: MeasurementBasis = MeasurementBasis.UNKNOWN,
+        kind: CTType = CTType.BRANCH,
+        device: str | None = None,
+    ) -> CTChannel:
+        return CTChannel(
+            ct_id=ct_id,
+            entity_id=f"sensor.{ct_id}",
+            ct_type=kind,
+            phase=Phase.L1,
+            parent_ct_id=parent,
+            polarity=Polarity.NORMAL,
+            device_id=device,
+            topology_status=TopologyStatus.CONFIRMED,
+            measurement_basis=basis,
+        )
+
+    def device(device_id: str, branch_ct_ids: list[str]) -> DeviceTopology:
+        return DeviceTopology(
+            device_id=device_id,
+            branch_ct_ids=branch_ct_ids,
+            phase=Phase.L1,
+            topology_status=TopologyStatus.CONFIRMED,
+        )
+
+    model = DeviceModelVersion(
+        device_id="lamp",
+        model_type=ModelType.BINARY,
+        version=1,
+        status=ModelStatus.ACTIVE,
+        sample_count=100,
+        training_quality=0.9,
+        validation_metrics={"r2": 0.9, "mae_w": 5.0},
+        parameters=DeviceModelParameters(
+            on_power_w=80.0, standby_power_w=0.0, off_power_w=0.0
+        ),
+        confidence=0.8,
+    )
+
+    # --- used side: two instrument bases, a transition, levels, residual events -
+    rich_topology = Topology(
+        version=1,
+        status=TopologyStatus.CONFIRMED,
+        channels=[
+            channel("main_l1", kind=CTType.MAIN),
+            channel("ct_plug", parent="main_l1", basis=MeasurementBasis.CT_MEASURED, device="kettle"),
+            channel("ct_smart", parent="main_l1", basis=MeasurementBasis.MONITOR_REPORTED, device="lamp"),
+        ],
+        devices=[device("kettle", ["ct_plug"]), device("lamp", ["ct_smart"])],
+    )
+    rich_window = ObservationWindow.from_values(
+        at,
+        {"main_l1": 500.0, "ct_plug": 300.0, "ct_smart": 80.0},
+        cadence_s=15.0,
+        previous_states={"kettle": "off"},
+        state_transitions=[dict(device_id="kettle", previous_state="off", new_state="on")],
+    )
+    rich_window.metadata["device_levels"] = {"lamp": 0.5}
+    rich = DisaggregationEngine().infer(
+        rich_window,
+        device_states={"kettle": "on", "lamp": "on"},
+        models={"lamp": model},
+        topology=rich_topology,
+        residual_events=[{"event_id": "evt-1"}],
+    )
+    # --- unused side: a model but no transition, no levels, no CT, no residual -
+    bare_topology = Topology(
+        version=1,
+        status=TopologyStatus.CONFIRMED,
+        channels=[channel("main_l1", kind=CTType.MAIN)],
+        devices=[device("solo", [])],
+    )
+    bare_window = ObservationWindow.from_values(
+        at, {"main_l1": 100.0}, cadence_s=15.0
+    )
+    bare = DisaggregationEngine().infer(
+        bare_window,
+        device_states={"solo": "on"},
+        models={"solo": model.model_copy(update={"device_id": "solo"})},
+        topology=bare_topology,
+    )
+
+    assert len(SOURCE_IDS) == 7
+    for batch in (rich, bare):
+        assert batch.results
+        for result in batch.results:
+            # Both lists are always present, even when one is empty.
+            assert isinstance(result.sources_used, list)
+            assert isinstance(result.sources_unused, list)
+            assert all(set(entry) == {"source", "reason"} for entry in result.sources_used)
+            assert all(set(entry) == {"source", "reason"} for entry in result.sources_unused)
+            every = [e["source"] for e in (*result.sources_used, *result.sources_unused)]
+            # All seven sources are named exactly once across the two lists.
+            assert sorted(every) == sorted(SOURCE_IDS)
+            assert len(every) == len(set(every)), "a source was named twice"
+
+    rich_result = rich.results[0]
+    rich_used = {e["source"]: e["reason"] for e in rich_result.sources_used}
+    assert rich_used["ha_state"] == "state_transition_consumed"
+    assert rich_used["topology"].startswith("graph_used_for_rows_and_identifiability")
+    assert rich_used["ct_measurement"].startswith("rows_in_fit:")
+    assert rich_used["smart_plug_measurement"].startswith("rows_in_fit:")
+    assert rich_used["residual_events"].startswith("residual_events_consumed:")
+
+    bare_result = bare.results[0]
+    bare_unused = {e["source"]: e["reason"] for e in bare_result.sources_unused}
+    assert bare_unused["ha_state"] == "no_transition_in_window"
+    assert bare_unused["ha_attributes"] == "no_device_level_attributes"
+    assert bare_unused["smart_plug_measurement"] == "no_smart_plug_rows"
+    assert bare_unused["ct_measurement"] == "no_ct_measurement_rows"
+    assert bare_unused["residual_events"] == "no_residual_events"
+    # The model resolved and produced a value, so learned_models is used, not
+    # merely available; the topology is always used.
+    bare_used = {e["source"] for e in bare_result.sources_used}
+    assert bare_used == {"topology", "learned_models"}
