@@ -36,12 +36,12 @@
 | `OD-09`–`OD-15` | `10-ui-and-user-experience-spec.md` §15 | Renumbered to `OD-81`–`OD-87` (§5.2). |
 | `OD-21`–`OD-31` | `11-test-and-validation-plan.md` §15 | Renumbered to `OD-88`–`OD-98` (§5.2). |
 | `OD-09`–`OD-13` | `12-deployment-and-rollback.md` §13.2 | Renumbered to `OD-99`–`OD-103` (§5.2). |
-| `OD-30`–`OD-38`, `ASM-01`–`ASM-07` | this register | Items raised here. |
+| `OD-30`–`OD-38`, `ASM-01`–`ASM-08` | this register | Items raised here. |
 
 **Rule.** No ID is used twice. The `OD-21` band was claimed independently by four sibling files; the resolution is renumbering, not deletion (§5.2).
 **Rule.** The old IDs are valid **only** inside the sibling files until the orchestrator's correction pass rewrites them.
 
-**Tally.** 95 items: 12 inherited from `00-`/`03-` (`OD-01`–`OD-08` and `OD-03.1`–`OD-03.4`), 1 retained from `01-` (`OD-09`), 2 owner-resolved (`OD-03.9`, `OD-03.12`), 9 open decisions raised here (`OD-30`–`OD-38`) — one of them, `OD-38`, is now **RESOLVED** by the orchestrator's approval of the specification set (§3) — 7 assumptions recorded here (`ASM-01`–`ASM-07`) — one of them, `ASM-06`, is now **RESOLVED** by the owner (§4) — and 64 sibling items harvested from the nine landed files (§5.1). Every sibling in the `04`–`12` range has landed; `14-…` and `15-…` landed and raise no new decisions. The complete one-line index is §8.
+**Tally.** 96 items: 12 inherited from `00-`/`03-` (`OD-01`–`OD-08` and `OD-03.1`–`OD-03.4`), 1 retained from `01-` (`OD-09`), 2 owner-resolved (`OD-03.9`, `OD-03.12`), 9 open decisions raised here (`OD-30`–`OD-38`) — one of them, `OD-38`, is now **RESOLVED** by the orchestrator's approval of the specification set (§3) — 8 assumptions recorded here (`ASM-01`–`ASM-08`) — two of them, `ASM-06` and `ASM-08`, are now **RESOLVED** (`ASM-06` by the owner, §4; `ASM-08` by the orchestrator's cadence-default ruling, §4) — and 64 sibling items harvested from the nine landed files (§5.1). Every sibling in the `04`–`12` range has landed; `14-…` and `15-…` landed and raise no new decisions. The complete one-line index is §8.
 
 ---
 
@@ -327,6 +327,22 @@
 | **Status** | ASSUMED |
 | **Source** | no shipped field for event-evidence retention in `config/settings.py`; `config/settings.py:151-152` for the retention defaults it must exceed |
 
+### ASM-08 — The two cadence defaults are independent by design — **RESOLVED** by orchestrator ruling
+
+| Field | Value |
+| --- | --- |
+| **ID** | ASM-08 |
+| **Description** | Two different "documented defaults" appear side by side: `DEFAULT_CADENCE_S = 15.7` (`electrical/window.py:39`, the resolver's fallback) and `default_sample_interval_s = 10.0` (`config/settings.py:162`, env `WM_DEFAULT_SAMPLE_INTERVAL_S`). A builder asked whether the configured setting should be the fallback, i.e. whether the wiring was missing. |
+| **Impact** | Requirement: none. No requirement, identifier or behaviour changes — this records an interpretation already stated by `03-…` §6.2–§6.3. The question is whether the two values conflict; they do not. |
+| **Current assumption** | The two are **intentional and independent**, answering different questions. `DEFAULT_CADENCE_S` (15.7 s) is the **audited physical median** — how often the source publishes a new state — and is the fallback used when resolving a cadence (`resolve_channel_cadence`, `observed_cadence_s`); it describes reality, so it is an honest last resort. `default_sample_interval_s` (10.0 s) is a **configurable operator placeholder**, deliberately "not a measurement", and is **deliberately not wired into the cadence resolver**. Wiring them would substitute a configured placeholder for an audited measurement, which `03-…` forbids. `WM_DEFAULT_SAMPLE_INTERVAL_S` overrides the placeholder only; it does not feed cadence resolution. |
+| **Validation needed** | None. The governing rule is already stated in `03-measurement-and-electrical-domain.md` §6.3 and the values were confirmed in code (`window.py:39`; `config/settings.py:162`, `:269-271`). This entry exists so the question is not re-litigated. |
+| **Implementation may proceed?** | YES — no change is required. |
+| **Owner** | orchestrator (ruling); measurement subsystem |
+| **Status** | RESOLVED — settled as a clarification by the orchestrator's review of `TASK-MEASURE-003` (2026-11-16); recorded here so it is not re-opened. |
+| **Source** | `03-measurement-and-electrical-domain.md` §6.2–§6.3 (the cadence table and the `DEFAULT_CADENCE_S` row); `electrical/window.py:39`; `config/settings.py:162`, `:269-271` |
+
+**Note.** This is a settled clarification, not an open question, so it is recorded as a `RESOLVED`-style **`ASM-*`** assumption rather than as an `OD-*` decision: there is no owner left to route it to and nothing further to decide. It continues the register's own assumption band `ASM-01`–`ASM-07`; `ASM-08` is not renumbered, per the rule at §5.2 that this register's own items keep their IDs.
+
 ---
 
 ## 5. Sibling harvest and ID renumbering
@@ -376,13 +392,13 @@ Six bands overlapped. The `OD-21`–`OD-30` range was claimed independently by *
 
 **Note.** `01-requirements.md`'s `OD-09` is **not** part of any colliding band and is **retained** unchanged — it is the T-catalogue conflict described in §8.2.
 
-**Rule.** The blocks above do not overlap each other, this register's own `OD-30`–`OD-38` / `ASM-01`–`ASM-07`, or the inherited `OD-01`–`OD-08` / `OD-03.1`–`OD-03.4`.
+**Rule.** The blocks above do not overlap each other, this register's own `OD-30`–`OD-38` / `ASM-01`–`ASM-08`, or the inherited `OD-01`–`OD-08` / `OD-03.1`–`OD-03.4`.
 
 **Rule.** The old IDs are valid **only** in the sibling files until the orchestrator's correction pass rewrites them; after that pass the `OD-40` onward IDs are the only valid ones.
 
 **Rule.** The two owner-resolved IDs `OD-03.9` and `OD-03.12` are **not** renumbered — the owner's answers are recorded against them (§2.4) and `06-…` must keep citing them.
 
-**Rule.** This register's own `OD-30`–`OD-38` and `ASM-01`–`ASM-07` are **not** renumbered.
+**Rule.** This register's own `OD-30`–`OD-38` and `ASM-01`–`ASM-08` are **not** renumbered.
 
 **Rule.** `OD-09`–`OD-39` are retired as standalone IDs and must not be reused — except `01-requirements.md`'s `OD-09`, which is retained (§8.2), and except `OD-30`–`OD-38` and `OD-03.9` / `OD-03.12`, which are live items of this register and its inherited and owner-resolved bands. `OD-39` was never allocated to anything and is retired with the rest of the band.
 
@@ -481,7 +497,7 @@ The three owner-resolved items do not join this list: `OD-03.9`, `OD-03.12` and 
 
 ### 7.4 ID integrity check
 
-**Rule.** Every ID in this register is used exactly once. `OD-01`–`OD-08` and `OD-03.1`–`OD-03.4` keep the IDs their source files gave them; `OD-03.9` and `OD-03.12` keep theirs because the owner answered them (§2.4); `OD-30`–`OD-38` and `ASM-01`–`ASM-07` are this register's own.
+**Rule.** Every ID in this register is used exactly once. `OD-01`–`OD-08` and `OD-03.1`–`OD-03.4` keep the IDs their source files gave them; `OD-03.9` and `OD-03.12` keep theirs because the owner answered them (§2.4); `OD-30`–`OD-38` and `ASM-01`–`ASM-08` are this register's own.
 
 **Rule.** The renumbered sibling items occupy ten disjoint blocks, each matching its source band's extent exactly:
 
@@ -498,7 +514,7 @@ The three owner-resolved items do not join this list: `OD-03.9`, `OD-03.12` and 
 | `OD-99`–`OD-103` | 5 | `12-deployment-and-rollback.md` | `OD-09`–`OD-13` |
 | `OD-03.9`, `OD-03.12` | 2 | `06-device-and-load-model-spec.md` | unchanged — RESOLVED |
 
-**Rule.** No two blocks overlap, none touches `OD-30`–`OD-38` / `ASM-01`–`ASM-07`, and none touches the inherited `OD-01`–`OD-08` / `OD-03.1`–`OD-03.4`. `OD-09`–`OD-39` are retired and unused, save `01-requirements.md`'s retained `OD-09` (§8.2).
+**Rule.** No two blocks overlap, none touches `OD-30`–`OD-38` / `ASM-01`–`ASM-08`, and none touches the inherited `OD-01`–`OD-08` / `OD-03.1`–`OD-03.4`. `OD-09`–`OD-39` are retired and unused, save `01-requirements.md`'s retained `OD-09` (§8.2).
 
 ---
 
@@ -510,9 +526,9 @@ lifted verbatim from the row the source file itself carries; the **Source file**
 column names the file that *defines* the item, and the **Status** column is the
 status that item carries there (or in this register, for the items raised here).
 
-The table holds **95 rows**: 12 inherited from `00-`/`03-`, 1 retained from
+The table holds **96 rows**: 12 inherited from `00-`/`03-`, 1 retained from
 `01-`, 2 owner-resolved (`OD-03.9`, `OD-03.12`), 9 open decisions raised by this
-register, 7 assumptions recorded by this register, and 64 sibling items harvested
+register, 8 assumptions recorded by this register, and 64 sibling items harvested
 from the nine landed siblings in the `04`–`12` range.
 
 ### 8.1 The index
@@ -614,6 +630,8 @@ from the nine landed siblings in the `04`–`12` range.
 | `ASM-05` | Residual baseline window: `residual_baseline_window_s = 3600.0` (proposed) | `13-open-decisions-and-assumptions.md` | ASSUMED |
 | `ASM-06` | Mapping-matrix refresh trigger: `mapping_refresh_interval_s = 3600.0` (proposed), disabled by default | `13-open-decisions-and-assumptions.md` | RESOLVED |
 | `ASM-07` | Event-evidence retention horizon: `event_evidence_retention_days = 90` (proposed) | `13-open-decisions-and-assumptions.md` | ASSUMED |
+| `ASM-08` | The two cadence defaults (`DEFAULT_CADENCE_S` 15.7 s and `default_sample_interval_s` 10.0 s) are independent by design | `13-open-decisions-and-assumptions.md` | RESOLVED |
+
 ### 8.2 The one retained ID
 
 `01-requirements.md` carries an `OD-09` that is **not** part of any of the
@@ -634,9 +652,9 @@ band, which §5.2 already renumbers to `OD-74`–`OD-80`, `OD-81`–`OD-87` and
 **Rule.** A row's status is the status of the item at the source named in its
 **Source file** column. An item marked `OPEN` in a sibling is `OPEN` here; the
 sibling's own row carries the full nine-field entry and the routing decision.
-**Rule.** `OD-03.9`, `OD-03.12` and `ASM-06` are `RESOLVED`; `OD-33`, `ASM-01`,
-`ASM-02`, `ASM-03`, `ASM-04`, `ASM-05` and `ASM-07` are `ASSUMED`; `OD-35` is
-`DEFERRED`; every other row is `OPEN`.
+**Rule.** `OD-03.9`, `OD-03.12`, `ASM-06` and `ASM-08` are `RESOLVED`; `OD-33`,
+`ASM-01`, `ASM-02`, `ASM-03`, `ASM-04`, `ASM-05` and `ASM-07` are `ASSUMED`;
+`OD-35` is `DEFERRED`; every other row is `OPEN`.
 **Rule.** The index is a **read-only view**. It restates no decision and closes
 none; the authoritative text for every row is the source file it names.
 

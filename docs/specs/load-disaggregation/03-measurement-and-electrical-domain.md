@@ -282,6 +282,8 @@ A repository-wide search of `engine/wattmosaic_engine/` for voltage, current, re
 
 **Rule.** A window width is a function of the *observed* cadence. A hardcoded window width is a defect.
 
+**Rule.** The two documented cadence defaults are **independent by design**, and they answer different questions — do not wire them together. `DEFAULT_CADENCE_S = 15.7` is the **audited physical median** (§6.1) and is the fallback used when resolving a cadence: it describes what this installation's readers actually do, so it is an honest last resort for `resolve_channel_cadence` and `observed_cadence_s`. `default_sample_interval_s = 10.0` is a **configurable operator placeholder**, overridable by `WM_DEFAULT_SAMPLE_INTERVAL_S`, deliberately labelled "not a measurement"; it is **not** fed into the cadence resolver. Substituting a configured placeholder for an audited measurement is forbidden. `WM_DEFAULT_SAMPLE_INTERVAL_S` therefore overrides the placeholder only — it does not feed cadence resolution. See `13-open-decisions-and-assumptions.md` §4 `ASM-08`.
+
 ### 6.4 Alignment and staleness
 
 **EXISTS.** `SampleAligner` (`synchronization/aligner.py:425`) holds bounded per-channel ring buffers (`DEFAULT_MAX_AGE_S`, `DEFAULT_MAX_SAMPLES_PER_CHANNEL`, `stale_after_s`); a channel's samples are aged out and the buffer is trimmed. `ChannelReading.is_usable(max_age_s)` (`electrical/window.py:67-73`) returns `False` when `value_w is None`, when the quality is `MISSING` or `BAD`, or when the reading is older than the age bound.
