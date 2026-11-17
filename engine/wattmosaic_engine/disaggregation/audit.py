@@ -49,6 +49,7 @@ from typing import Any
 from ..contracts import (
     Circuit,
     ConfidenceVector,
+    ConfigurationChangeEvent,
     EdgeLifecycle,
     EventIsolation,
     HaEntityBinding,
@@ -67,7 +68,12 @@ from ..contracts import (
 from ..device_links import device_for_entity
 from ..electrical.factors import FactorRegistry
 from ..electrical.hierarchy import HierarchyConfig, HierarchyFinder
-from ..electrical.topology import build_graph
+from ..electrical.topology import (
+    TopologyVersionRecord,
+    build_graph,
+    detect_configuration_changes,
+    make_version,
+)
 from ..models.protocols import window_time
 from ..models.residual_power import ResidualAnalyzer, ResidualScope
 from ..models.residual_power import persist as persist_residual
@@ -391,6 +397,9 @@ class AuditReport:
     circuits: list[Circuit] = field(default_factory=list)
     residuals: list[ResidualPower] = field(default_factory=list)
     records: list[InferenceRecord] = field(default_factory=list)
+    #: Suspected configuration changes detected this pass.  Published as audit
+    #: evidence; never promoted to a confirmed topology by the pass.
+    configuration_changes: list[ConfigurationChangeEvent] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=lambda: dict.fromkeys(COUNT_KEYS, 0))
     refused: dict[str, str] = field(default_factory=dict)
     errors: dict[str, str] = field(default_factory=dict)
@@ -406,6 +415,9 @@ class AuditReport:
             "errors": dict(self.errors),
             "stages": {key: dict(value) for key, value in self.stages.items()},
             "written": dict(self.written),
+            "configuration_changes": [
+                event.model_dump(mode="json") for event in self.configuration_changes
+            ],
         }
 
     def isolation_status(self) -> dict[str, Any]:
@@ -733,6 +745,10 @@ class AuditPass:
         #: always -- indistinguishable from an analysis that never ran.
         self._verdicts: dict[str, EventIsolation] = {}
         self._verdict_order: deque[str] = deque(maxlen=DEFAULT_VERDICT_HISTORY)
+        #: The current versioned topology the pass was last configured with, set
+        #: by ``analyze``; a later observed snapshot is compared against it, never
+        #: against a version the detection itself advances.
+        self._current_topology_version: Any | None = None
         self._seed_from_database()
 
     # -- lifecycle -------------------------------------------------------- #
@@ -848,8 +864,17 @@ class AuditPass:
         events: Sequence[Any] | None = None,
         now: datetime | None = None,
         mode: str = "incremental",
+        observed_topology: Topology | None = None,
+        current_version: TopologyVersionRecord | None = None,
     ) -> AuditReport:
-        """One pass over ``window``.  Never raises for a single bad input."""
+        """One pass over ``window``.  Never raises for a single bad input.
+
+        ``observed_topology`` is an optional, newly observed topology snapshot.
+        When supplied, the pass compares it against the current version and
+        publishes the resulting **suspected** configuration changes in
+        ``report.configuration_changes``.  Detection is pure: it never advances
+        a version, rewrites history or promotes a change to confirmed.
+        """
         at = now or window_time(window)
         report = AuditReport(at=at, mode=mode)
         # Declarations are user knowledge and can be corrected while the process
@@ -893,6 +918,13 @@ class AuditPass:
         report.relations = relations
         report.circuits = circuits
         report.records = records
+        self._detect_changes(
+            topology=topology,
+            at=at,
+            report=report,
+            observed_topology=observed_topology,
+            current_version=current_version,
+        )
         self.last_report = report
         return report
 
@@ -953,6 +985,67 @@ class AuditPass:
             )
         finally:
             self._override_histories = None
+
+    # -- configuration change detection ----------------------------------- #
+    def _detect_changes(
+        self,
+        *,
+        topology: Topology,
+        at: datetime,
+        report: AuditReport,
+        observed_topology: Topology | None,
+        current_version: TopologyVersionRecord | None,
+    ) -> None:
+        """Compare an observed snapshot with the current version and publish changes.
+
+        Historical topology versions and stored observations are never touched:
+        a version record is derived (not written) purely to name the version the
+        change is about, and the resulting events are SUSPECTED, evidence-carrying
+        proposals.  They are published in the report's audit evidence and, when a
+        database is attached, mirrored into the existing ``system_events`` log.
+        There is no new storage and no auto-promotion.
+        """
+        if observed_topology is None:
+            return
+        try:
+            version = current_version or make_version(
+                version_number=int(getattr(topology, "version", 1) or 1),
+                topology=topology,
+                status=topology.status,
+                created_at=at,
+                created_by="audit",
+            )
+            self._current_topology_version = version
+            changes = detect_configuration_changes(
+                current_version=version,
+                current_topology=topology,
+                observed_topology=observed_topology,
+                occurred_at=at,
+                reported_by="scheduler",
+                evidence_event_ids=[],
+            )
+        except Exception as exc:  # noqa: BLE001 - detection never aborts the pass
+            report.errors["configuration_change_detection"] = (
+                f"{type(exc).__name__}: {exc}"
+            )
+            return
+
+        report.configuration_changes = list(changes)
+        report.written["configuration_changes"] = len(changes)
+        # Persist through the existing system-event log; no new table/service.
+        if self.database is not None:
+            for event in changes:
+                try:
+                    self.database.log_system_event(
+                        "info",
+                        "configuration_change",
+                        f"{event.kind}: {event.change_id}",
+                        {"status": event.status, "event": event.model_dump(mode="json")},
+                    )
+                except Exception as exc:  # noqa: BLE001 - never fatal to the pass
+                    report.errors[f"configuration_change_write:{event.change_id}"] = (
+                        f"{type(exc).__name__}: {exc}"
+                    )
 
     # -- stage 0: inputs --------------------------------------------------- #
     @staticmethod

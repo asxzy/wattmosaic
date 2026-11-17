@@ -23,11 +23,16 @@ from typing import Any
 
 import pytest
 from wattmosaic_engine.contracts import (
+    ChangeDetection,
+    ChangeStatus,
+    Circuit,
+    ConfigurationChangeKind,
     CTChannel,
     CTType,
     DeviceTopology,
     EdgeLifecycle,
     Phase,
+    Polarity,
     RelationKind,
     Topology,
     TopologyRelation,
@@ -35,6 +40,7 @@ from wattmosaic_engine.contracts import (
 )
 from wattmosaic_engine.electrical.topology import (
     EdgeView,
+    detect_configuration_changes,
     diff_topologies,
     make_version,
 )
@@ -45,7 +51,7 @@ from wattmosaic_engine.storage.migrations import LATEST_VERSION
 def _channel(ct_id: str, **kw) -> CTChannel:
     return CTChannel(
         ct_id=ct_id,
-        entity_id=f"sensor.{ct_id}_power",
+        entity_id=kw.pop("entity_id", f"sensor.{ct_id}_power"),
         name=ct_id,
         ct_type=kw.pop("ct_type", CTType.BRANCH),
         phase=kw.pop("phase", Phase.L1),
@@ -689,3 +695,274 @@ def test_edge_view_covers_the_contract_endpoint_fields() -> None:
     assert version.status == TopologyStatus.CANDIDATE.value
     assert version.edge_count == 1
     assert version.edge_ids == ("dca_dev_a|ct_a",)
+
+
+# --------------------------------------------------------------------------- #
+# TASK-TOPOLOGY-005a -- change detection -> typed SUSPECTED change events
+# --------------------------------------------------------------------------- #
+#
+# A newly observed topology/config is compared against the current versioned
+# topology.  Each difference becomes a typed ``ConfigurationChangeEvent`` whose
+# status is SUSPECTED (never CONFIRMED), carrying a confidence, the version it
+# was observed against and its evidence.  Detection is read-only: it never
+# rewrites the current topology, an observation or a historical version, and it
+# never auto-promotes a hypothesis.
+
+
+def _detect_changes(
+    current: Topology,
+    observed: Topology,
+    *,
+    version_number: int = 1,
+    evidence: tuple[str, ...] = (),
+):
+    """Build the current version and run detection; pure, writes nothing."""
+    version = make_version(
+        version_number=version_number,
+        topology=current,
+        created_at=datetime(2026, 11, 17, tzinfo=UTC),
+        created_by="scheduler",
+    )
+    return detect_configuration_changes(
+        current_version=version,
+        current_topology=current,
+        observed_topology=observed,
+        occurred_at=datetime(2026, 11, 17, tzinfo=UTC),
+        evidence_event_ids=evidence,
+    )
+
+
+def _kind_of(event) -> ConfigurationChangeKind:
+    """``use_enum_values`` stores the value as a plain string on the model."""
+    if isinstance(event.kind, ConfigurationChangeKind):
+        return event.kind
+    return ConfigurationChangeKind(event.kind)
+
+
+#: One (current, observed) topology pair per change kind.  Each pair differs in
+#: exactly the field that names the kind, so the mapping from observation to
+#: contract vocabulary is asserted directly rather than through a shared helper.
+_CHANGE_KIND_CASES = [
+    (
+        ConfigurationChangeKind.SMART_PLUG_RELOCATION,
+        Topology(
+            status=TopologyStatus.CANDIDATE,
+            devices=[DeviceTopology(device_id="dev_a", branch_ct_ids=["ct_a"])],
+        ),
+        Topology(
+            status=TopologyStatus.CANDIDATE,
+            devices=[DeviceTopology(device_id="dev_a", branch_ct_ids=["ct_b"])],
+        ),
+    ),
+    (
+        ConfigurationChangeKind.CT_READER_RELOCATION,
+        Topology(status=TopologyStatus.CANDIDATE, channels=[_channel("ct_a")]),
+        Topology(
+            status=TopologyStatus.CANDIDATE,
+            channels=[_channel("ct_a", parent_ct_id="main_l1")],
+        ),
+    ),
+    (
+        ConfigurationChangeKind.READER_REPLACEMENT,
+        Topology(status=TopologyStatus.CANDIDATE, channels=[_channel("ct_a")]),
+        Topology(
+            status=TopologyStatus.CANDIDATE,
+            channels=[_channel("ct_a", entity_id="sensor.replacement")],
+        ),
+    ),
+    (
+        ConfigurationChangeKind.CT_DIRECTION_CHANGE,
+        Topology(status=TopologyStatus.CANDIDATE, channels=[_channel("ct_a")]),
+        Topology(
+            status=TopologyStatus.CANDIDATE,
+            channels=[_channel("ct_a", polarity=Polarity.INVERTED)],
+        ),
+    ),
+    (
+        ConfigurationChangeKind.CALIBRATION_CHANGE,
+        Topology(status=TopologyStatus.CANDIDATE, channels=[_channel("ct_a")]),
+        Topology(
+            status=TopologyStatus.CANDIDATE,
+            channels=[_channel("ct_a", measurement_multiplier=2.0)],
+        ),
+    ),
+    (
+        ConfigurationChangeKind.READER_INSTALLATION,
+        Topology(status=TopologyStatus.CANDIDATE),
+        Topology(status=TopologyStatus.CANDIDATE, channels=[_channel("ct_new")]),
+    ),
+    (
+        ConfigurationChangeKind.READER_REMOVAL,
+        Topology(status=TopologyStatus.CANDIDATE, channels=[_channel("ct_old")]),
+        Topology(status=TopologyStatus.CANDIDATE),
+    ),
+    (
+        ConfigurationChangeKind.MEASUREMENT_SCOPE_CHANGE,
+        Topology(
+            status=TopologyStatus.CANDIDATE, channels=[_channel("ct_a", circuit_id="c1")]
+        ),
+        Topology(
+            status=TopologyStatus.CANDIDATE, channels=[_channel("ct_a", circuit_id="c2")]
+        ),
+    ),
+    (
+        ConfigurationChangeKind.CIRCUIT_RECONFIGURATION,
+        Topology(
+            status=TopologyStatus.CANDIDATE,
+            circuits=[Circuit(circuit_id="c1", ct_ids=["ct_a"])],
+        ),
+        Topology(
+            status=TopologyStatus.CANDIDATE,
+            circuits=[Circuit(circuit_id="c1", ct_ids=["ct_b"])],
+        ),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "kind,current,observed",
+    _CHANGE_KIND_CASES,
+    ids=[k.value for k, _, _ in _CHANGE_KIND_CASES],
+)
+def test_configuration_event_per_change_kind(kind, current, observed) -> None:
+    """Every change kind produces a typed event, and each is SUSPECTED.
+
+    The event carries a confidence, the version it was observed against and its
+    evidence.  ``detection`` says how it was learned (INFERRED), a separate
+    question from ``status`` (SUSPECTED); nothing here is auto-confirmed.
+    """
+    events = _detect_changes(current, observed, evidence=("obs-1",))
+
+    matching = [e for e in events if _kind_of(e) is kind]
+    assert matching, f"no {kind.value} event in {[e.kind for e in events]}"
+    event = matching[0]
+    assert event.status == ChangeStatus.SUSPECTED
+    assert event.detection == ChangeDetection.INFERRED
+    assert event.confidence is not None
+    assert 0.0 <= event.confidence <= 1.0
+    assert event.topology_version == "tv-00000001"
+    assert event.evidence_event_ids == ["obs-1"]
+    assert event.change_id.startswith("chg-")
+    assert event.superseded_by is None
+
+
+def test_suspected_change_is_not_confirmed() -> None:
+    """SUSPECTED is a distinct, non-established state; detection never confirms."""
+    current = _topology_with()
+    observed = _topology_with(
+        _relation("dca_dev_a|ct_a", confidence=0.9, declared_by="user")
+    )
+    events = _detect_changes(current, observed)
+
+    assert events
+    for event in events:
+        assert event.status == ChangeStatus.SUSPECTED
+        assert event.status != ChangeStatus.CONFIRMED
+    # A CONFIRMED event would be a different value; detection never mints one.
+    assert ChangeStatus.SUSPECTED.value != ChangeStatus.CONFIRMED.value
+
+
+def test_detection_preserves_history_and_does_not_rewrite_observations() -> None:
+    """Detection is read-only: neither version, topology nor observation mutates."""
+    current = _topology_with(_relation("dca_dev_a|ct_a", confidence=0.4))
+    observed = _topology_with(
+        _relation("dca_dev_a|ct_a", confidence=0.9),
+        _relation(
+            "dca_dev_b|ct_b",
+            subject_id="dev_b",
+            object_id="ct_b",
+            confidence=0.5,
+        ),
+    )
+    version = make_version(
+        version_number=1,
+        topology=current,
+        created_at=datetime(2026, 11, 17, tzinfo=UTC),
+        created_by="scheduler",
+    )
+    version_json = _stable_json_of(version)
+    version_edges = version.edges
+    version_diff = version.diff
+    current_json = current.model_dump(mode="json")
+    observed_json = observed.model_dump(mode="json")
+
+    events = detect_configuration_changes(
+        current_version=version,
+        current_topology=current,
+        observed_topology=observed,
+        occurred_at=datetime(2026, 11, 17, tzinfo=UTC),
+    )
+
+    assert events
+    # The historical version record is byte-identical and never advanced.
+    assert _stable_json_of(version) == version_json
+    assert version.edges == version_edges
+    assert version.diff is version_diff
+    assert version.version_id == "tv-00000001"
+    assert version.version_number == 1
+    # Neither the current nor the observed topology is rewritten.
+    assert current.model_dump(mode="json") == current_json
+    assert observed.model_dump(mode="json") == observed_json
+
+
+def test_identical_topology_produces_no_change_event() -> None:
+    """Detecting no difference must not invent a change."""
+    topology = _topology_with(_relation("dca_dev_a|ct_a", confidence=0.7))
+    assert _detect_changes(topology, topology) == ()
+
+
+def test_audit_pass_publishes_and_persists_suspected_changes(tmp_path) -> None:
+    """The audit pass publishes changes in its evidence and the existing event log.
+
+    A ``system_events`` row with the ``configuration_change`` category is the
+    persistence path (no new storage).  The report's evidence carries the typed
+    event; the live topology and its stored observation are untouched.
+    """
+    from wattmosaic_engine.disaggregation.audit import AuditConfig, AuditPass
+
+    database = Database(tmp_path / "wm.db")
+    database.save_topology(_topology())
+    current = _topology()
+    observed = Topology(
+        status=TopologyStatus.CANDIDATE,
+        channels=[
+            _channel(
+                "main_panel_l1",
+                ct_type=CTType.MAIN,
+                phase=Phase.L1,
+                panel_id="main_panel",
+                panel_name="Main Panel",
+                polarity=Polarity.INVERTED,
+            ),
+        ],
+    )
+    pass_ = AuditPass(database, config=AuditConfig())
+    report = pass_.analyze(
+        object(),  # window is unused for change detection
+        topology=current,
+        results=[],
+        events=[],
+        now=datetime(2026, 11, 17, tzinfo=UTC),
+        observed_topology=observed,
+    )
+
+    assert report.configuration_changes
+    assert all(e.status == ChangeStatus.SUSPECTED for e in report.configuration_changes)
+    evidence = report.as_dict()["configuration_changes"]
+    assert evidence
+    assert evidence[0]["status"] == ChangeStatus.SUSPECTED.value
+    assert evidence[0]["kind"] == ConfigurationChangeKind.CT_DIRECTION_CHANGE.value
+
+    rows = database._conn.execute(
+        "SELECT category, details_json FROM system_events WHERE category = ?",
+        ("configuration_change",),
+    ).fetchall()
+    assert len(rows) == len(report.configuration_changes)
+    assert all(json.loads(row["details_json"])["status"] == "suspected" for row in rows)
+    # The stored topology is unchanged by detection.
+    reloaded = database.load_topology()
+    assert reloaded is not None
+    assert {c.ct_id: c.polarity for c in reloaded.channels} == {
+        c.ct_id: c.polarity for c in current.channels
+    }
+
