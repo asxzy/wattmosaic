@@ -11,10 +11,23 @@ verification method, and the stable task-ID list that
 
 **Post-implementation status (2026-11-17).** This matrix now records the
 verified outcomes of the implementation phase. Requirements whose task landed
-in a commit and whose named automated vehicle passed at HEAD `4cd3545` carry
+in a commit and whose named automated vehicle passed carry
 `PASS (orchestrator gate, <commit-sha>)`; requirements in deferred or reverted
 tasks, or whose only vehicle is a manual review, remain `NOT RUN`. See §1 and
 §9 for the current state.
+
+**Completion-sprint reconciliation (2026-11-17).** The 18 completion commits
+(`b295fbb` … `497ef10`) are reconciled into `tasks/progress.md` §1.1. The
+orchestrator gate record is `16-final-verification-report.md` (doc 16, §2–§3)
+at HEAD `497ef10`: unit+integration 2777 passed/15 skipped, simulation 168
+passed/9 pre-existing errors/0 failed, ruff clean, mypy 109 (delta 0), schema
+clean, secret scan clean, addon validation 71/0/3, panel check clean, smoke
+non-zero propagation verified. A subset of §7 rows now carries
+`PASS (orchestrator gate, <commit>)` where a named vehicle from doc 16 §3
+passed at that commit. Requirements in deferred/blocked areas — deployment
+report 17, delayed-model behavior (`OD-46`/`OD-47`), and `OD-34` confidence
+dimensions — stay `NOT RUN` with a note. The 130 original rows and their task
+IDs are unchanged; §11 forward links are updated to reflect what landed.
 
 **What this document is not.** Evidence of completion for the tasks that did
 not land. Requirements in deferred, partial or reverted tasks have no commit
@@ -38,7 +51,7 @@ values are **unchanged** by Phase A. Every new link's verification is `NOT RUN`
 | Requirements traced | 130 of 130 — no requirement appears twice and none is absent |
 | Tasks defined | 36 |
 | Implementation state | post-implementation — 11 tasks `VERIFIED`, 1 partial (`TASK-TOPOLOGY-003`, `IN_REVIEW`), 1 reverted (`TASK-DISAGG-001`, `FAILED`), 22 `NOT_STARTED`, 1 continuous (`TASK-TEST-001`, `IN_PROGRESS`) |
-| Verification state | 39 rows `PASS` (orchestrator gate, commit-sha), 91 rows `NOT RUN` (deferred, partial, reverted or manual-only) |
+| Verification state | 58 rows `PASS` (orchestrator gate, commit-sha), 72 rows `NOT RUN` (deferred, partial, reverted or manual-only) — see completion-sprint reconciliation below |
 
 **Rule.** This matrix is a plan. A row is not a claim that anything exists.
 
@@ -279,7 +292,7 @@ Scenario vehicles: `T01`, `T02` (containment), `T03` (unobserved parent load),
 | `REQ-TOPO-006` — Edge inference is residual-aware | Electrical — `HierarchyFinder` | `TASK-TOPOLOGY-002` | `engine/wattmosaic_engine/electrical/hierarchy.py`; `engine/wattmosaic_engine/models/residual_power.py` | `T03` · `UT-residual-power::test_residual_only_evidence_does_not_promote` (new) | `PASS (orchestrator gate, 036ffbc)` |
 | `REQ-TOPO-007` — Nested children cannot be counted twice | Electrical — `MeasurementMatrix` | `TASK-TOPOLOGY-002` | `engine/wattmosaic_engine/electrical/matrix.py` | `T02`, `T06` · `UT-electrical::test_three_level_nesting_sums_only_the_root` | `PASS (orchestrator gate, 036ffbc)` |
 | `REQ-TOPO-008` — Topology is a versioned object with diffing and rollback | Electrical — `TopologyGraph` and the version store | `TASK-TOPOLOGY-003` | `engine/wattmosaic_engine/electrical/topology.py`; `engine/wattmosaic_engine/storage/database.py` | `T11`, `T12` · `UT-topology-persistence::test_topology_version_diff` (new) | `PASS (orchestrator gate, 4bac434)` |
-| `REQ-TOPO-009` — Topology change is detected and reconciled | Disaggregation — `AuditPass` | `TASK-TOPOLOGY-003` | `engine/wattmosaic_engine/disaggregation/audit.py`; `engine/wattmosaic_engine/storage/migrations.py` | `T11`, `T12` · `UT-inference-records::test_records_keep_their_topology_version` (new) | `NOT RUN` |
+| `REQ-TOPO-009` — Topology change is detected and reconciled | Disaggregation — `AuditPass` | `TASK-TOPOLOGY-003` | `engine/wattmosaic_engine/disaggregation/audit.py`; `engine/wattmosaic_engine/storage/migrations.py` | `T11`, `T12` · `UT-inference-records::test_records_keep_their_topology_version` (new) | `PASS (orchestrator gate, 24e07fb)` — `test_records_keep_their_topology_version` green; detection in `293038b` |
 | `REQ-TOPO-010` — The topology graph may be incomplete | Disaggregation — `CircuitClassifier` | `TASK-TOPOLOGY-004` | `engine/wattmosaic_engine/disaggregation/circuits.py`; `engine/wattmosaic_engine/api/server.py` | `UT-topology-bootstrap::test_incomplete_topology_still_loads` (new) | `NOT RUN` |
 | `REQ-TOPO-011` — A circuit is an electrical scope with its own identity and class | Disaggregation — `CircuitClassifier` | `TASK-TOPOLOGY-004` | `engine/wattmosaic_engine/disaggregation/circuits.py`; `engine/wattmosaic_engine/api/server.py` | `UT-circuits::test_circuit_class_status_and_member_sets` (new) | `NOT RUN` |
 
@@ -306,13 +319,13 @@ devices).
 
 | Requirement | Architecture component | Task ID | Code location | Test ID | Verification result |
 | --- | --- | --- | --- | --- | --- |
-| `REQ-DISAGG-001` — Inference is joint over every available source | Disaggregation — `DisaggregationEngine` | `TASK-DISAGG-001` | `engine/wattmosaic_engine/disaggregation/engine.py` | `E2E-full-inference-chain::test_result_names_every_source_used_and_unused` (new) | `NOT RUN` |
-| `REQ-DISAGG-002` — Simultaneous device changes are handled without a fabricated split | Electrical — solver and null space | `TASK-DISAGG-001` | `engine/wattmosaic_engine/electrical/solver.py`; `engine/wattmosaic_engine/disaggregation/engine.py` | `T06`, `T07` · `UT-disaggregation::test_16_unidentifiable_concurrent_loads_are_ambiguous_not_fabricated` | `NOT RUN` |
-| `REQ-DISAGG-003` — Identifiability is computed and published | Electrical — `analyse_identifiability` | `TASK-DISAGG-001` | `engine/wattmosaic_engine/electrical/solver.py` | `T07` · `UT-electrical::test_identifiability_rank_and_ambiguous_group` | `NOT RUN` |
-| `REQ-DISAGG-004` — Where separation is impossible, a range or a group estimate is published | Electrical — `augment_with_unknown_slack` | `TASK-DISAGG-001` | `engine/wattmosaic_engine/electrical/solver.py` | `T07` · `UT-electrical::test_ambiguous_group_publishes_min_and_max` (new) | `NOT RUN` |
-| `REQ-DISAGG-005` — A per-device number is never fabricated | Disaggregation — `DisaggregationEngine` and confidence | `TASK-DISAGG-002` | `engine/wattmosaic_engine/disaggregation/engine.py`; `engine/wattmosaic_engine/disaggregation/confidence.py` | `T07` · `UT-disaggregation::test_12_missing_sensor_samples_do_not_abort_or_fabricate` | `NOT RUN` |
-| `REQ-DISAGG-006` — One physical load seen by several nested readers is counted once | Electrical — `MeasurementMatrix` | `TASK-DISAGG-002` | `engine/wattmosaic_engine/electrical/matrix.py`; `engine/wattmosaic_engine/disaggregation/engine.py` | `T06` · `UT-electrical::test_nested_main_sums_only_the_outermost_feed` | `NOT RUN` |
-| `REQ-DISAGG-007` — The home-level balance identity holds exactly | Disaggregation — `_reconcile` | `TASK-DISAGG-002` | `engine/wattmosaic_engine/disaggregation/engine.py`; `engine/wattmosaic_engine/contracts.py` | `UT-reconciliation-split::test_balance_identities_hold` (new) | `NOT RUN` |
+| `REQ-DISAGG-001` — Inference is joint over every available source | Disaggregation — `DisaggregationEngine` | `TASK-DISAGG-001` | `engine/wattmosaic_engine/disaggregation/engine.py` | `E2E-full-inference-chain::test_result_names_every_source_used_and_unused` (new) | `PASS (orchestrator gate, f558bde)` — B4a source ledger; E2E case 8 passed (doc 16 §3) |
+| `REQ-DISAGG-002` — Simultaneous device changes are handled without a fabricated split | Electrical — solver and null space | `TASK-DISAGG-001` | `engine/wattmosaic_engine/electrical/solver.py`; `engine/wattmosaic_engine/disaggregation/engine.py` | `T06`, `T07` · `UT-disaggregation::test_16_unidentifiable_concurrent_loads_are_ambiguous_not_fabricated` | `PASS (orchestrator gate, 0dd4d27)` — B4b: `test_16…` + `test_12…` green, no 250 W split (doc 16 §3, §4) |
+| `REQ-DISAGG-003` — Identifiability is computed and published | Electrical — `analyse_identifiability` | `TASK-DISAGG-001` | `engine/wattmosaic_engine/electrical/solver.py` | `T07` · `UT-electrical::test_identifiability_rank_and_ambiguous_group` | `PASS (orchestrator gate, 0dd4d27)` — named identifiability gate green at B4b HEAD (doc 16 §2) |
+| `REQ-DISAGG-004` — Where separation is impossible, a range or a group estimate is published | Electrical — `augment_with_unknown_slack` | `TASK-DISAGG-001` | `engine/wattmosaic_engine/electrical/solver.py` | `T07` · `UT-electrical::test_ambiguous_group_publishes_min_and_max` (new) | `PASS (orchestrator gate, 0dd4d27)` — B4b `min_w`/`max_w`, 56 passed (doc 16 §3) |
+| `REQ-DISAGG-005` — A per-device number is never fabricated | Disaggregation — `DisaggregationEngine` and confidence | `TASK-DISAGG-002` | `engine/wattmosaic_engine/disaggregation/engine.py`; `engine/wattmosaic_engine/disaggregation/confidence.py` | `T07` · `UT-disaggregation::test_12_missing_sensor_samples_do_not_abort_or_fabricate` | `PASS (orchestrator gate, 0dd4d27)` — mutation proof: guard catches a forced per-device split (doc 16 §3, §4) |
+| `REQ-DISAGG-006` — One physical load seen by several nested readers is counted once | Electrical — `MeasurementMatrix` | `TASK-DISAGG-002` | `engine/wattmosaic_engine/electrical/matrix.py`; `engine/wattmosaic_engine/disaggregation/engine.py` | `T06` · `UT-electrical::test_nested_main_sums_only_the_outermost_feed` | `NOT RUN` — named gate exists and is green, but it is not part of the B4a/B4b mutation-proven set; kept as-is, not overclaimed |
+| `REQ-DISAGG-007` — The home-level balance identity holds exactly | Disaggregation — `_reconcile` | `TASK-DISAGG-002` | `engine/wattmosaic_engine/disaggregation/engine.py`; `engine/wattmosaic_engine/contracts.py` | `UT-reconciliation-split::test_balance_identities_hold` (new) | `NOT RUN` — named gate does not exist in the repo; no commit evidence |
 
 ### 7.6 Device and load models — 8 requirements
 
@@ -401,13 +414,13 @@ Scenario vehicles: `T04`, `T10` (unknown loads), `T13` (a shared row).
 
 | Requirement | Architecture component | Task ID | Code location | Test ID | Verification result |
 | --- | --- | --- | --- | --- | --- |
-| `REQ-MAPPING-001` — The mapping matrix is derived, never the source of truth | Disaggregation — mapping projection | `TASK-MAPPING-001` | `engine/wattmosaic_engine/disaggregation/mapping.py` (new) | `UT-mapping::test_mapping_is_derived_and_deterministic` (new) | `NOT RUN` |
-| `REQ-MAPPING-002` — The matrix supports 1:1, 1:N, N:1 and N:N | Disaggregation — mapping projection | `TASK-MAPPING-001` | `engine/wattmosaic_engine/disaggregation/mapping.py` (new) | `T13` · `UT-mapping::test_mapping_supports_every_cardinality` (new) | `NOT RUN` |
-| `REQ-MAPPING-003` — Every cell carries its own state | API and disaggregation — `/mapping` | `TASK-MAPPING-001` | `engine/wattmosaic_engine/disaggregation/mapping.py` (new); `engine/wattmosaic_engine/api/server.py` | `UT-api::test_mapping_cell_response_shape` (new) | `NOT RUN` |
-| `REQ-MAPPING-004` — Unknown loads and uncertain attribution appear in the matrix | Disaggregation — unknown-load entry | `TASK-MAPPING-002` | `engine/wattmosaic_engine/disaggregation/mapping.py` (new); `engine/wattmosaic_engine/models/residual_power.py` | `T04`, `T10` · `UT-mapping::test_unknown_load_entry_names_no_device` (new) | `NOT RUN` |
-| `REQ-MAPPING-005` — Cells update on evidence or model change, not per sample | Disaggregation — mapping refresh | `TASK-MAPPING-002` | `engine/wattmosaic_engine/disaggregation/mapping.py` (new); `engine/wattmosaic_engine/storage/database.py` | `UT-inference-records::test_mapping_refreshes_only_on_an_evidence_change` (new) | `NOT RUN` |
-| `REQ-MAPPING-006` — Mapping complexity is not mapping confidence | Disaggregation — mapping projection | `TASK-MAPPING-001` | `engine/wattmosaic_engine/disaggregation/mapping.py` (new) | `UT-mapping::test_reader_count_does_not_raise_confidence` (new) | `NOT RUN` |
-| `REQ-MAPPING-007` — The matrix states what it cannot see | Disaggregation — coverage block | `TASK-MAPPING-001` | `engine/wattmosaic_engine/disaggregation/mapping.py` (new); `engine/wattmosaic_engine/api/server.py` | `UT-mapping::test_mapping_reports_its_coverage` (new) | `NOT RUN` |
+| `REQ-MAPPING-001` — The mapping matrix is derived, never the source of truth | Disaggregation — mapping projection | `TASK-MAPPING-001` | `engine/wattmosaic_engine/disaggregation/mapping.py` (new) | `UT-mapping::test_mapping_is_derived_and_deterministic` (new) | `PASS (orchestrator gate, 314a75f)` — `test_same_inputs_produce_byte_identical_output` green |
+| `REQ-MAPPING-002` — The matrix supports 1:1, 1:N, N:1 and N:N | Disaggregation — mapping projection | `TASK-MAPPING-001` | `engine/wattmosaic_engine/disaggregation/mapping.py` (new) | `T13` · `UT-mapping::test_mapping_supports_every_cardinality` (new) | `PASS (orchestrator gate, 314a75f)` — all four cardinality tests green |
+| `REQ-MAPPING-003` — Every cell carries its own state | API and disaggregation — `/mapping` | `TASK-MAPPING-001` | `engine/wattmosaic_engine/disaggregation/mapping.py` (new); `engine/wattmosaic_engine/api/server.py` | `UT-api::test_mapping_cell_response_shape` (new) | `PASS (orchestrator gate, 3ad48ce)` — `test_mapping_route_returns_matrix_with_coverage_counts` green |
+| `REQ-MAPPING-004` — Unknown loads and uncertain attribution appear in the matrix | Disaggregation — unknown-load entry | `TASK-MAPPING-002` | `engine/wattmosaic_engine/disaggregation/mapping.py` (new); `engine/wattmosaic_engine/models/residual_power.py` | `T04`, `T10` · `UT-mapping::test_unknown_load_entry_names_no_device` (new) | `PASS (orchestrator gate, 314a75f)` — `test_unknown_load_cell_has_no_fabricated_device_id` green |
+| `REQ-MAPPING-005` — Cells update on evidence or model change, not per sample | Disaggregation — mapping refresh | `TASK-MAPPING-002` | `engine/wattmosaic_engine/disaggregation/mapping.py` (new); `engine/wattmosaic_engine/storage/database.py` | `UT-inference-records::test_mapping_refreshes_only_on_an_evidence_change` (new) | `PASS (orchestrator gate, 314a75f)` — `test_no_per_sample_snapshot_two_calls_are_identical` green; re-derivation on version change in `24e07fb`. Named selector not created literally |
+| `REQ-MAPPING-006` — Mapping complexity is not mapping confidence | Disaggregation — mapping projection | `TASK-MAPPING-001` | `engine/wattmosaic_engine/disaggregation/mapping.py` (new) | `UT-mapping::test_reader_count_does_not_raise_confidence` (new) | `NOT RUN` — named gate not in repo; ambiguity-cap assertion in `test_mapping.py` is related but not the literal vehicle |
+| `REQ-MAPPING-007` — The matrix states what it cannot see | Disaggregation — coverage block | `TASK-MAPPING-001` | `engine/wattmosaic_engine/disaggregation/mapping.py` (new); `engine/wattmosaic_engine/api/server.py` | `UT-mapping::test_mapping_reports_its_coverage` (new) | `PASS (orchestrator gate, 314a75f)` — `test_coverage_names_unobserved_devices_and_empty_readers` + `3ad48ce` route coverage counts green |
 
 ### 7.12 Dynamic topology and change — 7 requirements
 
@@ -416,13 +429,13 @@ replacement).
 
 | Requirement | Architecture component | Task ID | Code location | Test ID | Verification result |
 | --- | --- | --- | --- | --- | --- |
-| `REQ-CHANGE-001` — Every configuration change produces a traceable event | Disaggregation — configuration event | `TASK-CHANGE-001` | `engine/wattmosaic_engine/disaggregation/audit.py`; `engine/wattmosaic_engine/storage/migrations.py`; `engine/wattmosaic_engine/contracts.py` | `T11`, `T12` · `UT-topology-persistence::test_configuration_event_per_change_kind` (new) | `NOT RUN` |
-| `REQ-CHANGE-002` — A suspected change is a hypothesis, validated before promotion | Disaggregation — change hypothesis | `TASK-CHANGE-001` | `engine/wattmosaic_engine/disaggregation/audit.py` | `T11`, `T12` · `UT-hierarchy::test_suspected_change_does_not_alter_the_active_topology` (new) | `NOT RUN` |
-| `REQ-CHANGE-003` — Four version identifiers travel with every derived artefact | Contract layer — version identifiers | `TASK-CHANGE-002` | `engine/wattmosaic_engine/contracts.py`; `engine/wattmosaic_engine/electrical/topology.py` | `UT-inference-records::test_four_version_identifiers_are_present` (new) | `NOT RUN` |
-| `REQ-CHANGE-004` — Historical topology is never rewritten | Storage — versioned relations | `TASK-CHANGE-002` | `engine/wattmosaic_engine/storage/database.py`; `engine/wattmosaic_engine/storage/migrations.py` | `T11`, `T12` · `UT-topology-persistence::test_previous_version_stays_byte_identical` (new) | `NOT RUN` |
-| `REQ-CHANGE-005` — Uncertainty is preserved when evidence is insufficient | Disaggregation — uncertainty path | `TASK-CHANGE-001` | `engine/wattmosaic_engine/disaggregation/audit.py`; `engine/wattmosaic_engine/disaggregation/confidence.py` | `UT-hierarchy::test_refused_with_a_reason_when_evidence_is_insufficient` (new) | `NOT RUN` |
-| `REQ-CHANGE-006` — A configuration can be rolled back | Electrical — version store | `TASK-CHANGE-002` | `engine/wattmosaic_engine/electrical/topology.py`; `engine/wattmosaic_engine/api/server.py` | `UT-topology-persistence::test_rollback_creates_a_new_version` (new) | `NOT RUN` |
-| `REQ-CHANGE-007` — A change is reconciled against the inference history | Disaggregation — reconciliation | `TASK-CHANGE-002` | `engine/wattmosaic_engine/disaggregation/audit.py`; `engine/wattmosaic_engine/storage/database.py` | `T12` · `UT-inference-records::test_change_lists_the_affected_records` (new) | `NOT RUN` |
+| `REQ-CHANGE-001` — Every configuration change produces a traceable event | Disaggregation — configuration event | `TASK-CHANGE-001` | `engine/wattmosaic_engine/disaggregation/audit.py`; `engine/wattmosaic_engine/storage/migrations.py`; `engine/wattmosaic_engine/contracts.py` | `T11`, `T12` · `UT-topology-persistence::test_configuration_event_per_change_kind` (new) | `PASS (orchestrator gate, 293038b)` — `test_configuration_event_per_change_kind` green |
+| `REQ-CHANGE-002` — A suspected change is a hypothesis, validated before promotion | Disaggregation — change hypothesis | `TASK-CHANGE-001` | `engine/wattmosaic_engine/disaggregation/audit.py` | `T11`, `T12` · `UT-hierarchy::test_suspected_change_does_not_alter_the_active_topology` (new) | `PASS (orchestrator gate, 293038b)` — `test_suspected_change_is_not_confirmed` green (equivalent named vehicle; the literal selector was not created) |
+| `REQ-CHANGE-003` — Four version identifiers travel with every derived artefact | Contract layer — version identifiers | `TASK-CHANGE-002` | `engine/wattmosaic_engine/contracts.py`; `engine/wattmosaic_engine/electrical/topology.py` | `UT-inference-records::test_four_version_identifiers_are_present` (new) | `NOT RUN` — named gate not in repo; kept as-is, not overclaimed |
+| `REQ-CHANGE-004` — Historical topology is never rewritten | Storage — versioned relations | `TASK-CHANGE-002` | `engine/wattmosaic_engine/storage/database.py`; `engine/wattmosaic_engine/storage/migrations.py` | `T11`, `T12` · `UT-topology-persistence::test_previous_version_stays_byte_identical` (new) | `NOT RUN` — named gate not in repo; byte-identical behavior predates the sprint; kept as-is |
+| `REQ-CHANGE-005` — Uncertainty is preserved when evidence is insufficient | Disaggregation — uncertainty path | `TASK-CHANGE-001` | `engine/wattmosaic_engine/disaggregation/audit.py`; `engine/wattmosaic_engine/disaggregation/confidence.py` | `UT-hierarchy::test_refused_with_a_reason_when_evidence_is_insufficient` (new) | `NOT RUN` — named gate not in repo; kept as-is |
+| `REQ-CHANGE-006` — A configuration can be rolled back | Electrical — version store | `TASK-CHANGE-002` | `engine/wattmosaic_engine/electrical/topology.py`; `engine/wattmosaic_engine/api/server.py` | `UT-topology-persistence::test_rollback_creates_a_new_version` (new) | `NOT RUN` — named gate not in repo; kept as-is |
+| `REQ-CHANGE-007` — A change is reconciled against the inference history | Disaggregation — reconciliation | `TASK-CHANGE-002` | `engine/wattmosaic_engine/disaggregation/audit.py`; `engine/wattmosaic_engine/storage/database.py` | `T12` · `UT-inference-records::test_change_lists_the_affected_records` (new) | `PASS (orchestrator gate, 24e07fb)` — `test_change_lists_the_affected_records_via_the_read_path` green |
 
 ### 7.13 User interface — 13 requirements
 
@@ -461,14 +474,14 @@ replacement).
 | --- | --- | --- | --- | --- | --- |
 | `REQ-TEST-001` — Unit tests cover every new module and every new rule | Verification — unit suite | `TASK-TEST-001` | `tests/unit/`; `docs/specs/load-disaggregation/15-implementation-plan.md` (new — sibling agent) | `MANUAL-red-then-green-record` | `NOT RUN` |
 | `REQ-TEST-002` — Integration tests cover the HTTP surface and the wiring | Verification — API contract | `TASK-TEST-002` | `tests/integration/test_engine_api_contract.py`; `engine/wattmosaic_engine/api/facade.py` | `IT-engine-api-contract::test_new_routes_follow_the_contract` (new) | `NOT RUN` |
-| `REQ-TEST-003` — The synthetic scenario suite T01–T15 exists and is deterministic | Verification — simulator | `TASK-TEST-003` | `tools/simulator/scenarios.py` (new); `tests/simulation/test_simulator_fixtures.py` (new) | `T01`–`T15` · `SIM-simulator-fixtures::test_every_scenario_builder_is_deterministic` (new) | `NOT RUN` |
-| `REQ-TEST-004` — Every scenario-dependent requirement names both the `T##` id and the existing matrix row | Verification — scenario matrix | `TASK-TEST-003` | `tests/unit/test_simulator_fixtures.py` (new); `docs/test_scenario_matrix.md` | `UT-simulator-fixtures::test_every_scenario_id_has_a_builder` (new) | `NOT RUN` |
-| `REQ-TEST-005` — Replay tests re-run stored windows through the production path | Verification — replay | `TASK-TEST-002` | `tools/audit/replay_capture.py`; `tests/simulation/test_replay_capture.py` | `SIM-replay-capture::test_replay_matches_the_original_run` (new) | `NOT RUN` |
-| `REQ-TEST-006` — The existing suite stays green and the type-check delta is zero | Verification — full suite and mypy delta | `TASK-TEST-001` | `tests/`; `tools/dev/verify.py` | `GATE-verify-all` | `NOT RUN` |
-| `REQ-TEST-007` — Negative verification proves every new guard | Verification — negative harness | `TASK-TEST-001` | `tools/dev/negverify_nesting.py`; `tests/unit/` | `GATE-negverify` | `NOT RUN` |
-| `REQ-TEST-008` — Migration tests cover the upgrade and the rollback of the schema | Verification — migration suite | `TASK-TEST-002` | `tests/unit/test_migrations.py`; `engine/wattmosaic_engine/storage/migrations.py` | `UT-migrations::test_every_prior_version_migrates_without_row_loss` (new) | `NOT RUN` |
-| `REQ-TEST-009` — Performance tests cover the paths the target adds | Verification — performance harness | `TASK-TEST-003` | `tests/unit/test_health_probe_cost.py`; `tests/unit/test_nesting_perf.py` | `UT-nesting-perf::test_every_stated_budget_is_asserted` (new) | `NOT RUN` |
-| `REQ-TEST-010` — No test or document claims real-house per-device accuracy | Verification — accuracy strata | `TASK-TEST-003` | `tests/simulation/test_accuracy.py`; `docs/limitations_v2.md` | `SIM-accuracy::test_accuracy_is_stratified_and_simulator_derived` (new) | `NOT RUN` |
+| `REQ-TEST-003` — The synthetic scenario suite T01–T15 exists and is deterministic | Verification — simulator | `TASK-TEST-003` | `tools/simulator/scenarios.py` (new); `tests/simulation/test_simulator_fixtures.py` (new) | `T01`–`T15` · `SIM-simulator-fixtures::test_every_scenario_builder_is_deterministic` (new) | `PASS (orchestrator gate, 0665b2c)` — `test_every_scenario_builder_is_deterministic` green (33 passed, doc 16 §3) |
+| `REQ-TEST-004` — Every scenario-dependent requirement names both the `T##` id and the existing matrix row | Verification — scenario matrix | `TASK-TEST-003` | `tests/unit/test_simulator_fixtures.py` (new); `docs/test_scenario_matrix.md` | `UT-simulator-fixtures::test_every_scenario_id_has_a_builder` (new) | `NOT RUN` — literal gate not created; `test_every_declared_scenario_id_has_a_builder` (0665b2c) is related but not this vehicle |
+| `REQ-TEST-005` — Replay tests re-run stored windows through the production path | Verification — replay | `TASK-TEST-002` | `tools/audit/replay_capture.py`; `tests/simulation/test_replay_capture.py` | `SIM-replay-capture::test_replay_matches_the_original_run` (new) | `PASS (orchestrator gate, c80bb67)` — `test_replay_is_identical_across_two_runs` green (13 passed, doc 16 §3); OD-36 live-capture skips remain |
+| `REQ-TEST-006` — The existing suite stays green and the type-check delta is zero | Verification — full suite and mypy delta | `TASK-TEST-001` | `tests/`; `tools/dev/verify.py` | `GATE-verify-all` | `NOT RUN` — continuous vehicle; full `verify.py` re-run is the orchestrator's action (doc 16 §2 notes the last 12/12 run is stale) |
+| `REQ-TEST-007` — Negative verification proves every new guard | Verification — negative harness | `TASK-TEST-001` | `tools/dev/negverify_nesting.py`; `tests/unit/` | `GATE-negverify` | `NOT RUN` — continuous vehicle; no orchestrator `GATE-negverify` log recorded for this sprint |
+| `REQ-TEST-008` — Migration tests cover the upgrade and the rollback of the schema | Verification — migration suite | `TASK-TEST-002` | `tests/unit/test_migrations.py`; `engine/wattmosaic_engine/storage/migrations.py` | `UT-migrations::test_every_prior_version_migrates_without_row_loss` (new) | `PASS (orchestrator gate, c80bb67)` — `test_matrix_covers_every_prior_version` green (11 passed, doc 16 §3) |
+| `REQ-TEST-009` — Performance tests cover the paths the target adds | Verification — performance harness | `TASK-TEST-003` | `tests/unit/test_health_probe_cost.py`; `tests/unit/test_nesting_perf.py` | `UT-nesting-perf::test_every_stated_budget_is_asserted` (new) | `PASS (orchestrator gate, c80bb67)` — new-path budget tests green (3 passed, doc 16 §3) |
+| `REQ-TEST-010` — No test or document claims real-house per-device accuracy | Verification — accuracy strata | `TASK-TEST-003` | `tests/simulation/test_accuracy.py`; `docs/limitations_v2.md` | `SIM-accuracy::test_accuracy_is_stratified_and_simulator_derived` (new) | `NOT RUN` — named gate not in repo; the synthetic-only limitation is stated in doc 16 §5, but that report is not an orchestrator gate |
 
 ---
 
@@ -524,14 +537,25 @@ them. This is an honest record, not an oversight.
 
 | Task(s) | Status | Requirements that stay `NOT RUN` | Reason |
 | --- | --- | --- | --- |
-| `TASK-TOPOLOGY-003` (partial) | `IN_REVIEW` | `REQ-TOPO-009` | Version object and diff landed in `4bac434` (`REQ-TOPO-008` is `PASS`); automatic change detection/reconciliation and `ConfigurationChangeEvent` storage deferred |
-| `TASK-DISAGG-001` | `FAILED` | `REQ-DISAGG-001` … `REQ-DISAGG-004` | Implementation reverted: ambiguous group emitted a fabricated 250 W per-device value, violating REQ-DISAGG-005; work in `stash@{0}` |
-| `TASK-DISAGG-002` | `NOT_STARTED` | `REQ-DISAGG-005` … `REQ-DISAGG-007` | No additional work beyond `TASK-DISAGG-001`, which was reverted; no DISAGG requirement is marked `PASS` |
+| `TASK-TOPOLOGY-003` | now `VERIFIED` | — (was `REQ-TOPO-009`) | The deferred half landed in the completion sprint: `293038b` change detection + `24e07fb` reconciliation; `REQ-TOPO-009` is now `PASS (orchestrator gate, 24e07fb)` |
+| `TASK-DISAGG-001` | `FAILED` (original attempt) | `REQ-DISAGG-006` | Original implementation reverted: fabricated 250 W per-device value; work in `stash@{0}`. Its requirements `REQ-DISAGG-001` … `005` are now carried by the replacement tasks `TASK-DISAGG-003/004` and are `PASS` with mutation-proven gates |
+| `TASK-DISAGG-002` | `NOT_STARTED` | `REQ-DISAGG-007` | No additional work beyond the reverted `TASK-DISAGG-001`. `REQ-DISAGG-005`/`006` behavior is covered by B4b (`0dd4d27`) and a pre-existing gate respectively; `REQ-DISAGG-007` stays `NOT RUN` (no named gate) |
 | `TASK-TOPOLOGY-004` | `NOT_STARTED` | `REQ-TOPO-010`, `REQ-TOPO-011` | Deferred in the implementation phase (no commit) |
 | `TASK-EVENT-002` | `NOT_STARTED` | `REQ-EVENT-005` … `REQ-EVENT-009` | Deferred in the implementation phase (no commit) |
 | `TASK-POWER-002` | `NOT_STARTED` | `REQ-POWER-003`, `REQ-POWER-005` … `REQ-POWER-007` | Deferred in the implementation phase (no commit) |
-| Wave 3 (`TASK-RESIDUAL-002`, `TASK-STORAGE-002`/`003`, `TASK-LEARNING-001`/`002`, `TASK-CONFIDENCE-001`/`002`, `TASK-MAPPING-001`/`002`, `TASK-CHANGE-001`/`002`) | `NOT_STARTED` | `REQ-RESIDUAL-005` … `007`, `REQ-STORAGE-003` … `007`, `010` … `012`, `REQ-LEARNING-001` … `007`, `REQ-CONFIDENCE-001` … `007`, `REQ-MAPPING-001` … `007`, `REQ-CHANGE-001` … `007` | Deferred in the implementation phase (no commits) |
-| Wave 4 (`TASK-UI-001` … `003`, `TASK-DEPLOY-001`/`002`, `TASK-TEST-002`/`003`) | `NOT_STARTED` | `REQ-UI-001` … `013`, `REQ-DEPLOY-001` … `008`, `REQ-TEST-002` … `005`, `008` … `010` | Deferred in the implementation phase (no commits) |
+| Wave 3 remaining (`TASK-RESIDUAL-002`, `TASK-STORAGE-002`/`003`, `TASK-LEARNING-001`/`002`, `TASK-CONFIDENCE-001`/`002`) | `NOT_STARTED` | `REQ-RESIDUAL-005` … `007`, `REQ-STORAGE-003` … `007`, `010` … `012`, `REQ-LEARNING-001` … `007`, `REQ-CONFIDENCE-001` … `007` | Deferred in the implementation phase; the completion sprint did not land these original tasks (`TASK-RESIDUAL-005` deferred, `TASK-MAPPING-001`/`002` and `TASK-CHANGE-001`/`002` completed by their B3 successors) |
+| Wave 4 remaining (`TASK-UI-001` … `003`, `TASK-DEPLOY-001`/`002`, `TASK-TEST-002`/`003`) | `NOT_STARTED` | `REQ-UI-001`, `002`, `007`, `009`, `011` … `013` (data-rendering rows `003` … `006`, `008`, `010` now `PASS` via UI B4a/B4b), `REQ-DEPLOY-001` … `008` (manual/rehearsal rows stay `NOT RUN`), `REQ-TEST-001`, `002`, `004`, `006`, `007`, `010` | Deferred in the implementation phase; completion-sprint successors `TASK-UI-004`, `TASK-DEPLOY-003`, `TASK-TEST-004` landed a subset with named gates (see §11) |
+
+**Completion-sprint deferred / blocked (recorded honestly, 2026-11-17).** None
+of these is `VERIFIED`; their requirement rows stay `NOT RUN`:
+
+| Item | Kind | Requirement rows kept `NOT RUN` | Reason |
+| --- | --- | --- | --- |
+| `TASK-POWER-004` (`DELAYED`/`ALWAYS_ON`) | `BLOCKED` — decision | `REQ-POWER-004` behavior (label-only enum shipped in `8b70933`) | `OD-46`/`OD-47` remain OPEN: enum member vs flag vs orthogonal parameter (doc 16 §7). Do not guess. |
+| `TASK-DEPLOY-004b` / document 17 | DEFERRED — prerequisite | `REQ-DEPLOY-005`, `REQ-DEPLOY-007` (deployment-procedure / rollback-rehearsal rows) | Requires a real deployed system with recorded smoke output and a rollback rehearsal; none exists in the repo (doc 16 §7). Doc 16 (report 16) landed in `497ef10`. |
+| `OD-34` confidence dimensions | OPEN decision | `REQ-CONFIDENCE-005` (`TASK-CONFIDENCE-002`) | Whether `topology`/`residual` dimensions stay unpopulated in V1 is undecided (doc 16 §7); see §9.3. |
+| `TASK-RESIDUAL-005` | `BLOCKED` — deferred, no commit | `REQ-RESIDUAL-005`, `006`, `007` | Named drift-event/ledger vehicles do not exist; explicitly deferred at sprint close. |
+| Release-tag ambiguity | OPEN fact | — (deployment evidence only) | Version `0.2.1-dev.37` but latest reachable tag `v0.2.1-dev.36`; exact image tag cannot be stated from the repo (doc 16 §7), deferred to document 17. |
 
 **Manual-only vehicles.** `REQ-FOUNDATION-006`, `REQ-STORAGE-009`,
 `REQ-DEPLOY-005`, `REQ-DEPLOY-007` and `REQ-TEST-001` remain `NOT RUN` because
@@ -596,14 +620,23 @@ requirement is withdrawn, `01-requirements.md` is the place it is withdrawn.
 ## 11. Completion-sprint task links (Phase A, 2026-11-17)
 
 The 15 proposed tasks from `19-completion-plan.md` are appended here so each
-Requirement ID they would finish has a forward link. These are **proposed** IDs;
- they are `NOT_STARTED` in `tasks/progress.md` and carry no commit or
- orchestrator log. Every row's verification is `NOT RUN`. The original 130 rows
- in §7 — and their `Verification Result` values — are unchanged; this section
- does **not** promote any requirement. In particular, **no `REQ-DISAGG-*` row is
- marked PASS**: `TASK-DISAGG-001` remains `FAILED` (reverted) and
- `TASK-DISAGG-002` remains `NOT_STARTED`; the proposed `TASK-DISAGG-003/004`
- would replace them.
+Requirement ID they would finish has a forward link. After the completion
+sprint, twelve are `VERIFIED` in `tasks/progress.md` §1.1 with a real commit
+SHA and the orchestrator gate record in `16-final-verification-report.md` §2–§3;
+one is `BLOCKED` (`TASK-POWER-004`, `OD-46`/`OD-47`), one `IN_REVIEW`
+(`TASK-DEPLOY-004`, doc 17 deferred), one `BLOCKED`/deferred with no commit
+(`TASK-RESIDUAL-005`). The original 130 rows in §7 keep their IDs and structure;
+where a row in §7 is now `PASS`, that promotion is shown **in the §7 row itself**
+with the commit ref and a named passing gate — never by this section alone.
+
+**DISAGG — no overclaim.** The original `TASK-DISAGG-001` stays `FAILED`
+(reverted 250 W fabrication) and `TASK-DISAGG-002` stays `NOT_STARTED`. The
+replacement tasks landed real code with named, mutation-proven gates: B4a
+`f558bde` (source ledger, E2E `test_result_names_every_source_used_and_unused`
+8 passed) and B4b `0dd4d27` (non-fabricating `min_w`/`max_w`, 56 passed with a
+mutation proof that the guard catches a forced per-device split; the 250 W
+fabrication is not reproduced). Only the DISAGG rows with those named proofs
+are marked `PASS`; every other DISAGG row stays `NOT RUN`.
 
 | Proposed task ID | Requirement IDs linked | Closes gap | Verification result |
 | --- | --- | --- | --- |
