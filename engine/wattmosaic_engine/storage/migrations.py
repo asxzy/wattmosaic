@@ -789,6 +789,16 @@ MIGRATIONS: tuple[Migration, ...] = (
     ),
 )
 
+#: Version that introduced the payload encoding (`REQ-STORAGE-008`).  Recorded
+#: beside :data:`MIGRATIONS` rather than as a thirteenth migration: the encoding
+#: is a **write-path** marker (``storage/payload.py`` prefixes a compressed
+#: value with ``Z1:``) and the decoder reads both forms, so there is no column
+#: to add and -- per §11.1, "a migration must not rewrite historical evidence" --
+#: no historical payload may be rewritten.  A migration that did nothing but
+#: bump ``user_version`` would advance the version on a database whose bytes
+#: never changed and make ``schema_version`` a lie about the data.
+PAYLOAD_ENCODING_VERSION = 12
+
 LATEST_VERSION = max(m.version for m in MIGRATIONS)
 
 

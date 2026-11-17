@@ -330,11 +330,15 @@ SQLite in WAL mode does not compress the database file. What it does provide is 
 
 What is used instead:
 
-1. **Time-ordered access** — buckets are floored to epoch-aligned boundaries (`aggregation/aggregator.py:112-115`), and rows are keyed by time, so a time range is a contiguous range scan on the natural key.
-2. **Index strategy** — the index set (§6.2) is what makes the time-range reads bounded.
-3. **PRAGMA configuration** — WAL, `busy_timeout`, `wal_autocheckpoint` (`engine/wattmosaic_engine/storage/database.py:92-99`) govern how the file grows and how concurrent readers behave.
+| Mechanism | What it does | Evidence |
+|---|---|---|
+| Time-ordered keys | buckets are floored to epoch-aligned boundaries and rows are keyed by time, so a time range is a contiguous range scan on the natural key | `aggregation/aggregator.py:112-115` (`_floor_bucket`) |
+| Index strategy | the index set of §6.2 is what makes the time-range reads bounded | §6.2 |
+| PRAGMA configuration | WAL, `busy_timeout=10000`, `wal_autocheckpoint=1000` govern how the file grows and how concurrent readers behave | `engine/wattmosaic_engine/storage/database.py:92-99` |
 
-**Under what condition a different storage technology would be reconsidered.** Only when a measurement shows that the single-file store can no longer meet a stated requirement — e.g. sustained write throughput above what the single-writer SQLite path sustains, a dataset size that makes the required queries exceed their latency budget, or a retention requirement that cannot be met by pruning. Any such proposal must state the measurement, the requirement it fails, and the operational cost of the alternative, and must be raised as an open decision rather than implemented.
+**Measurement that justifies not partitioning.** The reference install (`data/wattmosaic.db`, 2026-11-07) holds the largest payload table, `inference_results`, at 320 852 rows and 16.1 MB of `explanation_json`; the newest `topology_versions` snapshot is 37 302 bytes raw and 3 151 bytes zlib-compressed. Against the documented ~1.5 GB/day event-spam rate (§5.2), the growth driver is the event path, not a per-partition access path; the access paths stay bounded because the read surfaces carry the index set of §6.2. SQLite has no native partitioning, and none of the measured tables needs it.
+
+**Under what condition a different storage technology would be reconsidered.** Only when a measurement shows the single-file store misses a **stated requirement**: sustained write throughput above the single-writer path sustains, a dataset whose required queries exceed their latency budget, or a retention requirement pruning cannot meet. Any such proposal must state the measurement, the requirement it fails, and the operational cost of the alternative, and must be raised as an open decision rather than implemented.
 
 **Rule.** Never introduce distributed infrastructure without a measurable justification. Partitioning is not a reason to shard; sharding is a reason to introduce distributed infrastructure.
 
