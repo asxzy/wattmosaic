@@ -179,6 +179,97 @@ class ModelStatus(str, Enum):
     REJECTED = "rejected"
 
 
+class LoadShape(str, Enum):
+    """The load-shape class -- a separate axis from ``ModelType``.
+
+    ``ModelType`` names *model implementations* (``BINARY``, ``DIMMABLE``, ...)
+    and answers "what shape is the power law?".  ``LoadShape`` names *how a
+    device draws power* and answers "what is the character of the load?".
+    The two are not the same axis and neither substitutes for the other; a
+    device's ``ModelType`` may change as it is learned while its load shape is
+    a declared property of the appliance (spec ``06-...`` §4.1, ADR-0011's
+    four-axis rule).
+
+    This refines ``OD-45``'s field-only reading (an additive optional
+    ``power_model_class: str | None``).  A closed ``Enum`` is what makes
+    "never inferred from a device name" enforceable: a free string cannot be
+    validated, so a typo or a heuristic could smuggle a class in.  The
+    contract change stays additive and optional -- ``UNKNOWN`` is the neutral
+    default and no existing field is retyped.
+
+    Mapping onto the shipped taxonomy (spec ``06-...`` §4.1's table): the six
+    classes are the load-shape view of ``ModelType`` and ``PowerBehavior``.
+
+    * ``FIXED``     -- ``ModelType.BINARY`` / ``PowerBehavior.FIXED``
+    * ``ADJUSTABLE`` -- ``ModelType.DIMMABLE`` / ``PowerBehavior.VARIABLE``
+    * ``DYNAMIC``   -- ``ModelType.VARIABLE_SPEED`` / ``MULTI_STATE`` /
+      ``TIME_VARYING`` / ``PowerBehavior.VARIABLE`` or ``COMPLEX``
+    * ``DELAYED``   -- no ``ModelType`` member; a response delay is orthogonal
+      to the power law (``response_delay_s``, ``OD-47``)
+    * ``ALWAYS_ON`` -- no ``ModelType`` member; the absence of an OFF state
+      (``always_on``, ``OD-46``)
+    * ``UNKNOWN``   -- ``ModelType.RESIDUAL`` / ``PowerBehavior.UNKNOWN``
+
+    Rule: a load shape is **declared**, never inferred.  No code path derives
+    it from a device name, an entity id or any other naming surface.
+    """
+
+    FIXED = "fixed"
+    """Constant watts while running: a binary load on one level."""
+
+    ADJUSTABLE = "adjustable"
+    """Power follows a continuous control value; the response may be a curve."""
+
+    DYNAMIC = "dynamic"
+    """Power follows a discrete or time-varying programme, not one setting."""
+
+    DELAYED = "delayed"
+    """The control signal and the load are separated by a response delay."""
+
+    ALWAYS_ON = "always_on"
+    """There is no OFF state; the minimum power is the standby draw."""
+
+    UNKNOWN = "unknown"
+    """Not declared, or no model exists yet; no claim is made either way."""
+
+
+class PowerLevel(str, Enum):
+    """Which of a device's four power levels a published value belongs to.
+
+    ``06-device-and-load-model-spec.md`` §5.1 names four levels -- standby,
+    idle, active, transient -- and ``ExpectedPower`` carries the envelope
+    (``standby_w``, ``idle_w``, ``on_w``, ``startup_w`` / ``shutdown_w``).
+    This enum is the label a *published* value carries.
+
+    It is a **different axis** from ``PowerState`` and must never be conflated
+    with it.  ``PowerState`` is a *provenance* label (``measured`` /
+    ``estimated`` / ``allocated`` / ``unknown``) derived by ``power_state_for``
+    from ``Source`` and ``MeasurementBasis``; ``PowerLevel`` is the *operating
+    level* the number sits at.  A value can be both ``measured`` and
+    ``standby``: the two fields answer different questions and coexist on
+    ``InferenceResult``.
+
+    ``UNKNOWN`` is the neutral default, so a payload that does not name a level
+    reads as "not stated" rather than as a claim.
+    """
+
+    STANDBY = "standby"
+    """Off, or idle in a low-power state, but still connected to power."""
+
+    IDLE = "idle"
+    """On and reachable, but not doing work."""
+
+    ACTIVE = "active"
+    """Doing work -- the running level (``ExpectedPower.on_w``)."""
+
+    TRANSIENT = "transient"
+    """The start-up inrush or shutdown decay.  Never averaged into a
+    steady-state fit or the energy integral."""
+
+    UNKNOWN = "unknown"
+    """No level is named; the value is not claimed to be at any level."""
+
+
 class SampleRejection(str, Enum):
     STALE_MEASUREMENT = "stale_measurement"
     TIMESTAMP_UNRELIABLE = "timestamp_unreliable"
@@ -1675,6 +1766,11 @@ class DeviceConfiguration(Model):
 
     # -- axis 3: power behaviour ------------------------------------------
     behavior: PowerBehavior = PowerBehavior.UNKNOWN
+    #: The load-shape class (``LoadShape``): a declared property of the
+    #: appliance, separate from ``ModelType`` and never inferred from a name.
+    #: ``UNKNOWN`` is the neutral default, so an undeclared device makes no
+    #: claim (spec ``06-...`` §4.5, ``OD-45`` as refined by ``LoadShape``).
+    load_shape: LoadShape = LoadShape.UNKNOWN
     expected: ExpectedPower = Field(default_factory=ExpectedPower)
     light: LightConfiguration | None = None
     controller: ControllerConfiguration | None = None
@@ -1936,6 +2032,11 @@ class InferenceResult(Model):
     #: interpreted without re-reading the configuration.
     monitoring_level: MonitoringLevel = MonitoringLevel.UNKNOWN
     power_behavior: PowerBehavior = PowerBehavior.UNKNOWN
+    #: The declared load-shape class (``LoadShape``), published with the value.
+    #: A separate axis from ``power_behavior`` and from ``model_id``'s
+    #: ``ModelType``; ``UNKNOWN`` when the device declared none.  Never derived
+    #: from a device name (spec ``06-...`` §4.5).
+    load_shape: LoadShape = LoadShape.UNKNOWN
     #: Why the tier is what it is, in the same style as ``explanation``.
     tier_reasons: list[str] = Field(default_factory=list)
     # Not a calibrated probability. Engineering score only.
@@ -1950,6 +2051,12 @@ class InferenceResult(Model):
     #: settable.  Optional with a neutral default so a pre-change payload
     #: validates and reads as "unknown", not as a claim.
     power_state: PowerState = PowerState.UNKNOWN
+    #: Which of the device's four power levels this value sits at (spec
+    #: ``06-...`` §5.1).  A separate axis from ``power_state`` above, which is
+    #: provenance: this one names the *operating level* (standby / idle /
+    #: active / transient).  The two coexist and answer different questions --
+    #: a value can be ``measured`` *and* ``standby``.  ``UNKNOWN`` is neutral.
+    power_level: PowerLevel = PowerLevel.UNKNOWN
     #: Per-dimension confidence.  ``None`` means no dimension was derived, which
     #: is honest; a consumer must not read ``None`` as a low score.
     confidence_dimensions: ConfidenceVector | None = None

@@ -35,9 +35,11 @@ import numpy as np
 from wattmosaic_engine.contracts import (
     CONTRACT_VERSION,
     InferenceResult,
+    LoadShape,
     MeasurementBasis,
     MonitoringLevel,
     PowerBehavior,
+    PowerLevel,
     PowerState,
     QualityStatus,
     Reconciliation,
@@ -1408,6 +1410,11 @@ class DisaggregationEngine:
         concurrent_events = len(window.state_transitions)
         monitoring = config.monitoring if config is not None else MonitoringLevel.UNKNOWN
         behavior = config.behavior if config is not None else PowerBehavior.UNKNOWN
+        load_shape = config.load_shape if config is not None else LoadShape.UNKNOWN
+        # The device's declared standby/idle/active/transient envelope.  A pure
+        # computed property of ``EffectiveConfig`` (no ``__dict__`` on a frozen
+        # ``slots`` dataclass), so it is rebuilt here rather than cached.
+        profile = config.power_profile if config is not None else None
         config_notes = list(config.notes) if config is not None else []
         # A state value is only evidence when the topology declares a load entity
         # for this device; an undeclared key in ``device_states`` proves nothing.
@@ -1458,6 +1465,27 @@ class DisaggregationEngine:
             )
             result.power_behavior = (
                 behavior.value if hasattr(behavior, "value") else str(behavior)
+            )
+            # The declared load-shape class, published with the value so a
+            # consumer can read the axis without re-reading the configuration.
+            # A declaration only; never derived from the device name.
+            result.load_shape = (
+                load_shape.value  # type: ignore[assignment]
+                if hasattr(load_shape, "value")
+                else str(load_shape)
+            )
+            # The operating level of the value, derived from the device's declared
+            # power profile.  ``UNKNOWN`` is the honest fallback: a device with no
+            # declaration (or a value matching none of its stated levels) names no
+            # level rather than guessing one.  This is a separate axis from
+            # ``power_state`` below, which is provenance.
+            level = PowerLevel.UNKNOWN
+            if profile is not None:
+                level = profile.level_for(result.power_w)
+            result.power_level = (
+                level.value  # type: ignore[assignment]
+                if hasattr(level, "value")
+                else str(level)
             )
             # Derived, never independently settable: the label follows the
             # source and the basis, so it cannot disagree with how the value

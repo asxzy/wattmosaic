@@ -66,8 +66,10 @@ from wattmosaic_engine.contracts import (
     DeviceConfigurationSet,
     DeviceTopology,
     DeviceType,
+    ExpectedPower,
     HaConnectivity,
     LightType,
+    LoadShape,
     MonitoringLevel,
     Phase,
     PowerBehavior,
@@ -75,6 +77,7 @@ from wattmosaic_engine.contracts import (
     TopologyStatus,
 )
 from wattmosaic_engine.entity_evidence import classify_entity
+from wattmosaic_engine.models.device_profile import DevicePowerProfile
 
 from ..electrical.topology import TopologyGraph, build_graph
 
@@ -123,6 +126,13 @@ class EffectiveConfig:
     device_id: str
     monitoring: MonitoringLevel = MonitoringLevel.UNKNOWN
     behavior: PowerBehavior = PowerBehavior.UNKNOWN
+    #: The declared load-shape class.  Read from ``DeviceConfiguration`` only;
+    #: it is never derived from a name, a device type or a model.
+    load_shape: LoadShape = LoadShape.UNKNOWN
+    #: The declared ``ExpectedPower`` envelope, when a configuration exists.
+    #: Kept as the contract object so the profile is a pure function of the
+    #: declaration rather than a second copy of the numbers.
+    expected: ExpectedPower | None = None
     connectivity: HaConnectivity = HaConnectivity.UNKNOWN
     device_type: DeviceType = DeviceType.UNKNOWN
     #: CTs declared by the user, intersected with CTs that exist.
@@ -158,6 +168,20 @@ class EffectiveConfig:
         if self.expected_on_w is None:
             return None
         return max(self.expected_on_w + self.expected_tolerance_w, 0.0)
+
+    @property
+    def power_profile(self) -> DevicePowerProfile | None:
+        """The device's standby/idle/active/transient envelope.
+
+        Built from the configuration's ``ExpectedPower`` only, or ``None``
+        when no configuration exists.  This is a pure function of the
+        declaration and is deliberately *not* cached: ``EffectiveConfig`` is
+        a frozen ``slots`` dataclass, so there is no ``__dict__`` to memoise
+        into, and a profile is three attribute reads.
+        """
+        if self.expected is None:
+            return None
+        return DevicePowerProfile.from_expected(self.device_id, self.expected)
 
 
 def derive_monitoring(
@@ -348,6 +372,11 @@ def effective_config(
         behavior = PowerBehavior(str(metadata.get(BEHAVIOR_KEY, "unknown")))
     except ValueError:
         behavior = PowerBehavior.UNKNOWN
+    # The load shape is a declaration; an unparseable value is UNKNOWN, never a
+    # guess and never a derivation from the device's name or type.
+    load_shape = LoadShape.UNKNOWN
+    if config is not None:
+        load_shape = LoadShape(str(config.load_shape))
     connectivity = HaConnectivity.UNKNOWN
     try:
         connectivity = HaConnectivity(str(metadata.get(CONNECTIVITY_KEY, "unknown")))
@@ -468,6 +497,8 @@ def effective_config(
         device_id=device_id,
         monitoring=monitoring,
         behavior=behavior,
+        load_shape=load_shape,
+        expected=config.expected if config is not None else None,
         connectivity=connectivity,
         device_type=DeviceType(config.device_type) if config is not None else DeviceType.UNKNOWN,
         monitored_by_ct_ids=declared_cts,
