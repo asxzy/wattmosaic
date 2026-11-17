@@ -44,12 +44,20 @@ from wattmosaic_engine.disaggregation.isolation import (
     physical_device_events,
     split_attribution,
 )
+from wattmosaic_engine.disaggregation.mapping import (
+    CONFIRM_MIN_EVENTS,
+    MappingCoverage,
+    MappingEvidence,
+    MappingMatrix,
+    build_mapping_matrix,
+)
 
 __all__ = [
     "DEFAULT_K_MAD",
     "MAD_TO_SIGMA",
     "AssociationConfig",
     "AssociationFinder",
+    "CONFIRM_MIN_EVENTS",
     "CircuitClassifier",
     "CircuitConfig",
     "ConfidenceBreakdown",
@@ -59,6 +67,9 @@ __all__ = [
     "InferenceBatch",
     "IsolationConfig",
     "IsolationWindow",
+    "MappingCoverage",
+    "MappingEvidence",
+    "MappingMatrix",
     "Observation",
     "PhysicalDeviceEvent",
     "SampleCoverage",
@@ -71,6 +82,7 @@ __all__ = [
     "explain_circuit",
     "mad_sigma",
     "median",
+    "build_mapping_matrix",
     "persist",
     "persist_circuits",
     "physical_device_events",
