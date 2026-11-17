@@ -710,6 +710,37 @@ class Database:
             ).fetchone()
         return None if row is None else self._row_to_inference_record(row)
 
+    def inference_records_for_topology_version(
+        self, topology_version: int | str, limit: int = 5000
+    ) -> list[dict[str, Any]]:
+        """Read path for reconciliation: records produced under one topology version.
+
+        Filters the existing ``inference_records.topology_version`` **integer**
+        column; there is no status/flag column and none is added, so this needs
+        no schema migration.  Reconciliation decides staleness by comparing the
+        version a record already carries (immutably) with the version in force.
+        Ordered oldest first so a consumer can replay the affected history in
+        the order it happened; ``limit`` keeps the newest rows.
+        """
+        # Import locally to avoid a storage -> electrical -> storage import cycle
+        # (the topology module is imported widely during package initialisation).
+        from ..electrical.topology import version_number
+
+        number = version_number(topology_version)
+        if number is None:
+            # An opaque id with no integer spelling matches no integer column.
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT * FROM inference_records WHERE topology_version=?
+                ORDER BY timestamp DESC, revision DESC LIMIT ?""",
+                (number, limit),
+            ).fetchall()
+        return [
+            self._row_to_inference_record(row)
+            for row in sorted(rows, key=lambda r: (r["timestamp"], r["revision"]))
+        ]
+
     # -- measurement factors (contract 1.6.0) ----------------------------- #
     def insert_measurement_factor(self, factor: MeasurementFactor) -> None:
         """Append a validity interval, refusing an overlap for the same CT.

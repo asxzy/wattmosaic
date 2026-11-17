@@ -53,7 +53,7 @@ from wattmosaic_engine.contracts import (
     UnknownResidualEvent,
 )
 from wattmosaic_engine.electrical.models import ModelView
-from wattmosaic_engine.electrical.topology import build_graph
+from wattmosaic_engine.electrical.topology import build_graph, version_token
 
 from .association import (
     AMBIGUOUS_MULTIPLIER,
@@ -605,4 +605,183 @@ def build_mapping_matrix(
         coverage=coverage,
         reader_configuration_version=reader_configuration_version,
         topology_version=topology_version,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Reconciliation after a topology version change (REQ-TOPO-009,
+# REQ-CHANGE-004/007, REQ-MAPPING-005; gap G-08)
+# --------------------------------------------------------------------------- #
+#
+# A confirmed topology change changes the configuration that downstream
+# inferences and mapping cells were computed against.  Reconciliation answers
+# exactly one question -- "what does this change invalidate?" -- without
+# mutating any historical observation.  It is a *pure projection*: given the new
+# topology and a snapshot of existing records/cells it returns (a) the matrix
+# re-derived from the new topology via B3a's :func:`build_mapping_matrix` and
+# (b) the identity of every record/cell still stamped with the old version.
+# Nothing is deleted, rewritten or promoted.
+
+
+@dataclass(frozen=True)
+class StaleRecord:
+    """One downstream artefact whose assumptions a version change invalidated.
+
+    ``record_id`` names an ``InferenceRecord`` (the DB read path filters the
+    existing ``topology_version`` integer column); ``cell_key`` names a mapping
+    cell as ``device_id|reader_id``.  Exactly one of the two is set.  The stored
+    value itself is never touched -- this is a verdict about a record, not a
+    rewrite of it.
+    """
+
+    record_id: str | None = None
+    cell_key: str | None = None
+    topology_version: int | str | None = None
+    reason: str = "topology_version_superseded"
+
+    @property
+    def identity(self) -> str:
+        """A stable, human-legible identity for the affected artefact."""
+        return self.record_id if self.record_id is not None else str(self.cell_key)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "record_id": self.record_id,
+            "cell_key": self.cell_key,
+            "topology_version": self.topology_version,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class ReconciliationResult:
+    """The complete, read-only outcome of reconciling a version change.
+
+    ``matrix`` is the deterministic re-derivation under ``new_version``;
+    ``stale`` lists every artefact that still carries ``old_version`` (or any
+    version other than ``new_version`` when ``strict_new_only`` is off).  The
+    result is a value: calling reconciliation twice with the same inputs yields
+    two equal results (idempotence), and it never changes the inputs.
+    """
+
+    old_version: int | str | None
+    new_version: int | str | None
+    matrix: MappingMatrix
+    stale: tuple[StaleRecord, ...]
+
+    @property
+    def affected_record_ids(self) -> tuple[str, ...]:
+        return tuple(item.record_id for item in self.stale if item.record_id is not None)
+
+    @property
+    def affected_cell_keys(self) -> tuple[str, ...]:
+        return tuple(item.cell_key for item in self.stale if item.cell_key is not None)
+
+    def as_dict(self) -> dict[str, Any]:
+        """Audit-evidence view; byte-stable for equal inputs."""
+        return {
+            "old_version": self.old_version,
+            "new_version": self.new_version,
+            "matrix": self.matrix.as_dict(),
+            "stale": [item.as_dict() for item in self.stale],
+            "affected_record_ids": list(self.affected_record_ids),
+            "affected_cell_keys": list(self.affected_cell_keys),
+        }
+
+
+def _record_version(value: Any) -> int | str | None:
+    """Read a record's ``topology_version`` off a model or a decoded dict."""
+    return _field(value, "topology_version")
+
+
+def _record_id(value: Any) -> str | None:
+    return _field(value, "record_id")
+
+
+def reconcile_topology_change(
+    *,
+    old_version: int | str | None,
+    new_version: int | str | None,
+    new_topology: Topology,
+    reader_configuration_version: str,
+    inference_records: Sequence[Any] = (),
+    current_matrix: MappingMatrix | None = None,
+    models: Mapping[str, ModelView | None] | None = None,
+    evidence: MappingEvidence | None = None,
+    strict_new_only: bool = False,
+) -> ReconciliationResult:
+    """Re-derive the mapping matrix and flag history invalidated by a change.
+
+    Pure and deterministic: it never writes storage, never changes a clock and
+    never modifies ``inference_records`` or ``current_matrix``.  The matrix is
+    re-derived from ``new_topology`` by the B3a projection, so it is exactly the
+    matrix the new configuration would produce (REQ-MAPPING-005).  A record or
+    cell is flagged stale when the version it carries is no longer the version
+    in force:
+
+    * when ``strict_new_only`` is ``False`` (the default), anything that is not
+      the new version is stale -- this is the honest "old version" answer even
+      when the caller cannot name the exact predecessor;
+    * when ``True``, only artefacts carrying ``old_version`` are flagged, which
+      is the narrow old→new answer when both endpoints are known.
+
+    Because the check is a comparison against the new version, running twice is
+    identical (idempotence) and no stored observation is rewritten.  This is the
+    reconciliation half of a *confirmed* version change; detection and promotion
+    remain separate, evidence-gated acts (no auto-promotion here).
+    """
+    new_token = version_token(new_version)
+    old_token = version_token(old_version)
+    # Mapping cells carry the opaque string spelling of the version; inference
+    # records carry the integer.  One token keeps the re-derived matrix and the
+    # stale verdicts talking about the same version.
+    matrix_version = new_token if new_token is not None else (
+        None if new_version is None else str(new_version)
+    )
+    matrix = build_mapping_matrix(
+        new_topology,
+        models=models,
+        evidence=evidence,
+        reader_configuration_version=reader_configuration_version,
+        topology_version=matrix_version,
+    )
+
+    stale: list[StaleRecord] = []
+    for record in inference_records:
+        record_token = version_token(_record_version(record))
+        is_stale = (
+            record_token == old_token
+            if strict_new_only and old_token is not None
+            else record_token != new_token
+        )
+        if is_stale:
+            stale.append(
+                StaleRecord(
+                    record_id=str(_record_id(record)),
+                    topology_version=_record_version(record),
+                )
+            )
+
+    if current_matrix is not None:
+        for cell in current_matrix.cells:
+            cell_token = version_token(cell.topology_version)
+            is_stale = (
+                cell_token == old_token
+                if strict_new_only and old_token is not None
+                else cell_token != new_token
+            )
+            if is_stale:
+                stale.append(
+                    StaleRecord(
+                        cell_key=f"{cell.device_id}|{cell.reader_id}",
+                        topology_version=cell.topology_version,
+                    )
+                )
+
+    stale.sort(key=lambda item: (item.record_id is None, item.identity))
+    return ReconciliationResult(
+        old_version=old_version,
+        new_version=new_version,
+        matrix=matrix,
+        stale=tuple(stale),
     )

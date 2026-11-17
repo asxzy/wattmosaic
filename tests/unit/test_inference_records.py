@@ -596,3 +596,78 @@ def test_every_evidence_ref_prefix_names_a_row_that_exists(tmp_path) -> None:
         assert not db.resolve_evidence_ref("record:e1")
     finally:
         db.close()
+
+
+# --------------------------------------------------------------------------- #
+# Reconciliation read path & version retention (REQ-TOPO-009, REQ-CHANGE-004/007)
+# --------------------------------------------------------------------------- #
+
+
+def test_records_keep_their_topology_version(tmp_path) -> None:
+    """A record stores the version it was produced under, unchanged, on read."""
+    db = Database(tmp_path / "keep_version.db")
+    try:
+        for version, record_id in ((1, "r1"), (2, "r2"), (3, "r3")):
+            record = _record(record_id)
+            db.insert_inference_record(record.model_copy(update={"topology_version": version}))
+        versions = {
+            r["record_id"]: r["topology_version"]
+            for r in db.inference_records_for_device("dev1")
+        }
+        assert versions == {"r1": 1, "r2": 2, "r3": 3}
+    finally:
+        db.close()
+
+
+def test_change_lists_the_affected_records_via_the_read_path(tmp_path) -> None:
+    """A consumer can list the records a version change invalidated, read-only."""
+    db = Database(tmp_path / "affected.db")
+    try:
+        db.insert_inference_record(_record("old1").model_copy(update={"topology_version": 1}))
+        db.insert_inference_record(_record("old2").model_copy(update={"topology_version": 1}))
+        db.insert_inference_record(_record("current").model_copy(update={"topology_version": 2}))
+
+        affected = db.inference_records_for_topology_version(1)
+        assert [r["record_id"] for r in affected] == ["old1", "old2"]
+        # The result is a pure read: nothing was rewritten.
+        assert all(r["topology_version"] == 1 for r in affected)
+        assert len(db.inference_records_for_device("dev1")) == 3
+        # Filtering by the new version returns the current records.
+        assert [r["record_id"] for r in db.inference_records_for_topology_version(2)] == [
+            "current"
+        ]
+    finally:
+        db.close()
+
+
+def test_topology_version_read_path_accepts_the_opaque_id_spelling(tmp_path) -> None:
+    """The read path normalises ``tv-`` ids to the stored integer column."""
+    db = Database(tmp_path / "opaque.db")
+    try:
+        db.insert_inference_record(_record("old").model_copy(update={"topology_version": 2}))
+        # Numeric and tv- spellings resolve to the same stored integer.
+        assert [r["record_id"] for r in db.inference_records_for_topology_version("tv-2")] == [
+            "old"
+        ]
+        assert [r["record_id"] for r in db.inference_records_for_topology_version(2)] == [
+            "old"
+        ]
+        # An opaque id with no integer spelling matches no integer column.
+        assert db.inference_records_for_topology_version("tv-unknown") == []
+    finally:
+        db.close()
+
+
+def test_reconciliation_read_path_is_additive_no_status_column(tmp_path) -> None:
+    """Staleness is computed from the existing version field, not a new column."""
+    db = Database(tmp_path / "no_flag.db")
+    try:
+        db.insert_inference_record(_record("r1"))
+        cols = {row["name"] for row in db._conn.execute("PRAGMA table_info(inference_records)")}
+        # No status/stale flag column was added by reconciliation.
+        assert not {"status", "stale", "is_stale", "superseded"} & cols
+        assert "topology_version" in cols
+        # The read helper is just a filter over that existing column.
+        assert len(db.inference_records_for_topology_version(1)) == 1
+    finally:
+        db.close()

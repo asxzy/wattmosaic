@@ -926,6 +926,47 @@ def version_id_for(version_number: int) -> str:
     return f"tv-{int(version_number):08d}"
 
 
+def version_token(value: int | str | None) -> str | None:
+    """Canonical comparison token for a topology version identifier.
+
+    The engine spells one version three ways: inference records carry an ``int``
+    (``contracts.InferenceRecord.topology_version``), version records and change
+    events carry an opaque ``tv-<padded>`` id, and mapping cells carry either as
+    a string.  Normalising them to one token lets reconciliation decide which
+    records a change invalidated **without rewriting any stored value**.  ``None``
+    stays ``None`` so "not stated" is never confused with a real version.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, int):
+        return version_id_for(value)
+    text = str(value).strip()
+    if text.isdigit():
+        return version_id_for(int(text))
+    if text.startswith("tv-") and text[3:].isdigit():
+        return version_id_for(int(text[3:]))
+    return text
+
+
+def version_number(value: int | str | None) -> int | None:
+    """The integer behind a version identifier, or ``None`` if it has none.
+
+    Inverse of :func:`version_token` for the storage read path, which queries the
+    existing integer ``inference_records.topology_version`` column.  No schema
+    change: an unrecognised id simply matches no row.
+    """
+    token = version_token(value)
+    if token is None:
+        return None
+    if token.startswith("tv-") and token[3:].isdigit():
+        return int(token[3:])
+    if token.isdigit():
+        return int(token)
+    return None
+
+
 def _enum_text(value: Any) -> str:
     return str(getattr(value, "value", value))
 
@@ -1485,4 +1526,6 @@ __all__ = [
     "edge_views_from_payload",
     "make_version",
     "version_id_for",
+    "version_number",
+    "version_token",
 ]

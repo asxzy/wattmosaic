@@ -34,6 +34,11 @@ from wattmosaic_engine.disaggregation import (
     MappingMatrix,
     build_mapping_matrix,
 )
+from wattmosaic_engine.disaggregation.mapping import (
+    ReconciliationResult,
+    StaleRecord,
+    reconcile_topology_change,
+)
 from wattmosaic_engine.electrical.models import ModelView
 
 T0 = datetime(2026, 11, 17, 12, 0, 0, tzinfo=UTC)
@@ -489,3 +494,137 @@ def test_cells_are_contract_instances() -> None:
         assert isinstance(cell, DeviceReaderMappingCell)
         # Round-trips through the frozen contract unchanged.
         assert DeviceReaderMappingCell.model_validate(cell.model_dump()).model_dump() == cell.model_dump()
+
+
+# --------------------------------------------------------------------------- #
+# Reconciliation after a topology version change
+# (REQ-TOPO-009, REQ-CHANGE-004/007, REQ-MAPPING-005, gap G-08)
+# --------------------------------------------------------------------------- #
+
+
+class _Record:
+    """A minimal inference-record stand-in carrying the version it ran under."""
+
+    def __init__(self, record_id: str, topology_version: int) -> None:
+        self.record_id = record_id
+        self.topology_version = topology_version
+
+
+def _old_topology() -> Topology:
+    return _topology(
+        [_channel("br_a", device="dev_a")],
+        [_device("dev_a", branches=["br_a"])],
+    )
+
+
+def _new_topology() -> Topology:
+    # The new version moves dev_b onto a new reader br_b and adds it.
+    return _topology(
+        [
+            _channel("br_a", device="dev_a"),
+            _channel("br_b", device="dev_b"),
+        ],
+        [
+            _device("dev_a", branches=["br_a"]),
+            _device("dev_b", branches=["br_b"]),
+        ],
+    )
+
+
+def _reconcile(**overrides):
+    defaults = dict(
+        old_version=1,
+        new_version=2,
+        new_topology=_new_topology(),
+        reader_configuration_version=Rcv,
+    )
+    defaults.update(overrides)
+    return reconcile_topology_change(**defaults)
+
+
+def test_reconciliation_rederives_matrix_from_the_new_topology() -> None:
+    """The re-derived matrix is exactly B3a's projection of the new topology."""
+    new_topology = _new_topology()
+    result = _reconcile(new_topology=new_topology)
+    assert isinstance(result, ReconciliationResult)
+    expected = build_mapping_matrix(
+        new_topology,
+        reader_configuration_version=Rcv,
+        topology_version="tv-00000002",
+    )
+    assert result.matrix.stable_json() == expected.stable_json()
+    # The new topology has a device/cell the old one did not.
+    assert {(c.device_id, c.reader_id) for c in result.matrix.cells} == {
+        ("dev_a", "br_a"),
+        ("dev_b", "br_b"),
+    }
+    assert result.matrix.topology_version == "tv-00000002"
+
+
+def test_reconciliation_flags_old_version_records_and_cells_as_stale() -> None:
+    old_matrix = build_mapping_matrix(
+        _old_topology(),
+        reader_configuration_version=Rcv,
+        topology_version="tv-00000001",
+    )
+    records = [_Record("rec-old-1", 1), _Record("rec-old-2", 1), _Record("rec-new", 2)]
+    result = _reconcile(current_matrix=old_matrix, inference_records=records)
+
+    # Records under the old version are flagged; the new-version one is not.
+    assert result.affected_record_ids == ("rec-old-1", "rec-old-2")
+    assert "rec-new" not in result.affected_record_ids
+    # The old matrix's cell (stamped v1) is flagged too.
+    assert result.affected_cell_keys == ("dev_a|br_a",)
+    assert all(isinstance(item, StaleRecord) for item in result.stale)
+    assert all(item.reason == "topology_version_superseded" for item in result.stale)
+
+
+def test_reconciliation_does_not_delete_or_rewrite_history() -> None:
+    """Records and the current matrix are unchanged in content by reconciliation."""
+    records = [_Record("rec-old-1", 1)]
+    before = [(r.record_id, r.topology_version) for r in records]
+    old_matrix = build_mapping_matrix(
+        _old_topology(), reader_configuration_version=Rcv, topology_version="tv-00000001"
+    )
+    matrix_before = old_matrix.stable_json()
+    result = _reconcile(current_matrix=old_matrix, inference_records=records)
+
+    assert [(r.record_id, r.topology_version) for r in records] == before
+    assert old_matrix.stable_json() == matrix_before
+    # The verdict is a *separate* value; it is not written back onto the record.
+    assert result.stale[0].record_id == "rec-old-1"
+    assert not hasattr(records[0], "stale")
+
+
+def test_reconciliation_is_idempotent() -> None:
+    records = [_Record("rec-old-1", 1), _Record("rec-old-2", 1)]
+    old_matrix = build_mapping_matrix(
+        _old_topology(), reader_configuration_version=Rcv, topology_version="tv-00000001"
+    )
+    first = _reconcile(current_matrix=old_matrix, inference_records=records)
+    second = _reconcile(current_matrix=old_matrix, inference_records=records)
+    assert first.as_dict() == second.as_dict()
+    assert first.matrix.stable_json() == second.matrix.stable_json()
+    assert first.stale == second.stale
+
+
+def test_reconciliation_strict_mode_flags_only_the_named_old_version() -> None:
+    """With both endpoints known, only artefacts carrying old_version are flagged."""
+    records = [
+        _Record("rec-v1", 1),
+        _Record("rec-v3", 3),
+        _Record("rec-v2", 2),
+    ]
+    result = _reconcile(inference_records=records, strict_new_only=True)
+    # Only v1 is the named predecessor; the stray v3 is not touched.
+    assert result.affected_record_ids == ("rec-v1",)
+
+
+def test_reconciliation_does_not_promote_or_advance_a_version() -> None:
+    """The caller's version numbers are echoed unchanged; nothing is promoted."""
+    result = _reconcile(old_version=1, new_version=2)
+    assert result.old_version == 1
+    assert result.new_version == 2
+    assert result.matrix.topology_version == "tv-00000002"
+    # No change-status/suspicion mutation occurs here: promotion is separate.
+    assert "status" not in result.as_dict()
