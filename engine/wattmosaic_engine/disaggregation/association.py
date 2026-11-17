@@ -1155,6 +1155,20 @@ class AssociationFinder:
             "algorithm_version": self.config.algorithm_version,
             "config": self.config.as_metadata(),
             "isolation": {"clean_status": IsolationStatus.ISOLATED.value, "rule": "isolated_only"},
+            # REQ-TOPO-006: an association is a statement about *matched responses*.
+            # A parent's unexplained remainder is corroborating context for a
+            # containment hypothesis, never a way to manufacture one, so it is
+            # named here rather than left implied by the absence of a contradiction.
+            "residual_evidence": {
+                "role": "corroborating_only",
+                "promotes_edge": False,
+                "note": (
+                    "a device response observed on this CT supports the "
+                    "association; the parent's unexplained residual may "
+                    "corroborate a containment hypothesis but cannot promote "
+                    "an edge on its own"
+                ),
+            },
         }
         if split_with:
             evidence["split_with"] = split_with

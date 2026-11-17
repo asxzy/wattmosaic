@@ -478,8 +478,17 @@ def _declared_pairs(declared: Sequence[Any]) -> set[tuple[str, str]]:
     return pairs
 
 
-def _association_devices(relations: Sequence[Any]) -> dict[str, list[str]]:
-    """Device -> CTs that respond to it, from WP5 association relations only."""
+def _association_devices(
+    relations: Sequence[Any],
+    channels: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, list[str]]:
+    """Device -> CTs that respond to it, from WP5 association relations only.
+
+    ``channels`` resolves alias chains so a device read by two channels that are
+    one conductor contributes **one** reading, not two.  Without it every
+    observation counts, which would let the same device meet the independence
+    bar twice through one wire.
+    """
     by_device: dict[str, list[str]] = {}
     for item in relations:
         payload = _payload(item)
@@ -487,6 +496,8 @@ def _association_devices(relations: Sequence[Any]) -> dict[str, list[str]]:
             continue
         device = str(payload["subject_id"])
         ct_id = str(payload["object_id"])
+        if channels:
+            ct_id = _resolve_alias(ct_id, channels)
         by_device.setdefault(device, [])
         if ct_id not in by_device[device]:
             by_device[device].append(ct_id)
@@ -602,7 +613,13 @@ class HierarchyFinder:
         report["algorithm_version"] = self.config.algorithm_version
         self._report = report
 
-        by_device = _association_devices(relations)
+        # The channel map is built *before* the device->CT index so that a
+        # device read by two channels of one conductor (an alias chain) counts
+        # as one electrical contribution, not two.  Channels that carry no
+        # declaration are still admitted from the series below.
+        channel_map = _normalise_channels(channels)
+
+        by_device = _association_devices(relations, channel_map)
         if not by_device:
             report["reason"] = "no_device_evidence"
             report["explanation"] = (
@@ -625,7 +642,6 @@ class HierarchyFinder:
             )
             return []
 
-        channel_map = _normalise_channels(channels)
         for ct_id in series_map:
             channel_map.setdefault(ct_id, {"ct_id": ct_id})
 
