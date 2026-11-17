@@ -1015,3 +1015,81 @@ def test_every_ref_resolves_when_records_and_verdicts_are_both_written(database)
             assert set(row["evidence_refs"]) <= {
                 ref for record in incremental.records for ref in record.evidence_refs
             }
+
+
+# --------------------------------------------------------------------------- #
+# TASK-RESIDUAL-001 -- the production residual path publishes the decomposition
+# --------------------------------------------------------------------------- #
+def test_the_production_residual_carries_the_decomposition() -> None:
+    """The audit pass's residual is a published, decomposed point.
+
+    ``AuditPass._residuals`` builds the ``ResidualScope`` for a single-CT
+    circuit and computes through ``ResidualAnalyzer``, so the residual that
+    reaches storage carries ``baseline_w``/``dynamic_w`` and the identity holds
+    there -- not only in a unit test that builds the scope by hand.
+
+    The production pass supplies no ``window_w`` (``G75``), so the estimator is
+    ``no_window_current_only`` and ``dynamic_w`` is exactly ``0.0``.  That is the
+    honest answer for a pass with no residual history yet: the split is
+    degenerate, not absent, and the identity still holds.
+    """
+    at = dt.datetime(2026, 1, 1, 12, 0, tzinfo=dt.UTC)
+    pass_ = AuditPass(None, config=AuditConfig())
+
+    class Scope:
+        circuit_id = "circuit:one_ct"
+        ct_ids = ("ct_l1",)
+        device_ids = ()
+
+    report = audit_module.AuditReport(at=at)
+    computed = pass_._residuals(
+        [Scope()],  # type: ignore[list-item]
+        None,
+        audit_module.FactorRegistry(),
+        {},
+        {"ct_l1": 1200.0},
+        at,
+        report,
+    )
+
+    assert set(computed) == {"circuit:one_ct"}
+    residual = computed["circuit:one_ct"]
+    assert residual.baseline_w is not None
+    assert residual.dynamic_w is not None
+    assert residual.baseline_w + residual.dynamic_w == pytest.approx(
+        residual.residual_w, abs=1e-9
+    )
+    # No window in the production path today: the split is current-only.
+    assert residual.baseline_w == pytest.approx(residual.residual_w)
+    assert residual.dynamic_w == pytest.approx(0.0, abs=1e-9)
+    assert residual.resolved is False
+    assert residual.unresolved_since == at
+
+
+def test_a_negative_production_residual_is_not_clamped() -> None:
+    """The audit pass preserves a surplus: ``device`` claims more than measured."""
+    at = dt.datetime(2026, 1, 1, 12, 0, tzinfo=dt.UTC)
+    pass_ = AuditPass(None, config=AuditConfig())
+
+    class Scope:
+        circuit_id = "circuit:surplus"
+        ct_ids = ("ct_l1",)
+        device_ids = ("dev1",)
+
+    report = audit_module.AuditReport(at=at)
+    computed = pass_._residuals(
+        [Scope()],  # type: ignore[list-item]
+        None,
+        audit_module.FactorRegistry(),
+        {"dev1": _result("dev1", 1500.0, at)},
+        {"ct_l1": 800.0},
+        at,
+        report,
+    )
+
+    residual = computed["circuit:surplus"]
+    assert residual.residual_w == pytest.approx(-700.0)
+    assert residual.kind == "negative"
+    assert residual.baseline_w == pytest.approx(-700.0)
+    assert residual.dynamic_w == pytest.approx(0.0, abs=1e-9)
+    assert residual.baseline_w + residual.dynamic_w == pytest.approx(-700.0)

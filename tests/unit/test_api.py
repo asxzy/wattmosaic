@@ -9,10 +9,13 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import tempfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import aiohttp
+import pytest
 from wattmosaic_engine.api.facade import (
     FacadeUnavailable,
     InvalidRequest,
@@ -26,9 +29,13 @@ from wattmosaic_engine.contracts import (
     DeviceTopology,
     ErrorResponse,
     HealthResponse,
+    MeasurementBasis,
+    ResidualKind,
+    ResidualPower,
     ServiceCommand,
     ServiceResult,
 )
+from wattmosaic_engine.storage.database import Database
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -246,6 +253,100 @@ def test_export_endpoint() -> None:
         return True
 
     assert run(_with_server(StubFacade(), fn))
+
+
+def test_residual_history_route() -> None:
+    """``UT-api``: ``GET /residuals`` answers, and its values are signed.
+
+    The route already exists (``api/server.py`` registers it against
+    ``residual_components``), so this verifies it rather than adding a second
+    one.  A real ``Database`` is written through ``insert_residual_power`` so
+    the round trip -- the component that has silently dropped fields before --
+    is part of the assertion, and the negative value must survive the wire.
+    """
+
+    class ResidualFacade(StubFacade):
+        def __init__(self, db) -> None:
+            super().__init__()
+            self.db = db
+
+        def residual_components(self, *, hours: float = 24.0, limit: int = 500):
+            since = datetime.now(UTC) - timedelta(hours=max(0.0, float(hours)))
+            rows = self.db.residual_history(since=since, limit=max(1, int(limit)))
+            return {
+                "window_hours": float(hours),
+                "count": len(rows),
+                "components": [dict(row) for row in rows],
+            }
+
+    async def fn(session, base):
+        async with session.get(f"{base}/residuals", headers=HEADERS) as resp:
+            assert resp.status == 200, await resp.text()
+            body = await resp.json()
+        assert body["count"] == 2
+        values = [row["residual_w"] for row in body["components"]]
+        assert -125.0 in values
+        assert 800.0 in values
+        # Each published point carries the three components and the identity.
+        for row in body["components"]:
+            assert row["baseline_w"] is not None
+            assert row["dynamic_w"] is not None
+            assert row["baseline_w"] + row["dynamic_w"] == pytest.approx(
+                row["residual_w"], abs=1e-9
+            )
+            assert row["resolved"] is False
+            assert row["unresolved_since"] is not None
+        # The query parameters are bounded and honoured.
+        async with session.get(f"{base}/residuals?limit=not-a-number", headers=HEADERS) as resp:
+            assert resp.status == 400
+            assert (await resp.json())["error"] == "bad_request"
+        async with session.get(f"{base}/residuals?limit=0", headers=HEADERS) as resp:
+            assert resp.status == 400
+        return True
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "residuals.db")
+        try:
+            db.insert_residual_power(
+                ResidualPower(
+                    residual_w=-125.0,
+                    kind=ResidualKind.NEGATIVE,
+                    resolved=False,
+                    unresolved_since=datetime.now(UTC),
+                    basis=MeasurementBasis.CT_MEASURED,
+                    baseline_w=-125.0,
+                    dynamic_w=0.0,
+                )
+            )
+            db.insert_residual_power(
+                ResidualPower(
+                    residual_w=800.0,
+                    kind=ResidualKind.POSITIVE,
+                    resolved=False,
+                    unresolved_since=datetime.now(UTC),
+                    basis=MeasurementBasis.CT_MEASURED,
+                    baseline_w=800.0,
+                    dynamic_w=0.0,
+                )
+            )
+            assert run(_with_server(ResidualFacade(db), fn))
+        finally:
+            db.close()
+
+
+def test_residual_history_route_is_registered_once() -> None:
+    """The route is registered exactly once, under the documented path.
+
+    A duplicate registration would shadow one handler with another and the
+    second would be unreachable, so the count is asserted rather than assumed.
+    """
+    app = create_app(StubFacade(), api_token="")
+    matches = [
+        r
+        for r in app.router.routes()
+        if r.method == "GET" and r.resource.canonical == "/api/v1/residuals"
+    ]
+    assert len(matches) == 1
 
 
 # --------------------------------------------------------------------------- #

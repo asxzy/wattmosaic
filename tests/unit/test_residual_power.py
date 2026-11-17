@@ -23,6 +23,7 @@ from __future__ import annotations
 import inspect
 import math
 from datetime import UTC, datetime, timedelta
+from statistics import median
 from typing import Any
 
 import pytest
@@ -691,6 +692,348 @@ def test_persist_round_trips_the_signed_residual(tmp_path):
         rows = db.residual_history()
         assert rows[0]["residual_w"] == pytest.approx(-400.0)
         assert rows[0]["kind"] == ResidualKind.NEGATIVE.value
+    finally:
+        db.close()
+
+
+# --------------------------------------------------------------------------- #
+# TASK-RESIDUAL-001 -- the guarantees, pinned by name
+# --------------------------------------------------------------------------- #
+def test_signed_residual_is_never_clamped():
+    """Scenario ``T15``: the negative residual survives every stage.
+
+    The residual is computed, decomposed, carried into the frozen contract and
+    persisted; none of those stages may clamp it.  ``abs()`` and ``max(0.0, ...)``
+    are checked explicitly because they are the two ways a surplus becomes
+    "unattributed load" -- a fact about the wrong direction.
+    """
+    analyzer = ResidualAnalyzer()
+    scope = _scope(
+        device_contributions={"dryer": 700.0, "oven": 300.0},
+        window_w=(-180.0, -200.0, -220.0),
+    )
+
+    residual = analyzer.compute(scope, 800.0, now=LATER)
+    _assert_negative_is_preserved(residual, -200.0)
+
+    # The decomposition refuses to explain a deficit but must not flatten it:
+    # ``before_w`` keeps the sign and the conflict names the reason.
+    decomposition = analyzer.decompose(_history([-200.0]), {}, now=LATER)
+    assert decomposition.before_w == pytest.approx(-200.0)
+    assert decomposition.conflict is True
+    assert decomposition.reason_code == "residual_is_negative"
+    assert decomposition.unexplained_w == pytest.approx(-200.0)
+
+    # A carried decomposition (resolved) never carries a sign-flattened value.
+    carried = analyzer.decompose(_history([200.0]), {"dryer": 200.0}).require_resolved()
+    assert carried.residual_w == 0.0
+    assert carried.kind == ResidualKind.NEAR_ZERO
+
+    # The stored row and the contract serialisation never turn it positive.
+    payload = residual.model_dump(mode="json")
+    assert payload["residual_w"] == pytest.approx(-200.0)
+    assert payload["kind"] == ResidualKind.NEGATIVE.value
+    assert payload["baseline_w"] + payload["dynamic_w"] == pytest.approx(-200.0)
+
+    # The single subtraction routine is the only arithmetic and is unclamped.
+    from wattmosaic_engine.models.residual_power import _signed_residual
+
+    assert _signed_residual(800.0, 1000.0) == -200.0
+    body = inspect.getsource(_signed_residual)
+    # Strip the docstring: it *names* the two operations it refuses, so the
+    # check is on the executable body, not on the prose that documents them.
+    body = body.split('"""', 2)[-1]
+    assert "max(0" not in body
+    assert "abs(" not in body
+
+
+@pytest.mark.parametrize(
+    ("window", "circuit", "contributions", "expected"),
+    [
+        ((), 0.0, {}, 0.0),  # exactly zero: no window, no dynamic claim
+        ((), 1000.0, {}, 1000.0),  # positive, no window
+        ((196.0, 199.0, 200.0, 201.0, 204.0), 1000.0, {"fridge": 800.0}, 200.0),
+        ((120.0, 900.0, 40.0), 500.0, {"dryer": 100.0}, 400.0),
+        ((-30.0, -30.0, -400.0), 100.0, {"oven": 300.0}, -200.0),  # negative
+        ((5000.0, 5000.0, 5000.0), 0.0, {}, 0.0),  # an all-spike window, zero total
+    ],
+)
+def test_baseline_plus_dynamic_equals_residual(window, circuit, contributions, expected):
+    """Scenario ``T03``: the identity holds for every published point.
+
+    ``baseline_w`` and ``dynamic_w`` are a decomposition of the *same* signed
+    number, so their sum is the residual exactly -- including for a zero residual
+    and a negative one, which are the two cases a clamp would break.
+    """
+    residual = ResidualAnalyzer().compute(
+        _scope(window_w=window, device_contributions=contributions), circuit
+    )
+    assert residual.residual_w == pytest.approx(expected)
+    assert residual.baseline_w is not None
+    assert residual.dynamic_w is not None
+    assert residual.baseline_w + residual.dynamic_w == pytest.approx(
+        residual.residual_w, abs=1e-9
+    )
+    # The zero case is a real published point, not an absent one.
+    if expected == 0.0:
+        assert residual.resolved is True
+        assert residual.kind == ResidualKind.NEAR_ZERO
+        # With a window the dynamic part is ``residual - median``; with none it is
+        # exactly ``0.0`` (``no_window_current_only``).
+        if window:
+            assert residual.dynamic_w == pytest.approx(0.0 - median(window), abs=1e-9)
+        else:
+            assert residual.dynamic_w == pytest.approx(0.0, abs=1e-9)
+
+
+def test_baseline_plus_dynamic_survives_the_persistence_round_trip(tmp_path):
+    """The identity is asserted on the *published* point, after storage.
+
+    An explicit column list silently dropping a component is the defect class
+    this repo has been bitten by, so the identity is checked on the row that
+    actually comes back from the database, not only on the in-memory object.
+    """
+    db = Database(tmp_path / "identity.db")
+    try:
+        residual = ResidualAnalyzer().compute(
+            _scope(window_w=(190.0, 195.0, 200.0, 205.0, 210.0), device_contributions={"dryer": 800.0}),
+            1000.0,
+            now=T0,
+        )
+        assert residual.baseline_w is not None and residual.dynamic_w is not None
+        persist([residual], db, timestamp=T0)
+
+        rows = db.residual_history()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["baseline_w"] is not None
+        assert row["dynamic_w"] is not None
+        assert row["baseline_w"] + row["dynamic_w"] == pytest.approx(
+            row["residual_w"], abs=1e-9
+        )
+    finally:
+        db.close()
+
+
+def test_residual_trend_publishes_its_pattern():
+    """Scenarios ``T03``/``T10``: the pattern is published, with a derived confidence.
+
+    The confidence is ``min(1.0, n / (n + 8))``: it is a function of the sample
+    count, never a hardcoded 1.0 and never a fabricated 0.0.
+    """
+    analyzer = ResidualAnalyzer()
+    history = _history([100.0, 200.0, 300.0, 400.0])  # newest first
+
+    trend = analyzer.trend(history)
+
+    payload = trend.as_dict()
+    assert payload["current_w"] == pytest.approx(400.0)
+    assert payload["typical_w"] == pytest.approx(250.0)
+    assert payload["baseline_w"] == pytest.approx(250.0)
+    assert payload["dynamic_w"] == pytest.approx(150.0)
+    assert payload["kind"] == ResidualKind.POSITIVE.value
+    assert payload["sample_count"] == 4
+    assert payload["evidence"]["cause_counts"] == {
+        "positive": 4,
+        "negative": 0,
+        "near_zero": 0,
+    }
+    assert payload["evidence"]["sign_changes"] == 0
+    assert trend.confidence == pytest.approx(min(1.0, 4 / (4 + 8.0)))
+    assert trend.confidence is not None
+    assert trend.confidence > 0.0
+
+    # The curve is a time series in ascending order, so a consumer can plot it.
+    assert [value for _, value in trend.curve] == [100.0, 200.0, 300.0, 400.0]
+
+
+def test_residual_trend_confidence_is_none_without_history():
+    """No history is not ``0.0``: the confidence is ``None``, never a number.
+
+    A fabricated ``0.0`` would read as "the trend is certainly not supported"
+    while a fabricated ``1.0`` would read as "certain"; the honest answer is
+    that no trend was computed at all, and the reason code says so.
+    """
+    trend = ResidualAnalyzer().trend([])
+
+    assert trend.confidence is None
+    assert trend.as_dict()["confidence"] is None
+    assert trend.confidence != 0.0
+    assert trend.reason_code == "no_residual_history"
+    assert trend.sample_count == 0
+
+
+def test_unresolved_residual_is_none_not_zero():
+    """An unresolved residual is ``null`` with an age, never ``0 W``.
+
+    The consumer-visible surface is the serialised payload: a residual that was
+    never measured must be absent, not a number a consumer can read as zero
+    power.  ``ResidualPower`` itself is a contract that carries a number, so
+    the honest "no measurement" case lives in the decomposition/trend payloads
+    and in the refusal path.
+    """
+    analyzer = ResidualAnalyzer()
+
+    # No history at all: the decomposition has nothing to carry, and the
+    # serialised form must be absent rather than 0.0.
+    decomposition = analyzer.decompose([], {"dryer": 100.0})
+    payload = decomposition.as_dict()
+    assert decomposition.before_w is None
+    assert decomposition.unexplained_w is None
+    assert decomposition.after_w is None
+    assert payload["residual_w"] is None
+    assert payload["before_w"] is None
+    assert payload["after_w"] is None
+    assert payload["resolved"] is False
+    assert payload["quality_status"] == QualityStatus.MISSING.value
+    assert payload["reason_code"] == "no_residual_history"
+    # A consumer that reads the payload as a number must not get 0.0.
+    assert payload["residual_w"] != 0.0
+    assert payload["before_w"] != 0.0
+
+    # The trend is absent too, and carries the age of nothing.
+    trend = analyzer.trend([])
+    assert trend.current_w is None
+    assert trend.confidence is None
+    assert trend.unresolved_since is None
+    assert trend.as_dict()["current_w"] is None
+
+    # An unresolved residual that *was* measured keeps its age and its value:
+    # "unresolved" is a state of the number, not a missing number.
+    unresolved = analyzer.compute(_scope(), 400.0, now=LATER)
+    assert unresolved.resolved is False
+    assert unresolved.unresolved_since == LATER
+    assert unresolved.residual_w == pytest.approx(400.0)
+    assert unresolved.resolved is not True
+    carried = analyzer.decompose(_history([400.0]), {}, now=LATER)
+    assert carried.unexplained_w == pytest.approx(400.0)
+    assert carried.resolved is False
+    assert carried.unexplained_w != 0.0
+
+
+def test_the_residual_is_never_redistributed_onto_a_device():
+    """``REQ-RESIDUAL-007``: no device power moves because a residual existed.
+
+    The residual is a *view* over the engine's balance: the device rows the
+    engine produced are byte-identical before and after the residual is
+    attached, and no field on ``Reconciliation`` can express a per-device
+    distribution of the unknown remainder.
+    """
+    topo = _aliased_engine_topology()
+    window = ObservationWindow.from_values(
+        T0,
+        {
+            "load_manager_l1": 1000.0,
+            "load_manager_l2": 0.0,
+            "main_panel_l1": 651.1,
+            "main_panel_l2": 0.0,
+            "ct_heater": 833.6,
+        },
+        cadence_s=15.7,
+    )
+    reconciliation = DisaggregationEngine().infer(
+        window, device_states={}, models={}, topology=topo
+    ).reconciliation
+
+    analyzer = ResidualAnalyzer(topology=build_graph(topo))
+    residual = analyzer.compute(
+        _scope(
+            scope_id="whole_home",
+            ct_id="load_manager_l1",
+            device_contributions={"heater": reconciliation.inferred_w},
+        ),
+        reconciliation.main_power_w,
+        now=reconciliation.timestamp,
+    )
+
+    before = reconciliation.model_dump(mode="json")
+    attached = reconciliation.model_copy(update={"residual": residual})
+    after = attached.model_dump(mode="json")
+
+    # The device-facing components are unchanged: the residual was not pushed
+    # into any device's estimate.
+    for field in (
+        "direct_measured_w",
+        "inferred_w",
+        "model_estimated_w",
+        "configured_prior_w",
+        "main_power_w",
+        "meter_disagreement_w",
+        "unmonitored_w",
+        "unknown_residual_w",
+    ):
+        assert after[field] == pytest.approx(before[field], abs=1e-9)
+    # The unknown remainder is still the authoritative total.
+    assert attached.unknown_residual_w == pytest.approx(
+        reconciliation.unknown_residual_w, abs=1e-9
+    )
+    # No contract field can express "residual distributed to a device".
+    assert not any("redistribut" in name for name in Reconciliation.model_fields)
+
+
+def test_the_noise_component_is_not_publishable_without_a_contract_change():
+    """``05-…`` §3.3.4 / ``G74``: the third component has no contract home.
+
+    The measured per-Reader noise floor exists (``main.py:1093`` publishes
+    ``channel_noise_floor_w``), but ``ResidualPower`` has no field to carry it,
+    so the residual decomposition cannot publish a noise term today.  This test
+    records that boundary: it fails if a noise field appears on the contract
+    without the additive-and-optional protocol, and it is the check the later
+    wave must update.
+    """
+    fields = ResidualPower.model_fields
+    assert "baseline_w" in fields
+    assert "dynamic_w" in fields
+    assert "noise_w" not in fields
+    assert "noise_floor_w" not in fields
+    assert "noise_source" not in fields
+    # The decomposition still sums to the residual without a noise term: the
+    # split is a two-part decomposition until the contract grows a third.
+    residual = ResidualAnalyzer().compute(_scope(window_w=(190.0, 200.0, 210.0)), 1200.0)
+    assert residual.baseline_w + residual.dynamic_w == pytest.approx(
+        residual.residual_w, abs=1e-9
+    )
+
+
+def test_persist_round_trips_every_decomposition_component(tmp_path):
+    """The write path must not silently drop a component.
+
+    ``Database.insert_residual_power`` carries an explicit column list, which is
+    exactly the shape that drops a field when a contract grows one.  The three
+    published components -- the signed value, ``baseline_w`` and ``dynamic_w`` --
+    are asserted on the row that comes back, for a negative residual and for a
+    zero one.
+    """
+    db = Database(tmp_path / "components.db")
+    try:
+        analyzer = ResidualAnalyzer()
+        cases = (
+            analyzer.compute(
+                _scope(window_w=(190.0, 195.0, 200.0, 205.0, 210.0)), 1000.0, now=T0
+            ),
+            analyzer.compute(
+                _scope(window_w=(190.0, 195.0, 200.0, 205.0, 210.0), device_contributions={"dryer": 1200.0}),
+                1000.0,
+                now=LATER,
+            ),
+            analyzer.compute(_scope(device_contributions={"tv": 100.0}), 100.0, now=LATER),
+        )
+        for residual in cases:
+            assert residual.baseline_w is not None
+            assert residual.dynamic_w is not None
+            persist([residual], db)
+
+        rows = db.residual_history()
+        assert len(rows) == 3
+        # ``residual_history`` is newest first; the writes were in ``cases``
+        # order, so the reversed rows line up one-to-one with their source.
+        for row, residual in zip(reversed(rows), cases, strict=True):
+            assert row["residual_w"] == pytest.approx(residual.residual_w)
+            assert row["baseline_w"] == pytest.approx(residual.baseline_w)
+            assert row["dynamic_w"] == pytest.approx(residual.dynamic_w)
+            assert row["baseline_w"] + row["dynamic_w"] == pytest.approx(
+                row["residual_w"], abs=1e-9
+            )
     finally:
         db.close()
 
