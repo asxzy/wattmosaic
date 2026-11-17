@@ -1,6 +1,6 @@
 # 13 — Open Decisions and Assumptions
 
-**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION** — Register of everything the load-disaggregation specification set did **not** decide, plus the V1 defaults the implementation proceeds on. Two product decisions from `06-device-and-load-model-spec.md` have since been answered by the project owner and are recorded as `RESOLVED` (§2.4); a third owner decision — the Device↔Reader mapping module **is** built in V1 — closes `ASM-06` (§4); and the orchestrator's approval of the specification set closes `OD-38` (§3).
+**SPEC_STATUS: APPROVED_FOR_IMPLEMENTATION** — Register of everything the load-disaggregation specification set did **not** decide, plus the V1 defaults the implementation proceeds on. Two product decisions from `06-device-and-load-model-spec.md` have since been answered by the project owner and are recorded as `RESOLVED` (§2.4); three completion-sprint owner decisions are recorded in §2.5 — `OD-46`/`OD-47` resolved as orthogonal parameters (implemented in `df3e2f6`) and `OD-34`'s V1 deferral accepted; a fourth owner decision — the Device↔Reader mapping module **is** built in V1 — closes `ASM-06` (§4); and the orchestrator's approval of the specification set closes `OD-38` (§3).
 
 ## 1. How to read this register
 
@@ -41,7 +41,7 @@
 **Rule.** No ID is used twice. The `OD-21` band was claimed independently by four sibling files; the resolution is renumbering, not deletion (§5.2).
 **Rule.** The old IDs are valid **only** inside the sibling files until the orchestrator's correction pass rewrites them.
 
-**Tally.** 96 items: 12 inherited from `00-`/`03-` (`OD-01`–`OD-08` and `OD-03.1`–`OD-03.4`), 1 retained from `01-` (`OD-09`), 2 owner-resolved (`OD-03.9`, `OD-03.12`), 9 open decisions raised here (`OD-30`–`OD-38`) — one of them, `OD-38`, is now **RESOLVED** by the orchestrator's approval of the specification set (§3) — 8 assumptions recorded here (`ASM-01`–`ASM-08`) — two of them, `ASM-06` and `ASM-08`, are now **RESOLVED** (`ASM-06` by the owner, §4; `ASM-08` by the orchestrator's cadence-default ruling, §4) — and 64 sibling items harvested from the nine landed files (§5.1). Every sibling in the `04`–`12` range has landed; `14-…` and `15-…` landed and raise no new decisions. The complete one-line index is §8.
+**Tally.** 96 items: 12 inherited from `00-`/`03-` (`OD-01`–`OD-08` and `OD-03.1`–`OD-03.4`), 1 retained from `01-` (`OD-09`), 2 owner-resolved (`OD-03.9`, `OD-03.12`), 9 open decisions raised here (`OD-30`–`OD-38`) — one of them, `OD-38`, is now **RESOLVED** by the orchestrator's approval of the specification set (§3) — 8 assumptions recorded here (`ASM-01`–`ASM-08`) — two of them, `ASM-06` and `ASM-08`, are now **RESOLVED** (`ASM-06` by the owner, §4; `ASM-08` by the orchestrator's cadence-default ruling, §4) — and 64 sibling items harvested from the nine landed files (§5.1). Of the siblings, `OD-46`/`OD-47` (raised by `06-…`) and `OD-34` (raised here) are now **RESOLVED** by the completion-sprint owner decisions recorded in §2.5. Every sibling in the `04`–`12` range has landed; `14-…` and `15-…` landed and raise no new decisions. The complete one-line index is §8.
 
 ---
 
@@ -94,6 +94,67 @@
 | **Owner** | `user` (decided); the learning-pipeline implementation is the subsystem owner's |
 | **Status** | RESOLVED — closed by the project owner's answer ("Allow state model learning."), recorded in this item. |
 | **Source** | `06-device-and-load-model-spec.md` (`OD-03.12`) |
+
+### 2.5 Completion-sprint owner decisions — `OD-46`, `OD-47` (RESOLVED) and `OD-34` (V1 deferral accepted)
+
+*Three product questions were put to the project owner at the close of the
+completion sprint. The owner answered all three; each answer is recorded here
+with its attribution and is not re-litigated. `OD-46` and `OD-47` are closed by
+the owner's choice and implemented in `df3e2f6` (`TASK-POWER-004`); `OD-34` is
+closed by the owner accepting the V1 deferral that the specification already
+assumed. The §8 index rows for all three now name this register (§2.5) as the
+source and carry their new `RESOLVED` status; the full pre-decision entries
+remain in the originating files (`06-…` for `OD-46`/`OD-47`, §3 of this register
+for `OD-34`).*
+
+#### OD-46 — Is `ALWAYS_ON` a new `ModelType` member or a flag on an existing one? — **RESOLVED**
+
+| Field | Value |
+| --- | --- |
+| **ID** | OD-46 |
+| **Description** | Whether the `ALWAYS_ON` load shape is represented by a new `ModelType` enum member, or by an orthogonal flag on an existing model's parameters. |
+| **Owner decision (completion sprint)** | **Orthogonal parameter, not an enum member; shipped LoadShape labels preserved.** `always_on: bool = False` is an additive field on `DeviceModelParameters`; no new `ModelType` member is introduced, and the already-shipped `LoadShape` labels are not changed or removed. |
+| **Impact** | Requirement: `REQ-POWER-001`, `REQ-POWER-004`, `REQ-EVENT-003` (G-04). A new enum member would duplicate the binary state machine with one state removed and force a branch in every `ModelType` switch. The orthogonal flag keeps the closed label vocabulary intact and works with any shape. |
+| **Current assumption / result** | An always-on device has no off state; its standing load is modelled by the same state-conditioned machinery with the off-state expectation replaced by the standby expectation. |
+| **Implementation** | Implemented in `df3e2f6` (`TASK-POWER-004`, B2b). Deterministic synthetic tests prove no off-state for always-on devices. |
+| **Owner** | project owner (decided, completion sprint) |
+| **Status** | RESOLVED — closed by the project owner's decision, implemented in `df3e2f6`. |
+| **Source** | `06-device-and-load-model-spec.md` (`OD-46`, G65) |
+
+#### OD-47 — Is `DELAYED` a new `ModelType` member or an orthogonal parameter? — **RESOLVED**
+
+| Field | Value |
+| --- | --- |
+| **ID** | OD-47 |
+| **Description** | Whether the `DELAYED` load shape is represented by a new `ModelType` enum member, or by an orthogonal response-delay parameter on any model. |
+| **Owner decision (completion sprint)** | **Orthogonal parameter, not an enum member; shipped LoadShape labels preserved.** `response_delay_s: float \| None` is an additive field on `DeviceModelParameters`; delay does not change the power law (a delayed dimmable light is still `DIMMABLE`), and the already-shipped `LoadShape` labels are not changed or removed. |
+| **Impact** | Requirement: `REQ-POWER-001`, `REQ-POWER-004`, `REQ-EVENT-003` (G-04). An orthogonal parameter carries the delay on an axis already expressed by a field, avoiding a new enum member and a branch in every `ModelType` switch. |
+| **Current assumption / result** | Response is suppressed before the declared delay and applied after it; the default `None` preserves prompt behaviour and the shipped labels stay valid. |
+| **Implementation** | Implemented in `df3e2f6` (`TASK-POWER-004`, B2b). Deterministic synthetic tests prove suppression before the delay and application after it. |
+| **Owner** | project owner (decided, completion sprint) |
+| **Status** | RESOLVED — closed by the project owner's decision, implemented in `df3e2f6`. |
+| **Source** | `06-device-and-load-model-spec.md` (`OD-47`, G64) |
+
+#### OD-34 — `ConfidenceVector.topology` and `.residual` are declared but never populated — **V1 DEFERRAL ACCEPTED (RESOLVED)**
+
+| Field | Value |
+| --- | --- |
+| **ID** | OD-34 |
+| **Description** | The confidence vector declares `topology` and `residual` dimensions that no code path populates in V1. |
+| **Owner decision (completion sprint)** | **V1 decision: defer population of the topology/residual confidence dimensions; owner accepted deferral (completion sprint).** The two dimensions stay declared-but-unpopulated in V1; effective confidence is computed from the populated dimensions only, and the UI must not render them as if they carried information. |
+| **Impact** | Requirement: `REQ-CONFIDENCE-005` (`TASK-CONFIDENCE-002`). The requirement's "carry a value wherever evidence exists" reading is **not** adopted for V1; the spec's declared-but-unpopulated assumption stands by owner decision. Population is deferred to a later version and remains an open product task then. |
+| **Validation needed** | A `pytest` case asserting the effective confidence is unchanged when `topology` and `residual` are zeroed, and a manual UI check that no badge or gauge derives from them. |
+| **Owner** | project owner (accepted deferral, completion sprint); population is a later-version product task |
+| **Status** | RESOLVED (V1 deferral accepted) — the owner closed the V1 question in favour of the existing declared-but-unpopulated assumption; the dimensions stay unpopulated in V1. |
+| **Source** | this register (`OD-34`, §3); `confidence_model.md` §2; `docs/limitations_v2.md` §8 |
+
+**Recorded note — deployment image-tag ambiguity (no OD; unresolved).** The
+delivered version is `0.2.1-dev.37` (`pyproject.toml:7`), but the latest reachable
+git tag is `v0.2.1-dev.36` (`git describe --tags --abbrev=0`); the `dev.37`
+release commit carries no tag. The exact image tag that a real deployment would
+pull is therefore **not inferable from the repository**. This ambiguity is
+recorded, not resolved — no tag is fabricated. It is carried into
+`17-deployment-report.md` and `16-final-verification-report.md` §7.
 
 ---
 
@@ -165,9 +226,9 @@
 | **Current assumption** | V1 keeps both dimensions declared-but-unpopulated; the effective confidence is computed from the populated dimensions only, and the UI must not render the two as if they carried information. The contract states that their derivation is undefined in V1. |
 | **Validation needed** | A `pytest` case asserting the populated dimensions and that the effective confidence is unchanged when `topology` and `residual` are zeroed; a manual UI check that no badge or gauge derives from them. |
 | **Implementation may proceed?** | YES-WITH-CONSTRAINT — the two dimensions must not be published as populated scores, and the API contract must state their derivation is undefined. |
-| **Owner** | disaggregation subsystem |
-| **Status** | OPEN |
-| **Source** | `docs/confidence_model.md` §2; `docs/limitations_v2.md` §8 |
+| **Owner** | project owner (V1 deferral accepted, completion sprint); population is a later-version product task |
+| **Status** | RESOLVED — V1 deferral accepted by the project owner (completion sprint); the two dimensions stay declared-but-unpopulated in V1. Recorded in §2.5. |
+| **Source** | `docs/confidence_model.md` §2; `docs/limitations_v2.md` §8; §2.5 |
 
 ### OD-35 — `docs/` version strings and workflow references are stale
 
@@ -554,7 +615,7 @@ from the nine landed siblings in the `04`–`12` range.
 | `OD-31` | Raw-retention default versus the `REQ-STORAGE-002` acceptance range | `13-open-decisions-and-assumptions.md` | OPEN |
 | `OD-32` | No creation path for `MeasurementFactor` | `13-open-decisions-and-assumptions.md` | OPEN |
 | `OD-33` | `audit_config_source` is always `"global"` | `13-open-decisions-and-assumptions.md` | ASSUMED |
-| `OD-34` | `ConfidenceVector.topology` and `.residual` are declared but never populated | `13-open-decisions-and-assumptions.md` | OPEN |
+| `OD-34` | `ConfidenceVector.topology` and `.residual` are declared but never populated | `13-open-decisions-and-assumptions.md` | RESOLVED — V1 deferral accepted (§2.5) |
 | `OD-35` | `docs/` version strings and workflow references are stale | `13-open-decisions-and-assumptions.md` | DEFERRED |
 | `OD-36` | Nine live-capture tests skip without `WATTMOSAIC_REAL_DB` | `13-open-decisions-and-assumptions.md` | OPEN |
 | `OD-37` | `mypy` delta-zero policy and the pre-existing error debt | `13-open-decisions-and-assumptions.md` | OPEN |
@@ -565,8 +626,8 @@ from the nine landed siblings in the `04`–`12` range.
 | `OD-43` | What is the retirement horizon for an unknown-load profile? | `05-residual-model-spec.md` | OPEN |
 | `OD-44` | Does the promotion of a profile to `CANDIDATE` create a `TopologyRelation`, or an artefact of its own? | `05-residual-model-spec.md` | OPEN |
 | `OD-45` | How the master's six power model classes are recorded on a device: a new field on `DeviceConfiguration` (`contracts.py:1376`), a new enum, or derivation from `ModelType` plus model parameters. | `06-device-and-load-model-spec.md` | OPEN |
-| `OD-46` | Whether `ALWAYS_ON` is a new `ModelType` member or a flag on an existing one. | `06-device-and-load-model-spec.md` | OPEN |
-| `OD-47` | Whether `DELAYED` is a new `ModelType` member or an orthogonal parameter. | `06-device-and-load-model-spec.md` | OPEN |
+| `OD-46` | Whether `ALWAYS_ON` is a new `ModelType` member or a flag on an existing one. | `13-open-decisions-and-assumptions.md` (§2.5) | RESOLVED — orthogonal parameter, implemented in `df3e2f6` |
+| `OD-47` | Whether `DELAYED` is a new `ModelType` member or an orthogonal parameter. | `13-open-decisions-and-assumptions.md` (§2.5) | RESOLVED — orthogonal parameter, implemented in `df3e2f6` |
 | `OD-48` | Whether a Load Component is a persisted contract entity or a model-internal concept. | `06-device-and-load-model-spec.md` | OPEN |
 | `OD-49` | The acceptance criteria for a model with no control state (the shape model of §3.2) and for a non-linear curve (§7.2). | `06-device-and-load-model-spec.md` | OPEN |
 | `OD-50` | Which `Source` labels a device that has no measurement endpoint of its own but is allocated a share of a solve. | `06-device-and-load-model-spec.md` | OPEN |
@@ -652,9 +713,11 @@ band, which §5.2 already renumbers to `OD-74`–`OD-80`, `OD-81`–`OD-87` and
 **Rule.** A row's status is the status of the item at the source named in its
 **Source file** column. An item marked `OPEN` in a sibling is `OPEN` here; the
 sibling's own row carries the full nine-field entry and the routing decision.
-**Rule.** `OD-03.9`, `OD-03.12`, `ASM-06` and `ASM-08` are `RESOLVED`; `OD-33`,
-`ASM-01`, `ASM-02`, `ASM-03`, `ASM-04`, `ASM-05` and `ASM-07` are `ASSUMED`;
-`OD-35` is `DEFERRED`; every other row is `OPEN`.
+**Rule.** `OD-03.9`, `OD-03.12`, `ASM-06`, `ASM-08`, `OD-34`, `OD-46` and
+`OD-47` are `RESOLVED` (`OD-34` by V1 deferral accepted, `OD-46`/`OD-47` by
+the completion-sprint owner decision implemented in `df3e2f6`; all in §2.5);
+`OD-33`, `ASM-01`, `ASM-02`, `ASM-03`, `ASM-04`, `ASM-05` and `ASM-07` are
+`ASSUMED`; `OD-35` is `DEFERRED`; every other row is `OPEN`.
 **Rule.** The index is a **read-only view**. It restates no decision and closes
 none; the authoritative text for every row is the source file it names.
 

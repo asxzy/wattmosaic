@@ -69,9 +69,11 @@ Delivery and acceptance appendices:
   read-only, requirement-by-requirement completion gap analysis.
 - [`19-completion-plan.md`](19-completion-plan.md) — the dependency-ordered
   completion plan.
-- `17-deployment-report.md` — **deferred**: a version-stamped deployment and
-  rollback report requires a real deployed system and a recorded smoke run. It
-  does not exist yet, so it is named here rather than linked.
+- [`17-deployment-report.md`](17-deployment-report.md) — the honest deployment
+  report. **No deployed system was available** in this environment: the smoke
+  script and workflow were authored and verified locally only. It records that
+  fact and a runbook of what remains to execute on a real system; it does not
+  claim a deployment.
 
 The sibling files are listed above and linked from `00` and `01`; the links are
 relative and resolve to the files in this folder.

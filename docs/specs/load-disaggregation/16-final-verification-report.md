@@ -113,6 +113,9 @@ authoring):**
   smoke script (current HEAD).
 - `f558bde350bd80a53f0e3285a436ecfb58f0306d` — B4a: `sources_used` /
   `sources_unused` ledger (E2E chain test added in the same commit).
+- `df3e2f69394e3fb710bc87f33c6a6d685ef75eb2` — B2b (landed after this report's
+  `edb0211` snapshot): delayed / always-on response as orthogonal parameters;
+  closes G-04 / `TASK-POWER-004` under the owner's `OD-46`/`OD-47` decision.
 
 `TASK-TEST-001` remains `IN_PROGRESS` as the continuous verification vehicle;
 these runs are its evidence, not a status change.
@@ -228,11 +231,22 @@ These remain open and are **not** resolved by this report:
 
 | Item | Why deferred | What is needed |
 | --- | --- | --- |
-| **Deployment report 17** (`17-deployment-report.md`) | Requires a **real deployed system**: version-stamped deployment/rollback report, recorded smoke output and a rollback rehearsal. No deployed installation or smoke log exists in the repository (`18-…:336`, `:363`, `:392`). | An actual deployment with a captured run; out of scope here. Report 17 stays **named, not linked** in the spec-set README. |
-| **OD-34** | Whether `topology`/`residual` confidence dimensions stay unpopulated in V1 (`18-…:390`); carries `TASK-CONFIDENCE-002`. | A recorded product decision. |
-| **OD-46 / OD-47** | Whether `ALWAYS_ON`/`DELAYED` are enum members, flags or orthogonal parameters (`18-…:389`); blocks `TASK-POWER-004` (G-04). | A recorded product decision; do not guess. |
-| **Deployment image-tag ambiguity** | HEAD version is `dev.37` but the latest reachable tag is `v0.2.1-dev.36` (`18-…:346`, `:391`). | The deployment report must state the exact image tag pulled; not inferable from the repository. |
+| **Deployment report 17** (`17-deployment-report.md`) | Requires a **real deployed system**: version-stamped deployment/rollback report, recorded smoke output and a rollback rehearsal. No deployed installation or smoke log exists in the repository (`18-…:336`, `:363`, `:392`). Report 17 now exists but **honestly records that no deployment was available** — it is linked in the spec-set README, not overclaimed. | An actual deployment with a captured run; out of scope here. The runbook in report 17 lists the remaining steps. |
+| **OD-34** | V1 deferral **accepted by the owner** (completion sprint): `topology`/`residual` confidence dimensions stay declared-but-unpopulated in V1 (`13-…` §2.5); carries `TASK-CONFIDENCE-002`. | RESOLVED for V1 by owner decision; populating the dimensions is a later-version product task, so the item stays open for a future version. |
+| **OD-46 / OD-47** | **RESOLVED and implemented** in `df3e2f6` (B2b, `TASK-POWER-004`): the owner chose orthogonal parameters, not enum members; shipped `LoadShape` labels preserved (`13-…` §2.5). | Closed — no longer blocks `TASK-POWER-004` (G-04). |
+| **Deployment image-tag ambiguity** | HEAD version is `dev.37` but the latest reachable tag is `v0.2.1-dev.36` (`18-…:346`, `:391`). | Unresolved: the exact image tag pulled by a real deployment is not inferable from the repository; recorded, not fabricated, in report 17. |
 | **Orchestrator gate moves** | Builder self-reports never set `VERIFIED` or a matrix `PASS` (`progress.md:21-25`). | The orchestrator runs `tools/dev/verify.py` and the named vehicles, then moves rows. |
+
+**B2b completion (`df3e2f6`).** Since this report was authored at `edb0211`,
+commit `df3e2f6` (`feat(models): implement delayed and always-on response as
+orthogonal parameters`) landed on `main`. It closes G-04 / `TASK-POWER-004`
+using the owner's `OD-46`/`OD-47` decision: a device may declare a response
+delay and an always-on standing load as orthogonal parameters that work with
+any `LoadShape`, without adding enum members or changing the shipped labels.
+Deterministic synthetic tests prove delayed suppression before the delay,
+application after it, and no off-state for always-on devices; unit+integration
+is green at `2784 passed, 15 skipped` with the docs-only change on top. No
+requirement matrix row was moved by this documentation update.
 
 ---
 
@@ -242,5 +256,6 @@ These remain open and are **not** resolved by this report:
 - [`14-requirement-traceability.md`](14-requirement-traceability.md) — the matrix whose rows this report does **not** move.
 - [`18-completion-gap-analysis.md`](18-completion-gap-analysis.md) — §2 status totals and §4 verification assessment used above.
 - [`19-completion-plan.md`](19-completion-plan.md) — the dependency-ordered Phase B plan.
-- [`README.md`](README.md) — the spec-set file index (16/18/19 linked; 17 named pending deployment).
+- [`README.md`](README.md) — the spec-set file index (16/17/18/19 linked).
+- [`17-deployment-report.md`](17-deployment-report.md) — honest deployment report: no deployed system was available; smoke/workflow verified locally only.
 - [`tasks/progress.md`](tasks/progress.md) — authoritative task status and the orchestrator-only `VERIFIED` rule.
