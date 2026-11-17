@@ -219,6 +219,8 @@ Evidence: `config/settings.py:150-152` and `:257-261`; `engine/wattmosaic_engine
 
 **Gap `G-STORE-04` — the L2/L4 horizon is MISSING.** No configuration field or env var exists for bounding evidence or version history. The requirement is: an explicit, opt-in, separately named horizon that defaults to disabled, and whose use is logged.
 
+> **Implementation status note.** The underlying config fields now exist (`EngineConfig.retention_days_evidence` / `retention_days_versions`, env `WM_RETENTION_DAYS_EVIDENCE` / `WM_RETENTION_DAYS_VERSIONS`, default `None` = disabled) and are exposed as App options in `addon/run.sh` and `addon/config.yaml`. This App-surface change does not by itself implement pruning of L2/L4 at the horizon; the `G-STORE-04` gap for the prune action and its logging remains open.
+
 ### 3.2 Pruning trigger and mechanics
 
 - **Trigger:** the maintenance loop, every `MAINTENANCE_INTERVAL_S = 60.0` s (`main.py:98`, loop at `main.py:1308-1319`). The loop calls `self.aligner.prune()` then `self.db.prune(retention_days_raw, retention_days_aggregates)`.
