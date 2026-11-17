@@ -49,6 +49,7 @@ from wattmosaic_engine.models import (
     segment_power_series,
     trapezoidal_energy_kwh,
 )
+from wattmosaic_engine.models.device_profile import off_w, power_after
 from wattmosaic_engine.models.registry import ModelRegistry
 from wattmosaic_engine.models.serde import parameters_from_json, version_from_row
 from wattmosaic_engine.storage import Database
@@ -267,6 +268,117 @@ def test_declared_adjustable_profile_preserves_level_lookup() -> None:
     assert undeclared.is_adjustable() is False
     assert undeclared.power_at_level(50.0) is None
     assert undeclared.level_for(110.0) == PowerLevel.ACTIVE
+
+
+# --------------------------------------------------------------------------- #
+# TASK-POWER-004: delayed / always-on response as orthogonal parameters (G-04)
+# --------------------------------------------------------------------------- #
+
+
+def _delayed_profile(delay_s: float = 5.0) -> DevicePowerProfile:
+    """A deterministic synthetic profile: 10 W standby, 100 W active, +delay."""
+    base = DevicePowerProfile.from_expected(
+        "synthetic_delayed_load", ExpectedPower(standby_w=10.0, on_w=100.0)
+    )
+    return base.with_response_delay(delay_s)
+
+
+def test_delayed_response_is_declared_and_honoured() -> None:
+    """A state change produces no electrical change until the declared delay.
+
+    Mutation-proven assertions for G-04/OD-47: before the delay the device still
+    draws standby (the response is suppressed), at and after the delay it draws
+    the target.  The delay is an orthogonal parameter -- the load shape and the
+    power levels are untouched, and no LoadShape enum member was added.
+    """
+    profile = _delayed_profile(5.0)
+
+    assert profile.response_delay_s == pytest.approx(5.0)
+    # Activation: suppressed before the delay, applied at/after it.
+    assert profile.activation_power_w(0.0) == pytest.approx(10.0)
+    assert profile.activation_power_w(4.9) == pytest.approx(10.0)
+    assert profile.activation_power_w(5.0) == pytest.approx(100.0)
+    assert profile.activation_power_w(9.0) == pytest.approx(100.0)
+    # Deactivation: the device keeps drawing until the delay elapses too.
+    assert profile.deactivation_power_w(0.0) == pytest.approx(100.0)
+    assert profile.deactivation_power_w(4.9) == pytest.approx(100.0)
+    assert profile.deactivation_power_w(5.0) == pytest.approx(10.0)
+
+    # The declaration is orthogonal: levels, shape and other callers are intact.
+    assert profile.standby_w == pytest.approx(10.0)
+    assert profile.active_w == pytest.approx(100.0)
+    assert profile.operating_w() == pytest.approx(100.0)
+
+
+def test_power_after_pure_helper_neutral_and_malformed_cases() -> None:
+    """The pure timing helper is neutral by default and honest on bad input."""
+    # Zero delay (the default): the target applies immediately.
+    assert power_after(10.0, 100.0, delay_s=None, elapsed_s=0.0) == pytest.approx(100.0)
+    assert power_after(10.0, 100.0, delay_s=0.0, elapsed_s=0.0) == pytest.approx(100.0)
+    # A positive delay suppresses before, applies at/after.
+    assert power_after(10.0, 100.0, delay_s=3.0, elapsed_s=2.99) == pytest.approx(10.0)
+    assert power_after(10.0, 100.0, delay_s=3.0, elapsed_s=3.0) == pytest.approx(100.0)
+    # Missing / non-finite elapsed time answers None, never a fabricated value.
+    assert power_after(10.0, 100.0, delay_s=3.0, elapsed_s=None) is None
+    assert power_after(10.0, 100.0, delay_s=3.0, elapsed_s=float("nan")) is None
+    # A malformed delay falls back to the neutral zero-delay behavior.
+    assert power_after(10.0, 100.0, delay_s=-1.0, elapsed_s=0.0) == pytest.approx(100.0)
+
+
+def test_always_on_has_no_off_state() -> None:
+    """An always-on device never drops to the standby/off transition (OD-46).
+
+    A normal device falls to standby on OFF; an always-on device keeps its
+    standing (active) load.  This is orthogonal: the power levels are untouched
+    and no new enum member is needed.
+    """
+    base = DevicePowerProfile.from_expected(
+        "synthetic_standing_load", ExpectedPower(standby_w=10.0, on_w=100.0)
+    )
+    always_on = base.with_always_on(True)
+
+    # Normal binary fall-back vs always-on standing load.
+    assert base.off_transition_w() == pytest.approx(10.0)
+    assert always_on.off_transition_w() == pytest.approx(100.0)
+    assert always_on.is_always_on() is True
+    assert base.is_always_on() is False
+
+    # Deactivation of an always-on device never reaches standby.
+    assert always_on.deactivation_power_w(0.0) == pytest.approx(100.0)
+    assert base.deactivation_power_w(0.0) == pytest.approx(10.0)
+
+    # Orthogonal: declared levels and the pure helper agree.
+    assert off_w(10.0, 100.0, always_on=True) == pytest.approx(100.0)
+    assert off_w(10.0, 100.0, always_on=False) == pytest.approx(10.0)
+    assert always_on.active_w == pytest.approx(100.0)
+
+
+def test_orthogonal_parameters_are_neutral_by_default() -> None:
+    """With no declarations, behavior is byte-for-byte the shipped behavior."""
+    profile = DevicePowerProfile.from_expected(
+        "plain", ExpectedPower(standby_w=10.0, on_w=100.0)
+    )
+    assert profile.response_delay_s is None
+    assert profile.always_on is False
+    # Immediate response, normal off transition.
+    assert profile.activation_power_w(0.0) == pytest.approx(100.0)
+    assert profile.deactivation_power_w(0.0) == pytest.approx(10.0)
+    # Serialisation is unchanged for a default profile (no new keys emitted).
+    assert "response_delay_s" not in profile.as_dict()
+    assert "always_on" not in profile.as_dict()
+    # A round-trip through a mapping keeps the neutral defaults.
+    restored = DevicePowerProfile.from_mapping("plain", profile.as_dict())
+    assert restored.response_delay_s is None
+    assert restored.always_on is False
+
+
+def test_shipped_loadshape_labels_are_unchanged() -> None:
+    """DELAYED/ALWAYS_ON stay labels; no enum members added or renamed."""
+    assert {shape.value for shape in LoadShape} == {
+        "fixed", "adjustable", "dynamic", "delayed", "always_on", "unknown",
+    }
+    assert LoadShape.DELAYED.value == "delayed"
+    assert LoadShape.ALWAYS_ON.value == "always_on"
 
 
 def test_context_from_sample_parses_state_control_and_notes() -> None:

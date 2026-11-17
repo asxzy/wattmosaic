@@ -88,6 +88,12 @@ MONITORING_KEY = "monitoring_level"
 BEHAVIOR_KEY = "power_behavior"
 CONNECTIVITY_KEY = "connectivity"
 CONFIG_KEY = "device_config"
+#: Orthogonal response declarations (OD-46/47), read as device metadata.  They
+#: are *not* new ``DeviceConfiguration`` contract fields (which would require a
+#: contract bump): they live in the engine metadata projection, so existing
+#: payloads validate unchanged.  Defaults are neutral.
+RESPONSE_DELAY_KEY = "response_delay_s"
+ALWAYS_ON_KEY = "always_on"
 #: Evidence-derived runtime entities (never rewritten by configuration).
 STATE_ENTITIES_KEY = "state_entity_ids"
 #: CT ids this module mirrored onto the device's own measurement lists from
@@ -129,6 +135,13 @@ class EffectiveConfig:
     #: The declared load-shape class.  Read from ``DeviceConfiguration`` only;
     #: it is never derived from a name, a device type or a model.
     load_shape: LoadShape = LoadShape.UNKNOWN
+    #: A declared response delay in seconds (OD-47), orthogonal to the power
+    #: law / load shape.  ``None`` is the neutral "no delay" default.  Read from
+    #: the projected configuration metadata, never from a device name.
+    response_delay_s: float | None = None
+    #: A declared always-on standing load (OD-46), orthogonal to the power law.
+    #: ``False`` is the neutral default (a device with a normal off transition).
+    always_on: bool = False
     #: The declared ``ExpectedPower`` envelope, when a configuration exists.
     #: Kept as the contract object so the profile is a pure function of the
     #: declaration rather than a second copy of the numbers.
@@ -181,7 +194,14 @@ class EffectiveConfig:
         """
         if self.expected is None:
             return None
-        return DevicePowerProfile.from_expected(self.device_id, self.expected)
+        profile = DevicePowerProfile.from_expected(self.device_id, self.expected)
+        # Orthogonal declarations are attached additively.  With the neutral
+        # defaults this returns the same profile as before these fields existed.
+        if self.response_delay_s is not None:
+            profile = profile.with_response_delay(self.response_delay_s)
+        if self.always_on:
+            profile = profile.with_always_on(True)
+        return profile
 
 
 def derive_monitoring(
@@ -383,6 +403,20 @@ def effective_config(
     except ValueError:
         connectivity = HaConnectivity.UNKNOWN
 
+    # Orthogonal response declarations (OD-46/47) come from device metadata,
+    # never from a name or a device type.  Both fall back to neutral defaults on
+    # absence or malformation so existing devices behave exactly as before.
+    response_delay_s: float | None = None
+    raw_delay = metadata.get(RESPONSE_DELAY_KEY)
+    if raw_delay is not None and not isinstance(raw_delay, bool):
+        try:
+            parsed_delay = float(raw_delay)
+        except (TypeError, ValueError):
+            parsed_delay = -1.0
+        if parsed_delay >= 0.0:
+            response_delay_s = parsed_delay
+    always_on = metadata.get(ALWAYS_ON_KEY, False) is True
+
     load_entities: tuple[str, ...] = ()
     mode_entities: tuple[str, ...] = ()
     declared_cts: tuple[str, ...] = ()
@@ -498,6 +532,8 @@ def effective_config(
         monitoring=monitoring,
         behavior=behavior,
         load_shape=load_shape,
+        response_delay_s=response_delay_s,
+        always_on=always_on,
         expected=config.expected if config is not None else None,
         connectivity=connectivity,
         device_type=DeviceType(config.device_type) if config is not None else DeviceType.UNKNOWN,
@@ -935,6 +971,8 @@ __all__ = [
     "LINEAR_DIMMING_DEFAULT",
     "MODE_ENTITIES_KEY",
     "MONITORING_KEY",
+    "RESPONSE_DELAY_KEY",
+    "ALWAYS_ON_KEY",
     "configured_power",
     "derive_monitoring",
     "effective_config",

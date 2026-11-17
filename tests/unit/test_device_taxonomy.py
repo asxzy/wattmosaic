@@ -42,6 +42,8 @@ from wattmosaic_engine.contracts import (
     Topology,
 )
 from wattmosaic_engine.disaggregation.configuration import (
+    ALWAYS_ON_KEY,
+    RESPONSE_DELAY_KEY,
     configured_power,
     derive_monitoring,
     effective_config,
@@ -834,6 +836,82 @@ def test_load_shape_is_never_derived_from_a_device_name() -> None:
     assert result.load_shape == LoadShape.UNKNOWN.value
 
     # The six shapes are a closed axis separate from PowerBehavior/ModelType.
+    assert {shape.value for shape in LoadShape} == {
+        "fixed", "adjustable", "dynamic", "delayed", "always_on", "unknown",
+    }
+
+
+def test_delayed_and_always_on_are_orthogonal_declarations() -> None:
+    """TASK-POWER-004: delay/always-on flow from the declaration, not a name.
+
+    The parameters live in engine metadata (not new contract fields), so an
+    existing payload validates unchanged; they reach ``EffectiveConfig`` and its
+    power profile additively, and neither adds a LoadShape enum member nor
+    retypes a shipped label.
+    """
+    plain_cfg = DeviceConfiguration(
+        device_id="water_heater",
+        expected=ExpectedPower(standby_w=10.0, on_w=4500.0),
+    )
+    projected = _with([plain_cfg])
+    # Neutral by default: a device with no orthogonal declaration is unchanged.
+    plain = effective_config("water_heater", topology=projected)
+    assert plain.response_delay_s is None
+    assert plain.always_on is False
+    plain_profile = plain.power_profile
+    assert plain_profile is not None
+    assert plain_profile.activation_power_w(0.0) == pytest.approx(4500.0)
+    assert plain_profile.off_transition_w() == pytest.approx(10.0)
+
+    # Declare both parameters as engine metadata (the additive projection home).
+    for device in projected.devices:
+        if device.device_id == "water_heater":
+            device.metadata[RESPONSE_DELAY_KEY] = 5.0
+            device.metadata[ALWAYS_ON_KEY] = True
+    configured = effective_config("water_heater", topology=projected)
+    assert configured.response_delay_s == pytest.approx(5.0)
+    assert configured.always_on is True
+    profile = configured.power_profile
+    assert profile is not None
+    # Delayed activation: suppressed before the delay, applied at/after it.
+    assert profile.activation_power_w(0.0) == pytest.approx(10.0)
+    assert profile.activation_power_w(4.9) == pytest.approx(10.0)
+    assert profile.activation_power_w(5.0) == pytest.approx(4500.0)
+    # Always-on: an OFF transition never drops to standby.
+    assert profile.off_transition_w() == pytest.approx(4500.0)
+    assert profile.deactivation_power_w(0.0) == pytest.approx(4500.0)
+
+    # The published load-shape axis is untouched by these parameters.
+    assert {shape.value for shape in LoadShape} == {
+        "fixed", "adjustable", "dynamic", "delayed", "always_on", "unknown",
+    }
+
+
+def test_always_on_has_no_off_state() -> None:
+    """UT acceptance: an always-on device never drops to a standby OFF level.
+
+    A normal device's deactivation falls to standby; an always-on device keeps
+    its standing load.  This is driven by the declared orthogonal flag, never by
+    a device name, and requires no new LoadShape enum member.
+    """
+    cfg = DeviceConfiguration(
+        device_id="water_heater",
+        expected=ExpectedPower(standby_w=10.0, on_w=4500.0),
+    )
+    projected = _with([cfg])
+    normal = effective_config("water_heater", topology=projected).power_profile
+    assert normal is not None
+    assert normal.off_transition_w() == pytest.approx(10.0)
+
+    for device in projected.devices:
+        if device.device_id == "water_heater":
+            device.metadata[ALWAYS_ON_KEY] = True
+    standing = effective_config("water_heater", topology=projected).power_profile
+    assert standing is not None
+    assert standing.is_always_on() is True
+    assert standing.off_transition_w() == pytest.approx(4500.0)
+    assert standing.deactivation_power_w(0.0) == pytest.approx(4500.0)
+    # A suggestive device name alone never creates an always-on device.
     assert {shape.value for shape in LoadShape} == {
         "fixed", "adjustable", "dynamic", "delayed", "always_on", "unknown",
     }

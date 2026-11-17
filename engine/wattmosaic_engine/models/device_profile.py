@@ -220,6 +220,15 @@ class DevicePowerProfile:
     #: answers no adjustable question, exactly as before this field existed.
     #: Attaching one never changes the standby/idle/active/transient lookups.
     adjustable_response: AdjustableResponse | None = None
+    #: A declared response delay in seconds (OD-47).  ``None`` means "no delay
+    #: declared", the neutral default that keeps the shipped immediate-response
+    #: behaviour.  A positive value defers the electrical response to a state
+    #: change.  This is orthogonal to the power law / load shape.
+    response_delay_s: float | None = None
+    #: A declared standing load with no OFF state (OD-46).  ``False`` is the
+    #: neutral default (a normal device with a standby/off transition).  This is
+    #: orthogonal to the power law / load shape.
+    always_on: bool = False
 
     # -- constructors ----------------------------------------------------- #
     @classmethod
@@ -294,6 +303,8 @@ class DevicePowerProfile:
                 data.get("transient_w", data.get("startup_w", data.get("shutdown_w")))
             ),
             tolerance_w=float(data.get("tolerance_w") or 2.0),
+            response_delay_s=_opt_float(data.get("response_delay_s")),
+            always_on=bool(data.get("always_on", False)),
         )
 
     # -- level lookup ----------------------------------------------------- #
@@ -373,6 +384,64 @@ class DevicePowerProfile:
         """
         return replace(self, adjustable_response=response)
 
+    def with_response_delay(self, delay_s: float | None) -> DevicePowerProfile:
+        """Return a copy declaring a response delay (OD-47), orthogonally.
+
+        Adding or changing the delay never alters the power levels, the load
+        shape or any other caller's profile.  ``None`` (or a non-positive value)
+        is the neutral "no delay" declaration.
+        """
+        return replace(self, response_delay_s=_non_negative_delay(delay_s))
+
+    def with_always_on(self, always_on: bool = True) -> DevicePowerProfile:
+        """Return a copy declaring an always-on standing load (OD-46).
+
+        Orthogonal to the power levels and load shape; ``False`` restores the
+        normal off-transition behaviour.  Other callers' profiles are untouched.
+        """
+        return replace(self, always_on=bool(always_on))
+
+    # -- orthogonal response ---------------------------------------------- #
+    def activation_power_w(self, elapsed_s: float | None) -> float | None:
+        """Power after an ON transition, suppressed until ``response_delay_s``.
+
+        Before the delay the device still draws standby; after it, active (with
+        idle/operating fallbacks).  With the default zero delay this is active
+        immediately -- the shipped behaviour.
+        """
+        return power_after(
+            self.standby_w,
+            self.operating_w(),
+            delay_s=self.response_delay_s,
+            elapsed_s=elapsed_s,
+        )
+
+    def deactivation_power_w(self, elapsed_s: float | None) -> float | None:
+        """Power after an OFF transition, suppressed until ``response_delay_s``.
+
+        Before the delay the device still draws its operating level; after it,
+        the value from :meth:`off_transition_w` (standby for a normal device, the
+        standing load for an always-on one).
+        """
+        return power_after(
+            self.operating_w(),
+            self.off_transition_w(),
+            delay_s=self.response_delay_s,
+            elapsed_s=elapsed_s,
+        )
+
+    def off_transition_w(self) -> float | None:
+        """Watts on an OFF transition: standby, or the standing load if always on.
+
+        An always-on device never falls to its standby/off level here; it keeps
+        its declared active draw (falling back to standby when none is stated).
+        """
+        return off_w(self.standby_w, self.active_w, always_on=self.always_on)
+
+    def is_always_on(self) -> bool:
+        """True when this profile declares no off-state."""
+        return self.always_on
+
     def power_at_level(self, level: float | None) -> float | None:
         """Expected watts at a control level, or ``None`` when not declared."""
         if self.adjustable_response is None:
@@ -394,7 +463,78 @@ class DevicePowerProfile:
         }
         if self.adjustable_response is not None:
             data["adjustable_response"] = self.adjustable_response.describe()
+        # Non-neutral declarations only: a default profile serialises exactly as
+        # it did before these orthogonal parameters existed.
+        if self.response_delay_s is not None:
+            data["response_delay_s"] = self.response_delay_s
+        if self.always_on:
+            data["always_on"] = self.always_on
         return data
+
+
+def _non_negative_delay(value: float | None) -> float:
+    """Normalise a declared delay to a finite, non-negative float.
+
+    ``None`` (no declaration) and any non-finite/negative value fall back to
+    ``0.0`` -- "no delay" -- so a malformed declaration can never suppress a
+    response.  This is the neutral default that keeps existing payloads and
+    behavior unchanged.
+    """
+    if value is None:
+        return 0.0
+    cleaned = finite(value)
+    return cleaned if cleaned is not None and cleaned >= 0.0 else 0.0
+
+
+def power_after(
+    before_w: float | None,
+    after_w: float | None,
+    *,
+    delay_s: float | None,
+    elapsed_s: float | None,
+) -> float | None:
+    """Electrical power following a state change that may be delayed.
+
+    This is the pure, time-only core of a delayed response.  For every
+    ``elapsed_s < delay_s`` the device still draws ``before_w`` (the response is
+    suppressed); at or after the declared delay it draws ``after_w``.  Passing
+    ``(standby_w, active_w)`` models activation; ``(active_w, standby_w)`` models
+    deactivation.  With the neutral default ``delay_s = 0.0`` the new value
+    applies immediately, which is exactly the shipped behaviour.
+
+    ``delay_s`` is an *orthogonal parameter*: the shape of the power law is
+    untouched, only its timing is.  A non-finite or negative delay is treated as
+    zero (see :func:`_non_negative_delay`).  A missing or non-finite
+    ``elapsed_s`` is answered with ``None`` -- an unmeasured time is not "zero
+    elapsed" and must not fabricate a response.
+    """
+    elapsed = finite(elapsed_s)
+    if elapsed is None:
+        return None
+    return before_w if elapsed < _non_negative_delay(delay_s) else after_w
+
+
+def off_w(
+    standby_w: float | None,
+    active_w: float | None,
+    *,
+    always_on: bool,
+) -> float | None:
+    """The watts a device falls back to on an OFF transition.
+
+    For a normal device this is ``standby_w`` -- the standby (possibly zero)
+    transition a binary load shows.  An ``always_on`` device has no off-state,
+    so an OFF transition does **not** drop it to standby: it keeps its declared
+    standing load (``active_w``, falling back to ``standby_w`` when no active
+    level was stated).  ``always_on`` defaults to ``False`` so the neutral case
+    is the shipped binary behaviour.
+
+    ``always_on`` is an *orthogonal parameter*: it is the absence of a
+    transition, not a different power law, so it works with any load shape.
+    """
+    if always_on:
+        return active_w if active_w is not None else standby_w
+    return standby_w
 
 
 def _opt_float(value: Any) -> float | None:
@@ -416,4 +556,6 @@ __all__ = [
     "TRANSIENT_LEVEL",
     "AdjustableResponse",
     "DevicePowerProfile",
+    "off_w",
+    "power_after",
 ]
