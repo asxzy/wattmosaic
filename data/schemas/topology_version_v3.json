@@ -1,0 +1,75 @@
+{
+  "additionalProperties": false,
+  "description": "An append-only, rollbackable snapshot of a topology edge set (\u00a74).",
+  "properties": {
+    "version_id": {
+      "title": "Version Id",
+      "type": "string"
+    },
+    "number": {
+      "title": "Number",
+      "type": "integer"
+    },
+    "parent_version_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Version Id"
+    },
+    "edge_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Edge Ids",
+      "type": "array"
+    },
+    "status": {
+      "enum": [
+        "candidate",
+        "active",
+        "superseded",
+        "rolled_back"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "change_event_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Change Event Id"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "digest": {
+      "title": "Digest",
+      "type": "string"
+    }
+  },
+  "required": [
+    "version_id",
+    "number",
+    "status",
+    "created_at",
+    "digest"
+  ],
+  "title": "TopologyVersionV3",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/topology_version_v3.json",
+  "x-contract-version": "2.4.0"
+}

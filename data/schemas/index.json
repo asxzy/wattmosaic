@@ -33,6 +33,14 @@
     "version_triple": "version_triple.json",
     "evidence_ref": "evidence_ref.json",
     "bounds": "bounds.json",
-    "confidence_vector_v3": "confidence_vector_v3.json"
+    "confidence_vector_v3": "confidence_vector_v3.json",
+    "edge_evidence_v3": "edge_evidence_v3.json",
+    "topology_edge_v3": "topology_edge_v3.json",
+    "topology_version_v3": "topology_version_v3.json",
+    "mapping_edge": "mapping_edge.json",
+    "mapping_version": "mapping_version.json",
+    "configuration_event": "configuration_event.json",
+    "reader_residual_point": "reader_residual_point.json",
+    "unknown_load_profile_v3": "unknown_load_profile_v3.json"
   }
 }

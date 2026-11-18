@@ -1,0 +1,56 @@
+{
+  "additionalProperties": false,
+  "description": "Immutable-style counters of support/conflict for one edge (design \u00a75).\n\n``parent_only`` events are neutral: they are recorded as residual evidence\nand **never counted against an edge** (HB \u00a74.3, AT-2).  The derived\n:attr:`conflict_ratio` therefore uses only the decisive support/conflict\ncounts and returns ``0.0`` when there is no decisive evidence yet.",
+  "properties": {
+    "support": {
+      "default": 0,
+      "title": "Support",
+      "type": "integer"
+    },
+    "conflict": {
+      "default": 0,
+      "title": "Conflict",
+      "type": "integer"
+    },
+    "parent_only": {
+      "default": 0,
+      "title": "Parent Only",
+      "type": "integer"
+    },
+    "independent_causes": {
+      "default": 0,
+      "title": "Independent Causes",
+      "type": "integer"
+    },
+    "last_support_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Last Support At"
+    },
+    "last_conflict_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Last Conflict At"
+    }
+  },
+  "title": "EdgeEvidence",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/edge_evidence_v3.json",
+  "x-contract-version": "2.4.0"
+}

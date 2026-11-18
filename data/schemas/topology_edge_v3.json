@@ -1,0 +1,184 @@
+{
+  "$defs": {
+    "EdgeEvidence": {
+      "additionalProperties": false,
+      "description": "Immutable-style counters of support/conflict for one edge (design \u00a75).\n\n``parent_only`` events are neutral: they are recorded as residual evidence\nand **never counted against an edge** (HB \u00a74.3, AT-2).  The derived\n:attr:`conflict_ratio` therefore uses only the decisive support/conflict\ncounts and returns ``0.0`` when there is no decisive evidence yet.",
+      "properties": {
+        "support": {
+          "default": 0,
+          "title": "Support",
+          "type": "integer"
+        },
+        "conflict": {
+          "default": 0,
+          "title": "Conflict",
+          "type": "integer"
+        },
+        "parent_only": {
+          "default": 0,
+          "title": "Parent Only",
+          "type": "integer"
+        },
+        "independent_causes": {
+          "default": 0,
+          "title": "Independent Causes",
+          "type": "integer"
+        },
+        "last_support_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Support At"
+        },
+        "last_conflict_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Conflict At"
+        }
+      },
+      "title": "EdgeEvidence",
+      "type": "object"
+    },
+    "EdgeLifecycleV3": {
+      "description": "Lifecycle of a single v3 topology or mapping edge (HB \u00a74.3).\n\nThis is a *new* seven-state vocabulary.  The legacy :class:`EdgeLifecycle`\nhas a different member set (it includes ``UNDER_REVIEW`` and omits nothing,\nbut is not identical); it is deliberately left alone.  One event never moves\nan edge past CANDIDATE (DEC-10).",
+      "enum": [
+        "candidate",
+        "provisional",
+        "confirmed",
+        "conflicted",
+        "suspected_change",
+        "rejected",
+        "retired"
+      ],
+      "title": "EdgeLifecycleV3",
+      "type": "string"
+    },
+    "RelationType": {
+      "description": "The five reader\u2194reader relation kinds of HB \u00a74.2 (DEC-10, DEC-11).",
+      "enum": [
+        "contains",
+        "shared_load",
+        "paired_leg",
+        "correlated",
+        "same_conductor"
+      ],
+      "title": "RelationType",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "A typed, time-scoped, lifecycle-bearing reader\u2194reader edge (\u00a74).\n\nOnly readers (measurement endpoints) are endpoints.  For a CONTAINS edge,\n``source_endpoint_id`` is the parent and ``target_endpoint_id`` the child.",
+  "properties": {
+    "edge_id": {
+      "title": "Edge Id",
+      "type": "string"
+    },
+    "relation": {
+      "$ref": "#/$defs/RelationType"
+    },
+    "source_endpoint_id": {
+      "title": "Source Endpoint Id",
+      "type": "string"
+    },
+    "target_endpoint_id": {
+      "title": "Target Endpoint Id",
+      "type": "string"
+    },
+    "lifecycle": {
+      "$ref": "#/$defs/EdgeLifecycleV3"
+    },
+    "declared_by": {
+      "enum": [
+        "user",
+        "inference",
+        "migration"
+      ],
+      "title": "Declared By",
+      "type": "string"
+    },
+    "beta": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Beta"
+    },
+    "beta_basis": {
+      "anyOf": [
+        {
+          "enum": [
+            "unity",
+            "recorded_factor",
+            "estimated"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Beta Basis"
+    },
+    "evidence": {
+      "$ref": "#/$defs/EdgeEvidence"
+    },
+    "valid_from": {
+      "format": "date-time",
+      "title": "Valid From",
+      "type": "string"
+    },
+    "valid_until": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Valid Until"
+    },
+    "pinned": {
+      "title": "Pinned",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "edge_id",
+    "relation",
+    "source_endpoint_id",
+    "target_endpoint_id",
+    "lifecycle",
+    "declared_by",
+    "evidence",
+    "valid_from",
+    "pinned"
+  ],
+  "title": "TopologyEdgeV3",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/topology_edge_v3.json",
+  "x-contract-version": "2.4.0"
+}

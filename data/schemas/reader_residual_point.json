@@ -1,0 +1,94 @@
+{
+  "$defs": {
+    "MeasurementBasis": {
+      "description": "What produced the watt value, independent of how much we trust it.\n\n``Source`` answers *\"how was the value obtained\"*; this answers *\"what kind\nof instrument produced the watts\"*.  A ``DIRECT_MEASURED`` result can be\n``FACTOR_ADJUSTED``, and a ``MODEL_ESTIMATED`` result can never be\n``CT_MEASURED``.",
+      "enum": [
+        "ct_measured",
+        "monitor_reported",
+        "factor_adjusted",
+        "estimated_appliance_total",
+        "unknown"
+      ],
+      "title": "MeasurementBasis",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One signed residual sample for one reader (HB \u00a79.4 E, DEF-05).\n\nThe point is keyed by reader and carries the topology version it was\ncomputed under, so per-reader baselines no longer share a single\ninstall-wide window.  ``residual_w`` is signed and never clamped; ``None``\nmeans unknown (HB \u00a718), never 0 W.",
+  "properties": {
+    "reader_id": {
+      "title": "Reader Id",
+      "type": "string"
+    },
+    "at": {
+      "format": "date-time",
+      "title": "At",
+      "type": "string"
+    },
+    "residual_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Residual W"
+    },
+    "baseline_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Baseline W"
+    },
+    "dynamic_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Dynamic W"
+    },
+    "noise_sigma_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Noise Sigma W"
+    },
+    "topology_version_id": {
+      "title": "Topology Version Id",
+      "type": "string"
+    },
+    "basis": {
+      "$ref": "#/$defs/MeasurementBasis"
+    }
+  },
+  "required": [
+    "reader_id",
+    "at",
+    "topology_version_id",
+    "basis"
+  ],
+  "title": "ReaderResidualPoint",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/reader_residual_point.json",
+  "x-contract-version": "2.4.0"
+}

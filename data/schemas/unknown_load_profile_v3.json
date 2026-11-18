@@ -1,0 +1,63 @@
+{
+  "additionalProperties": false,
+  "description": "A recurring, un-attributed load signature (HB \u00a79.4 D).\n\nIts lifecycle has no ``confirmed`` state: an unknown load is observed,\ncharacterised, offered as a candidate, promoted by a user, or retired \u2014\nnever auto-confirmed by the engine.  A retired profile is retained.",
+  "properties": {
+    "profile_id": {
+      "title": "Profile Id",
+      "type": "string"
+    },
+    "scope_endpoint_id": {
+      "title": "Scope Endpoint Id",
+      "type": "string"
+    },
+    "lifecycle": {
+      "enum": [
+        "observing",
+        "characterised",
+        "candidate",
+        "promoted",
+        "retired"
+      ],
+      "title": "Lifecycle",
+      "type": "string"
+    },
+    "signature": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "title": "Signature",
+      "type": "object"
+    },
+    "event_count": {
+      "default": 0,
+      "title": "Event Count",
+      "type": "integer"
+    },
+    "independent_event_count": {
+      "default": 0,
+      "title": "Independent Event Count",
+      "type": "integer"
+    },
+    "first_seen": {
+      "format": "date-time",
+      "title": "First Seen",
+      "type": "string"
+    },
+    "last_seen": {
+      "format": "date-time",
+      "title": "Last Seen",
+      "type": "string"
+    }
+  },
+  "required": [
+    "profile_id",
+    "scope_endpoint_id",
+    "lifecycle",
+    "first_seen",
+    "last_seen"
+  ],
+  "title": "UnknownLoadProfileV3",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/unknown_load_profile_v3.json",
+  "x-contract-version": "2.4.0"
+}
