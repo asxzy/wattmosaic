@@ -27,15 +27,15 @@
 
 | ID | Wave | Status | Owner / PR | Acceptance closed | Notes |
 |---|---|---|---|---|---|
-| X00 | 0 | IN_REVIEW | | | ADRs 0035–0041, supersession note, tracker baseline |
-| X01 | 0 | READY | | | |
-| X02 | 0 | READY | | | |
-| X03 | 0 | READY | | | |
-| X04 | 0 | READY | | | |
-| X05 | 0 | READY | | | |
-| X06 | 0 | READY | | | |
-| X07 | 0 | READY | | | |
-| K00 | 1 | NOT_STARTED | | | |
+| X00 | 0 | VERIFIED | | | ADRs 0035–0041, supersession note, tracker baseline |
+| X01 | 0 | VERIFIED | | | |
+| X02 | 0 | VERIFIED | | | |
+| X03 | 0 | VERIFIED | | | |
+| X04 | 0 | VERIFIED | | | |
+| X05 | 0 | VERIFIED | | | |
+| X06 | 0 | VERIFIED | | | |
+| X07 | 0 | VERIFIED | | | |
+| K00 | 1 | VERIFIED | | | |
 | K01 | 1 | NOT_STARTED | | | |
 | K02 | 1 | NOT_STARTED | | | |
 | K03 | 1 | NOT_STARTED | | | |
