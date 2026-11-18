@@ -588,6 +588,19 @@
     devicesFilter: '',
     devicesSort: 'power',
     qualityFilter: 'all',
+    // Matrix debug mode.  "debug" turns on the tracing aids (raw ids, change
+    // trace, hierarchy breadcrumbs); "filter" narrows the matrix to matching
+    // device/reader/circuit labels.  Both survive a re-render/poll like the
+    // hierarchy filter does, so typing in the box never resets on refresh.
+    matrix: {
+      debug: false,
+      showRawIds: false,
+      filter: '',
+      lastSignature: null,   // signature of the last-rendered matrix payload
+      lastChangedAt: null,   // Date.now() of the last observed matrix change
+      changeCount: 0,        // how many distinct matrices observed this session
+      trace: [],             // newest-first [{at, summary}] of recent changes
+    },
     // The hierarchy view's own state lives here, not in the DOM, so a re-render
     // (a poll, a refresh, a route change) does not reset what the user opened.
     tree: {
@@ -1079,22 +1092,65 @@
    * ---------------------------------------------------------------------- */
 
   async function renderMatrix(root, signal) {
-    const [mapping, devices, snapshot, status] = await Promise.all([
+    // /topology/tree is the read-time electrical hierarchy (panel → circuit →
+    // device).  It is fetched here so the matrix can present its header as a
+    // stack instead of one flat line of opaque reader ids.  An older engine that
+    // 404s degrades to the device axis and name map only.
+    const [mapping, devices, snapshot, status, topology] = await Promise.all([
       get('/mapping', signal).catch(() => null),
       get('/devices', signal).catch(() => []),
       get('/snapshot', signal).catch(() => null),
       get('/status', signal).catch(() => null),
+      get('/topology/tree', signal).catch(() => null),
     ]);
     if (signal.aborted) return;
+
+    // Trace any change to the matrix since the last time this view was painted.
+    // The matrix is a pure read-time projection, so a changed signature means
+    // the underlying topology/relations/models/HA data changed — exactly what a
+    // debug view needs to surface.
+    const trace = matrixObserveChange(mapping);
+
+    const dbg = state.matrix;
+    const debugBtn = el('button', {
+      class: `btn btn-sm ${dbg.debug ? 'btn-primary' : 'btn-ghost'}`,
+      type: 'button',
+      'aria-pressed': dbg.debug ? 'true' : 'false',
+      onclick: () => { state.matrix.debug = !state.matrix.debug; render(); },
+    }, dbg.debug ? 'Debug: on' : 'Debug: off');
+
+    const rawBtn = el('button', {
+      class: `btn btn-sm ${dbg.showRawIds ? 'btn-primary' : 'btn-ghost'}`,
+      type: 'button',
+      'aria-pressed': dbg.showRawIds ? 'true' : 'false',
+      disabled: !dbg.debug,
+      title: dbg.debug ? 'Show raw HA ids alongside labels' : 'Enable Debug to show raw ids',
+      onclick: () => { state.matrix.showRawIds = !state.matrix.showRawIds; render(); },
+    }, dbg.showRawIds ? 'Raw IDs: on' : 'Raw IDs: off');
+
+    const filterInput = el('input', {
+      class: 'input matrix-filter',
+      type: 'search',
+      placeholder: 'Filter devices, circuits, readers…',
+      value: dbg.filter,
+      'aria-label': 'Filter the matrix by device, circuit or reader',
+      oninput: (e) => {
+        state.matrix.filter = e.target.value;
+        matrixApplyFilter();
+      },
+    });
 
     root.append(
       el('div', { class: 'page-head' }, [
         el('div', {}, [
           el('h1', {}, 'Matrix & internal process'),
           el('p', { class: 'lede' },
-            'How the engine mapped readers to devices and decided what it could attribute — cell by cell, source by source.'),
+            'How the engine mapped readers to devices and decided what it could attribute — cell by cell, source by source. Devices are labelled with their Home Assistant names.'),
         ]),
         el('div', { class: 'head-actions' }, [
+          filterInput,
+          rawBtn,
+          debugBtn,
           el('button', { class: 'btn', type: 'button', onclick: () => render() }, 'Refresh'),
         ]),
       ])
@@ -1120,10 +1176,19 @@
       }),
     ]));
 
-    root.append(matrixPivotCard(mapping));
-    root.append(matrixCellsCard(mapping));
+    // Build the label + hierarchy context once and share it with the cards.
+    const ctx = matrixContext(mapping, topology);
+
+    if (dbg.debug) root.append(matrixTraceCard(trace, mapping));
+    root.append(matrixPivotCard(mapping, ctx));
+    root.append(matrixCellsCard(mapping, ctx));
     root.append(matrixSourceLedgerCard(devices, snapshot, mapping));
     root.append(matrixIdentifiabilityCard(devices, snapshot));
+
+    // Re-apply the active filter to the freshly painted cards (the DOM is new
+    // after every render).  Do this synchronously so there is no flash of the
+    // full matrix before the filtered view settles.
+    matrixApplyFilter();
   }
 
   /* --- Derived backend data (completion sprint B4-UIa) ------------------- *
@@ -1602,6 +1667,186 @@
     );
   }
 
+  /* --- Matrix debug helpers --------------------------------------------- *
+   * Pure functions over data the panel already fetches.  They never invent a
+   * value: a missing name falls back to the id, a missing topology falls back
+   * to a flat header.  Kept independent of the DOM (except where noted) so the
+   * harness can exercise them.
+   * ---------------------------------------------------------------------- */
+
+  // Flatten /topology/tree into the lookups the matrix needs:
+  //   deviceLabel:  device id (dev_...) or HA hex id -> human name
+  //   readerPath:   reader/CT id -> { panel, circuit, label }
+  //   groupLabel:   panel -> label (used to group the header stack)
+  // The tree nodes carry {id, kind, label, children, device_id, ct_id}.  A device
+  // node's device_id links the /devices axis; a circuit's ct_id links a reader.
+  // HA hex-id devices from the mapping axis are labelled via mapping.device_names.
+  function matrixContext(mapping, topology) {
+    const data = mapping || {};
+    const deviceNames = (data.device_names && typeof data.device_names === 'object')
+      ? data.device_names : {};
+    const deviceLabel = Object.create(null);
+    const readerPath = Object.create(null);
+    const panelLabels = Object.create(null);
+    const ancestors = [];
+
+    const walk = (node) => {
+      if (!node || typeof node !== 'object') return;
+      const kind = String(node.kind || '');
+      const name = node.label ? String(node.label) : null;
+      if (kind === 'panel') {
+        ancestors.length = 0;
+        ancestors.push({ panel: name, circuit: null, group: null });
+        if (name && node.id) panelLabels[String(node.id)] = name;
+      } else if (kind === 'group') {
+        if (ancestors.length) ancestors[0].group = name;
+      } else if (kind === 'circuit') {
+        const ctx = ancestors.length ? { ...ancestors[0] } : { panel: null, group: null };
+        ctx.circuit = name;
+        if (node.ct_id) readerPath[String(node.ct_id)] = ctx;
+        // Keep the panel context for descending device nodes.
+        ancestors.push(ctx);
+      } else if (kind === 'device') {
+        const id = node.device_id || (String(node.id || '').startsWith('device:')
+          ? String(node.id).slice('device:'.length) : null);
+        if (id && name) deviceLabel[String(id)] = name;
+      }
+      (Array.isArray(node.children) ? node.children : []).forEach(walk);
+      if (kind === 'circuit') ancestors.pop();
+    };
+    (topology && Array.isArray(topology.roots) ? topology.roots : []).forEach(walk);
+
+    // The /devices payload is not passed here, but topology device nodes carry
+    // names too; HA hex-axis names come straight from the mapping projection.
+    Object.keys(deviceNames).forEach((id) => {
+      deviceLabel[id] = String(deviceNames[id]);
+    });
+
+    return { deviceLabel, readerPath, panelLabels, deviceNames };
+  }
+
+  // A signature of exactly the fields that define the matrix projection.  Two
+  // matrices with the same signature are byte-identical by contract; a change
+  // means the engine's underlying topology/relations/models/HA data changed.
+  function matrixSignature(mapping) {
+    const d = mapping || {};
+    const cells = Array.isArray(d.cells) ? d.cells : [];
+    const cellSig = cells.map((c) => [
+      c && c.device_id, c && c.reader_id, c && c.status, c && c.observability,
+      c && c.relation_type, c && c.estimated_contribution_w, c && c.min_contribution_w,
+      c && c.max_contribution_w, c && c.model_version,
+    ].join('~')).join('|');
+    return [
+      d.reader_configuration_version, d.topology_version,
+      (d.devices || []).join(','), (d.readers || []).join(','), cellSig,
+    ].join('::');
+  }
+
+  // Compare this render's matrix to the last one and record a trace entry when
+  // it changed.  Returns the fresh trace (newest first, capped) for the card.
+  function matrixObserveChange(mapping) {
+    const dbg = state.matrix;
+    const sig = matrixSignature(mapping);
+    if (sig !== dbg.lastSignature) {
+      const now = Date.now();
+      const count = Array.isArray(mapping && mapping.cells) ? mapping.cells.length : 0;
+      dbg.changeCount += 1;
+      dbg.lastSignature = sig;
+      dbg.lastChangedAt = now;
+      dbg.trace.unshift({
+        at: now,
+        summary: dbg.changeCount === 1 ? 'first observation' : `${count} cell(s)`,
+      });
+      if (dbg.trace.length > 20) dbg.trace.length = 20;
+    }
+    return dbg.trace;
+  }
+
+  function matrixTraceCard(trace, mapping) {
+    const dbg = state.matrix;
+    const rows = (trace || []).map((entry) =>
+      el('div', { class: 'matrix-trace-row' }, [
+        el('span', { class: 'matrix-trace-when' }, clock(new Date(entry.at).toISOString())),
+        el('span', { class: 'matrix-trace-summary' }, String(entry.summary)),
+      ]));
+    const changed = dbg.lastChangedAt
+      ? clock(new Date(dbg.lastChangedAt).toISOString()) : '—';
+    return card('Matrix change trace', [
+      kv([
+        ['Changes observed', String(dbg.changeCount)],
+        ['Last changed at', changed],
+        ['Topology version', String((mapping && mapping.topology_version) || '—')],
+      ]),
+      rows.length
+        ? el('div', { class: 'matrix-trace' }, rows)
+        : el('p', { class: 'stat-hint' }, 'No changes recorded yet.'),
+    ], {
+      foot: 'Debug mode: each entry is a distinct matrix projection observed this session. Refresh to sample again — the matrix is recomputed read-time from the engine’s current state.',
+    });
+  }
+
+  // Apply the Matrix filter to the currently painted cards without a full
+  // re-render (so typing does not re-fetch /mapping). Rows and columns whose
+  // visible label / id / group text matches stay visible; a row is hidden only
+  // when none of its cells or its own label match.
+  function matrixApplyFilter() {
+    const query = String(state.matrix.filter || '').trim().toLowerCase();
+    const table = document.querySelector('table.matrix-pivot');
+    if (!table) return;
+    const bodyRows = [...table.querySelectorAll('tbody tr')];
+    bodyRows.forEach((row) => {
+      const own = (row.querySelector('th.matrix-pivot-device')?.textContent || '').toLowerCase();
+      let visible = !query || own.includes(query);
+      if (!visible) {
+        const cells = [...row.querySelectorAll('td.matrix-pivot-cell')];
+        visible = cells.some((cell) => {
+          const label = cell.getAttribute('data-filter-text') || cell.textContent || '';
+          return label.toLowerCase().includes(query);
+        });
+      }
+      row.hidden = !visible;
+    });
+    // Hide reader columns when no visible row has a match in that column.
+    if (query) {
+      const headerCells = [...table.querySelectorAll('thead th.matrix-pivot-reader')];
+      headerCells.forEach((th) => {
+        const idx = [...th.parentElement.children].indexOf(th);
+        const anyVisible = bodyRows.some((row) => {
+          if (row.hidden) return false;
+          const cell = row.querySelectorAll('td.matrix-pivot-cell')[idx - 1];
+          if (!cell) return false;
+          const label = cell.getAttribute('data-filter-text') || cell.textContent || '';
+          return label.toLowerCase().includes(query);
+        });
+        const colVisible = anyVisible || (th.textContent || '').toLowerCase().includes(query);
+        th.hidden = !colVisible;
+        bodyRows.forEach((row) => {
+          const cell = row.querySelectorAll('td.matrix-pivot-cell')[idx - 1];
+          if (cell) cell.hidden = !colVisible;
+        });
+      });
+    } else {
+      // Clear any column hiding from a previous filter.
+      [...table.querySelectorAll('thead th.matrix-pivot-reader')].forEach((th) => { th.hidden = false; });
+      bodyRows.forEach((row) =>
+        [...row.querySelectorAll('td.matrix-pivot-cell')].forEach((cell) => { cell.hidden = false; }));
+    }
+    const counter = document.getElementById('matrix-filter-count');
+    if (counter) {
+      const shown = bodyRows.filter((r) => !r.hidden).length;
+      counter.textContent = query ? `${shown} of ${bodyRows.length} devices` : '';
+    }
+  }
+
+  // Human label for a device id: prefer the HA name from the projection, then a
+  // topology device node name, then the raw id (never an invented placeholder).
+  function matrixDeviceLabel(id, ctx, showRaw) {
+    const name = ctx.deviceLabel[String(id)];
+    if (name && !showRaw) return name;
+    if (name && showRaw) return `${name} · ${id}`;
+    return String(id);
+  }
+
   // Device-major pivot of the mapping matrix, built from the backend's additive
   // axes: rows are the real devices (``devices``), columns the CT readers
   // (``readers``).  CT ids therefore only ever appear as column headers, never
@@ -1610,11 +1855,13 @@
   // the cell-detail helpers below.  A non-identifiable cell shows "—" for its
   // contribution, never an invented per-device watt.  Older backends without
   // both axes fall back to the flat cell list.
-  function matrixPivotCard(mapping) {
+  function matrixPivotCard(mapping, ctx) {
     const data = mapping || {};
+    const context = ctx || matrixContext(mapping, null);
+    const showRaw = Boolean(state.matrix.debug && state.matrix.showRawIds);
     const devices = Array.isArray(data.devices) ? data.devices : [];
     const readers = Array.isArray(data.readers) ? data.readers : [];
-    if (!devices.length || !readers.length) return matrixCellsCard(mapping);
+    if (!devices.length || !readers.length) return matrixCellsCard(mapping, ctx);
 
     const cells = Array.isArray(data.cells) ? data.cells : [];
     const byPair = new Map();
@@ -1661,29 +1908,52 @@
       ]);
     };
 
-    const header = el('tr', {}, [
-      el('th', { class: 'matrix-pivot-corner' }, 'Device / reader'),
-      ...readers.map((reader) => el('th', {
-        class: 'matrix-pivot-reader', dataset: { reader: String(reader) },
-      }, String(reader))),
+    // Reader label: prefer the electrical circuit name from /topology/tree;
+    // fall back to the raw reader id when the engine publishes no hierarchy.
+    const readerLabel = (reader) => {
+      const path = context.readerPath[String(reader)];
+      return path && path.circuit ? String(path.circuit) : String(reader);
+    };
+    // The header is a STACK: one row for the panel/group level, one for the
+    // circuit/reader level, instead of a single flat line of opaque ids.  Each
+    // column keeps its reader id in dataset so cells still line up by index.
+    const panelRow = el('tr', { class: 'matrix-hdr-panel' }, [
+      el('th', { class: 'matrix-pivot-corner', rowspan: '2' }, 'Device / circuit'),
+      ...readers.map((reader) => {
+        const path = context.readerPath[String(reader)];
+        const group = path && (path.panel || path.group) ? String(path.panel || path.group) : '';
+        return el('th', {
+          class: 'matrix-hdr-group', dataset: { reader: String(reader) },
+          title: group || 'Reader grouped under no published panel',
+        }, group || '—');
+      }),
     ]);
+    const circuitRow = el('tr', { class: 'matrix-hdr-circuit' },
+      readers.map((reader) => el('th', {
+        class: 'matrix-pivot-reader', dataset: { reader: String(reader) },
+        title: String(reader),
+      }, readerLabel(reader)))
+    );
+    const header = [panelRow, circuitRow];
 
     const bodyRows = devices.map((device) => el('tr', {}, [
       el('th', {
         class: 'matrix-pivot-device', scope: 'row', dataset: { device: String(device) },
-      }, String(device)),
+        title: String(device),
+      }, matrixDeviceLabel(device, context, showRaw)),
       ...readers.map((reader) => {
         const c = byPair.get(`${device}|${reader}`);
+        const filterText = `${matrixDeviceLabel(device, context, false)} ${readerLabel(reader)} ${reader}`;
         if (!c) {
           return el('td', {
             class: 'matrix-pivot-cell matrix-pivot-empty',
-            dataset: { device: String(device), reader: String(reader) },
-            title: `No mapping for ${device} / ${reader}`,
+            dataset: { device: String(device), reader: String(reader), filterText },
+            title: `No mapping for ${matrixDeviceLabel(device, context, showRaw)} / ${readerLabel(reader)}`,
           }, '—');
         }
         return el('td', {
           class: 'matrix-pivot-cell', tabindex: '0',
-          dataset: { device: String(device), reader: String(reader) },
+          dataset: { device: String(device), reader: String(reader), filterText },
           title: `${label(c.status || 'unknown')} · ${label(c.observability || 'unknown')}`,
         }, [
           el('span', { class: 'matrix-pivot-signal' }, [
@@ -1697,6 +1967,7 @@
     ]));
 
     return card('Mapping matrix — device × reader', [
+      el('div', { class: 'matrix-filter-count', id: 'matrix-filter-count' }),
       el('div', { class: 'table-wrap matrix-pivot-wrap' }, [
         el('table', { class: 'data matrix-pivot' }, [
           el('thead', {}, header),
@@ -1704,7 +1975,7 @@
         ]),
       ]),
     ], {
-      foot: 'Rows are real devices; columns are CT readers. A CT observes a conductor, so its id appears only as a column header. Hover or focus a cell for its full detail — bounds, confidence and provenance are the engine’s published values, never an invented per-device watt.',
+      foot: 'Rows are real devices, labelled with their Home Assistant names; columns are CT readers grouped by electrical panel/circuit. The header is a stack: panel above circuit. Hover or focus a cell for its full detail — bounds, confidence and provenance are the engine’s published values, never an invented per-device watt.',
     });
   }
 
@@ -1712,8 +1983,10 @@
   // than the overview's compact card: it exposes every field the cell publishes
   // so a person can audit the mapping cell by cell.  A non-identifiable cell has
   // bounds but no point estimate, rendered "—" and never a fabricated watt.
-  function matrixCellsCard(mapping) {
+  function matrixCellsCard(mapping, ctx) {
     const data = mapping || {};
+    const context = ctx || matrixContext(mapping, null);
+    const showRaw = Boolean(state.matrix.debug && state.matrix.showRawIds);
     const cells = Array.isArray(data.cells) ? data.cells : [];
     const rows = cells.map((cell) => {
       const c = cell || {};
@@ -1731,7 +2004,8 @@
       const sources = (Array.isArray(c.sources_used) ? c.sources_used : [])
         .map((s) => String((s && s.source) || 'unknown'));
       return el('tr', {}, [
-        el('td', {}, String(c.device_id || '—')),
+        el('td', {}, c.device_id
+          ? matrixDeviceLabel(c.device_id, context, showRaw) : '—'),
         el('td', {}, String(c.reader_id || '—')),
         el('td', {}, statusBadge(status)),
         el('td', {}, label(c.observability || 'unknown')),
@@ -5201,5 +5475,16 @@
 
   // Export a couple of helpers for debugging from the browser console without
   // exposing engine data through any other surface.
-  window.WattMosaicUI = Object.freeze({ reload: () => render(), route: parseHash });
+  window.WattMosaicUI = Object.freeze({
+    reload: () => render(),
+    route: parseHash,
+    // Matrix debug: inspect/toggle the tracing aids from the console.
+    matrixDebug: {
+      state: () => ({ ...state.matrix, trace: state.matrix.trace.slice() }),
+      enable: (on = true) => { state.matrix.debug = Boolean(on); render(); },
+      rawIds: (on = true) => { state.matrix.showRawIds = Boolean(on); render(); },
+      filter: (text = '') => { state.matrix.filter = String(text); render(); },
+      context: (mapping) => matrixContext(mapping, null),
+    },
+  });
 })();

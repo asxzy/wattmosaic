@@ -35,7 +35,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -129,6 +129,11 @@ class MappingMatrix:
     #: and defaulted so existing callers/envelopes stay byte-compatible.
     devices: tuple[str, ...] = ()
     readers: tuple[str, ...] = ()
+    #: Human-readable HA device labels keyed by the exact id used on the device
+    #: axis.  The HA hex ids carry no information on their own; this map lets the
+    #: panel label rows with the name the owner gave the device in HA.  Additive
+    #: and defaulted (empty) so older projections and callers stay compatible.
+    device_names: dict[str, str] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         """A stable, JSON-round-trippable view for byte-identical comparison."""
@@ -139,6 +144,9 @@ class MappingMatrix:
             "coverage": self.coverage.as_dict(),
             "devices": list(self.devices),
             "readers": list(self.readers),
+            # Sorted so the projection stays byte-identical across calls whose
+            # HA registry source order happens to differ.
+            "device_names": {key: self.device_names[key] for key in sorted(self.device_names)},
         }
 
     def stable_json(self) -> str:
@@ -300,6 +308,49 @@ def _real_device_ids(
         real.add(device.device_id)
 
     return tuple(sorted(real))
+
+
+def _device_names(
+    topology: Topology,
+    *,
+    device_sources: Sequence[Sequence[Any]] = (),
+) -> dict[str, str]:
+    """Human-readable labels for the device axis, keyed by axis id.
+
+    Uses the same sources as :func:`_real_device_ids` so every labelled id is one
+    that can actually appear on the row axis.  HA registry records carry a
+    ``name_by_user``/``name``; config-backed topology rows carry ``name``.  Only
+    non-empty names are kept: the panel falls back to the raw id rather than
+    inventing a label the engine did not publish.
+    """
+    names: dict[str, str] = {}
+
+    for source in device_sources:
+        for entry in source:
+            if not isinstance(entry, Mapping) and not hasattr(entry, "device_id"):
+                continue
+            identifier = _field(entry, "device_id") or _field(entry, "id")
+            if identifier is None:
+                continue
+            key = str(identifier).strip()
+            if not key or key.startswith(_UNKNOWN_ID_PREFIX):
+                continue
+            name = _field(entry, "name_by_user") or _field(entry, "name")
+            if name is not None and str(name).strip():
+                names[key] = str(name).strip()
+
+    channels = topology.channel_map()
+    for device in topology.devices:
+        if _is_ct_auto_circuit(device, channels):
+            continue
+        if device.device_id.startswith(_UNKNOWN_ID_PREFIX):
+            continue
+        if device.name and str(device.name).strip():
+            names[device.device_id] = str(device.name).strip()
+
+    # Only label ids that actually appear on the row axis.
+    axis = _real_device_ids(topology, device_sources=device_sources)
+    return {key: value for key, value in names.items() if key in axis}
 
 
 def _reader_ids(topology: Topology) -> tuple[str, ...]:
@@ -724,6 +775,7 @@ def build_mapping_matrix(
         topology_version=topology_version,
         devices=_real_device_ids(topology, device_sources=device_sources),
         readers=_reader_ids(topology),
+        device_names=_device_names(topology, device_sources=device_sources),
     )
 
 

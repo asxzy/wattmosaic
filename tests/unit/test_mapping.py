@@ -705,6 +705,53 @@ def test_device_sources_add_ha_and_config_devices_to_the_row_axis() -> None:
     assert "dev_ct_kitchen" not in matrix.devices
 
 
+def test_device_names_label_the_axis_with_human_readable_ha_names() -> None:
+    """Opaque HA ids get an informative label; raw ids are never invented names."""
+    topology = _topology(
+        [_channel("ct_kitchen")],
+        [_ct_auto_circuit("dev_ct_kitchen", "ct_kitchen")],
+    )
+    matrix = build_mapping_matrix(
+        topology,
+        reader_configuration_version=Rcv,
+        device_sources=[
+            [
+                {"id": "ha_light_abc", "name_by_user": "Kitchen light"},
+                {"device_id": "ha_washer_xyz", "name": "Washer"},
+                {"id": "ha_unnamed", "name_by_user": None, "name": None},
+            ],
+            [{"device_id": "dev_fridge", "name": "Fridge"}],
+        ],
+    )
+    assert matrix.device_names == {
+        "ha_light_abc": "Kitchen light",
+        "ha_washer_xyz": "Washer",
+        "dev_fridge": "Fridge",
+    }
+    assert "ha_unnamed" not in matrix.device_names
+    assert "ha_light_abc" in matrix.devices  # labelled ids are real axis rows
+
+
+def test_device_names_are_published_and_byte_stable_in_as_dict() -> None:
+    """The additive map is in the payload and stable_json order is canonical."""
+    topology = _topology([_channel("ct_x")], [DeviceTopology(device_id="dev_a")])
+    matrix = build_mapping_matrix(
+        topology,
+        reader_configuration_version=Rcv,
+        device_sources=[[{"id": "hb", "name": "Beta"}, {"id": "ha", "name": "Alpha"}]],
+    )
+    payload = matrix.as_dict()
+    assert payload["device_names"] == {"ha": "Alpha", "hb": "Beta"}
+    assert list(payload["device_names"]) == ["ha", "hb"]  # sorted
+    assert matrix.as_dict() == build_mapping_matrix(
+        topology,
+        reader_configuration_version=Rcv,
+        device_sources=[[{"id": "ha", "name": "Alpha"}, {"id": "hb", "name": "Beta"}]],
+    ).as_dict()
+    # No sources -> empty name map (the additive field never invents labels).
+    assert _project(topology).as_dict()["device_names"] == {}
+
+
 def test_axes_are_deterministic_and_sorted() -> None:
     topology = _topology(
         [_channel("ct_b"), _channel("ct_a")],
