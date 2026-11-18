@@ -148,6 +148,28 @@ for `OD-34`).*
 | **Status** | RESOLVED (V1 deferral accepted) — the owner closed the V1 question in favour of the existing declared-but-unpopulated assumption; the dimensions stay unpopulated in V1. |
 | **Source** | this register (`OD-34`, §3); `confidence_model.md` §2; `docs/limitations_v2.md` §8 |
 
+#### Learning cadence — training and reanalysis are realtime — **OWNER DECISION (2026-11-18)**
+
+**Owner decision (2026-11-18): all learning realtime — training/reanalysis fire on matured events; no periodic throttle.**
+
+Training and reanalysis are event-driven: they fire as soon as matured samples
+or matured evidence arrive, debounced only by the per-device/newest-evidence
+watermarks rather than by the former 3600 s wall-clock throttles. Sample
+maturation (``window_s + settle_s``) and trainer readiness remain in force as
+correctness gates. The defaults ``train_interval_s = 0.0`` and
+``reanalysis_interval_s = 0.0`` implement this decision; the matured-evidence
+watermarks prevent needless re-derivation of identical data. This closes the
+cadence question for learning; the separate mapping-matrix refresh cadence
+(ASM-06) is unaffected.
+
+| Field | Value |
+| --- | --- |
+| **ID** | Learning cadence (completion sprint, 2026-11-18) |
+| **Description** | Whether training/reanalysis fire periodically on a 3600 s throttle or realtime on matured events. |
+| **Owner decision** | All learning realtime: fire on matured events; no periodic throttle. |
+| **Status** | RESOLVED — closed by the project owner's decision (2026-11-18). |
+| **Source** | `07-event-and-inference-spec.md` §12 (2026-11-18 SPEC CHANGE); `EngineConfig.train_interval_s` / `reanalysis_interval_s` |
+
 **Recorded note — deployment image-tag ambiguity (no OD; unresolved).** The
 delivered version is `0.2.1-dev.37` (`pyproject.toml:7`), but the latest reachable
 git tag is `v0.2.1-dev.36` (`git describe --tags --abbrev=0`); the `dev.37`

@@ -25,7 +25,7 @@ These tests pin the replacement contract:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -612,6 +612,52 @@ def test_backend_counters_are_monotonic_across_cycles(db: Database) -> None:
     second = (backend.samples_collected, backend.samples_accepted, backend.samples_rejected)
     assert all(b >= a for a, b in zip(first, second, strict=True))
     assert first[0] == first[1] + first[2]
+
+
+def test_backend_trains_realtime_on_ready_data_without_a_3600s_gate(db: Database) -> None:
+    """Realtime learning: consecutive ready cycles train; maturation is preserved.
+
+    The old implementation suppressed training for 3600 s after the first pass,
+    so a second batch of matured samples arriving immediately was never fitted.
+    With ``train_interval_s=0`` each cycle with *new* matured samples trains
+    immediately; a cycle with no new matured sample is debounced by the
+    per-device ``_trained_to`` watermark rather than a wall-clock throttle.
+    """
+    from types import SimpleNamespace
+
+    from wattmosaic_engine.integration import WattMosaicBackend
+
+    backend = WattMosaicBackend(db, learning_enabled=True)
+    topology = _topology(confirmed=True)
+    assert backend.train_interval_s == 0.0, "realtime is the default"
+
+    # Stub the pipeline so each cycle exposes a distinct newest matured sample
+    # while readiness stays True -- maturation/readiness are correctness gates
+    # that remain in force; only the 3600 s throttle is gone.
+    newest = [BASE_TIME]
+
+    class _Sample:
+        def __init__(self, at: datetime) -> None:
+            self.captured_at = at
+
+    pipeline = SimpleNamespace(
+        stored_samples=lambda device_id, accepted_only=True: [_Sample(newest[0])],
+        trainer=SimpleNamespace(should_train=lambda device_id, samples, versions: (True, "")),
+        registry=SimpleNamespace(versions=lambda device_id: []),
+        retrain_device=lambda device_id, device=None: (None, None),
+    )
+    backend.learning = pipeline  # type: ignore[assignment] - test double
+
+    # Two back-to-back cycles with a NEW matured sample each both train.
+    backend._maybe_train(topology)  # noqa: SLF001 - internal contract
+    assert backend.status()["training_attempts"] == 1
+    newest[0] = BASE_TIME + timedelta(seconds=15)
+    backend._maybe_train(topology)  # noqa: SLF001 - internal contract
+    assert backend.status()["training_attempts"] == 2, backend.status()
+
+    # A third cycle with no new matured sample is debounced, not throttled.
+    backend._maybe_train(topology)  # noqa: SLF001 - internal contract
+    assert backend.status()["training_attempts"] == 2, backend.status()
 
 
 def test_backend_reports_off_when_learning_is_disabled(db: Database) -> None:

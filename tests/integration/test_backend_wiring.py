@@ -551,53 +551,64 @@ def test_paused_learning_stops_collecting(tmp_db_path) -> None:
         db.close()
 
 
-def test_training_throttle_is_not_consumed_before_data_exists(tmp_db_path) -> None:
-    """Regression: the throttle must not be armed by a cycle with no samples.
+def test_training_is_realtime_on_new_matured_samples(tmp_db_path) -> None:
+    """Realtime learning: training fires on new matured samples, not a 3600 s clock.
 
-    ``_maybe_train`` used to stamp ``last_train_at`` on its first call, before
-    any device had enough accepted samples.  With the production interval of one
-    hour that suppressed training for an hour *after* the data finally arrived,
-    so an install could run for a day and never fit a single model.
+    There is no wall-clock throttle any more.  Two consecutive ``_maybe_train``
+    cycles that each see a *new* matured accepted sample must both train, even
+    back-to-back with ``train_interval_s=0``.  A third cycle with no new sample
+    must not retrain (the per-device ``_trained_to`` watermark debounces repeats),
+    and a cycle with no ready data must not stamp ``last_train_at`` at all.
+
+    Sample maturation and the trainer's readiness checks still apply: they are
+    correctness gates, not a throttle, and the stub below keeps both satisfied.
     """
+    from types import SimpleNamespace
+
     from wattmosaic_engine.storage.database import Database
 
     db = Database(tmp_db_path)
     try:
         backend = WattMosaicBackend(db, learning_enabled=True)
         assert backend.learning is not None
+        # Realtime: no periodic throttle, even if someone sets the legacy attr.
         backend.train_interval_s = 3600.0
 
-        # One cycle with no data at all: nothing is ready, so nothing is armed.
-        backend._maybe_train(_topology_confirmed())  # noqa: SLF001 - internal contract
-        assert backend.last_train_at is None
+        # Stub the learning pipeline so each cycle can inject a distinct newest
+        # matured sample timestamp while keeping readiness permanently True.
+        base = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        newest = [base]
 
-        # Now supply enough on/off transitions for the fridge to clear
-        # ``min_samples_for_model`` and train.
-        start = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        class _Sample:
+            def __init__(self, at: datetime) -> None:
+                self.captured_at = at
+
+        pipeline = SimpleNamespace(
+            stored_samples=lambda device_id, accepted_only=True: [_Sample(newest[0])],
+            trainer=SimpleNamespace(should_train=lambda device_id, samples, versions: (True, "")),
+            registry=SimpleNamespace(versions=lambda device_id: []),
+            retrain_device=lambda device_id, device=None: (None, None),
+        )
+        backend.learning = pipeline  # type: ignore[assignment] - test double
         topology = _topology_confirmed()
-        state = "off"
-        for i in range(0, 400):
-            # A real appliance cycle: 100 W idle, 900 W when on, one hour-ish
-            # worth of 15 s ticks with a transition every 12th tick.
-            cycles = i // 12
-            on = cycles % 2 == 1
-            watts = 900.0 if on else 100.0
-            window = _Window(
-                {"m_l1": 1000.0, "ded_fridge": watts}, start + timedelta(seconds=15 * i)
-            )
-            events = []
-            if i % 12 == 0:
-                state = "on" if on else "off"
-                events = [{
-                    "entity_id": "sensor.fridge",
-                    "new_state": state,
-                    "attributes": {},
-                    "occurred_at": start + timedelta(seconds=15 * i),
-                }]
-            backend.process(window, device_states={}, topology=topology, events=events)
 
-        assert backend.samples_accepted >= 12, backend.status()
-        assert backend.training_attempts >= 1, backend.status()
+        # A cycle with no ready data does not stamp the diagnostic timestamp.
+        backend.learning = None  # type: ignore[assignment] - arm the no-data cycle
+        backend._maybe_train(topology)  # noqa: SLF001 - internal contract
+        assert backend.last_train_at is None
+        backend.learning = pipeline  # type: ignore[assignment] - restore
+
+        # Two back-to-back cycles with a NEW matured sample each must both train:
+        # no 3600 s suppression on ready data.
+        backend._maybe_train(topology)  # noqa: SLF001 - internal contract
+        assert backend.training_attempts == 1
+        newest[0] = base + timedelta(seconds=15)
+        backend._maybe_train(topology)  # noqa: SLF001 - internal contract
+        assert backend.training_attempts == 2, backend.status()
         assert backend.last_train_at is not None
+
+        # A third cycle with no new matured sample is debounced (no retrain).
+        backend._maybe_train(topology)  # noqa: SLF001 - internal contract
+        assert backend.training_attempts == 2, backend.status()
     finally:
         db.close()

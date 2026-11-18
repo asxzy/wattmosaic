@@ -36,7 +36,7 @@ import math
 from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .contracts import (
@@ -65,8 +65,10 @@ log = logging.getLogger("wattmosaic.integration")
 #: How many recent inference results may accumulate before the aggregator is
 #: flushed even when no cycle boundary is reached.
 DEFAULT_FLUSH_EVERY_CYCLES = 12
-#: Minimum wall-clock gap between automatic training attempts per backend.
-DEFAULT_TRAIN_INTERVAL_S = 3600.0
+#: DEPRECATED (realtime learning): retained only for constructor/config
+#: compatibility.  Training is event-driven — it fires when new matured samples
+#: arrive — so this value no longer throttles anything.  ``0`` means realtime.
+DEFAULT_TRAIN_INTERVAL_S = 0.0
 #: Bound on remembered HA events awaiting a learning pass.
 DEFAULT_EVENT_BUFFER = 512
 #: How far back crash recovery replays stored inference results.
@@ -140,7 +142,7 @@ class WattMosaicBackend:
         flush_every_cycles: int = DEFAULT_FLUSH_EVERY_CYCLES,
         event_buffer: int = DEFAULT_EVENT_BUFFER,
         audit: AuditConfig | None = None,
-        reanalysis_interval_s: float = 3600.0,
+        reanalysis_interval_s: float = 0.0,
         reanalysis_lookback_s: float = 21600.0,
     ) -> None:
         # The synchroniser exposes only a point-in-time snapshot (no per-channel
@@ -158,7 +160,10 @@ class WattMosaicBackend:
         self.aggregator: Any | None = None
         self.learning: Any | None = None
         self.learning_active = bool(learning_enabled)
-        self.train_interval_s = max(60.0, float(train_interval_s))
+        # DEPRECATED (realtime learning): no longer a throttle.  Kept as a public
+        # attribute so callers that set it still work; 0 means realtime.  Training
+        # is now event-driven via a per-device "last trained to" watermark.
+        self.train_interval_s = max(0.0, float(train_interval_s))
         self.flush_every_cycles = max(1, int(flush_every_cycles))
         self.max_measurement_age_s = float(max_measurement_age_s)
 
@@ -167,6 +172,12 @@ class WattMosaicBackend:
         self.models_promoted = 0
         self.energy_updates = 0
         self.last_train_at: datetime | None = None
+        #: Realtime learning: per-device watermark of the newest sample timestamp
+        #: already fed to a training pass.  A device is retrained only when a
+        #: *new* matured sample exists beyond this point — an event-driven
+        #: debounce that replaces the old wall-clock interval without the
+        #: runaway cost of retraining on every one of the 5 s inference cycles.
+        self._trained_to: dict[str, datetime] = {}
         self.last_error: str | None = None
 
         self._pending_events: deque[Any] = deque(maxlen=max(16, int(event_buffer)))
@@ -187,13 +198,18 @@ class WattMosaicBackend:
         # versioned ``InferenceRecord`` audit trail beside the existing output.
         self.audit_config = audit or AuditConfig()
         self.audit = AuditPass(database, config=self.audit_config, tracker=self.tracker)
+        #: DEPRECATED as a throttle (realtime learning): ``0`` (the default) means
+        #: reanalysis fires as soon as relevant matured evidence exists.  A
+        #: positive value is now only a short *debounce*, not a 3600 s gate.
         self.reanalysis_interval_s = max(0.0, float(reanalysis_interval_s))
         self.reanalysis_lookback_s = max(60.0, float(reanalysis_lookback_s))
         self.reanalysis_attempts = 0
-        #: Seeded to construction time so the first stored-history scan happens
-        #: one interval after start, not on the first cycle: at t=0 the pass has
-        #: nothing to re-derive and would only duplicate the incremental record.
-        self.last_reanalysis_at: datetime | None = utcnow()
+        #: Event-driven reanalysis watermark: the newest stored device-event time
+        #: already re-derived.  The pass fires only when newer matured evidence
+        #: exists (or once at startup when there is evidence to derive).  ``None``
+        #: means no pass has run yet, so the first evidence-bearing cycle fires.
+        self.last_reanalysis_at: datetime | None = None
+        self._reanalysis_evidence_seen: datetime | None = None
         self.last_audit_report: Any | None = None
         self._reanalysis_history: deque[datetime] = deque(
             maxlen=DEFAULT_REANALYSIS_HISTORY
@@ -662,19 +678,21 @@ class WattMosaicBackend:
         self._maybe_train(topology)
 
     def _maybe_train(self, topology: Topology) -> None:
+        """Realtime, event-driven training on matured samples.
+
+        There is no wall-clock throttle.  A device is trained as soon as a *new*
+        matured, accepted sample exists for it — the per-device ``_trained_to``
+        watermark is the only debounce, so an inference cycle with no new data
+        costs nothing while a cycle that matured new evidence trains immediately.
+        Sample maturation (``window_s + settle_s``) and the trainer's per-device
+        readiness checks still apply: they are correctness, not a throttle.
+        """
         pipeline = self.learning
         if pipeline is None:
             return
         now = utcnow()
-        if (
-            self.last_train_at is not None
-            and (now - self.last_train_at).total_seconds() < self.train_interval_s
-        ):
-            return
-        # Only stamp the throttle when a device was actually ready.  Stamping it
-        # on the first cycle (when almost no samples exist yet) would suppress
-        # training for a full interval after the data finally arrived.
-        ready_devices: list[Any] = []
+        # Only stamp the diagnostic timestamp when a device was actually trained.
+        trained_any = False
         for device in topology.devices:
             try:
                 accepted = pipeline.stored_samples(device.device_id, accepted_only=True)
@@ -684,13 +702,21 @@ class WattMosaicBackend:
                 if not ready:
                     log.debug("no training for %s: %s", device.device_id, reason)
                     continue
-                ready_devices.append(device)
+                # Event-driven debounce: the newest accepted sample timestamp is
+                # this device's progress watermark.  Retrain only when a strictly
+                # newer matured sample arrived since the last pass.  This is
+                # independent of model promotion, so a candidate kept for review
+                # does not cause a retrain on every 5 s cycle with the same data.
+                newest = max(s.captured_at for s in accepted)
+                seen_to = self._trained_to.get(device.device_id)
+                if seen_to is not None and newest <= seen_to:
+                    log.debug("no new matured samples for %s since %s", device.device_id, seen_to)
+                    continue
+                self._trained_to[device.device_id] = newest
             except Exception as exc:  # noqa: BLE001 - per-device isolation
                 log.warning("training readiness check failed for %s: %s", device.device_id, exc)
-        if not ready_devices:
-            return
-        self.last_train_at = now
-        for device in ready_devices:
+                continue
+            trained_any = True
             try:
                 self.training_attempts += 1
                 candidate, decision = pipeline.retrain_device(device.device_id, device=device)
@@ -712,6 +738,8 @@ class WattMosaicBackend:
                     )
             except Exception as exc:  # noqa: BLE001 - per-device isolation
                 log.warning("training failed for %s: %s", device.device_id, exc)
+        if trained_any:
+            self.last_train_at = now
 
     def _bridge_event(self, event: Any, topology: Topology) -> dict[str, Any]:
         """Attach the topology's device + CT association to an HA event.
@@ -801,23 +829,65 @@ class WattMosaicBackend:
         if report.errors:
             log.debug("analysis pass reported %d error(s)", len(report.errors))
 
+    def _newest_stored_event_at(self) -> datetime | None:
+        """Newest ``occurred_at`` among stored device events in the lookback.
+
+        Returns ``None`` when there is no stored evidence at all.  This is the
+        signal that drives realtime reanalysis: a pass runs only when this value
+        advances, i.e. when genuinely new evidence has been persisted.
+        """
+        database = self.database
+        if database is None:
+            return None
+        now = utcnow()
+        try:
+            rows = database.recent_device_events(
+                now - timedelta(seconds=self.reanalysis_lookback_s), limit=2000
+            )
+        except Exception as exc:  # noqa: BLE001 - reanalysis is an optimisation
+            log.debug("reanalysis evidence query failed: %s", exc)
+            return None
+        newest: datetime | None = None
+        for row in rows:
+            at = _event_time(row)
+            if at is not None and (newest is None or at > newest):
+                newest = at
+        return newest
+
     def _maybe_reanalyze(
         self, results: Sequence[InferenceResult], topology: Topology
     ) -> None:
-        """Periodic re-derivation from stored raw history.
+        """Realtime, event-driven re-derivation from stored raw history.
 
-        Runs on the existing inference loop, never on a timer of its own: the
-        clock is only *read* here to decide whether the interval elapsed.  A pass
-        that re-derives from stored samples is what can reach ``ISOLATED`` for an
-        event that was still inside its own analysis window when it arrived.
+        There is no 3600 s timer.  A pass fires as soon as new matured evidence
+        exists — the newest stored device-event occurrence advanced past the
+        ``_reanalysis_evidence_seen`` watermark — and does nothing on cycles with
+        no new evidence.  This is the minimal debounce that keeps the 5 s loop
+        from re-deriving identical history every cycle.  ``reanalysis_interval_s``
+        is now an *optional* minimum gap (0 = immediate, the default); a positive
+        value is a short debounce, never a periodic trigger.
+
+        A re-derivation from stored samples is what can reach ``ISOLATED`` for an
+        event that was still inside its own analysis window when it arrived.  It
+        runs on the existing inference loop and starts no thread or task.
         """
-        interval = self.reanalysis_interval_s
-        if interval <= 0.0 or self.database is None:
+        if self.database is None:
             return
+        newest = self._newest_stored_event_at()
+        if newest is None:
+            return  # no stored evidence yet — nothing to re-derive
+        seen = self._reanalysis_evidence_seen
+        if seen is not None and newest <= seen:
+            return  # no new matured evidence since the last pass
         now = utcnow()
+        interval = self.reanalysis_interval_s
         last = self.last_reanalysis_at
-        if last is not None and (now - last).total_seconds() < interval:
+        if interval > 0.0 and last is not None and (now - last).total_seconds() < interval:
             return
+        # Claim the evidence before the pass so a failing reanalysis cannot
+        # trigger a retry storm on every 5 s cycle.  Reanalysis is an optimisation
+        # whose failure is non-fatal; the next new event claims the next pass.
+        self._reanalysis_evidence_seen = newest
         self.last_reanalysis_at = now
         self.reanalysis_attempts += 1
         self._reanalysis_history.append(now)
@@ -958,8 +1028,9 @@ def build_backend(config: Any, database: Any | None = None) -> WattMosaicBackend
         max_measurement_age_s=float(getattr(config, "stale_after_s", 120.0)),
         learning_enabled=bool(getattr(config, "learning_enabled", True)),
         audit=AuditConfig.from_settings(config),
+        train_interval_s=float(getattr(config, "train_interval_s", 0.0)),
         reanalysis_interval_s=float(
-            getattr(config, "reanalysis_interval_s", 3600.0)
+            getattr(config, "reanalysis_interval_s", 0.0)
         ),
         reanalysis_lookback_s=float(
             getattr(config, "reanalysis_lookback_s", 21600.0)

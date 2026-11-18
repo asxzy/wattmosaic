@@ -799,17 +799,17 @@ def test_production_loop_trains_and_promotes_a_model(tmp_path) -> None:
     learning pipeline existed, so ``model_estimated`` could never become
     non-zero.
 
-    The backend throttles *automatic* training on wall-clock time
-    (``train_interval_s``) so a busy install cannot retrain every cycle.  This
-    test replays three simulated hours in a couple of real seconds, so the
-    throttle is released between chunks — otherwise the whole simulated
-    timeline would collapse into a single training pass and the loop's
-    repeat-training behaviour would never run.
+    Training is realtime and event-driven: a device is fitted as soon as a new
+    matured, accepted sample exists for it, debounced only by the per-device
+    ``_trained_to`` watermark (no wall-clock ``train_interval_s`` throttle).
+    Sample maturation (``window_s + settle_s``) is preserved as a correctness
+    gate, so feeding the three simulated hours in time-ordered chunks still
+    yields repeated training passes as each chunk's samples mature.
     """
     core, db = _production_core(tmp_path)
     try:
         backend = core.inference_backend
-        # Train as soon as a device is ready rather than waiting an hour.
+        # Training is realtime by default; the watermark debounces repeats.
         backend.train_interval_s = 60.0
 
         records = _records(minutes=180)
@@ -819,8 +819,8 @@ def test_production_loop_trains_and_promotes_a_model(tmp_path) -> None:
             start = index * size
             stop = len(records) if index == chunks - 1 else (index + 1) * size
             _feed_production(core, records[start:stop])
-            # Emulate the wall-clock interval that separates these chunks in a
-            # real install, so the training throttle behaves as it would live.
+            # Chunks are time-ordered matured evidence; realtime training fires
+            # as each new sample arrives (kept here for diagnostic timestamps).
             backend.last_train_at = None
 
         status = backend.status()

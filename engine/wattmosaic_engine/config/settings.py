@@ -252,11 +252,18 @@ class EngineConfig:
     #: a replay is only comparable to a record written under the same value, so
     #: it is a real setting rather than a constant nothing can override.
     audit_algorithm_version: str = DEFAULT_AUDIT_ALGORITHM_VERSION
-    #: Wall-clock interval between periodic reanalysis passes.  Reanalysis runs
-    #: on the existing inference loop; it never starts a thread or a task.
-    reanalysis_interval_s: float = 3600.0
+    #: Realtime learning: reanalysis is event-driven — it fires as soon as new
+    #: matured stored evidence exists, on the existing inference loop (no thread
+    #: or task).  ``0`` (the default) means immediate.  A positive value is now
+    #: only an optional minimum-gap *debounce* between passes, never a periodic
+    #: 3600 s trigger.  Retained as a setting for backward compatibility.
+    reanalysis_interval_s: float = 0.0
     #: How much stored raw history a reanalysis pass reads.
     reanalysis_lookback_s: float = 21600.0
+    #: Realtime learning: training is event-driven on matured samples.  ``0``
+    #: (the default) means immediate; a positive value is retained only as an
+    #: optional minimum-gap debounce, never a periodic 3600 s throttle.
+    train_interval_s: float = 0.0
     # Learning thresholds (documented; not magic constants)
     min_samples_for_model: int = 12
     min_validation_r2: float = 0.70
@@ -373,6 +380,10 @@ class EngineConfig:
             get("WM_REANALYSIS_LOOKBACK_S", default=str(cfg.reanalysis_lookback_s))
             or cfg.reanalysis_lookback_s
         )
+        cfg.train_interval_s = float(
+            get("WM_TRAIN_INTERVAL_S", default=str(cfg.train_interval_s))
+            or cfg.train_interval_s
+        )
         cfg.log_level = (get("WM_LOG_LEVEL", "LOG_LEVEL", default="INFO") or "INFO").upper()
         cfg.log_json = _bool(get("WM_LOG_JSON"), True)
         return cfg
@@ -435,6 +446,8 @@ class EngineConfig:
             problems.append("reanalysis_interval_s must not be negative")
         if self.reanalysis_lookback_s <= 0:
             problems.append("reanalysis_lookback_s must be positive")
+        if self.train_interval_s < 0:
+            problems.append("train_interval_s must not be negative")
         problems.extend(self._isolation_layer_problems())
         if not str(self.audit_algorithm_version).strip():
             problems.append("audit_algorithm_version must not be empty")
@@ -534,4 +547,5 @@ class EngineConfig:
             "audit_algorithm_version": self.audit_algorithm_version,
             "reanalysis_interval_s": self.reanalysis_interval_s,
             "reanalysis_lookback_s": self.reanalysis_lookback_s,
+            "train_interval_s": self.train_interval_s,
         }

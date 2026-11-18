@@ -411,6 +411,10 @@ Some devices do not respond at the moment of the trigger: HVAC ramps, blinds tra
 
 ## 12. Historical replay
 
+> **Completion-sprint amendment — SPEC CHANGE (2026-11-18):** training and
+> reanalysis are realtime/event-driven on matured evidence; the 3600s throttles
+> are removed; sample maturation is preserved.
+
 ### 12.1 What exists
 
 Reanalysis over stored evidence exists (`disaggregation/audit.py:832` `AuditPass.reanalyze`), as do the append-only audit chain with revisions (`contracts.py:870` `InferenceRecord`; `docs/inference_audit.md`), the chain validation and identity (`record_id_for`), and the `InferenceBatch` (`disaggregation/engine.py:111`). The replay endpoint and the `EventEvidenceRecord` contract are **MISSING** — `G-EVENT-06`.

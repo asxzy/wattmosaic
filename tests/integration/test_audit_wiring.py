@@ -99,7 +99,10 @@ def test_audit_settings_defaults_are_the_documented_values() -> None:
     assert config.analysis_offset_s == 0.0
     assert config.isolation_window_s == 30.0
     assert config.isolation_power_window_s == 60.0
-    assert config.reanalysis_interval_s == 3600.0
+    # Realtime learning defaults: training and reanalysis fire on matured
+    # evidence immediately (0), never on a periodic 3600 s throttle.
+    assert config.reanalysis_interval_s == 0.0
+    assert config.train_interval_s == 0.0
     assert config.reanalysis_lookback_s == 21600.0
 
 
@@ -114,6 +117,7 @@ def test_audit_settings_are_readable_from_the_environment() -> None:
             "WM_ISOLATION_POWER_WINDOW_S": "90",
             "WM_REANALYSIS_INTERVAL_S": "0",
             "WM_REANALYSIS_LOOKBACK_S": "7200",
+            "WM_TRAIN_INTERVAL_S": "0",
         },
         dotenv_path="/nonexistent/.env",
     )
@@ -125,6 +129,7 @@ def test_audit_settings_are_readable_from_the_environment() -> None:
     assert config.isolation_power_window_s == 90.0
     assert config.reanalysis_interval_s == 0.0
     assert config.reanalysis_lookback_s == 7200.0
+    assert config.train_interval_s == 0.0
 
 
 def test_every_new_setting_is_redacted_and_validated() -> None:
@@ -147,6 +152,7 @@ def test_every_new_setting_is_redacted_and_validated() -> None:
         "audit_algorithm_version",
         "reanalysis_interval_s",
         "reanalysis_lookback_s",
+        "train_interval_s",
     ):
         assert key in redacted, f"{key} missing from redacted()"
 
