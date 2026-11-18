@@ -631,7 +631,7 @@ from the nine landed siblings in the `04`–`12` range.
 | `OD-48` | Whether a Load Component is a persisted contract entity or a model-internal concept. | `06-device-and-load-model-spec.md` | OPEN |
 | `OD-49` | The acceptance criteria for a model with no control state (the shape model of §3.2) and for a non-linear curve (§7.2). | `06-device-and-load-model-spec.md` | OPEN |
 | `OD-50` | Which `Source` labels a device that has no measurement endpoint of its own but is allocated a share of a solve. | `06-device-and-load-model-spec.md` | OPEN |
-| `OD-51` | Does `CANDIDATE` mean "proposed, unvalidated" only, or also "validated but not yet user-confirmed"? | `04-topology-spec.md` | OPEN |
+| `OD-51` | Does `CANDIDATE` mean "proposed, unvalidated" only, or also "validated but not yet user-confirmed"? | `04-topology-spec.md` | RESOLVED — Owner decision (2026-11-18): topology is always authoritative for inference and learning; confirmation no longer gates; confidence penalty preserved. Implemented in the topology un-gating change. |
 | `OD-52` | Is `SUSPECTED_CHANGE` a state of the *edge* or a separate overlay on the edge? | `04-topology-spec.md` | OPEN |
 | `OD-53` | May a `CONFIRMED` edge be demoted automatically on persistent inconsistency, or only to `SUSPECTED_CHANGE`? | `04-topology-spec.md` | OPEN |
 | `OD-54` | Should `CONTAINS` edges be allowed to overlap (a child in two parents)? | `04-topology-spec.md` | OPEN |

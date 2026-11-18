@@ -271,6 +271,8 @@ mapping is in §4.
 - **Scenario.** `T12` — extends matrix group **C** (row `C9`, reversed orientation / direction change); **new coverage** for the edge lifecycle across a reader change.
 - **Verification.** `pytest tests/unit/test_association.py` — a new assertion for `SUSPECTED_CHANGE` and `RETIRED`; `pytest tests/unit/test_hierarchy.py::test_every_candidate_requires_confirmation`.
 
+> **Completion-sprint amendment — SPEC CHANGE (2026-11-18).** Per the resolved owner decision OD-51, confirmation no longer gates inference or learning: the current topology is always authoritative regardless of `CANDIDATE`/`CONFIRMED` status. The topology is dynamic and publishes its confidence, with the reduced confidence carried as a penalty rather than a gate. Breaking changes remain `SUSPECTED` proposals and are not auto-applied. The original requirement text above is retained for traceability.
+
 #### REQ-TOPO-003 — Parent and child are treated asymmetrically
 
 - **Description.** A parent reader's row carries the aggregate of everything below it; a child reader's row is subtracted from its parent before the parent's remainder is solved; the two roles are never interchangeable.

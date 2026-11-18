@@ -3,7 +3,8 @@
 from .pipeline import LearningPipeline
 from .promotion import PromotionDecision, PromotionManager
 from .reporting import (
-    CONFIRM_REMEDY,
+    DYNAMIC_TOPOLOGY_NOTE,
+    DYNAMIC_TOPOLOGY_QUALITIES,
     LearningAccounting,
     build_learning_status,
 )
@@ -15,7 +16,8 @@ from .trainer import Trainer, TrainingResult, infer_model_type, training_quality
 from .validation import ValidationReport, compare_models, split_holdout, validate_model
 
 __all__ = [
-    "CONFIRM_REMEDY",
+    "DYNAMIC_TOPOLOGY_NOTE",
+    "DYNAMIC_TOPOLOGY_QUALITIES",
     "LearningAccounting",
     "LearningPipeline",
     "LearningThresholds",

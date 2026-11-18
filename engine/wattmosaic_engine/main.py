@@ -1457,22 +1457,23 @@ class EngineCore:
 
     @staticmethod
     def _add_blocked_reason_detail(status: dict[str, Any]) -> None:
-        """Name *why* learning is blocked, without changing what the engine does.
+        """Publish an informational note for a dynamic topology, without gating.
 
-        A user reading ``blocked`` cannot act on a reason label like
-        ``ambiguous_topology``: the cause is that the topology is still a
-        candidate, and the fix is to confirm it.  This only adds the explanation
-        -- the topology is **never** auto-confirmed here (contract §6), because
-        the wiring association is the user's assertion to make.
+        Owner decision (OD-51, 2026-11-18): topology is *always* authoritative
+        for inference and learning.  A candidate topology no longer blocks
+        learning, so this no longer names a confirmation "cause" or remedy.  It
+        only adds an informational ``topology_note`` describing the reduced
+        confidence.  The topology is **never** auto-confirmed here (contract §6),
+        because the wiring association is the user's assertion to make -- the
+        no-auto-confirm invariant is kept, just not used as a learning gate.
         """
-        from .learning.reporting import CONFIRM_REMEDY
+        from .learning.reporting import DYNAMIC_TOPOLOGY_NOTE, DYNAMIC_TOPOLOGY_QUALITIES
 
-        dominant = status.get("dominant_rejection_reason")
-        if status.get("effective_state") == "blocked" and dominant == "ambiguous_topology":
-            # ``ambiguous_topology`` is only ever stamped because the wiring
-            # association is unverified, so the detail names that directly.
-            status["blocked_reason_detail"] = "topology_not_confirmed"
-            status.setdefault("remedy", CONFIRM_REMEDY)
+        quality = str(status.get("topology_quality") or "").strip().lower()
+        if quality in DYNAMIC_TOPOLOGY_QUALITIES and not status.get("topology_note"):
+            # Informational only: a candidate topology is authoritative for
+            # learning, carrying a reduced confidence, never a block/remedy.
+            status["topology_note"] = DYNAMIC_TOPOLOGY_NOTE
 
     def inference_backend_status(self) -> dict[str, Any] | None:
         """Backend self-description for ``/status`` and diagnostics.
@@ -1525,9 +1526,9 @@ class EngineCore:
             "learning": {
                 "active": self.learning_active,
                 "effective_state": learning_status.get("effective_state"),
-                # ``blocked_reason_detail`` names the *cause* of a silent block
-                # (contract §6); it never changes what the engine does.
-                "blocked_reason_detail": learning_status.get("blocked_reason_detail"),
+                # Informational only (OD-51): a dynamic topology is authoritative
+                # for learning with reduced confidence, never a block/remedy.
+                "topology_note": learning_status.get("topology_note"),
                 "remedy": learning_status.get("remedy"),
             },
             "database": db_stats,

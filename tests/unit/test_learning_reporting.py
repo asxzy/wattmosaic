@@ -16,10 +16,11 @@ These tests pin the replacement contract:
 
 * counters are monotonic and O(1) per sample (no per-sample storage growth);
 * ``effective_state`` is ``learning`` only when samples are accepted;
-* ``blocked`` carries the dominant reason and a plain-language remedy;
+* ``blocked`` carries the dominant reason (OD-51 removed the topology gate);
 * ``off`` covers both a disabled and a paused pipeline;
 * the dominant reason is correct on a mixed batch;
-* the rejection *rules* are untouched (the same sample is still rejected).
+* a candidate topology is authoritative for learning and carries an
+  informational ``topology_note`` about the reduced confidence, never a remedy.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ from typing import Any
 import pytest
 from wattmosaic_engine.contracts import SampleRejection
 from wattmosaic_engine.learning import (
-    CONFIRM_REMEDY,
+    DYNAMIC_TOPOLOGY_NOTE,
     LearningAccounting,
     LearningPipeline,
     build_learning_status,
@@ -46,8 +47,8 @@ from wattmosaic_engine.storage import Database
 
 from tests.unit.conftest import BASE_TIME, make_sample
 
-#: An unconfirmed topology is the live-install cause.  It is a *correct*
-#: rejection: the association is unverified, so the sample must not train.
+#: Per OD-51 (owner, 2026-11-18) topology is always authoritative: a candidate
+#: is dynamic but authoritative, with reduced confidence -- never a gate.
 CANDIDATE = "candidate"
 CONFIRMED = "confirmed"
 
@@ -179,8 +180,11 @@ def test_blocked_when_every_sample_is_rejected() -> None:
     assert status["dominant_rejection_reason"] == "ambiguous_topology"
     assert status["acceptance_rate"] == 0.0
     assert "ambiguous_topology" in status["summary"]
-    assert status["remedy"] == CONFIRM_REMEDY
-    assert "confirm_topology" in status["remedy"]
+    # OD-51: a genuine rejection block has no confirmation remedy; the dynamic
+    # topology is described only by an informational note.
+    assert status["remedy"] is None
+    assert status["topology_note"] == DYNAMIC_TOPOLOGY_NOTE
+    assert "No confirmation is required" in status["topology_note"]
 
 
 def test_learning_when_samples_are_accepted() -> None:
@@ -237,8 +241,8 @@ def test_a_small_bad_batch_is_not_blocked() -> None:
     assert status["effective_state"] == "learning"
 
 
-def test_blocked_before_the_first_sample_on_a_candidate_topology() -> None:
-    """The user learns why on the first poll, not after a week of silence."""
+def test_candidate_topology_is_learning_not_blocked_before_the_first_sample() -> None:
+    """OD-51: a dynamic topology is authoritative; no sample means no verdict."""
     status = build_learning_status(
         enabled=True,
         active=True,
@@ -247,10 +251,11 @@ def test_blocked_before_the_first_sample_on_a_candidate_topology() -> None:
         samples_rejected=0,
         topology_quality=CANDIDATE,
     )
-    assert status["effective_state"] == "blocked"
-    assert status["dominant_rejection_reason"] == "ambiguous_topology"
-    assert status["blocked_by"] == "unconfirmed_topology"
-    assert status["remedy"] == CONFIRM_REMEDY
+    assert status["effective_state"] == "learning"
+    assert status["dominant_rejection_reason"] is None
+    assert status["blocked_by"] is None
+    assert status["remedy"] is None
+    assert status["topology_note"] == DYNAMIC_TOPOLOGY_NOTE
 
 
 def test_off_when_the_pipeline_is_disabled() -> None:
@@ -413,8 +418,8 @@ def db(tmp_db_path):
         database.close()
 
 
-def _candidate_sample(index: int):
-    """A structurally fine sample whose topology is a candidate."""
+def _ambiguous_topology_sample(index: int):
+    """A structurally fine sample whose entity has >1 topology candidate."""
     sample = make_sample(
         "dev",
         index,
@@ -423,12 +428,14 @@ def _candidate_sample(index: int):
         state="on",
         captured_at=BASE_TIME,
     )
-    return sample.model_copy(update={"notes": [*sample.notes, f"topology_quality:{CANDIDATE}"]})
+    return sample.model_copy(
+        update={"notes": [*sample.notes, "topology_candidates:2", f"topology_quality:{CANDIDATE}"]}
+    )
 
 
 def test_pipeline_counts_rejected_samples_with_their_reason(db: Database) -> None:
     pipeline = LearningPipeline(db)
-    accepted, rejected = pipeline.ingest_samples([_candidate_sample(0)])
+    accepted, rejected = pipeline.ingest_samples([_ambiguous_topology_sample(0)])
     assert accepted == []
     assert len(rejected) == 1
     snapshot = pipeline.accounting.snapshot()
@@ -446,11 +453,12 @@ def test_pipeline_counts_accepted_samples(db: Database) -> None:
 
 
 def test_rejection_logic_is_unchanged_by_the_accounting() -> None:
-    """The same unconfirmed-topology sample is still rejected for the same reason.
+    """OD-51: candidate topology is accepted; only genuine ambiguity rejects.
 
-    This is the guard against "fix the reporting by loosening the filter": an
-    unconfirmed topology must keep rejecting samples, because the association
-    itself is unverified.  Only the *reporting* of that fact changed.
+    The accounting never loosens a real rejection rule.  A candidate topology
+    is authoritative for learning (it carries a confidence penalty, not a
+    gate); only genuine contradictory evidence -- more than one topology
+    candidate for the entity -- still rejects as ``ambiguous_topology``.
     """
     from wattmosaic_engine.learning import SampleEvidence
 
@@ -461,11 +469,21 @@ def test_rejection_logic_is_unchanged_by_the_accounting() -> None:
 
     # A fresh filter: ``duplicate_state`` is stateful and would otherwise fire
     # first on a second look at the same device/state.
-    unconfirmed = good.model_copy(
+    candidate = good.model_copy(
         update={"notes": [*good.notes, "topology_quality:candidate"]}
     )
+    candidate_decision = SampleFilter().evaluate(
+        candidate, SampleEvidence(now=datetime(2026, 1, 1, 13, tzinfo=UTC))
+    )
+    assert candidate_decision.accepted is True
+    assert candidate_decision.reason is None
+
+    # Genuine ambiguity is still refused, with the documented reason code.
+    ambiguous = good.model_copy(
+        update={"notes": [*good.notes, "topology_candidates:2"]}
+    )
     decision = SampleFilter().evaluate(
-        unconfirmed, SampleEvidence(now=datetime(2026, 1, 1, 13, tzinfo=UTC))
+        ambiguous, SampleEvidence(now=datetime(2026, 1, 1, 13, tzinfo=UTC))
     )
     assert decision.accepted is False
     assert decision.reason == SampleRejection.AMBIGUOUS_TOPOLOGY
@@ -554,8 +572,8 @@ def _feed(backend: Any, topology: Any, *, confirmed: bool) -> None:
         backend.process(window, device_states={}, topology=topology, events=events)
 
 
-def test_backend_reports_blocked_on_an_unconfirmed_topology(db: Database) -> None:
-    """The exact live state: loop active, every sample rejected, nothing learned."""
+def test_backend_reports_learning_on_an_unconfirmed_topology(db: Database) -> None:
+    """OD-51: a candidate topology learns (with reduced confidence), not blocked."""
     from wattmosaic_engine.integration import WattMosaicBackend
 
     backend = WattMosaicBackend(db, learning_enabled=True)
@@ -563,13 +581,12 @@ def test_backend_reports_blocked_on_an_unconfirmed_topology(db: Database) -> Non
 
     status = backend.learning_status()
     assert backend.learning_active is True, "the loop itself is running"
-    assert status["effective_state"] == "blocked"
-    assert status["dominant_rejection_reason"] == "ambiguous_topology"
+    assert status["effective_state"] == "learning"
     assert status["samples_seen"] > 0
-    assert status["samples_accepted"] == 0
-    assert status["remedy"] == CONFIRM_REMEDY
-    assert backend.models_promoted == 0
-    assert backend.status()["learning_effective_state"] == "blocked"
+    assert status["samples_accepted"] > 0
+    assert status["remedy"] is None
+    assert status["topology_note"] == DYNAMIC_TOPOLOGY_NOTE
+    assert backend.status()["learning_effective_state"] == "learning"
 
 
 def test_backend_reports_learning_on_a_confirmed_topology(db: Database) -> None:

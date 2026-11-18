@@ -15,24 +15,24 @@ a bounded per-reason tally, and an ``effective_state``:
 
 * ``off``      -- the pipeline does not exist, or the user paused it;
 * ``learning`` -- running and accepting samples;
-* ``blocked``  -- running but rejecting every sample (or ~all of them), or
-  running on an unconfirmed topology, which the filter rejects by construction.
+* ``blocked``  -- running but rejecting every sample (or ~all of them).
 
 Cost is O(1) per sample (one integer increment, one dict increment) and O(k) per
 report with ``k <= MAX_REJECTION_LABELS`` (16).  Nothing is stored per sample, so
 a week of rejections costs exactly the same memory as one.
 
-The rejection *rules* are deliberately untouched: an unconfirmed topology must
-reject samples, because the association itself is unverified.  Only the
-reporting changes — and ``blocked`` names the remedy in plain words.
+Owner decision (OD-51, 2026-11-18): topology is *always* authoritative for
+inference and learning.  A candidate topology no longer blocks learning -- the
+sample filter only rejects genuinely contradictory topology evidence, and the
+reduced certainty is carried by the topology confidence penalty instead.  The
+``topology_note`` below is therefore informational; there is no confirmation
+remedy, and ``blocked`` now reflects only observed rejections.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
 from typing import Any
-
-from ..contracts import SampleRejection
 
 #: ``effective_state`` values.  Deliberately distinct from the HA binary state:
 #: ``blocked`` is a *running* pipeline that can never train a model.
@@ -55,17 +55,24 @@ FILTER_ERROR_LABEL = "filter_error"
 ALMOST_ALL_REJECTED = 0.95
 ALMOST_ALL_MIN_SAMPLES = 10
 
-#: Topology qualities the sample filter rejects as ``ambiguous_topology``.
-UNCONFIRMED_TOPOLOGY_QUALITIES: frozenset[str] = frozenset(
-    {"candidate", "ambiguous", "unconfirmed", "unknown"}
+#: Dynamic (non-confirmed) topology qualities.  These carry the reduced
+#: confidence penalty but no longer block learning (OD-51, 2026-11-18).
+#: ``ambiguous`` is deliberately excluded: it means the topology cannot
+#: attribute the entity at all (multiple candidates), which is genuine
+#: contradictory evidence the sample filter still rejects.
+DYNAMIC_TOPOLOGY_QUALITIES: frozenset[str] = frozenset(
+    {"candidate", "unconfirmed", "unknown"}
 )
 
-#: The user-facing remedy.  It names the exact entity the integration creates so
-#: a dashboard can explain itself without a wiki link.
-CONFIRM_REMEDY = (
-    "Confirm the topology: in Home Assistant press "
-    "button.wattmosaic_confirm_topology (WattMosaic Engine → Confirm topology), "
-    "or re-run the WattMosaic setup wizard and confirm the CT mapping."
+#: Informational note published for a dynamic topology.  A candidate is
+#: authoritative for learning; only its confidence is reduced
+#: (``TOPOLOGY_SCORE``: candidate 0.6 vs confirmed 1.0).  There is no
+#: confirmation remedy -- the wiring association stays the user's assertion,
+#: but it never gates a sample.
+DYNAMIC_TOPOLOGY_NOTE = (
+    "Topology is dynamic (candidate); it is authoritative for inference and "
+    "learning and carries a reduced confidence (candidate 0.6 vs confirmed "
+    "1.0). No confirmation is required."
 )
 
 
@@ -176,11 +183,12 @@ def build_learning_status(
 ) -> dict[str, Any]:
     """Derive the honest learning status from the counters and the topology.
 
-    ``topology_quality`` is what the sample filter will stamp on each sample
-    (``integration._topology_quality``).  A ``candidate`` topology means the
-    filter rejects *every* sample by construction, so the pipeline is reported
-    ``blocked`` even before the first rejection arrives — the user then learns
-    why on the very first poll instead of after a week of silence.
+    ``topology_quality`` is what the sample filter stamps on each sample
+    (``integration._topology_quality``).  Since OD-51 (2026-11-18) a candidate
+    topology no longer blocks learning: it is authoritative, with a reduced
+    confidence.  A dynamic topology therefore adds an informational
+    ``topology_note`` but never forces ``blocked``.  ``blocked`` reflects only
+    observed rejections.
     """
     seen = max(0, int(samples_seen))
     accepted = min(max(0, int(samples_accepted)), seen)
@@ -202,7 +210,12 @@ def build_learning_status(
 
     state = STATE_LEARNING
     blocked_by: str | None = None
-    remedy: str | None = None
+    topology_note: str | None = None
+
+    # A dynamic (candidate) topology is authoritative for learning.  Publish an
+    # informational note about the reduced confidence; never gate on it.
+    if quality in DYNAMIC_TOPOLOGY_QUALITIES:
+        topology_note = DYNAMIC_TOPOLOGY_NOTE
 
     if not enabled:
         state = STATE_OFF
@@ -220,33 +233,17 @@ def build_learning_status(
     ):
         state = STATE_BLOCKED
         blocked_by = "observed_rejections"
-    elif accepted == 0 and quality in UNCONFIRMED_TOPOLOGY_QUALITIES:
-        state = STATE_BLOCKED
-        blocked_by = "unconfirmed_topology"
 
     if state == STATE_BLOCKED:
-        if dominant is None and blocked_by == "unconfirmed_topology":
-            dominant = SampleRejection.AMBIGUOUS_TOPOLOGY.value
-            dominant_count = 0
-        if dominant == SampleRejection.AMBIGUOUS_TOPOLOGY.value:
-            remedy = CONFIRM_REMEDY
-        if blocked_by == "unconfirmed_topology":
-            summary = (
-                "Learning is running but the topology is still a candidate, so every "
-                "sample is rejected as ambiguous_topology and no model can be trained."
-            )
-        else:
-            share = "100%" if accepted == 0 else f"{(1 - (rate or 0.0)) * 100:.0f}%"
-            top = f", mostly {dominant}" if dominant else ""
-            summary = (
-                f"Learning is running but {share} of samples are rejected "
-                f"({rejected} of {seen}){top}; no model can be trained from them."
-            )
+        share = "100%" if accepted == 0 else f"{(1 - (rate or 0.0)) * 100:.0f}%"
+        top = f", mostly {dominant}" if dominant else ""
+        summary = (
+            f"Learning is running but {share} of samples are rejected "
+            f"({rejected} of {seen}){top}; no model can be trained from them."
+        )
     elif state == STATE_LEARNING:
         if seen == 0:
-            summary = (
-                "Learning is running; no sample has been offered yet."
-            )
+            summary = "Learning is running; no sample has been offered yet."
         else:
             summary = (
                 f"Learning is running and accepting samples "
@@ -267,14 +264,18 @@ def build_learning_status(
         "blocked_by": blocked_by,
         "topology_quality": quality,
         "summary": summary,
-        "remedy": remedy,
+        # ``remedy`` is retained as a JSON key for downstream compatibility; it
+        # is always None now -- there is no confirmation to perform.
+        "remedy": None,
+        "topology_note": topology_note,
     }
 
 
 __all__ = [
     "ALMOST_ALL_MIN_SAMPLES",
     "ALMOST_ALL_REJECTED",
-    "CONFIRM_REMEDY",
+    "DYNAMIC_TOPOLOGY_NOTE",
+    "DYNAMIC_TOPOLOGY_QUALITIES",
     "EFFECTIVE_STATES",
     "FILTER_ERROR_LABEL",
     "LearningAccounting",
@@ -283,6 +284,5 @@ __all__ = [
     "STATE_BLOCKED",
     "STATE_LEARNING",
     "STATE_OFF",
-    "UNCONFIRMED_TOPOLOGY_QUALITIES",
     "build_learning_status",
 ]

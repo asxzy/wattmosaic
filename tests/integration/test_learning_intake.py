@@ -4,10 +4,10 @@
 
 A live install reported ``active_learning = off / blocked / ambiguous_topology``
 with ``samples_seen: 0``, ``samples_accepted: 0``, ``samples_rejected: 0`` and
-``dominant_rejection_count: 0`` across 33 samples over 11 minutes.  Under a
-``candidate`` topology every *offered* sample is rejected as
-``ambiguous_topology``, so a healthy pipeline shows ``rejected > 0``.  Zero seen
-**and** zero rejected means the offer stage is empty: no sample ever reached the
+``dominant_rejection_count: 0`` across 33 samples over 11 minutes.  Since OD-51
+(owner, 2026-11-18) a ``candidate`` topology is authoritative for learning, so a
+healthy pipeline on a candidate topology shows ``accepted > 0``.  Zero seen
+**and** zero accepted means the offer stage is empty: no sample ever reached the
 filter.
 
 The chain that produced that:
@@ -495,15 +495,21 @@ def test_a_resolved_state_transition_matures_into_a_sample(tmp_path) -> None:
 
         rows = db.learning_samples("dev_hot_tub", accepted_only=False)
         assert rows, "a resolved state transition produced no learning sample"
-        assert rows[-1]["rejection_reason"] == "ambiguous_topology"
+        # OD-51: a candidate topology is authoritative for learning.  The
+        # resolved state transition must now be ACCEPTED, not rejected as
+        # ambiguous_topology; only genuine ambiguity blocks a sample.
+        # SQLite returns the boolean column as an integer, so assert truthiness.
+        assert rows[-1]["accepted"]
+        assert rows[-1]["rejection_reason"] is None
 
         status = core.inference_backend.learning_status()
         assert status["samples_seen"] >= 1
-        # The invariant: seen > 0 implies rejected > 0 while the topology is a
-        # candidate.  Zero seen *and* zero rejected is an empty offer stage.
-        assert status["samples_rejected"] > 0
-        assert status["dominant_rejection_reason"] == "ambiguous_topology"
-        assert status["effective_state"] == "blocked"
+        # The invariant: seen > 0 now implies accepted > 0 on a candidate
+        # topology.  Zero seen *and* zero accepted is an empty offer stage.
+        assert status["samples_accepted"] > 0
+        assert status["dominant_rejection_reason"] is None
+        assert status["effective_state"] == "learning"
+        assert "No confirmation is required" in status["topology_note"]
     finally:
         db.close()
 

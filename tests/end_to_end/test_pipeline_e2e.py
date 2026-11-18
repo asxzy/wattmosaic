@@ -850,8 +850,14 @@ def test_production_loop_trains_and_promotes_a_model(tmp_path) -> None:
         db.close()
 
 
-def test_candidate_topology_collects_but_never_trains(tmp_path) -> None:
-    """Unconfirmed topology: samples are recorded *and rejected*, never fitted."""
+def test_candidate_topology_collects_and_accepts_samples(tmp_path) -> None:
+    """OD-51: a candidate topology is authoritative, so samples are accepted.
+
+    The topology confidence penalty (not a gate) carries the reduced certainty.
+    Because the candidate topology is no longer gated, accepted samples from it
+    legitimately flow into training: this run produces a persisted model version
+    rather than leaving the model stage empty.
+    """
     core, db = _production_core(tmp_path, confirmed=False)
     try:
         core.inference_backend.train_interval_s = 60.0
@@ -859,8 +865,7 @@ def test_candidate_topology_collects_but_never_trains(tmp_path) -> None:
 
         backend = core.inference_backend
         assert backend.status()["samples_collected"] > 0
-        assert backend.status()["samples_accepted"] == 0
-        assert backend.status()["training_attempts"] == 0
+        assert backend.status()["samples_accepted"] > 0
 
         stored = [
             row
@@ -868,14 +873,16 @@ def test_candidate_topology_collects_but_never_trains(tmp_path) -> None:
             for row in db.learning_samples(device.device_id, accepted_only=False)
         ]
         assert stored
-        # Every row is rejected.  Samples whose measurements exist are rejected
-        # *because* the topology is unconfirmed (``ambiguous_topology``); the
-        # rest simply lacked a usable baseline/event pair.  Neither may train.
-        assert all(not row["accepted"] for row in stored)
-        assert "ambiguous_topology" in {row["rejection_reason"] for row in stored}
-        assert not any(
+        # Samples whose measurements exist are now ACCEPTED on a candidate
+        # topology (OD-51), not rejected as ambiguous_topology.  The rest simply
+        # lacked a usable baseline/event pair.  Genuine ambiguity still rejects.
+        assert any(row["accepted"] for row in stored)
+        assert "ambiguous_topology" not in {row["rejection_reason"] for row in stored}
+        # OD-51: a candidate topology is no longer gated, so the accepted samples
+        # train a real model.  The pipeline must persist at least one version.
+        assert any(
             db.model_versions(device.device_id) for device in core.topology_cache.devices
-        )
+        ), "candidate topology samples must train and persist a model version"
     finally:
         db.close()
 

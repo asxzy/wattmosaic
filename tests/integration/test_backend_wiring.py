@@ -341,9 +341,10 @@ def test_learning_disabled_does_not_advertise_activity(tmp_db_path) -> None:
 def _topology_confirmed() -> Topology:
     """The same topology after the user confirms it (ADR-0008).
 
-    Confirmation is what allows learning: an unconfirmed topology means the
-    association itself is uncertain, so every sample is correctly rejected as
-    ``ambiguous_topology`` (covered by its own test below).
+    Since OD-51 confirmation is no longer required for learning: a candidate
+    topology is authoritative too (with reduced confidence).  Confirmation
+    remains the user's declaration, kept here to exercise the confirmed path
+    alongside the candidate path covered below.
     """
     base = _topology()
     return base.model_copy(
@@ -402,8 +403,8 @@ def test_home_assistant_events_become_persisted_learning_samples(tmp_db_path) ->
         db.close()
 
 
-def test_unconfirmed_topology_rejects_samples_with_its_reason(tmp_db_path) -> None:
-    """A candidate topology may collect evidence but must not train on it."""
+def test_unconfirmed_topology_accepts_samples_after_od51(tmp_db_path) -> None:
+    """OD-51: a candidate topology is authoritative, so its samples are accepted."""
     from wattmosaic_engine.storage.database import Database
 
     db = Database(tmp_db_path)
@@ -430,11 +431,17 @@ def test_unconfirmed_topology_rejects_samples_with_its_reason(tmp_db_path) -> No
             backend.process(window, device_states={}, topology=topology, events=events)
 
         samples = db.learning_samples("dev_fridge", accepted_only=False)
-        assert samples, "the sample is still recorded so the reason is visible"
-        assert all(not s["accepted"] for s in samples)
-        assert {s["rejection_reason"] for s in samples} == {"ambiguous_topology"}
-        # And nothing was trained from a rejected sample.
-        assert backend.training_attempts == 0
+        assert samples, "the candidate topology must still produce learning samples"
+        accepted = [s for s in samples if s["accepted"]]
+        assert accepted, [s["rejection_reason"] for s in samples]
+        assert accepted[0]["delta_power_w"] == pytest.approx(800.0, abs=1.0)
+        # The learning status reports "learning" with an informational note,
+        # not "blocked" with a confirmation remedy.
+        status = backend.learning_status()
+        assert status["effective_state"] == "learning"
+        assert status["samples_accepted"] > 0
+        assert status["remedy"] is None
+        assert "No confirmation is required" in status["topology_note"]
     finally:
         db.close()
 

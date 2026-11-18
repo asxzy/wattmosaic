@@ -339,14 +339,15 @@ def test_a_second_press_writes_nothing(tmp_path: Path) -> None:
     assert version_after_two == version_after_first, "a second press created a revision"
 
 
-def test_the_confirmed_topology_unblocks_the_sample_filter(tmp_path: Path) -> None:
-    """The last link: the engine stamps ``confirmed`` and samples are accepted.
+def test_the_confirmed_topology_and_a_candidate_both_accept_samples(tmp_path: Path) -> None:
+    """OD-51: the engine stamps the topology status; both stamps now accept.
 
     ``WattMosaicBackend._topology_quality`` decides what every learning sample
     is stamped with.  It reads the topology status the engine just confirmed.
-    A ``candidate`` stamp is rejected as ``ambiguous_topology``; ``confirmed``
-    is not.  This asserts the two facts the whole round depends on, using the
-    value the engine really produces after the press.
+    Since OD-51 a ``candidate`` stamp is authoritative for learning too (with a
+    confidence penalty); a genuine multi-candidate ambiguity still rejects.
+    This asserts the facts the whole round depends on, using the value the
+    engine really produces after the press.
     """
 
     async def scenario(harness: _Harness) -> Any:
@@ -373,9 +374,9 @@ def test_the_confirmed_topology_unblocks_the_sample_filter(tmp_path: Path) -> No
     quality = WattMosaicBackend._topology_quality(contract_topology)
     assert quality == "confirmed", "the sample stamp follows the engine's status"
 
-    # And the filter accepts a sample carrying that stamp, while the candidate
-    # stamp of the same sample is rejected.  The rejection *rules* are
-    # untouched -- only the input changed, which is the point.
+    # The filter accepts samples carrying either stamp.  Since OD-51 a candidate
+    # topology is authoritative for learning; only genuine ambiguity (more than
+    # one topology candidate for the entity) is still rejected.
     from tests.unit.conftest import BASE_TIME, make_sample
 
     sample = make_sample(
@@ -387,12 +388,16 @@ def test_the_confirmed_topology_unblocks_the_sample_filter(tmp_path: Path) -> No
     candidate_sample = sample.model_copy(
         update={"notes": [*sample.notes, "topology_quality:candidate"]}
     )
+    ambiguous_sample = sample.model_copy(
+        update={"notes": [*sample.notes, "topology_candidates:2"]}
+    )
     # A fresh filter per evaluation: ``SampleFilter`` remembers the last state it
     # saw, so reusing one instance would reject the second sample as a
     # ``duplicate_state`` before it ever looked at the topology.
     assert SampleFilter().evaluate(confirmed_sample).accepted is True
+    assert SampleFilter().evaluate(candidate_sample).accepted is True
     assert (
-        SampleFilter().evaluate(candidate_sample).reason
+        SampleFilter().evaluate(ambiguous_sample).reason
         == contracts.SampleRejection.AMBIGUOUS_TOPOLOGY
     )
 

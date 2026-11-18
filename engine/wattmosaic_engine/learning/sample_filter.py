@@ -316,9 +316,15 @@ class SampleFilter:
         )
 
         # -- ambiguous topology ----------------------------------------- #
+        # Owner decision (OD-51, 2026-11-18): topology is *always* authoritative
+        # for inference and learning.  A candidate/unconfirmed quality is no
+        # longer a reason to reject a sample -- the topology confidence penalty
+        # (``disaggregation/confidence.py:TOPOLOGY_SCORE``) carries the reduced
+        # certainty instead.  Reject only genuine contradictory evidence: more
+        # than one candidate association for the same entity (``ambiguous``
+        # quality), which means the topology cannot attribute the sample at all.
         topology_bad = (
-            not ev.topology_confirmed
-            or topology_quality in {"candidate", "ambiguous", "unconfirmed", "unknown"}
+            topology_quality == "ambiguous"
             or int(_float(notes.get("topology_candidates")) or 0) > 1
         )
         checks[SampleRejection.AMBIGUOUS_TOPOLOGY] = (

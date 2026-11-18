@@ -166,9 +166,11 @@ def _binary_version(
             SampleRejection.CONCURRENT_EVENTS,
         ),
         (
+            # OD-51: an unconfirmed topology no longer rejects a sample.  Only
+            # genuine contradictory evidence (>1 topology candidate) does.
             "topology",
-            lambda f: _clean_sample(),
-            SampleEvidence(now=BASE_TIME, topology_confirmed=False),
+            lambda f: _clean_sample(notes=["topology_candidates:2"]),
+            SampleEvidence(now=BASE_TIME),
             SampleRejection.AMBIGUOUS_TOPOLOGY,
         ),
         (
@@ -258,10 +260,35 @@ def test_filter_decision_apply_persists_reason_and_note() -> None:
 
 
 def test_filter_records_ambiguous_topology_from_notes() -> None:
+    """Genuine ambiguity (>1 candidate) still rejects; candidate quality does not."""
     sample = _clean_sample(notes=["topology_candidates:2"])
     decision = SampleFilter(NEVER_STALE).evaluate(sample, SampleEvidence(now=BASE_TIME))
 
     assert decision.reason == SampleRejection.AMBIGUOUS_TOPOLOGY
+
+
+def test_filter_accepts_candidate_topology_after_od51() -> None:
+    """A candidate/unconfirmed topology is authoritative; only confidence drops.
+
+    Owner decision (OD-51, 2026-11-18): learning proceeds on candidate topology.
+    Neither the ``topology_confirmed`` evidence flag nor a ``candidate`` quality
+    stamp may reject a sample on its own; the topology confidence penalty
+    (``TOPOLOGY_SCORE``) carries the reduced certainty instead.
+    """
+    candidate_quality = _clean_sample(notes=["topology_quality:candidate"])
+    decision = SampleFilter(NEVER_STALE).evaluate(
+        candidate_quality, SampleEvidence(now=BASE_TIME, topology_confirmed=False)
+    )
+    assert decision.accepted is True
+    assert decision.reason is None
+
+    # The "unknown" quality is also dynamic and must not gate on its own.
+    unknown_quality = _clean_sample(index=1, notes=["topology_quality:unknown"])
+    unknown_decision = SampleFilter(NEVER_STALE).evaluate(
+        unknown_quality, SampleEvidence(now=BASE_TIME, topology_confirmed=False)
+    )
+    assert unknown_decision.accepted is True
+    assert unknown_decision.reason is None
 
 
 def test_filter_batch_and_rejection_summary() -> None:

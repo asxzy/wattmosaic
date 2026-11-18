@@ -914,16 +914,19 @@ class _BlockedBackend:
         }
 
 
-def test_blocked_learning_names_the_unconfirmed_topology(tmp_path: Path) -> None:
+def test_blocked_learning_reports_the_rejection_facts_only(tmp_path: Path) -> None:
+    """OD-51: a genuine rejection block names its reason, not a confirm remedy."""
     core, _, _, _ = _core(tmp_path)
     core.inference_backend = _BlockedBackend()
 
     learning = core.status()["learning"]
 
     assert learning["effective_state"] == "blocked"
-    assert learning["blocked_reason_detail"] == "topology_not_confirmed"
-    assert "Confirm the topology" in learning["remedy"]
-    # No behaviour change: the topology is the user's call, never auto-confirmed.
+    # The block comes from observed rejections, not an unconfirmed topology.
+    # No confirmation remedy is offered; the no-auto-confirm invariant is kept.
+    assert learning["remedy"] is None
+    assert learning["topology_note"] is not None
+    assert "No confirmation is required" in learning["topology_note"]
     assert core._active_topology().status == TopologyStatus.CONFIRMED
 
 
