@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import shutil
 import sqlite3
 import threading
 from collections.abc import Iterable, Iterator
@@ -171,6 +172,83 @@ class Database:
     def checkpoint(self) -> None:
         with self._lock:
             self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    def reset(self) -> dict[str, Any]:
+        """Wipe **all** app data and re-initialise a brand-new migrated schema.
+
+        This is the backend half of the destructive "Reset DB" feature.  It is
+        deliberately a *file-level* reset rather than a sequence of
+        ``DELETE FROM`` statements: dropping/emptying tables one by one can miss
+        WAL sidecars, ``sqlite_sequence`` counters and FTS/auxiliary artifacts,
+        leaving a half-wiped database.  Replacing the file guarantees the result
+        is byte-for-byte a fresh install.
+
+        Safety order matters:
+
+        1. :meth:`checkpoint` folds the WAL into the main file, so the backup is
+           a single self-contained copy even in WAL mode.
+        2. A timestamped ``<db>.reset-backup.<UTC>`` copy (including any WAL/SHM
+           sidecars that remain) is created **before** anything is removed.  The
+           reset is a no-op if this fails.
+        3. Under the lock, the connection is closed, every DB file/sidecar is
+           removed, a new connection is opened **in place on this object** and
+           all migrations are re-applied.  Rebinding ``self._conn`` (rather than
+           constructing a new ``Database``) is essential: every engine component
+           holds a reference to this *same* object, so they all transparently
+           see the fresh database afterwards.
+
+        The method is idempotent-safe: resetting an already-fresh database just
+        makes another backup and re-migrates it again.  An in-memory database
+        (``:memory:``) has no file to back up, so it is rejected explicitly
+        rather than silently doing something unsafe.
+
+        Returns a confirmation dict containing the backup path, the new schema
+        version and the latest schema version.  Raises ``RuntimeError`` for an
+        unsupported (in-memory) database.
+        """
+        if self.path == Path(":memory:") or str(self.path) == ":memory:":
+            raise RuntimeError("reset is not supported for an in-memory database")
+
+        # 1. Checkpoint so the main file is complete and the sidecars can be
+        #    ignored/removed safely after the backup.
+        self.checkpoint()
+
+        # 2. Timestamped safety backup, created before any destructive step.
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
+        backup = Path(f"{self.path}.reset-backup.{stamp}")
+        # Avoid a (very unlikely) same-microsecond collision.
+        suffix = 0
+        while backup.exists():
+            suffix += 1
+            backup = Path(f"{self.path}.reset-backup.{stamp}.{suffix}")
+        shutil.copy2(self.path, backup)
+        # Carry over any remaining sidecars so the backup is self-contained even
+        # if a writer re-created them between the checkpoint and the copy.
+        for sidecar in ("-wal", "-shm"):
+            side = Path(f"{self.path}{sidecar}")
+            if side.exists():
+                shutil.copy2(side, Path(f"{backup}{sidecar}"))
+
+        # 3. Close, remove every DB file, reopen in place, re-migrate.  All under
+        #    the lock so no other accessor can observe a half-reset connection.
+        with self._lock:
+            self._conn.close()
+            for target in (self.path, Path(f"{self.path}-wal"), Path(f"{self.path}-shm")):
+                target.unlink(missing_ok=True)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._conn = sqlite3.connect(
+                str(self.path), timeout=30.0, isolation_level=None, check_same_thread=False
+            )
+            self._conn.row_factory = sqlite3.Row
+            self._configure()
+            self.schema_version = apply_migrations(self._conn)
+
+        return {
+            "reset": True,
+            "backup_path": str(backup),
+            "schema_version": self.schema_version,
+            "latest_schema_version": LATEST_VERSION,
+        }
 
     # -- engine state ----------------------------------------------------- #
     def set_state(self, key: str, value: Any) -> None:

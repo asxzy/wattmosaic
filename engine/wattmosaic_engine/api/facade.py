@@ -355,6 +355,9 @@ class NullFacade:
     def metrics(self) -> Any:
         return self._unavailable()
 
+    def reset_database(self) -> Any:
+        raise FacadeUnavailable(self.reason)
+
     def mapping_matrix(self) -> Any:
         """Optional additive hook: ``None`` means "derive from current state".
 

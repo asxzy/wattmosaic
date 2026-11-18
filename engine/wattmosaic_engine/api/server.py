@@ -35,10 +35,10 @@ import math
 import time
 from datetime import date, datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from aiohttp import web
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ..contracts import CONTRACT_VERSION, ErrorResponse, ServiceCommand, Topology
 from .facade import (
@@ -103,6 +103,23 @@ TIMEOUTS_KEY: web.AppKey[dict[str, float]] = web.AppKey("wm_route_timeouts", dic
 BODY_KEY: web.RequestKey[bytes] = web.RequestKey("wm_raw_body", bytes)
 SEMAPHORE_KEY: web.AppKey[asyncio.Semaphore] = web.AppKey("wm_semaphore", asyncio.Semaphore)
 STARTED_AT_KEY: web.AppKey[float] = web.AppKey("wm_started_at", float)
+
+#: The literal the caller must send to authorise a destructive DB reset.
+RESET_CONFIRM_TOKEN = "RESET"
+RESET_DB_ROUTE = "/commands/reset-db"
+RESET_DB_PATH = f"{API_PREFIX}{RESET_DB_ROUTE}"
+
+
+class ResetDatabaseRequest(BaseModel):
+    """Typed confirmation for the destructive ``POST /commands/reset-db``.
+
+    ``confirm`` is a required literal, so a bare/unconfirmed call fails pydantic
+    validation (HTTP 400) *before* anything is wiped.  ``extra='forbid'`` rejects
+    stray keys rather than silently accepting a misspelled confirmation.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    confirm: Literal["RESET"]
 
 
 def _jsonable(value: Any) -> Any:
@@ -724,6 +741,31 @@ async def commands(request: web.Request) -> web.Response:
     return _ok(result)
 
 
+async def reset_database(request: web.Request) -> web.Response:
+    """Destructive full reset, guarded by an explicit ``{"confirm": "RESET"}``.
+
+    Auth is inherited from the shared ``_contract_and_auth`` middleware, exactly
+    like ``POST /commands`` -- this route does not weaken or bypass it.  The
+    typed model is validated first, so an unconfirmed/bare call returns HTTP 400
+    and never reaches the (destructive) facade method.  The blocking SQLite work
+    runs in a worker thread so it cannot stall ``/health``.
+    """
+    _validate(ResetDatabaseRequest, await _read_json(request))
+    facade = _facade(request)
+    method = getattr(facade, "reset_database", None)
+    if method is None:
+        # Backwards-compatible for facades that predate the optional method:
+        # an engine facade still exposes the backing ``.db`` with ``.reset()``.
+        db = getattr(facade, "db", None)
+        db_reset = getattr(db, "reset", None)
+        if db_reset is None:
+            raise FacadeUnavailable("database reset is not supported by this backend")
+        result = await asyncio.to_thread(db_reset)
+    else:
+        result = await maybe_await(await asyncio.to_thread(method))
+    return _ok(result)
+
+
 async def export(request: web.Request) -> web.Response:
     return _ok(await maybe_await(_facade(request).export(request.match_info["device_id"])))
 
@@ -834,6 +876,7 @@ def create_app(
     router.add_get(f"{base}/mapping", mapping_matrix)
     router.add_get(f"{base}/models/{{device_id}}", models)
     router.add_post(f"{base}/commands", commands)
+    router.add_post(f"{base}{RESET_DB_ROUTE}", reset_database)
     router.add_post(f"{base}/discover/placements", discover_placements)
     router.add_get(f"{base}/export/{{device_id}}", export)
     router.add_get(f"{base}/metrics", metrics)
@@ -856,6 +899,9 @@ __all__ = [
     "DEFAULT_ROUTE_TIMEOUTS",
     "DISCOVERY_PLACEMENTS_PATH",
     "DISCOVERY_REQUEST_TIMEOUT_S",
+    "RESET_CONFIRM_TOKEN",
+    "RESET_DB_PATH",
+    "ResetDatabaseRequest",
     "TIMEOUTS_KEY",
     "TOKEN_HEADER",
     "create_app",
