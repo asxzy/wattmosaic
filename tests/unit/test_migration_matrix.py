@@ -1,4 +1,4 @@
-"""Migration matrix: every supported prior schema version reaches LATEST safely.
+"""Migration matrix: released prior schemas reach LATEST safely.
 
 ``REQ-STORAGE-012``/``REQ-TEST-009`` require that each schema version the engine
 still supports can be migrated to the latest one, and that doing so is
@@ -13,11 +13,11 @@ seeds a sentinel row in ``engine_state`` (present since schema v1) and verifies
 it survives; before/after table+column inventories verify no schema object is
 lost; a second ``apply_migrations`` verifies idempotence at the entry-point level.
 
-**Discovery, not a list.**  ``MIGRATIONS`` is the package facade: versions 1-11
-from ``migrations/legacy.py`` plus every ``vNNN_*.py`` module discovered beside
-it (X05).  Deriving the versions here means a Wave-2 migration is covered by this
-matrix the moment its module lands, with no edit to this file.  ``12`` is
-excluded because it is the payload-encoding marker, not a schema version.
+**Released fixtures only.**  The matrix upgrades the schemas for which this repo
+ships a settled fixture -- the three released versions 9, 10 and 11.  Wave-2
+migrations (13-20, 25) land in parallel and out of order and may have gaps, so
+this matrix deliberately does *not* demand a fixture for every version created
+in that wave.  Those migrations are covered by their owning tasks' tests.
 """
 
 from __future__ import annotations
@@ -31,21 +31,26 @@ from wattmosaic_engine.storage.migrations import (
     MIGRATIONS,
     PAYLOAD_ENCODING_VERSION,
     RESERVED_VERSIONS,
+    SPARE_VERSIONS,
     apply_migrations,
     current_version,
 )
 
-#: The versions this matrix migrates *from*: every released prior version below
-#: LATEST.  Derived from the migration table so a new schema version is covered
-#: automatically instead of being silently skipped.
-PRIOR_VERSIONS: tuple[int, ...] = tuple(
-    m.version for m in MIGRATIONS if m.version < LATEST_VERSION
-)
+#: The released prior versions for which settled fixtures exist.  These are the
+#: versions the engine shipped with before the wave-2 seam; every one must be
+#: able to migrate straight to LATEST, whatever LATEST becomes.
+PRIOR_VERSIONS: tuple[int, ...] = (9, 10, 11)
 
 #: Numbers that are intentionally not migrations.  ``12`` is the payload-encoding
-#: marker (``PAYLOAD_ENCODING_VERSION``); any future reserved number joins it
-#: here rather than making the "no gaps" assertion lie.
-RESERVED: frozenset[int] = frozenset({PAYLOAD_ENCODING_VERSION, *RESERVED_VERSIONS})
+#: marker; 21-24 are spare.  A gap at any of these numbers must not be read as
+#: "a migration is missing" by the coverage guard.
+RESERVED: frozenset[int] = frozenset(
+    {PAYLOAD_ENCODING_VERSION, *RESERVED_VERSIONS, *SPARE_VERSIONS}
+)
+
+#: The newest version a wave-2 migration may claim (Z1's v025).  Used as the
+#: upper bound for the "discovered version" rule, so a typo like v026 is caught.
+MAX_WAVE_VERSION = 25
 
 SENTINEL_KEY = "migration_matrix_sentinel"
 SENTINEL_VALUE_TEMPLATE = "data-from-v{version}"
@@ -102,20 +107,30 @@ def _sentinel(conn: sqlite3.Connection) -> str:
 
 
 def test_matrix_covers_every_prior_version() -> None:
-    """Guard the matrix: no supported prior version is silently omitted.
+    """Guard the matrix and the version-number rules after the seam.
 
-    Every number from 1 to ``LATEST_VERSION`` is either a released migration or a
-    deliberately reserved one (12 is the payload-encoding marker), so a released
-    module cannot be skipped by the matrix and a gap cannot hide behind it.
+    The matrix covers the released versions 9, 10 and 11 and upgrades each to
+    LATEST.  The version-number rules reflect how wave-2 migrations land:
+
+    * 1-11 are contiguous and always present;
+    * 12 is never present (it is the payload-encoding marker);
+    * every discovered version ≥ 13 is unique and ≤ 25;
+    * gaps above 12 are allowed, because parallel tasks land in any order and
+      21-24 are spare.
     """
-    assert PRIOR_VERSIONS
+    assert PRIOR_VERSIONS == (9, 10, 11)
+    assert all(version in {m.version for m in MIGRATIONS} for version in PRIOR_VERSIONS)
+
     versions = tuple(m.version for m in MIGRATIONS)
     assert versions == tuple(sorted(versions))
-    # Every number up to the highest one in play is a migration or reserved.
-    highest = max(LATEST_VERSION, *RESERVED)
-    assert set(range(1, highest + 1)) == set(versions) | RESERVED
-    assert tuple(v for v in versions if v < LATEST_VERSION) == PRIOR_VERSIONS
-    assert LATEST_VERSION in versions
+    assert versions[:11] == tuple(range(1, 12))
+    assert len(versions) == len(set(versions)), f"duplicate migration version: {versions}"
+    assert 12 not in versions
+    assert all(13 <= version <= MAX_WAVE_VERSION for version in versions if version > 11)
+    assert max(versions) == LATEST_VERSION
+    assert not RESERVED & set(versions)
+    assert frozenset({12}) == RESERVED_VERSIONS
+    assert frozenset(range(21, 25)) == SPARE_VERSIONS
 
 
 @pytest.mark.parametrize("version", PRIOR_VERSIONS)

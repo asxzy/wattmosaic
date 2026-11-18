@@ -441,18 +441,22 @@ def test_migration_7_noops_when_create_table_already_has_the_columns(tmp_path: P
 
 
 def test_latest_schema_version_covers_every_migration() -> None:
-    """Migration numbers must stay 1..N with no gaps and no duplicates.
+    """Migration numbers are unique and ordered; 1-11 are contiguous.
 
     This is the guard for the defect that nearly shipped here: a branch added
     migration 7 while the main line had already shipped its own 7.  The two
     collided, ``apply_migrations`` skipped both, and the panel columns were
     never added -- so every topology write failed on a healthy-looking install.
-    A duplicate number fails here instead.
+    A duplicate number fails here instead.  Above 11, parallel wave-2 tasks may
+    land with gaps (21-24 are spare), so a strict 1..N rule no longer applies.
     """
     versions = [m.version for m in MIGRATIONS]
     assert len(versions) == len(set(versions)), f"duplicate migration version: {versions}"
-    assert versions == list(range(1, len(versions) + 1))
-    assert len(versions) == LATEST_VERSION
+    assert versions == sorted(versions)
+    assert versions[:11] == list(range(1, 12))
+    assert max(versions) == LATEST_VERSION
+    assert all(13 <= version <= 25 for version in versions if version > 11)
+    assert 12 not in versions
     assert LATEST_VERSION >= 8  # the panel identity columns
 
 

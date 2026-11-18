@@ -249,22 +249,24 @@ def test_the_published_registry_is_base_plus_migration_tiers() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _schema11_database(path: Path) -> Path:
-    """A schema-11 database with one row, built without ``Database``.
+def _database_at(path: Path, version: int = PRE_MIGRATION_VERSION) -> Path:
+    """A database stamped at ``version`` with one sentinel row, built without ``Database``.
 
     ``Database.__init__`` migrates immediately, so a plain connection is the only
-    way to produce a fixture that is genuinely *pre*-migration.
+    way to produce a fixture that is genuinely *pre*-migration.  The default is
+    the last released version (11); pass ``LATEST_VERSION`` for a genuinely
+    up-to-date database whose backup decision must be a no-op.
     """
     conn = sqlite3.connect(path)
     try:
         for migration in MIGRATIONS:
-            if migration.version > PRE_MIGRATION_VERSION:
+            if migration.version > version:
                 break
             for statement in migration.statements:
                 conn.execute(statement)
             if migration.apply is not None:
                 migration.apply(conn)
-        conn.execute(f"PRAGMA user_version = {PRE_MIGRATION_VERSION}")
+        conn.execute(f"PRAGMA user_version = {version}")
         conn.execute(
             "INSERT INTO engine_state(key, value, updated_at) VALUES('legacy', ?, ?)",
             (json.dumps({"kept": True}), NOW),
@@ -275,15 +277,28 @@ def _schema11_database(path: Path) -> Path:
     return path
 
 
+def _schema11_database(path: Path) -> Path:
+    """A schema-11 database with one row (the wave's migration-from fixture)."""
+    return _database_at(path, PRE_MIGRATION_VERSION)
+
+
 def _pending(monkeypatch: pytest.MonkeyPatch, *versions: int) -> None:
     """Make the constructor see exactly these migrations as pending."""
     pending = tuple(Migration(version=version, name=f"pending_{version}") for version in versions)
     monkeypatch.setattr(database_module, "pending_migrations", lambda conn: pending)
 
 
-def test_a_fresh_database_is_not_backed_up(tmp_path: Path) -> None:
-    """Nothing to lose, so no file is copied on a brand-new install."""
+def test_a_fresh_database_is_not_backed_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing to lose, so no file is copied on a brand-new install.
+
+    The migration must still be *pending* for the old code to have taken a
+    backup -- this guards the fresh-database skip specifically, not merely the
+    absence of a pending migration.
+    """
     path = tmp_path / "fresh.db"
+    _pending(monkeypatch, 13)
 
     db = Database(path)
     try:
@@ -293,9 +308,54 @@ def test_a_fresh_database_is_not_backed_up(tmp_path: Path) -> None:
     assert list(tmp_path.glob("*.bak")) == []
 
 
+def test_an_empty_file_is_not_backed_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A zero-byte file that predates init is not a usable rollback target."""
+    path = tmp_path / "empty.db"
+    path.write_bytes(b"")
+    _pending(monkeypatch, 13)
+
+    db = Database(path)
+    try:
+        assert db.backup_path is None
+    finally:
+        db.close()
+    assert list(tmp_path.glob("*.bak")) == []
+
+
+def test_an_unversioned_database_is_not_backed_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-existing file whose ``user_version`` is 0 has no data to restore."""
+    path = tmp_path / "unversioned.db"
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("CREATE TABLE partial (id INTEGER PRIMARY KEY)")
+        conn.commit()
+    finally:
+        conn.close()
+    assert path.stat().st_size > 0
+    verify = sqlite3.connect(path)
+    try:
+        assert int(verify.execute("PRAGMA user_version").fetchone()[0]) == 0
+    finally:
+        verify.close()
+    _pending(monkeypatch, 13)
+
+    db = Database(path)
+    try:
+        # A pending >=13 migration exists and the file predates init, yet an
+        # unversioned file is not a usable rollback target.
+        assert db.backup_path is None
+    finally:
+        db.close()
+    assert list(tmp_path.glob("*.bak")) == []
+
+
 def test_an_up_to_date_database_is_not_backed_up_on_every_start(tmp_path: Path) -> None:
     """The check runs on the pre-migration version, so a reopen copies nothing."""
-    path = _schema11_database(tmp_path / "current.db")
+    path = _database_at(tmp_path / "current.db", LATEST_VERSION)
     first = Database(path)
     try:
         assert first.backup_path is None
@@ -385,7 +445,9 @@ def test_a_real_v013_module_migrates_and_leaves_the_backup(
 
 def test_backup_rotation_keeps_the_newest_three(tmp_path: Path) -> None:
     """Five old backups collapse to the newest three; older ones are removed."""
-    path = _schema11_database(tmp_path / "rotate.db")
+    # The database is already at LATEST, so the constructor copies nothing and
+    # rotation of the five planted backups is what is under test here.
+    path = _database_at(tmp_path / "rotate.db", LATEST_VERSION)
     db = Database(path)
     try:
         assert BACKUP_KEEP == 3
@@ -443,3 +505,57 @@ def test_the_package_facade_reexports_the_released_migrations() -> None:
     assert storage.LATEST_VERSION == LATEST_VERSION == max(m.version for m in MIGRATIONS)
     assert [m.version for m in MIGRATIONS[:11]] == list(range(1, 12))
     assert migrations_module.AUDIT_TABLES  # declared beside the DDL that made them
+
+
+def test_a_v099_seam_probe_discovered_without_touching_the_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dummy high-numbered migration proves the version-agnostic seam.
+
+    The module is created in a temporary directory and injected by
+    monkeypatch -- never written under ``storage/migrations/``.  With it
+    discovered: a fresh database still is not backed up, an existing schema-11
+    database is backed up exactly once, and every test that asserts against
+    ``LATEST_VERSION`` continues to hold because that value tracks discovery.
+    """
+    directory = tmp_path / "migrations"
+    _write_module(
+        directory,
+        "v099_seam_probe.py",
+        statements=("CREATE TABLE v099_seam_probe (id INTEGER PRIMARY KEY)",),
+        tiers={"v099_seam_probe": "L4"},
+    )
+    discovered = discover_modules(directory)
+    assert [module.migration.version for module in discovered] == [99]
+
+    combined = (*MIGRATIONS, discovered[0].migration)
+    latest = max(migration.version for migration in combined)
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", combined)
+    monkeypatch.setattr(migrations_module, "LATEST_VERSION", latest)
+    monkeypatch.setattr(storage, "LATEST_VERSION", latest)
+
+    # Fresh database: migrate straight to the new latest, with no backup.
+    fresh = Database(tmp_path / "fresh.db")
+    try:
+        assert fresh.schema_version == latest
+        assert fresh.backup_path is None
+    finally:
+        fresh.close()
+    assert list(tmp_path.glob("*.bak")) == []
+
+    # Existing schema-11 database: backed up once before reaching the new latest.
+    upgrading = _schema11_database(tmp_path / "upgrading.db")
+    db = Database(upgrading)
+    try:
+        assert db.schema_version == latest
+        assert db.backup_path is not None and db.backup_path.exists()
+        assert db.backup_path.name.startswith(f"{upgrading.name}.pre-v099.")
+    finally:
+        db.close()
+    assert len(list(tmp_path.glob("*.bak"))) == 1
+
+    # Every discovered version is still unique, ≥ 13 (beyond 1-11) and ≤ 25 is
+    # not asserted here: 99 is a *test* probe, not a scheduled wave migration.
+    versions = [m.version for m in migrations_module.MIGRATIONS]
+    assert versions == sorted(versions)
+    assert len(versions) == len(set(versions))

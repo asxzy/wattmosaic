@@ -74,7 +74,7 @@ def _record(
 def test_a_fresh_database_reaches_the_latest_schema(tmp_path) -> None:
     db = Database(tmp_path / "fresh.db")
     try:
-        assert db.schema_version == LATEST_VERSION == 11
+        assert db.schema_version == LATEST_VERSION
         tables = {
             row["name"]
             for row in db._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")

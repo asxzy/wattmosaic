@@ -37,6 +37,7 @@ from wattmosaic_engine.storage.migrations import (
     LATEST_VERSION,
     MIGRATIONS,
     PAYLOAD_ENCODING_VERSION,
+    RESERVED_VERSIONS,
     apply_migrations,
     current_version,
 )
@@ -334,7 +335,6 @@ def test_latest_schema_includes_the_audit_tables(tmp_path) -> None:
     """Migrations 9 and 10 are additive audit state; config is unaffected."""
     db = Database(tmp_path / "audit_schema.db")
     try:
-        assert LATEST_VERSION == 11
         assert db.schema_version == LATEST_VERSION
         tables = {
             row["name"]
@@ -774,7 +774,6 @@ def test_prior_schema_database_migrates_and_loads(tmp_path) -> None:
     db = Database(path)
     try:
         assert db.schema_version == LATEST_VERSION
-        assert LATEST_VERSION == 11
         # The legacy configuration payload reads through the new decode path.
         loaded = db.load_device_configurations().by_device()["kitchen_lights"]
         assert loaded.notes == ["audited 2026-11-01", "five-bulb fixture"]
@@ -789,12 +788,14 @@ def test_prior_schema_database_migrates_and_loads(tmp_path) -> None:
 
 
 def test_the_payload_encoding_is_not_a_migration() -> None:
-    """The encoding is a write-path marker, so ``LATEST_VERSION`` stays at 11.
+    """The encoding is a write-path marker, so it is never a migration.
 
     A migration that only bumped ``user_version`` would advance the version on a
-    database whose bytes never changed, making ``schema_version`` a lie.
+    database whose bytes never changed, making ``schema_version`` a lie.  Its
+    number (12) is reserved and can be discovered as a gap between the released
+    migrations (1-11) and the wave-2 ones (13+).
     """
     assert PAYLOAD_ENCODING_VERSION == 12
-    assert LATEST_VERSION == 11
-    assert PAYLOAD_ENCODING_VERSION == LATEST_VERSION + 1
+    assert PAYLOAD_ENCODING_VERSION in RESERVED_VERSIONS
+    assert PAYLOAD_ENCODING_VERSION not in {m.version for m in MIGRATIONS}
     assert all(m.version <= LATEST_VERSION for m in MIGRATIONS)
