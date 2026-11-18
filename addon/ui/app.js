@@ -740,6 +740,21 @@
     return { health, status, snapshot, devices, residuals, mapping };
   }
 
+  // The 8s live poll only feeds updateOverviewLive(), which reads health,
+  // status, snapshot and devices.  /residuals and /mapping are expensive
+  // (the latter is an N+1 model read) and their results were discarded on
+  // every tick, so the timer never fetches them.  The Matrix tab calls
+  // /mapping itself when actually opened; the initial render uses fetchOverview.
+  async function fetchOverviewLive(signal) {
+    const [health, status, snapshot, devices] = await Promise.all([
+      get('/health', signal),
+      get('/status', signal).catch(() => null),
+      get('/snapshot', signal).catch(() => null),
+      get('/devices', signal).catch(() => []),
+    ]);
+    return { health, status, snapshot, devices };
+  }
+
   async function fetchDevice(deviceId, signal) {
     const [device, models] = await Promise.all([
       get(`/devices/${encodeURIComponent(deviceId)}`, signal),
@@ -4888,18 +4903,27 @@
   async function pollTick() {
     if (document.hidden) return;
     try {
-      const health = await get('/health');
-      state.lastHealth = health;
-      setConnection(health);
-      setFooter(health);
-      hideBanner();
       if (state.view === 'overview') {
-        // Refresh the data cards without tearing down the DOM (keeps focus and
-        // scroll position stable while values tick).
-        const { status, snapshot, devices } = await fetchOverview();
+        // Refresh only the values the live updater reads.  The poll used to
+        // call fetchOverview(), which also fetched /residuals and /mapping and
+        // then discarded both; the lightweight fetch skips those expensive
+        // endpoints on every 8s tick.
+        const { health, status, snapshot, devices } = await fetchOverviewLive();
+        state.lastHealth = health;
+        setConnection(health);
+        setFooter(health);
+        hideBanner();
         state.lastSnapshot = snapshot;
         state.lastDevices = devices;
         updateOverviewLive(health, status, snapshot, devices);
+      } else {
+        // Non-overview views still probe /health on the timer so the ingress
+        // session stays alive and a 401 is noticed promptly.
+        const health = await get('/health');
+        state.lastHealth = health;
+        setConnection(health);
+        setFooter(health);
+        hideBanner();
       }
     } catch (err) {
       setConnection(null, err);
