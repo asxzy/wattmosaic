@@ -1,0 +1,65 @@
+{
+  "additionalProperties": false,
+  "description": "An unmonitored/unknown-scope competitor on a branch row (HB \u00a78).",
+  "properties": {
+    "scope_reader_id": {
+      "title": "Scope Reader Id",
+      "type": "string"
+    },
+    "delta_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Delta W"
+    },
+    "point_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Point W"
+    },
+    "sigma_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Sigma W"
+    },
+    "profile_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Profile Id"
+    }
+  },
+  "required": [
+    "scope_reader_id"
+  ],
+  "title": "UnknownEstimate",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/unknown_estimate.json",
+  "x-contract-version": "2.4.0"
+}

@@ -1,0 +1,94 @@
+{
+  "additionalProperties": false,
+  "description": "Home-level balance with every term nullable (HB \u00a718).\n\n``main = identified + group + unknown + residual`` where identified sums\neach device once (AT-14).  ``balance_error_w`` is the signed mismatch and\nis ``None`` when any term is absent, never a fabricated zero.",
+  "properties": {
+    "main_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Main W"
+    },
+    "identified_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Identified W"
+    },
+    "group_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Group W"
+    },
+    "unknown_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Unknown W"
+    },
+    "residual_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Residual W"
+    },
+    "export_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Export W"
+    },
+    "meter_spread_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Meter Spread W"
+    }
+  },
+  "title": "ReconciliationV3",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/reconciliation_v3.json",
+  "x-contract-version": "2.4.0"
+}
