@@ -19,15 +19,21 @@ Pipeline
 7. Reconcile: ``unknown_residual = main - accounted`` and never redistribute.
 
 Nothing in this module mutates the topology or calls Home Assistant.
+
+Split (X02)
+-----------
+The heavy helpers now live in cohesive sibling modules.  ``infer`` below is the
+wiring; the module-level and private methods that used to hold the logic remain
+as thin delegating shims (so existing callers and test patches keep working).
+The new modules never import this one, so the dependency direction is one-way.
 """
 
 from __future__ import annotations
 
 import dataclasses
-import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 import numpy as np
@@ -35,96 +41,105 @@ import numpy as np
 from wattmosaic_engine.contracts import (
     CONTRACT_VERSION,
     InferenceResult,
-    LoadShape,
-    MeasurementBasis,
-    MonitoringLevel,
-    PowerBehavior,
-    PowerLevel,
-    PowerState,
     QualityStatus,
     Reconciliation,
     Source,
-    StageStatus,
     Topology,
-    TopologyStatus,
-    power_state_for,
 )
-from wattmosaic_engine.device_links import STATE_OVERRIDES_KEY
-from wattmosaic_engine.disaggregation.confidence import (
-    ConfidenceInputs,
-    compute_confidence,
-    event_isolation_score,
+
+# ``_PINNED_ZERO_W`` is an implementation detail of the solver now; import it
+# here so callers that reached in through ``engine`` keep seeing the same value.
+from wattmosaic_engine.disaggregation._shared import (
+    _PINNED_ZERO_W,
+    MODEL_MATCH_REL_TOL,
+    OFF_ATTRIBUTION_TOLERANCE_W,
+    OFF_STATES,
+    ON_STATES,
+    SOURCE_IDS,
+    UNKNOWN_STATES,
+    _is_off,
+    _is_on,
 )
-from wattmosaic_engine.disaggregation.configuration import (
-    EffectiveConfig,
-    configured_power,
-    effective_configs,
+from wattmosaic_engine.disaggregation.absolute_solve import (
+    _declared_leg_partner,
+    _exclude_partial_legs,
+    _solve_system,
+)
+from wattmosaic_engine.disaggregation.ambiguity import (
+    _detect_ambiguity,
+    _group_bounds,
+)
+from wattmosaic_engine.disaggregation.configuration import effective_configs
+from wattmosaic_engine.disaggregation.device_hierarchy import (
+    _fallback_result,
+    _infer_device,
+    _support_sigma,
+    _unknown_result,
 )
 from wattmosaic_engine.disaggregation.events import StepChange, StepTracker, detect_changes
-from wattmosaic_engine.disaggregation.tiers import TierInputs, grade
-from wattmosaic_engine.electrical.direct import DEFAULT_MAX_LEG_SKEW_S
-from wattmosaic_engine.electrical.main_power import (
-    MainPower,
-    main_power_w,
-    meter_spread_w,
+from wattmosaic_engine.disaggregation.ledger import _source_ledger
+from wattmosaic_engine.disaggregation.reconcile import (
+    _bound_configured_priors_by_row,
+    _reconcile,
 )
+from wattmosaic_engine.disaggregation.transitions import (
+    _anchor_steps,
+    _attribution_step,
+    _collect_transitions,
+    _device_state_overrides,
+    _device_step,
+    _normalize_overrides,
+    _row_siblings,
+    _siblings_held,
+    _state_text,
+    _Transition,
+    _transition_direction,
+)
+from wattmosaic_engine.electrical.direct import DEFAULT_MAX_LEG_SKEW_S
 from wattmosaic_engine.electrical.matrix import MeasurementMatrix, build_measurement_matrix
 from wattmosaic_engine.electrical.models import ModelView, resolve_model
-from wattmosaic_engine.electrical.solver import (
-    Identifiability,
-    analyse_identifiability,
-    augment_with_unknown_slack,
-    solve_constrained_nnls,
-)
+from wattmosaic_engine.electrical.solver import Identifiability
 from wattmosaic_engine.electrical.topology import TopologyGraph, build_graph
 from wattmosaic_engine.electrical.window import CoercedWindow, coerce_window
 
-#: A device explicitly reported OFF must not be credited with more than this
-#: (or twice its modelled standby power) just because its circuit carries an
-#: unexplained load.
-OFF_ATTRIBUTION_TOLERANCE_W = 15.0
-
-#: A device the state declares OFF, with no stated standby draw, is pinned at
-#: zero.  The bounded solver requires ``lower < upper`` strictly, so the cap is
-#: the smallest positive float that still behaves as zero at any realistic watt
-#: magnitude rather than a literal ``0.0``.
-_PINNED_ZERO_W = 1e-9
-
-#: Relative tolerance when comparing a solved value with a modelled value.
-MODEL_MATCH_REL_TOL = 0.40
-
-ON_STATES = {
-    "on",
-    "running",
-    "heating",
-    "cooling",
-    "active",
-    "open",
-    "playing",
-    "washing",
-    "drying",
-    "cleaning",
-}
-#: States that positively indicate no *active* operation.  ``unavailable`` and
-#: ``unknown`` are deliberately excluded: they mean "we do not know", not "off",
-#: and treating them as OFF would silently pin a device to zero.
-OFF_STATES = {"off", "idle", "standby", "closed", "paused", "none"}
-UNKNOWN_STATES = {"unavailable", "unknown", ""}
-
-#: The seven evidence sources REQ-DISAGG-001 names, in publication order.  Every
-#: inference result publishes a ledger over exactly these ids, so a consumer can
-#: tell "source was used" from "source was available but unused" without reading
-#: the engine.  ``topology`` is the structural source a solve cannot run without,
-#: so it is always present and always used.
-SOURCE_IDS: tuple[str, ...] = (
-    "ha_state",
-    "ha_attributes",
-    "smart_plug_measurement",
-    "ct_measurement",
-    "topology",
-    "residual_events",
-    "learned_models",
-)
+# Re-exports kept for backwards compatibility with callers that imported these
+# names from ``engine`` before the X02 split.  Their definitions now live in the
+# cohesive sibling modules; these aliases are the same objects, not copies.
+__all__ = [
+    "DisaggregationEngine",
+    "InferenceBatch",
+    "MODEL_MATCH_REL_TOL",
+    "OFF_ATTRIBUTION_TOLERANCE_W",
+    "OFF_STATES",
+    "ON_STATES",
+    "SOURCE_IDS",
+    "UNKNOWN_STATES",
+    "_PINNED_ZERO_W",
+    "_Transition",
+    "_anchor_steps",
+    "_attribution_step",
+    "_collect_transitions",
+    "_declared_leg_partner",
+    "_detect_ambiguity",
+    "_device_state_overrides",
+    "_device_step",
+    "_exclude_partial_legs",
+    "_fallback_result",
+    "_group_bounds",
+    "_infer_device",
+    "_is_off",
+    "_is_on",
+    "_normalize_overrides",
+    "_reconcile",
+    "_row_siblings",
+    "_siblings_held",
+    "_solve_system",
+    "_source_ledger",
+    "_state_text",
+    "_support_sigma",
+    "_transition_direction",
+    "_unknown_result",
+]
 
 
 @dataclass(slots=True)
@@ -138,524 +153,6 @@ class InferenceBatch:
 
     def get(self, device_id: str) -> InferenceResult | None:
         return self.by_device().get(device_id)
-
-
-# --------------------------------------------------------------------------- #
-# Helpers
-# --------------------------------------------------------------------------- #
-
-
-def _state_text(device_states: Mapping[str, Any], device_id: str) -> str | None:
-    raw = device_states.get(device_id)
-    if raw is None:
-        return None
-    if isinstance(raw, str):
-        return raw
-    state = getattr(raw, "state", None)
-    return None if state is None else str(state)
-
-
-def _normalize_overrides(raw: Any) -> dict[str, str]:
-    """``{"Heating": "on", "Cooling": "off"}`` -> lowercase, validated."""
-    if not isinstance(raw, Mapping):
-        return {}
-    out: dict[str, str] = {}
-    for label, meaning in raw.items():
-        key = str(label).strip().lower()
-        value = str(meaning).strip().lower()
-        if key and value in {"on", "off"}:
-            out[key] = value
-    return out
-
-
-def _device_state_overrides(topology: Topology) -> dict[str, dict[str, str]]:
-    """``device_id -> {label: on|off}`` declared in the device's metadata.
-
-    The global ``ON_STATES``/``OFF_STATES`` sets are a good default, but a single
-    global meaning cannot describe every integration.  A spa in a typical
-    installation reports ``Cooling`` while drawing 22 W and ``Heating`` while
-    drawing 4.5 kW; the global set treats ``cooling`` as ON, which would make the
-    engine believe a 22 W standby state is a 4.5 kW heater.  Overrides are
-    *declarative*, per device, and derived from measured power levels — never
-    guessed from the label text alone.
-    """
-    out: dict[str, dict[str, str]] = {}
-    for device in topology.devices:
-        metadata = device.metadata if isinstance(device.metadata, Mapping) else {}
-        overrides = _normalize_overrides(metadata.get(STATE_OVERRIDES_KEY))
-        if overrides:
-            out[device.device_id] = overrides
-    return out
-
-
-def _state_meaning(state: str | None, overrides: Mapping[str, str] | None = None) -> str | None:
-    """``"on"``, ``"off"`` or ``None`` (unknown), honouring per-device overrides."""
-    if state is None:
-        return None
-    key = state.strip().lower()
-    if overrides:
-        override = overrides.get(key)
-        if override is not None:
-            return override
-    if key in ON_STATES:
-        return "on"
-    if key in OFF_STATES:
-        return "off"
-    return None
-
-
-def _is_on(state: str | None, overrides: Mapping[str, str] | None = None) -> bool:
-    return _state_meaning(state, overrides) == "on"
-
-
-def _is_off(state: str | None, overrides: Mapping[str, str] | None = None) -> bool:
-    return _state_meaning(state, overrides) == "off"
-
-
-def _transition_direction(
-    previous: str | None,
-    new: str | None,
-    overrides: Mapping[str, str] | None = None,
-) -> str | None:
-    if previous is None and new is None:
-        return None
-    if previous is None:
-        return "activation" if _is_on(new, overrides) else None
-    if new is None:
-        return "deactivation" if _is_on(previous, overrides) else None
-    if _is_on(new, overrides) and _is_off(previous, overrides):
-        return "activation"
-    if _is_off(new, overrides) and _is_on(previous, overrides):
-        return "deactivation"
-    if _is_on(new, overrides) and not _is_on(previous, overrides):
-        return "activation"
-    if _is_off(new, overrides) and not _is_off(previous, overrides):
-        return "deactivation"
-    return None
-
-
-@dataclass(frozen=True, slots=True)
-class _Transition:
-    device_id: str
-    previous: str | None
-    new: str | None
-    at: datetime | None
-    direction: str | None
-    #: True only when ``at`` is the instant HA reported the state change.
-    #: Transitions inferred from the previous cycle's snapshot also carry a
-    #: timestamp (``window.at``), but that is when we *looked*, not when the
-    #: device switched, so it must never be used to anchor CT step detection.
-    anchored: bool = False
-
-    def as_dict(self) -> dict[str, object]:
-        return {
-            "device_id": self.device_id,
-            "previous_state": self.previous,
-            "new_state": self.new,
-            "occurred_at": None if self.at is None else self.at.isoformat(),
-            "direction": self.direction,
-            "anchored": self.anchored,
-        }
-
-
-def _collect_transitions(
-    window: CoercedWindow,
-    device_states: Mapping[str, Any],
-    overrides: Mapping[str, Mapping[str, str]] | None = None,
-) -> dict[str, _Transition]:
-    overrides = overrides or {}
-    out: dict[str, _Transition] = {}
-    for item in window.state_transitions:
-        if isinstance(item, Mapping):
-            did = item.get("device_id")
-            prev = item.get("previous_state", item.get("old_state"))
-            new = item.get("new_state", item.get("state"))
-            at = item.get("occurred_at", item.get("timestamp"))
-        else:
-            did = getattr(item, "device_id", None)
-            prev = getattr(item, "previous_state", None)
-            new = getattr(item, "new_state", None)
-            at = getattr(item, "occurred_at", getattr(item, "timestamp", None))
-        if not did:
-            continue
-        if not isinstance(at, datetime):
-            at = None
-        out[str(did)] = _Transition(
-            device_id=str(did),
-            previous=None if prev is None else str(prev),
-            new=None if new is None else str(new),
-            at=at,
-            direction=_transition_direction(
-                None if prev is None else str(prev),
-                None if new is None else str(new),
-                overrides.get(str(did)),
-            ),
-            anchored=at is not None,
-        )
-    # Derive transitions from previous_states vs current device_states.
-    for did in device_states:
-        current = _state_text(device_states, did)
-        previous = window.previous_states.get(did)
-        if did in out or previous is None:
-            continue
-        if current is None or current == previous:
-            continue
-        out[did] = _Transition(
-            device_id=did,
-            previous=previous,
-            new=current,
-            at=window.at,
-            direction=_transition_direction(previous, current, overrides.get(did)),
-            anchored=False,
-        )
-    return out
-
-
-def _device_step(
-    graph: TopologyGraph,
-    device_id: str,
-    steps: Mapping[str, StepChange],
-) -> StepChange | None:
-    """Best detected step on a CT that observes ``device_id``."""
-    candidates = [
-        steps[cid]
-        for cid in graph.device_channels(device_id)
-        if cid in steps and steps[cid].detected
-    ]
-    if not candidates:
-        return None
-
-    def rank(step: StepChange) -> tuple[int, float]:
-        t = graph.channels.get(step.channel_id)
-        kind = str(t.ct_type) if t else "unknown"
-        specificity = 1 if kind == "branch" else 2
-        return (specificity, -abs(step.delta_w))
-
-    return sorted(candidates, key=rank)[0]
-
-
-def _attribution_step(
-    graph: TopologyGraph,
-    device_id: str,
-    steps: Mapping[str, StepChange],
-) -> StepChange | None:
-    """Best detected step on a row that *attributes* this device.
-
-    Deliberately narrower than :func:`_device_step`.  A device is also observed
-    by its enclosing mains, but a step on a main may have been produced by any
-    other circuit in the panel, so it cannot be attributed to this device.  Only
-    the device's own attribution rows may speak for it (ADR-0026).
-    """
-    candidates = [
-        steps[cid]
-        for cid in graph.attribution_ct_ids(device_id)
-        if cid in steps and steps[cid].detected
-    ]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda step: abs(step.delta_w))
-
-
-def _row_siblings(graph: TopologyGraph, device_id: str) -> tuple[str, ...]:
-    """Other devices that share at least one of this device's attribution rows."""
-    rows = set(graph.attribution_ct_ids(device_id))
-    if not rows:
-        return ()
-    topology = graph.topology
-    out = [
-        other.device_id
-        for other in topology.devices
-        if other.device_id != device_id
-        and rows.intersection(other.branch_ct_ids)
-    ]
-    return tuple(out)
-
-
-def _siblings_held(
-    graph: TopologyGraph,
-    device_id: str,
-    transitions: Mapping[str, _Transition],
-) -> bool:
-    """True when no other device on this device's rows changed state.
-
-    This is the condition the delta rule needs, and it is deliberately weaker
-    than ADR-0023's "every sibling is positively OFF".  A sibling may well be
-    running; all that matters is that it did *not* change in this window, because
-    then the measured step on the row belongs to the device that did change.
-    A sibling whose state is unknown is not evidence of instability, but a
-    sibling that visibly changed is evidence against attribution.
-    """
-    for sibling in _row_siblings(graph, device_id):
-        transition = transitions.get(sibling)
-        if transition is not None and transition.direction is not None:
-            return False
-    return True
-
-
-def _state_power(model: ModelView | None, state: str | None) -> float | None:
-    if model is None:
-        return None
-    value = model.power_for_state(state)
-    if value is not None:
-        return value
-    # The aggregate ``estimated_power_w`` is a fallback for a state the model does
-    # not describe -- but never for a state that positively says the device is
-    # off.  A model with no ``off_power_w``/``standby_power_w`` returns ``None``
-    # for "off", and substituting the aggregate estimate there reported an OFF
-    # device as drawing its full running power.  That is the same fabrication as
-    # crediting a whole CT row to one lamp: a number that looks measured and is
-    # not.  "No model value for this state" is the honest answer.
-    normalized = (state or "").strip().lower()
-    if normalized in {"off", "idle", "standby", "closed", "paused", "unavailable", "unknown"}:
-        return None
-    if model.estimated_power_w is not None:
-        return float(model.estimated_power_w)
-    return None
-
-
-def _measured_level(
-    metadata: Mapping[str, object] | None, device_id: str
-) -> float | None:
-    """Measured dimmer output for one device, or ``None`` when not reported.
-
-    The facade collects each device's control value from its declared state
-    entity and publishes it under ``metadata["device_levels"]``.  This reads it
-    back per device and refuses anything that is not a finite number: a level is
-    a fraction of full scale, and a malformed one must degrade to "not reported"
-    rather than to some arbitrary wattage.
-
-    Range handling is deliberately *not* repeated here.  ``interpolate_curve``
-    already clamps to the measured points -- because extrapolating past what was
-    observed would invent watts -- and that behaviour is tested there.  A second
-    clamp here could drift from it, and neither copy would be provably
-    load-bearing.
-    """
-    levels = (metadata or {}).get("device_levels")
-    if not isinstance(levels, Mapping):
-        return None
-    raw = levels.get(device_id)
-    if raw is None:
-        return None
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(value):
-        return None
-    return value
-
-
-def _basis_value(basis: Any) -> str:
-    return str(getattr(basis, "value", basis))
-
-
-def _source_ledger(
-    *,
-    graph: TopologyGraph,
-    window: CoercedWindow,
-    matrix: MeasurementMatrix,
-    models: Mapping[str, ModelView | None],
-    results: Sequence[InferenceResult],
-    diagnostics: Mapping[str, Any],
-    state_pinned: frozenset[str] | set[str] = frozenset(),
-    residual_events: Sequence[Any] | None = None,
-) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    """Name every source used and every source available but unused, with a reason.
-
-    This helper is pure: it reads the same structures ``infer`` already built and
-    changes none of them, so the ledger can never alter a power estimate.  "Used"
-    means this cycle's inference actually consumed the source; "unused" means the
-    source was available (present in the inputs or observed in the window) but
-    did not contribute, with a concrete code-derived reason read back off those
-    structures.  Neither list is fabricated, and both are always returned so a
-    consumer never confuses "no source named" with "field absent".
-    """
-    used: list[dict[str, str]] = []
-    unused: list[dict[str, str]] = []
-
-    # -- ha_state: a state transition or a changed previous-state snapshot. --
-    transitions = diagnostics.get("events") or []
-    changed = [e for e in transitions if e.get("direction")]
-    if changed:
-        used.append({"source": "ha_state", "reason": "state_transition_consumed"})
-    elif transitions:
-        unused.append(
-            {"source": "ha_state", "reason": "transition_without_direction_change"}
-        )
-    else:
-        unused.append({"source": "ha_state", "reason": "no_transition_in_window"})
-
-    # -- ha_attributes: measured device levels published by the facade. -------
-    levels = window.metadata.get("device_levels")
-    if isinstance(levels, Mapping) and levels:
-        reported = {str(k) for k in levels}
-        consumed = [
-            r.device_id
-            for r in results
-            if r.device_id in reported
-            and r.provenance.get("configuration_source") == "measured_dimming_curve"
-        ]
-        if consumed:
-            used.append(
-                {
-                    "source": "ha_attributes",
-                    "reason": "device_level_read_for:" + ",".join(sorted(consumed)),
-                }
-            )
-        else:
-            unused.append(
-                {
-                    "source": "ha_attributes",
-                    "reason": "level_reported_but_no_device_has_a_measured_curve",
-                }
-            )
-    else:
-        unused.append({"source": "ha_attributes", "reason": "no_device_level_attributes"})
-
-    # -- smart_plug_measurement / ct_measurement: per-row instrument basis. ---
-    excluded_rows = diagnostics.get("excluded_rows") or {}
-    active = set(diagnostics.get("active_rows") or ())
-    bases_present: dict[str, list[str]] = {}
-    bases_active: dict[str, list[str]] = {}
-    for cid in matrix.row_channel_ids:
-        channel = graph.channel(cid)
-        basis = _basis_value(getattr(channel, "measurement_basis", None))
-        if basis == "monitor_reported":
-            key = "smart_plug_measurement"
-        elif basis == "ct_measured":
-            key = "ct_measurement"
-        else:
-            continue
-        bases_present.setdefault(key, []).append(cid)
-        if cid in active:
-            bases_active.setdefault(key, []).append(cid)
-    for key, missing_reason in (
-        ("smart_plug_measurement", "no_smart_plug_rows"),
-        ("ct_measurement", "no_ct_measurement_rows"),
-    ):
-        present = bases_present.get(key, [])
-        if not present:
-            unused.append({"source": key, "reason": missing_reason})
-            continue
-        live = bases_active.get(key, [])
-        if live:
-            used.append(
-                {"source": key, "reason": "rows_in_fit:" + ",".join(sorted(live))}
-            )
-        else:
-            unused.append(
-                {
-                    "source": key,
-                    "reason": "row_excluded:" + ",".join(
-                        f"{cid}:{excluded_rows.get(cid, 'no_usable_measurement')}"
-                        for cid in sorted(present)
-                    ),
-                }
-            )
-
-    # -- topology: the graph is always present and consumed by the solve. ----
-    topology_reason = "graph_used_for_rows_and_identifiability"
-    problems = graph.validate()
-    if problems:
-        topology_reason += ";validation_problems:" + ",".join(sorted(problems))
-    used.append({"source": "topology", "reason": topology_reason})
-
-    # -- residual_events: an optional caller-provided event stream, or the
-    # unexplained-residual fact the reconcile step recorded.  ----------------
-    if residual_events:
-        used.append(
-            {
-                "source": "residual_events",
-                "reason": "residual_events_consumed:" + str(len(list(residual_events))),
-            }
-        )
-    elif diagnostics.get("unexplained_residual_without_transition"):
-        used.append(
-            {
-                "source": "residual_events",
-                "reason": "unexplained_residual_recorded_not_fabricated",
-            }
-        )
-    elif changed:
-        unused.append(
-            {"source": "residual_events", "reason": "residual_explained_by_state_transition"}
-        )
-    else:
-        unused.append({"source": "residual_events", "reason": "no_residual_events"})
-
-    # -- learned_models: a resolved model that contributed a value. ----------
-    resolved = {d: v for d, v in (models or {}).items() if v is not None}
-    if not resolved:
-        unused.append({"source": "learned_models", "reason": "no_model_for_device"})
-    else:
-        used_ids = sorted(
-            {
-                r.device_id
-                for r in results
-                if r.source == Source.MODEL_ESTIMATED and r.model_id
-            }
-        )
-        if used_ids:
-            used.append(
-                {
-                    "source": "learned_models",
-                    "reason": "model_estimated_for:" + ",".join(used_ids),
-                }
-            )
-        unused_ids = sorted(set(resolved) - set(used_ids))
-        if unused_ids:
-            reason = "model_resolved_but_not_used_for:" + ",".join(unused_ids)
-            if state_pinned:
-                reason += ";device_pinned_by_state:" + ",".join(
-                    sorted(set(unused_ids) & set(state_pinned))
-                )
-            unused.append({"source": "learned_models", "reason": reason})
-
-    order = {name: i for i, name in enumerate(SOURCE_IDS)}
-    used.sort(key=lambda e: (order.get(e["source"], 99), e["source"]))
-    unused.sort(key=lambda e: (order.get(e["source"], 99), e["source"]))
-    return used, unused
-
-
-def _stage_for(model: ModelView | None, power_w: float) -> tuple[str | None, StageStatus]:
-    if model is None or not model.params.stages:
-        return (model.stage if model else None), StageStatus.UNKNOWN
-    best = None
-    best_distance = float("inf")
-    for stage in model.params.stages:
-        distance = abs(power_w - stage.power_mean_w)
-        if distance < best_distance:
-            best_distance = distance
-            best = stage
-    if best is None:
-        return None, StageStatus.UNKNOWN
-    tolerance = max(2.0 * best.power_std_w, 0.10 * max(abs(best.power_mean_w), 1.0))
-    if best_distance <= tolerance:
-        return best.name, StageStatus.PROBABLE
-    return best.name, StageStatus.UNKNOWN
-
-
-def _quality_from_age(age_s: float, quality: QualityStatus) -> QualityStatus:
-    if quality in (QualityStatus.MISSING, QualityStatus.BAD):
-        return quality
-    if age_s > 180.0:
-        return QualityStatus.STALE
-    if age_s > 30.0:
-        return QualityStatus.DEGRADED
-    return quality
-
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        out = float(value)
-    except (TypeError, ValueError):
-        return default
-    return out if math.isfinite(out) else default
-
-
-# --------------------------------------------------------------------------- #
-# Engine
-# --------------------------------------------------------------------------- #
 
 
 class DisaggregationEngine:
@@ -966,7 +463,9 @@ class DisaggregationEngine:
         )
 
     # ------------------------------------------------------------------ #
-    # Anchored step detection
+    # Delegating shims -- the logic now lives in cohesive sibling modules.
+    # These keep ``DisaggregationEngine._x`` patch points and direct callers
+    # working unchanged; ``infer`` above calls them exactly as before.
     # ------------------------------------------------------------------ #
     def _noise_floors(self, window: CoercedWindow) -> dict[str, float]:
         """Per-channel noise floor: the measured MAD where one exists.
@@ -993,6 +492,8 @@ class DisaggregationEngine:
             return floors
         for cid, value in raw.items():
             try:
+                import math
+
                 measured = float(value)
             except (TypeError, ValueError):
                 continue
@@ -1013,125 +514,20 @@ class DisaggregationEngine:
         noise_floors: Mapping[str, float] | None = None,
         diagnostics: dict[str, Any],
     ) -> dict[str, StepChange]:
-        """Confine CT steps to the instant HA says the device switched.
+        return _anchor_steps(
+            steps,
+            transitions,
+            graph,
+            window,
+            after_s=after_s,
+            cadence_s=cadence_s,
+            k_mad=self.k_mad,
+            min_delta_w=self.min_delta_w,
+            noise_floor_w=self.noise_floor_w,
+            noise_floors=noise_floors,
+            diagnostics=diagnostics,
+        )
 
-        ``steps`` is the unanchored scan.  It answers "did this channel move
-        somewhere in the buffered history", which is not the same question as
-        "did it move when this device switched".  On a real capture the two
-        differ by up to a minute: the CT cadence is 15.7 s and the engine runs
-        every 5 s, so a lamp switched on at t can be matched to a sister
-        circuit's step at t−47 s.
-
-        Every transition HA timestamped itself (``anchored``) gets a rescan of
-        exactly the channels that observe its device, restricted to
-        ``[at − after_s − cadence, at + after_s + cadence]``: one observation
-        window either side, which is the physical uncertainty of *when* a CT
-        published a step.  A step on one of those channels that lands outside
-        the window is discarded, because that channel's movement is not evidence
-        about this transition.
-
-        A transition derived from the previous cycle's snapshot carries no
-        instant -- only the time we looked -- so it anchors nothing and the
-        unanchored result stands for it.
-        """
-        if not steps:
-            return dict(steps)
-        anchored = {
-            did: t for did, t in transitions.items() if t.anchored and t.at is not None
-        }
-        if not anchored:
-            return dict(steps)
-        out = dict(steps)
-        multipliers = {cid: graph.multiplier_for(cid) for cid in window.readings}
-        # The anchored rescan must use the same per-channel floor as the
-        # unanchored scan.  Falling back to the scalar here would let a noisy
-        # channel pass the unanchored threshold and then fail (or vice versa) in
-        # the rescan, so a step's detected-ness would depend on which path
-        # measured it.
-        floors = dict(noise_floors or {})
-        #: For each channel that observes an anchored transition, the instants it
-        #: is allowed to have stepped at.  A channel shared by several devices
-        #: (a branch or a main) is valid if *any* of its devices can explain it.
-        windows: dict[str, list[tuple[datetime, datetime]]] = {}
-        dropped: list[str] = []
-        skipped: list[str] = []
-        for did, transition in anchored.items():
-            at = transition.at
-            if at is None:  # pragma: no cover - filtered above
-                continue
-            lo = at - timedelta(seconds=after_s + cadence_s)
-            hi = at + timedelta(seconds=after_s + cadence_s)
-            channels = {
-                cid: window.readings[cid]
-                for cid in graph.device_channels(did)
-                if cid in window.readings
-            }
-            if not channels:
-                continue
-            try:
-                rescued = detect_changes(
-                    channels,
-                    window.at,
-                    before_s=after_s,
-                    after_s=after_s,
-                    k_mad=self.k_mad,
-                    min_delta_w=self.min_delta_w,
-                    noise_floor_w={
-                        cid: floors.get(cid, self.noise_floor_w) for cid in channels
-                    },
-                    multipliers={
-                        cid: multipliers[cid] for cid in channels if cid in multipliers
-                    },
-                    anchor=at,
-                    anchor_before_s=after_s,
-                    anchor_after_s=after_s,
-                    anchor_grace_s=cadence_s,
-                    cadence_s=cadence_s,
-                )
-            except ValueError:
-                # Naive/aware mismatch between the transition instant and the
-                # window.  The data cannot be anchored, so the unanchored scan
-                # stands rather than raising out of inference.
-                skipped.append(did)
-                continue
-            for cid in channels:
-                windows.setdefault(cid, []).append((lo, hi))
-                rescued_step = rescued.get(cid)
-                if rescued_step is not None and rescued_step.detected:
-                    out[cid] = rescued_step
-                elif cid not in rescued:
-                    # No candidate split at all near the transition: leave the
-                    # unanchored step in place for the window test below to
-                    # judge.
-                    continue
-                else:
-                    # A split exists but is below threshold.  That is evidence
-                    # the channel did *not* move at the transition, so an
-                    # unanchored step elsewhere cannot be cited for it.
-                    out.pop(cid, None)
-                    dropped.append(cid)
-        for cid, spans in windows.items():
-            step = out.get(cid)
-            if step is None or not step.detected:
-                continue
-            when = step.change_time
-            if any(lo <= when <= hi for lo, hi in spans):
-                continue
-            # The channel moved, but not when any device that observes it
-            # switched: the movement belongs to an unrelated load and citing it
-            # would credit one device with another circuit's power.
-            dropped.append(cid)
-            out.pop(cid, None)
-        if dropped:
-            diagnostics["anchored_steps_dropped"] = sorted(dropped)
-            diagnostics["warnings"].append("ct_step_outside_transition_anchor")
-        if skipped:
-            diagnostics["anchor_skipped_devices"] = sorted(skipped)
-        return out
-
-    # ------------------------------------------------------------------ #
-    # Solver plumbing
-    # ------------------------------------------------------------------ #
     def _exclude_partial_legs(
         self,
         matrix: MeasurementMatrix,
@@ -1140,74 +536,20 @@ class DisaggregationEngine:
         mask: np.ndarray,
         excluded: dict[str, str],
     ) -> None:
-        """Drop rows that are one leg of a declared pair whose other leg is unusable.
-
-        ``paired_ct_id`` declares that two CTs measure the two legs of *one*
-        circuit.  A leg alone is not a measurement of that circuit at half its
-        value -- it is a measurement of half of it at full scale, and no
-        coefficient in the model knows that.  Using the live leg while its
-        partner is stale silently halves the row target (the residual then
-        absorbs the missing half and looks like unknown load), and using both
-        when they are polling apart mixes two instants into one equation.
-
-        So a pair is usable only as a pair: both legs fresh, both within
-        ``max_leg_skew_s`` of each other.  Otherwise both rows are excluded and
-        the reason says why, which is what lets reconciliation report the power
-        as unknown instead of misattributing it.
-        """
-        if not mask.any():
-            return
-        rows = matrix.row_channel_ids
-        seen: set[str] = set()
-        for cid in rows:
-            partner = self._declared_leg_partner(graph, cid)
-            if partner is None:
-                continue
-            pair = cid if cid < partner else partner
-            if pair in seen:
-                continue
-            seen.add(pair)
-            # The partner must also be modelled as a row; if it is disabled or
-            # has no coefficients there is nothing to compare against.
-            i = matrix.row_index(cid)
-            k = matrix.row_index(partner)
-            if i is None or k is None:
-                continue
-            reasons: list[str] = []
-            for leg in (cid, partner):
-                reading = window.readings.get(leg)
-                if reading is None or not reading.is_usable(self.max_measurement_age_s):
-                    reasons.append(f"partial_leg_measurement:{leg}")
-            if not reasons:
-                a = window.readings[cid].age_s
-                b = window.readings[partner].age_s
-                if math.isfinite(a) and math.isfinite(b) and abs(a - b) > self.max_leg_skew_s:
-                    reasons.append(
-                        f"leg_skew_exceeded:{cid}:{partner}:"
-                        f"{abs(a - b):.1f}s>{self.max_leg_skew_s:.1f}s"
-                    )
-            if not reasons:
-                continue
-            reason = reasons[0]
-            for leg, row in ((cid, i), (partner, k)):
-                mask[row] = False
-                excluded.setdefault(leg, reason)
+        return _exclude_partial_legs(
+            matrix,
+            graph,
+            window,
+            mask,
+            excluded,
+            max_measurement_age_s=self.max_measurement_age_s,
+            max_leg_skew_s=self.max_leg_skew_s,
+            declared_leg_partner=_declared_leg_partner,
+        )
 
     @staticmethod
     def _declared_leg_partner(graph: TopologyGraph, ct_id: str) -> str | None:
-        """The reciprocal ``paired_ct_id`` partner of ``ct_id``, if any.
-
-        Reciprocity matters: a one-sided pointer is a discovery artefact, not a
-        declaration that the two channels are legs of the same circuit.
-        """
-        ch = graph.channel(ct_id)
-        partner_id = getattr(ch, "paired_ct_id", None) if ch is not None else None
-        if not partner_id:
-            return None
-        partner = graph.channel(partner_id)
-        if partner is None or getattr(partner, "paired_ct_id", None) != ct_id:
-            return None
-        return partner_id
+        return _declared_leg_partner(graph, ct_id)
 
     def _solve_system(
         self,
@@ -1219,361 +561,23 @@ class DisaggregationEngine:
         states: Mapping[str, str | None],
         diagnostics: dict[str, Any],
         state_overrides: Mapping[str, Mapping[str, str]] | None = None,
-        configs: Mapping[str, EffectiveConfig] | None = None,
+        configs: Any = None,
     ) -> dict[str, Any]:
-        state_overrides = state_overrides or {}
-        configs = configs or {}
-        prepared = matrix.prepare(window.readings)
-        n = len(device_ids)
-        idx = {d: j for j, d in enumerate(device_ids)}
-        mask = prepared.mask.copy()
-        excluded = dict(prepared.excluded_rows)
-
-        # Row usability: never use a stale/missing row.  Repeated rows are
-        # down-weighted because they are not fresh physical samples.
-        weights = np.array(matrix.row_weights, dtype=float)
-        for i, cid in enumerate(matrix.row_channel_ids):
-            reading = window.readings.get(cid)
-            if reading is None:
-                mask[i] = False
-                excluded.setdefault(cid, "missing_measurement")
-                continue
-            if not reading.is_usable(self.max_measurement_age_s):
-                mask[i] = False
-                if reading.age_s > self.max_measurement_age_s:
-                    excluded.setdefault(cid, "stale_measurement")
-                elif reading.quality in (QualityStatus.MISSING, QualityStatus.BAD):
-                    excluded.setdefault(cid, f"quality_{reading.quality}")
-                else:
-                    excluded.setdefault(cid, "unusable_measurement")
-                continue
-            if reading.repeated:
-                weights[i] *= 0.5
-
-        self._exclude_partial_legs(matrix, graph, window, mask, excluded)
-
-        A = np.array(matrix.A, dtype=float)
-
-        # Solve for every device that has at least one live coefficient.
-        # Everything else is left at zero.
-        solve_cols = [
-            j for j in range(n) if np.any(np.abs(A[:, j]) > 0)
-        ]
-        if not solve_cols:
-            solve_result = solve_constrained_nnls(
-                np.zeros((0, 0)), np.zeros(0), device_ids=[], analyse=True
-            )
-            ident = analyse_identifiability(A, list(device_ids))
-            return {
-                "x": {d: 0.0 for d in device_ids},
-                "index": idx,
-                "identifiability": ident,
-                "solve_result": solve_result,
-            }
-
-        A_sub = A[:, solve_cols]
-        y_sub = prepared.y
-        sub_ids = [device_ids[j] for j in solve_cols]
-
-        # Main CT rows get an explicit non-negative "unknown load" slack.  The
-        # main row then constrains the *sum* of known devices without forcing
-        # the fit to invent device power for unmodelled household load.  Rows the
-        # user declared shared get the same slack for the same reason (ADR-0011).
-        shared_rows: list[str] = []
-        for did, cfg in configs.items():
-            if not cfg.shared_unmodelled:
-                continue
-            for cid in graph.attribution_ct_ids(did):
-                if cid in matrix.row_channel_ids and cid not in shared_rows:
-                    shared_rows.append(cid)
-        A_aug, slack_names, slack_rows = augment_with_unknown_slack(
-            A_sub, matrix.row_channel_ids, matrix.row_kind, shared_rows=shared_rows
+        return _solve_system(
+            matrix,
+            graph,
+            window,
+            device_ids,
+            models,
+            states,
+            diagnostics,
+            state_overrides,
+            configs,
+            max_measurement_age_s=self.max_measurement_age_s,
+            max_leg_skew_s=self.max_leg_skew_s,
+            model_ridge=self.model_ridge,
         )
-        diagnostics["shared_rows_held_as_upper_bounds"] = shared_rows
-        n_sub = len(sub_ids)
-        row_has_support = np.array(
-            [np.any(np.abs(A_aug[i]) > 0) for i in range(A_aug.shape[0])]
-        )
-        for i, cid in enumerate(matrix.row_channel_ids):
-            if not row_has_support[i]:
-                mask[i] = False
-                if cid not in excluded:
-                    excluded[cid] = "row_without_device_support"
 
-        upper: list[float | None] = []
-        prior: list[float] = []
-        state_pinned: list[str] = []
-        for j in solve_cols:
-            did = device_ids[j]
-            view = models.get(did)
-            model_power = _state_power(view, states.get(did))
-            prior.append(0.0 if model_power is None else max(float(model_power), 0.0))
-            # An explicitly OFF device is a *state constraint*: it cannot draw
-            # more than its standby power.  Pinning it is what makes a shared
-            # branch identifiable (the other device then owns the remainder).
-            #
-            # The cap is derived from evidence, never from the solver's freedom:
-            #
-            # * a model or configuration that states a standby draw allows that
-            #   draw (plus the measurement tolerance) -- the device may genuinely
-            #   consume it while "off";
-            # * no stated standby means no evidence of *any* draw, so the cap is
-            #   exactly zero.
-            #
-            # Without the second rule the row was only bounded and the solve was
-            # under-determined: two devices on one branch CT returned an
-            # arbitrary 190/10 split and credited 10 W to a lamp the user had
-            # declared off.  Adding a tolerance floor "so standby can be
-            # measured" fabricated attribution out of the solver's least-norm
-            # tie-break, which is the one thing this project never does.
-            #
-            # A declared load signal is evidence in its own right (ADR-0012), so
-            # the constraint must not require a learnt model.  Without this, a
-            # shared circuit where every device is modelled only by its switch
-            # stayed permanently unidentifiable -- the state told us which lamps
-            # were dark and the engine ignored it.  The requirement is a
-            # *declared* load entity: an undeclared state key proves nothing.
-            cfg = configs.get(did)
-            has_load_signal = bool(cfg is not None and cfg.load_entity_ids)
-            if _is_off(states.get(did), state_overrides.get(did)) and (
-                view is not None or has_load_signal
-            ):
-                standby = 0.0
-                if view is not None:
-                    if view.params.standby_power_w is not None:
-                        standby = abs(float(view.params.standby_power_w))
-                    elif view.params.off_power_w is not None:
-                        standby = abs(float(view.params.off_power_w))
-                if standby <= 0.0 and cfg is not None and cfg.expected_standby_w is not None:
-                    standby = abs(float(cfg.expected_standby_w))
-                # No evidence of any draw means the cap really is zero.  The
-                # bounded solver requires a strictly positive interval, so an
-                # exact zero is expressed as the smallest representable cap and
-                # the device is reported as pinned at zero.
-                upper.append(
-                    2.0 * standby if standby > 0.0 else _PINNED_ZERO_W
-                )
-                state_pinned.append(did)
-                continue
-            # A model bound is a *prior*, never a cap on a measurement.  When
-            # the device is alone in its attribution row the CT is a direct
-            # observation of that device, so the measurement wins and no upper
-            # bound is applied.  Bounds only help where the device shares a row
-            # with others and would otherwise be free to absorb unknown load.
-            if view is None or view.upper_bound_w is None or _is_solo_row(matrix, j):
-                upper.append(None)
-            else:
-                upper.append(float(view.upper_bound_w))
-
-        # A shared row carries loads nobody declared, and the solver has no way
-        # to tell that surplus from a claimant's own draw: whichever column has
-        # the widest bound absorbs it.  Measured on the reference installation,
-        # ``lights_ct2`` peaked at 1 036 W while its three fixtures declared
-        # 243.6 / 112.3 / 112.7 W; with one fixture ON and its siblings
-        # positively OFF the whole row was credited to that one lamp -- 4.25x its
-        # declared draw, graded ``tier_3_measured``.
-        #
-        # A *declared* wattage is the one bound that can prevent this.  Like a
-        # state pin, it is user evidence rather than a learnt prior, so it is
-        # never widened by the relaxation pass below.  On a solo row the CT is
-        # still a direct observation of the device and the measurement wins.
-        declared_bound: list[str] = []
-        for k, did in enumerate(sub_ids):
-            cfg = configs.get(did)
-            if cfg is None or cfg.config_ceiling_w is None:
-                continue
-            j = solve_cols[k]
-            if _is_solo_row(matrix, j):
-                continue
-            if did in state_pinned:
-                continue
-            # The declaration wins over a learnt model's bound: both are
-            # evidence, but only the model's is explicitly revisable, and the
-            # user's stated wattage is the stronger claim.
-            upper[k] = float(cfg.config_ceiling_w)
-            declared_bound.append(did)
-        if declared_bound:
-            diagnostics["declared_ceiling_applied"] = sorted(declared_bound)
-
-        active_mask = mask & row_has_support
-        if not np.any(active_mask):
-            diagnostics["warnings"].append("no_usable_measurement_rows")
-        active_idx = np.flatnonzero(active_mask)
-
-        # A slack has no model, but it is still bounded by physics: because
-        # every device power is >= 0, the unknown part of a main row cannot
-        # exceed that row's measured value.  A finite bound also keeps the
-        # bounded solver well conditioned (no ``inf`` in the active bounds).
-        for row in slack_rows:
-            row_value = float(y_sub[row]) if row < len(y_sub) else 0.0
-            upper.append(max(0.0, row_value) + 1.0)
-        prior.extend([0.0] * len(slack_names))
-        all_ids = [*sub_ids, *slack_names]
-
-        if active_idx.size:
-            A_act = A_aug[active_idx] * weights[active_idx, None]
-            y_act = y_sub[active_idx] * weights[active_idx]
-            upper_arr = None
-            if any(u is not None for u in upper):
-                upper_arr = np.array(
-                    [np.inf if u is None else float(u) for u in upper], dtype=float
-                )
-            ridge = self.model_ridge
-            if ridge > 0 and not any(p > 0 for p in prior[:n_sub]):
-                ridge = 0.0
-            solve_result = solve_constrained_nnls(
-                A_act,
-                y_act,
-                device_ids=all_ids,
-                weights=None,
-                lower=0.0,
-                upper=upper_arr,
-                prior=prior if ridge > 0 else None,
-                ridge=ridge,
-                analyse=False,
-            )
-            # If a model bound made the fit materially worse than the CT rows
-            # allow, relax the bound and refit.  The measurement is trusted over
-            # the learnt model, and the relaxation is recorded explicitly.
-            #
-            # A *state* constraint is never relaxed.  "This lamp is off" is
-            # evidence, not a model prior, and the refit exists because the
-            # solver's least-norm tie-break otherwise invents a share for an
-            # unobserved device.  Relaxing it would reintroduce exactly the
-            # fabricated attribution the pin was added to prevent.
-            #
-            # A *declared* ceiling is treated the same way, for the same reason:
-            # the user said what the fixture draws, so a shared row reading more
-            # than that is evidence of undeclared load on the circuit, not
-            # evidence that the declaration was wrong.
-            if solve_result.at_upper_bound:
-                relaxable = (
-                    set(solve_result.at_upper_bound)
-                    - set(state_pinned)
-                    - set(declared_bound)
-                )
-                relaxed = [
-                    None if did in relaxable else u
-                    for did, u in zip(all_ids, upper, strict=False)
-                ]
-                if any(u is not None for u in relaxed[:n_sub]):
-                    relaxed_arr = np.array(
-                        [np.inf if u is None else float(u) for u in relaxed], dtype=float
-                    )
-                    relaxed_result = solve_constrained_nnls(
-                        A_act,
-                        y_act,
-                        device_ids=all_ids,
-                        weights=None,
-                        lower=0.0,
-                        upper=relaxed_arr,
-                        prior=prior if ridge > 0 else None,
-                        ridge=ridge,
-                        analyse=False,
-                    )
-                    if relaxed_result.weighted_residual_norm < (
-                        0.98 * solve_result.weighted_residual_norm
-                    ):
-                        diagnostics["warnings"].append("model_upper_bound_relaxed")
-                        # Report only what was actually relaxed.  A state-pinned
-                        # device keeps its cap even when another device in the
-                        # same solve gets a wider bound, so listing it here
-                        # would claim evidence was overridden when it was not.
-                        diagnostics.setdefault("relaxed_bounds", []).extend(
-                            sorted(relaxable)
-                        )
-                        solve_result = relaxed_result
-        else:
-            solve_result = solve_constrained_nnls(
-                np.zeros((0, len(all_ids))),
-                np.zeros(0),
-                device_ids=all_ids,
-                lower=0.0,
-                analyse=False,
-            )
-
-        # Identifiability is evaluated on the *device* columns of the same
-        # augmented system: nuisance slacks must not be allowed to hide a
-        # genuine device ambiguity, and device ambiguity must not be fabricated
-        # by the presence of the slack.
-        # Only rows that actually contribute to the fit may inform the
-        # identifiability analysis.  A row that was excluded for staleness or a
-        # missing nested child must not make a device look observable.
-        # Identifiability is assessed on the *free* columns only.  A device
-        # pinned by an explicit OFF state is fixed by an external constraint,
-        # not estimated, so it cannot be part of a null-space ambiguity.
-        pinned_set = set(state_pinned)
-        free_local = [k for k, did in enumerate(sub_ids) if did not in pinned_set]
-        ident_rows = np.flatnonzero(mask & row_has_support)
-        ident = analyse_identifiability(
-            A_aug[ident_rows][:, free_local + list(range(n_sub, len(all_ids)))],
-            [sub_ids[k] for k in free_local] + slack_names,
-            weights=weights[ident_rows],
-            n_device_columns=len(free_local),
-        )
-        diagnostics["excluded_rows"].update(excluded)
-        diagnostics["active_rows"] = [matrix.row_channel_ids[i] for i in active_idx]
-        diagnostics["unknown_slack"] = {
-            name.split(":", 1)[1]: float(solve_result.x[n_sub + k])
-            for k, name in enumerate(slack_names)
-            if k + n_sub < len(solve_result.x)
-        }
-
-        x = np.zeros(n)
-        for k, j in enumerate(solve_cols):
-            x[j] = float(solve_result.x[k]) if k < len(solve_result.x) else 0.0
-
-        # A declared ceiling "binds" only when it is both active *and* the row
-        # still carries power the solve could not place.  A lamp that genuinely
-        # draws exactly its declared wattage also sits at its upper bound, and
-        # that is a measurement, not a cap.  The difference is the residual: with
-        # unexplained power on the row, the number the solver returned is the
-        # declaration; with none, the row really did measure that much.
-        declared_ceiling_hit: set[str] = set()
-        if declared_bound and active_idx.size:
-            x_dev = np.array(
-                [float(solve_result.x[k]) for k in range(len(solve_result.x))],
-                dtype=float,
-            )
-            predicted = A_aug @ x_dev
-            for did in declared_bound:
-                k = sub_ids.index(did)
-                if did not in solve_result.at_upper_bound:
-                    continue
-                for row_index in active_idx:
-                    if abs(float(A_sub[row_index, k])) <= 0.0:
-                        continue
-                    leftover = float(y_sub[row_index] - predicted[row_index])
-                    tolerance = max(
-                        3.0,
-                        3.0 * float(matrix.row_sigma[row_index])
-                        if row_index < len(matrix.row_sigma)
-                        else 3.0,
-                    )
-                    if leftover > tolerance:
-                        declared_ceiling_hit.add(did)
-                        break
-        if declared_ceiling_hit:
-            diagnostics["declared_ceiling_hit"] = sorted(declared_ceiling_hit)
-
-        return {
-            "x": {d: float(x[idx[d]]) for d in device_ids},
-            "index": idx,
-            "identifiability": ident,
-            "solve_result": solve_result,
-            "active_rows": [matrix.row_channel_ids[i] for i in active_idx],
-            "state_pinned": state_pinned,
-            "at_upper_bound": set(solve_result.at_upper_bound),
-            # Devices whose value is the *declared* wattage rather than an
-            # observation: the row carried power beyond what the declaration
-            # allows, so the surplus is undeclared load.  Callers must not grade
-            # such a value as a measurement.
-            "declared_ceiling_hit": declared_ceiling_hit,
-        }
-
-    # ------------------------------------------------------------------ #
-    # Ambiguity
-    # ------------------------------------------------------------------ #
     def _detect_ambiguity(
         self,
         transitions: Mapping[str, _Transition],
@@ -1581,43 +585,7 @@ class DisaggregationEngine:
         ident: Identifiability,
         diagnostics: dict[str, Any],
     ) -> set[str]:
-        changed = [d for d, t in transitions.items() if t.direction is not None]
-        if len(changed) < 2:
-            # Ambiguity needs at least two claimants.  A *single* changed device
-            # that the measurements cannot separate is not ambiguous: there is
-            # nothing it could be confused with.  (An unexplained residual with
-            # no transition at all is flagged in ``_reconcile`` instead.)
-            return set()
-        unidentifiable = set(ident.unidentifiable)
-        ambiguous: set[str] = set()
-        groups: list[list[str]] = []
-        # Ambiguous when at least two devices that changed state cannot be
-        # separated by the measurements (null-space sharing).
-        for group in ident.ambiguous_groups:
-            members = [d for d in group if d in changed]
-            if len(members) >= 2:
-                groups.append(members)
-                ambiguous.update(members)
-        # Devices that changed but are unidentifiable for another reason.
-        unresolved = [d for d in changed if d in unidentifiable and d not in ambiguous]
-        if unresolved:
-            groups.append(unresolved)
-            ambiguous.update(unresolved)
-        if ambiguous:
-            diagnostics["ambiguity"] = {
-                "ambiguous": True,
-                "explanation": "ambiguous_concurrent_events",
-                "groups": groups,
-                "devices": sorted(ambiguous),
-                "changed_devices": sorted(changed),
-                "reason": (
-                    "concurrent state changes cannot be separated by the available "
-                    "CT rows (shared null space); power is left unattributed"
-                ),
-            }
-            diagnostics["warnings"].append("ambiguous_concurrent_events")
-        _ = graph
-        return ambiguous
+        return _detect_ambiguity(transitions, graph, ident, diagnostics)
 
     @staticmethod
     def _group_bounds(
@@ -1627,679 +595,32 @@ class DisaggregationEngine:
         window: CoercedWindow,
         models: Mapping[str, ModelView | None],
         states: Mapping[str, str | None],
-        configs: Mapping[str, EffectiveConfig],
+        configs: Any,
         active_rows: Sequence[str],
     ) -> tuple[float | None, float | None]:
-        """Honest floor and cap of an inseparable group's *sum*.
+        return _group_bounds(
+            members,
+            matrix=matrix,
+            window=window,
+            models=models,
+            states=states,
+            configs=configs,
+            active_rows=active_rows,
+        )
 
-        An ambiguous group is only observable through the total on its shared
-        attribution row, never through a per-device value.  ``min_w`` is the
-        largest wattage the members' own stated on-power says the group must
-        draw (clamped >= 0; zero when no on-power is stated).  ``max_w`` is that
-        shared row's measured capacity clipped by the members' stated upper
-        bounds.  No per-device watt is computed here: the caller attaches the
-        range to every member, whose ``power_w`` stays a 0.0 placeholder.
-        ``(None, None)`` means no evidence established a meaningful range.
-        """
-        active = set(active_rows)
-        floors: list[float] = []
-        stated_caps: list[float] = []
-        for did in members:
-            view = models.get(did)
-            cfg = configs.get(did)
-            floor = 0.0
-            if view is not None and view.params.on_power_w is not None:
-                floor = max(floor, max(float(view.params.on_power_w), 0.0))
-            if cfg is not None and cfg.expected_on_w is not None:
-                floor = max(floor, max(float(cfg.expected_on_w), 0.0))
-            # A device positively OFF is pinned at zero by an explicit state
-            # constraint, so it cannot raise the group's floor.
-            if _is_off(states.get(did)):
-                floor = 0.0
-            floors.append(floor)
-            cap: float | None = None
-            if view is not None and view.upper_bound_w is not None:
-                cap = max(float(view.upper_bound_w), 0.0)
-            if cfg is not None and cfg.config_ceiling_w is not None:
-                ceiling = max(float(cfg.config_ceiling_w), 0.0)
-                cap = ceiling if cap is None else min(cap, ceiling)
-            if cap is not None:
-                stated_caps.append(cap)
-
-        # Capacity of the tightest active attribution row that sees every member.
-        capacities: list[float] = []
-        for cid in matrix.row_channel_ids:
-            if cid not in active:
-                continue
-            row = matrix.row_index(cid)
-            if row is None:
-                continue
-            cols = [matrix.col_index(did) for did in members]
-            if any(col is None or abs(float(matrix.A[row, col])) <= 0.0 for col in cols):
-                continue
-            reading = window.readings.get(cid)
-            if reading is None:
-                continue
-            value = reading.signed_w()
-            if value is None:
-                continue
-            capacities.append(max(0.0, abs(float(value))))
-
-        upper: list[float] = list(stated_caps)
-        row_capacity = min(capacities) if capacities else None
-        if row_capacity is not None:
-            upper.append(row_capacity)
-        max_w = min(upper) if upper else None
-        min_w = max(floors) if any(f > 0.0 for f in floors) else None
-        if min_w is None and max_w is None:
-            return None, None
-        if min_w is None:
-            min_w = 0.0
-        if max_w is None:
-            max_w = min_w
-        # A stated floor can never exceed the cap; contradictory user evidence
-        # must resolve to the interval, not to an impossible range.
-        max_w = max(max_w, min_w)
-        return round(min_w, 6), round(max_w, 6)
-
-    # ------------------------------------------------------------------ #
-    # Per-device hierarchy
-    # ------------------------------------------------------------------ #
     def _infer_device(
         self,
         device_id: str,
-        *,
-        graph: TopologyGraph,
-        window: CoercedWindow,
-        model: ModelView | None,
-        state: str | None,
-        transition: _Transition | None,
-        step: StepChange | None,
-        attribution_step: StepChange | None = None,
-        siblings_stable: bool = False,
-        row_is_shared: bool = False,
-        fit_value: float | None,
-        identifiable: bool,
-        ambiguous: bool,
-        fit_at_ceiling: bool = False,
-        declared_ceiling_hit: bool = False,
-        state_overrides: Mapping[str, str] | None = None,
-        config: EffectiveConfig | None = None,
+        **kwargs: Any,
     ) -> InferenceResult:
-        discipline = graph.resolve(device_id)
-        topology_status = str(discipline.topology_status)
-        now = window.at
-        own_event = transition is not None and transition.direction is not None
-        concurrent_events = len(window.state_transitions)
-        monitoring = config.monitoring if config is not None else MonitoringLevel.UNKNOWN
-        behavior = config.behavior if config is not None else PowerBehavior.UNKNOWN
-        load_shape = config.load_shape if config is not None else LoadShape.UNKNOWN
-        # The device's declared standby/idle/active/transient envelope.  A pure
-        # computed property of ``EffectiveConfig`` (no ``__dict__`` on a frozen
-        # ``slots`` dataclass), so it is rebuilt here rather than cached.
-        profile = config.power_profile if config is not None else None
-        config_notes = list(config.notes) if config is not None else []
-        # A state value is only evidence when the topology declares a load entity
-        # for this device; an undeclared key in ``device_states`` proves nothing.
-        has_load_signal = bool(config is not None and config.load_entity_ids)
-        state_on = has_load_signal and _is_on(state, state_overrides)
-        state_off = has_load_signal and _is_off(state, state_overrides)
-        # Measured dimmer output for *this* device, when the control entity
-        # reported one.  ``None`` means "not reported", never "full brightness":
-        # a light that is merely ``on`` must not be read as 100 % output.
-        level = _measured_level(window.metadata, device_id)
-
-        def finish(
-            result: InferenceResult,
-            *,
-            model_corroborates: bool = False,
-            configured_prior: bool = False,
-            prior_reason: str = "",
-            measured_step: bool = False,
-            degraded: bool = False,
-        ) -> InferenceResult:
-            """Attach the evidence grade to a result without changing its score."""
-            tier, score, reasons = grade(
-                TierInputs(
-                    source=Source(result.source),
-                    monitoring=monitoring,
-                    behavior=behavior,
-                    state_says_on=state_on,
-                    state_says_off=state_off,
-                    has_declared_load_signal=has_load_signal,
-                    model_corroborates=model_corroborates,
-                    configured_prior=configured_prior,
-                    prior_reason=prior_reason,
-                    measured_step=measured_step,
-                    stale=result.measurement_age_seconds > self.max_measurement_age_s,
-                    degraded=degraded,
-                ),
-                result.confidence,
-            )
-            result.confidence = score
-            # ``use_enum_values`` only coerces on validation, not on assignment, so
-            # assign the plain value to keep every downstream consumer (API JSON,
-            # SQLite, comparisons) seeing the same string form.
-            result.confidence_tier = (
-                tier.value if hasattr(tier, "value") else str(tier)
-            )
-            result.monitoring_level = (
-                monitoring.value if hasattr(monitoring, "value") else str(monitoring)
-            )
-            result.power_behavior = (
-                behavior.value if hasattr(behavior, "value") else str(behavior)
-            )
-            # The declared load-shape class, published with the value so a
-            # consumer can read the axis without re-reading the configuration.
-            # A declaration only; never derived from the device name.
-            result.load_shape = (
-                load_shape.value  # type: ignore[assignment]
-                if hasattr(load_shape, "value")
-                else str(load_shape)
-            )
-            # The operating level of the value, derived from the device's declared
-            # power profile.  ``UNKNOWN`` is the honest fallback: a device with no
-            # declaration (or a value matching none of its stated levels) names no
-            # level rather than guessing one.  This is a separate axis from
-            # ``power_state`` below, which is provenance.
-            level = PowerLevel.UNKNOWN
-            if profile is not None:
-                level = profile.level_for(result.power_w)
-            result.power_level = (
-                level.value  # type: ignore[assignment]
-                if hasattr(level, "value")
-                else str(level)
-            )
-            # Derived, never independently settable: the label follows the
-            # source and the basis, so it cannot disagree with how the value
-            # was obtained.  ``use_enum_values`` coerces only on validation,
-            # so re-read both axes through the house ``Enum(...)`` idiom before
-            # deriving, and assign the member (``model_dump`` emits the string).
-            result.power_state = power_state_for(
-                Source(result.source), MeasurementBasis(result.measurement_basis)
-            )
-            result.tier_reasons = [*config_notes, *reasons]
-            return result
-
-        # ---------------- Level 2/3/4: nothing measured this device directly ----
-        explanation: list[str] = []
-        if own_event:
-            explanation.append(
-                "ha_state_transition_activation"
-                if transition and transition.direction == "activation"
-                else "ha_state_transition_deactivation"
-            )
-        if step is not None and own_event and transition is not None:
-            agrees = (
-                transition.direction == "activation" and step.delta_w > 0
-            ) or (transition.direction == "deactivation" and step.delta_w < 0)
-            if agrees:
-                explanation.append(
-                    "branch_power_increase" if step.delta_w > 0 else "branch_power_decrease"
-                )
-        if ambiguous:
-            explanation.append("ambiguous_concurrent_events")
-
-        supporting = [cid for cid in graph.device_channels(device_id)]
-        sigma = self._support_sigma(graph, supporting)
-        ages = [
-            window.readings[cid].age_s
-            for cid in supporting
-            if cid in window.readings
-        ]
-        qualities = [
-            window.readings[cid].quality
-            for cid in supporting
-            if cid in window.readings
-        ]
-        if not qualities:
-            qualities = [QualityStatus.MISSING]
-        if not ages:
-            ages = [float("inf")]
-        stale = any(a > self.max_measurement_age_s for a in ages)
-        repeated = any(
-            window.readings[cid].repeated
-            for cid in supporting
-            if cid in window.readings
-        )
-        quality = _quality_from_age(max(ages), _worst(qualities))
-        isolation = event_isolation_score(
-            own_event=own_event,
-            concurrent_events=concurrent_events,
-            ambiguous=ambiguous,
+        return _infer_device(
+            device_id,
+            max_measurement_age_s=self.max_measurement_age_s,
+            off_tolerance_w=self.off_tolerance_w,
+            noise_floor_w=self.noise_floor_w,
+            **kwargs,
         )
 
-        # Ambiguity wins over every estimate.
-        if ambiguous:
-            confidence = compute_confidence(
-                ConfidenceInputs(
-                    source=Source.UNKNOWN,
-                    measurement_qualities=qualities,
-                    measurement_ages_s=ages,
-                    supporting_ct_count=len(supporting),
-                    model_quality=0.0 if model is None else model.quality,
-                    event_isolation=isolation,
-                    topology_status=topology_status,
-                    residual_w=0.0,
-                    residual_sigma_w=sigma,
-                    stale=stale,
-                    ambiguous=True,
-                )
-            )
-            return finish(
-                self._unknown_result(
-                    device_id,
-                    now,
-                    confidence.score,
-                    quality,
-                    supporting,
-                    explanation,
-                    provenance={
-                        "ambiguity": "concurrent_events_not_separable",
-                        "confidence": confidence.as_dict(),
-                    },
-                ),
-                degraded=True,
-            )
-
-        fit = 0.0 if fit_value is None else max(float(fit_value), 0.0)
-        model_power = _state_power(model, state)
-        standby = 0.0
-        if model is not None and model.params.standby_power_w is not None:
-            standby = abs(float(model.params.standby_power_w))
-        off_tolerance = max(self.off_tolerance_w, 2.0 * standby)
-
-        # ---------------- Level 2a: measured step (ADR-0026) --------------
-        # A shared row cannot be split by linear algebra, but a *step* on it can
-        # be read: the row moved by exactly this many watts while this device
-        # changed state, and no other device on the row changed.  That movement
-        # is the device's draw, measured.
-        #
-        # This is deliberately weaker than ADR-0023's "the single ON claimant
-        # owns the row", which required every sibling to be positively OFF and
-        # therefore credited the whole circuit to one lamp whenever the fixture
-        # list was incomplete.  Here a sibling may be running; it only has to
-        # have held steady across the transition.
-        #
-        # Only an *activation* is attributed.  On a deactivation the step tells
-        # us what the device drew a moment ago, not what it draws now -- it is
-        # off, and reporting the step as its current power would both be wrong
-        # for the device page and double count against the row that already
-        # dropped.  The deactivation is marked in the explanation so the evidence
-        # is visible without being reported as present power.
-        step_w = 0.0
-        if (
-            attribution_step is not None
-            and row_is_shared
-            and siblings_stable
-            and has_load_signal
-            and transition is not None
-            and transition.direction == "activation"
-            and attribution_step.delta_w > 0.0
-            and not stale
-            and not state_off
-        ):
-            step_w = float(attribution_step.delta_w)
-            row_now = window.readings.get(attribution_step.channel_id)
-            row_value = None if row_now is None else row_now.signed_w()
-            if row_value is not None:
-                # The step is a change *on* the row, so it cannot be larger than
-                # the row itself.  Clamping here is a physics guard against a
-                # mis-scaled or mis-signed reading, not an estimate.
-                step_w = min(step_w, abs(float(row_value)))
-            # A stated wattage is a non-relaxable upper bound (ADR-0025), and it
-            # applies to a measured step exactly as it applies to a fit.  A
-            # 400 W step on a row whose lamp declares 50 W is not that lamp's
-            # 50 W lamp being measured; the surplus belongs to something else on
-            # the circuit, so the step is not this device's draw at all.
-            ceiling = None if config is None else config.config_ceiling_w
-            if ceiling is not None and step_w > float(ceiling):
-                explanation.append("step_exceeds_declared_wattage")
-                step_w = 0.0
-            if step_w > 0.0:
-                explanation.append("shared_circuit_step_measured")
-                if attribution_step.source == "previous_snapshot":
-                    explanation.append("step_from_previous_snapshot")
-                confidence = compute_confidence(
-                    ConfidenceInputs(
-                        source=Source.INFERRED,
-                        measurement_qualities=qualities,
-                        measurement_ages_s=ages,
-                        supporting_ct_count=len(
-                            _used_support(graph, device_id, supporting)
-                        ),
-                        model_quality=0.0 if model is None else model.quality,
-                        event_isolation=isolation,
-                        topology_status=topology_status,
-                        residual_w=0.0,
-                        residual_sigma_w=float(attribution_step.noise_w),
-                        repeated=repeated,
-                    )
-                )
-                stage, stage_status = _stage_for(model, step_w)
-                return finish(
-                    InferenceResult(
-                        device_id=device_id,
-                        timestamp=now,
-                        power_w=step_w,
-                        source=Source.INFERRED,
-                        confidence=confidence.score,
-                        model_id=None if model is None else model.model_id,
-                        model_version=None if model is None else model.version,
-                        operating_stage=stage,
-                        stage_status=stage_status,
-                        sample_count=0 if model is None else model.sample_count,
-                        quality_status=quality,
-                        measurement_age_seconds=max(ages) if ages else 0.0,
-                        supporting_ct_channels=[attribution_step.channel_id],
-                        explanation=explanation,
-                        provenance={
-                            "measured_step_w": step_w,
-                            "step_channel_id": attribution_step.channel_id,
-                            "step_before_w": attribution_step.before_w,
-                            "step_after_w": attribution_step.after_w,
-                            "step_threshold_w": attribution_step.threshold_w,
-                            "step_source": attribution_step.source,
-                            "siblings_stable": True,
-                            "siblings": list(_row_siblings(graph, device_id)),
-                            "confidence": confidence.as_dict(),
-                        },
-                        confidence_is_calibrated=False,
-                    ),
-                    measured_step=True,
-                )
-        if (
-            attribution_step is not None
-            and row_is_shared
-            and siblings_stable
-            and attribution_step.delta_w < 0.0
-            and transition is not None
-            and transition.direction == "deactivation"
-        ):
-            # Keep the measurement as evidence without reporting it as current
-            # power: the device is off, and the row that dropped has already
-            # dropped.  Echoing the step now would double count it against the
-            # row and claim the device is drawing when it is not.  The magnitude
-            # is recorded so learning can use it.
-            explanation.append("shared_circuit_step_measured_on_deactivation")
-
-        # ---------------- Level 2: inferred ------------------------------
-        # A row the user declared shared carries power that belongs to siblings we
-        # do not model.  The solver already protects the *sum* with a slack
-        # column, but a device within it must not absorb the remainder: that would
-        # report a lights circuit's whole draw as one lamp.  Such a value is only
-        # ever a bounded prior at Level 3b.  When the siblings *are* modelled the
-        # row is legitimately separable and inference is allowed.
-        shared_attribution_blocked = config is not None and config.shared_unmodelled
-        if shared_attribution_blocked:
-            explanation.append("shared_circuit_not_individually_measured")
-        # A fit pinned at the device's *declared* wattage is not a measurement of
-        # the device.  The solver reached the user's own number because the row
-        # carried more power than the declaration allows, so the surplus is
-        # undeclared load and the honest answer is the declaration itself, graded
-        # as a configured prior -- never "a CT measured it".
-        declared_bound_blocked = declared_ceiling_hit and config is not None
-        if declared_bound_blocked:
-            explanation.append("declared_wattage_bounds_row_attribution")
-        if (
-            identifiable
-            and not stale
-            and fit > 0.0
-            and not shared_attribution_blocked
-            and not declared_bound_blocked
-        ):
-            if _is_off(state, state_overrides) and (fit_at_ceiling or fit > off_tolerance):
-                # The circuit carries power, but this device says OFF.  Do not
-                # invent an attribution; preserve it as unknown residual.
-                explanation.append("unexplained_load_on_device_circuit")
-                confidence = compute_confidence(
-                    ConfidenceInputs(
-                        source=Source.UNKNOWN,
-                        measurement_qualities=qualities,
-                        measurement_ages_s=ages,
-                        supporting_ct_count=len(supporting),
-                        model_quality=0.0 if model is None else model.quality,
-                        event_isolation=isolation,
-                        topology_status=topology_status,
-                        residual_w=fit,
-                        residual_sigma_w=sigma,
-                        stale=stale,
-                    )
-                )
-                return finish(
-                    self._unknown_result(
-                        device_id,
-                        now,
-                        confidence.score,
-                        quality,
-                        supporting,
-                        explanation,
-                        provenance={
-                            "unexplained_power_w": fit,
-                            "reason": "device_reported_off",
-                            "confidence": confidence.as_dict(),
-                        },
-                    ),
-                    degraded=True,
-                )
-            explanation.append("constrained_nnls_fit")
-            if repeated:
-                explanation.append("repeated_state_update")
-            if model is not None and model_power is not None:
-                tolerance = max(MODEL_MATCH_REL_TOL * max(abs(model_power), 1.0), 25.0)
-                if abs(fit - model_power) <= tolerance:
-                    explanation.append("historical_model_match")
-                else:
-                    explanation.append("measurement_disagrees_with_model")
-            confidence = compute_confidence(
-                ConfidenceInputs(
-                    source=Source.INFERRED,
-                    measurement_qualities=qualities,
-                    measurement_ages_s=ages,
-                    supporting_ct_count=len(_used_support(graph, device_id, supporting)),
-                    model_quality=0.0 if model is None else model.quality,
-                    event_isolation=isolation,
-                    topology_status=topology_status,
-                    residual_w=0.0,
-                    residual_sigma_w=sigma,
-                    repeated=repeated,
-                )
-            )
-            stage, stage_status = _stage_for(model, fit)
-            agrees = (
-                model is not None
-                and model_power is not None
-                and abs(fit - model_power)
-                <= max(MODEL_MATCH_REL_TOL * max(abs(model_power), 1.0), 25.0)
-            )
-            return finish(
-                InferenceResult(
-                    device_id=device_id,
-                    timestamp=now,
-                    power_w=fit,
-                    source=Source.INFERRED,
-                    confidence=confidence.score,
-                    model_id=None if model is None else model.model_id,
-                    model_version=None if model is None else model.version,
-                    operating_stage=stage,
-                    stage_status=stage_status,
-                    sample_count=0 if model is None else model.sample_count,
-                    quality_status=quality,
-                    measurement_age_seconds=max(ages) if ages else 0.0,
-                    supporting_ct_channels=supporting,
-                    explanation=explanation,
-                    provenance={
-                        "fit_w": fit,
-                        "identifiable": True,
-                        "confidence": confidence.as_dict(),
-                    },
-                    confidence_is_calibrated=False,
-                ),
-                model_corroborates=agrees,
-                degraded=repeated or (config.shared_unmodelled if config else False),
-            )
-
-        # ---------------- Level 3: model estimate ------------------------
-        model_usable = (
-            model is not None
-            and model_power is not None
-            and (not _is_off(state, state_overrides) or model_power > 0.0)
-        )
-        if model_usable:
-            explanation.append("historical_model_match")
-            if not identifiable:
-                explanation.append("measurements_do_not_identify_device")
-            if stale:
-                explanation.append("stale_measurement")
-            if fit > 0.0 and identifiable:
-                explanation.append("model_below_detection_or_zero_fit")
-            confidence = compute_confidence(
-                ConfidenceInputs(
-                    source=Source.MODEL_ESTIMATED,
-                    measurement_qualities=qualities,
-                    measurement_ages_s=ages,
-                    supporting_ct_count=len(supporting),
-                    model_quality=model.quality,
-                    event_isolation=isolation,
-                    topology_status=topology_status,
-                    residual_w=abs(fit - float(model_power)) if fit else 0.0,
-                    residual_sigma_w=sigma,
-                    stale=stale,
-                    missing_rows=not supporting,
-                    ambiguous=False,
-                    repeated=repeated,
-                )
-            )
-            stage, stage_status = _stage_for(model, float(model_power))
-            return finish(
-                InferenceResult(
-                    device_id=device_id,
-                    timestamp=now,
-                    power_w=float(model_power),
-                    source=Source.MODEL_ESTIMATED,
-                    confidence=confidence.score,
-                    model_id=model.model_id,
-                    model_version=model.version,
-                    operating_stage=stage,
-                    stage_status=stage_status,
-                    sample_count=model.sample_count,
-                    quality_status=quality,
-                    measurement_age_seconds=0.0 if not ages else max(ages),
-                    supporting_ct_channels=supporting,
-                    explanation=explanation,
-                    provenance={
-                        "model_power_w": float(model_power),
-                        "identifiable": False,
-                        "fit_w": fit,
-                        "confidence": confidence.as_dict(),
-                    },
-                    confidence_is_calibrated=False,
-                )
-            )
-
-        # ---------- Level 3b: configured prior (ADR-0011) ----------------
-        # Nothing measured or modelled this device, but the user has stated a
-        # watt value and the device's own control signal says it is running.
-        # This is a *bounded prior*, weaker than any measurement: it may explain
-        # part of the residual but it never claims to have observed anything.
-        # A shared circuit with unmodelled siblings is exactly the case this
-        # exists for: the CT row includes neighbours, so it cannot be attributed,
-        # yet a declared ``on_w`` is honest knowledge worth reporting.
-        prior_power = None
-        prior_reason = ""
-        if config is not None and not state_off:
-            resolved = configured_power(
-                config, state, state_is_on=state_on, level=level
-            )
-            if resolved is not None:
-                prior_power, prior_reason = resolved
-        if prior_power is not None and prior_power > 0.0:
-            explanation.append(prior_reason)
-            if config is not None and config.shared_unmodelled:
-                explanation.append("shared_circuit_not_attributable_from_ct")
-            if config is not None and config.expected_standby_w:
-                prior_power = max(float(prior_power), float(config.expected_standby_w))
-            confidence = compute_confidence(
-                ConfidenceInputs(
-                    source=Source.CONFIGURED_PRIOR,
-                    measurement_qualities=qualities,
-                    measurement_ages_s=ages,
-                    supporting_ct_count=0,
-                    model_quality=0.0 if model is None else model.quality,
-                    event_isolation=isolation,
-                    topology_status=topology_status,
-                    residual_w=0.0,
-                    residual_sigma_w=sigma,
-                    stale=stale,
-                    missing_rows=not supporting,
-                    repeated=repeated,
-                )
-            )
-            return finish(
-                InferenceResult(
-                    device_id=device_id,
-                    timestamp=now,
-                    power_w=float(prior_power),
-                    source=Source.CONFIGURED_PRIOR,
-                    confidence=confidence.score,
-                    sample_count=0 if model is None else model.sample_count,
-                    quality_status=quality,
-                    measurement_age_seconds=0.0 if not ages else max(ages),
-                    supporting_ct_channels=supporting,
-                    explanation=explanation,
-                    provenance={
-                        "configured_power_w": float(prior_power),
-                        "configuration_source": prior_reason,
-                        "fit_w": fit,
-                        "confidence": confidence.as_dict(),
-                    },
-                    confidence_is_calibrated=False,
-                ),
-                configured_prior=True,
-                prior_reason=prior_reason,
-                degraded=stale,
-            )
-
-        # ---------------- Level 4: unknown -------------------------------
-        if identifiable and stale:
-            explanation.append("stale_measurement")
-        elif not identifiable:
-            explanation.append("insufficient_independent_measurements")
-        if config is not None and config.mode_entity_ids:
-            explanation.append("only_mode_signals_declared")
-        if not explanation:
-            explanation.append("insufficient_evidence")
-        confidence = compute_confidence(
-            ConfidenceInputs(
-                source=Source.UNKNOWN,
-                measurement_qualities=qualities,
-                measurement_ages_s=ages,
-                supporting_ct_count=len(supporting),
-                model_quality=0.0 if model is None else model.quality,
-                event_isolation=isolation,
-                topology_status=topology_status,
-                residual_w=0.0,
-                residual_sigma_w=sigma,
-                stale=stale,
-                repeated=repeated,
-            )
-        )
-        return finish(
-            self._unknown_result(
-                device_id,
-                now,
-                confidence.score,
-                quality,
-                supporting,
-                explanation,
-                provenance={"fit_w": fit, "confidence": confidence.as_dict()},
-            ),
-            degraded=stale or repeated,
-        )
-
-    # ------------------------------------------------------------------ #
-    # Reconciliation
-    # ------------------------------------------------------------------ #
     def _bound_configured_priors_by_row(
         self,
         graph: TopologyGraph,
@@ -2307,113 +628,13 @@ class DisaggregationEngine:
         results: Sequence[InferenceResult],
         diagnostics: dict[str, Any],
     ) -> None:
-        """Bound configured priors by the power their own row actually carries.
-
-        ADR-0025 bounds each claimant *individually*: a lamp declaring 150 W is
-        never credited more than 150 W.  ADR-0026 bounds a *measured step* by the
-        row's own reading.  Level 3b had neither, so a declaration was reported
-        whenever its device's state said "on", whether or not the circuit carried
-        that much.  Three fixtures declaring 60 + 120 + 240 W therefore reported
-        420 W on a 58 W circuit, and because a ``configured_prior`` is subtracted
-        from the whole-home residual exactly like a measurement, the surplus
-        silently reduced the unknown load -- driving the residual negative when
-        the declarations were large enough.
-
-        A prior is the weakest evidence the engine has.  It may explain part of a
-        row; the part that does not fit is undeclared load and stays in the
-        residual.  Only ``CONFIGURED_PRIOR`` results are touched: a direct
-        reading is an observation, a fit was already constrained by the solver,
-        and a model estimate is a separate evidence class.
-
-        The row is shared out **in proportion to what each claimant declared**, so
-        no single declaration silently absorbs another device's share.  A row with
-        no usable reading, or a stale one, is left alone: there is no present
-        capacity to compare against, and substituting an out-of-date number would
-        trade one wrong value for another.
-
-        Devices are grouped by their *own* attribution row set rather than per CT,
-        because a double-pole device legitimately sits on two legs -- treating the
-        legs independently would clip it once per leg.
-        """
-        priors = [
-            result
-            for result in results
-            if result.source == Source.CONFIGURED_PRIOR and result.power_w > 0.0
-        ]
-        if not priors:
-            return
-        by_device = {result.device_id: result for result in results}
-
-        # Power already attributed to a row by any source other than a prior.
-        # A prior may only spend what is left: the fit and any measurement have
-        # first claim on the row they observed.
-        claimed: dict[str, float] = {}
-        for result in results:
-            if result.source == Source.CONFIGURED_PRIOR or result.power_w <= 0.0:
-                continue
-            for cid in graph.attribution_ct_ids(result.device_id):
-                claimed[cid] = claimed.get(cid, 0.0) + float(result.power_w)
-
-        # Group by the tuple of rows the device attributes through.
-        groups: dict[tuple[str, ...], list[str]] = {}
-        for result in priors:
-            rows = tuple(graph.attribution_ct_ids(result.device_id))
-            if rows:
-                groups.setdefault(rows, []).append(result.device_id)
-        if not groups:
-            return
-
-        bounded: dict[str, float] = {}
-        for rows, device_ids in groups.items():
-            capacity = 0.0
-            usable = True
-            for cid in rows:
-                reading = window.readings.get(cid)
-                if reading is None:
-                    usable = False
-                    break
-                # A stale row says nothing about what the circuit carries *now*.
-                if reading.age_s > self.max_measurement_age_s:
-                    usable = False
-                    break
-                value = reading.signed_w()
-                # Reverse flow on a device row is not capacity to spend on a
-                # declaration; leave the prior untouched rather than clip to 0.
-                if value is None or value < 0.0:
-                    usable = False
-                    break
-                capacity += float(value)
-            if not usable:
-                continue
-            # Spend only what the row has left after measurement and fits.
-            capacity -= sum(claimed.get(cid, 0.0) for cid in rows)
-            if capacity <= 0.0:
-                capacity = 0.0
-
-            declared = sum(by_device[d].power_w for d in device_ids)
-            if declared <= capacity + 1e-9:
-                continue
-            share = capacity / declared
-            for device_id in device_ids:
-                result = by_device[device_id]
-                clipped = result.power_w * share
-                bounded[device_id] = clipped
-                result.power_w = clipped
-                result.explanation = list(
-                    dict.fromkeys([*result.explanation, "declared_prior_bounded_by_row"])
-                )
-                result.provenance = {
-                    **dict(result.provenance or {}),
-                    "declared_prior_w": declared,
-                    "row_capacity_w": capacity,
-                    "row_capacity_ct_ids": list(rows),
-                    "row_shared_between": list(device_ids),
-                }
-
-        if bounded:
-            diagnostics["declared_priors_bounded_by_row"] = {
-                device_id: round(value, 6) for device_id, value in sorted(bounded.items())
-            }
+        return _bound_configured_priors_by_row(
+            graph,
+            window,
+            results,
+            diagnostics,
+            max_measurement_age_s=self.max_measurement_age_s,
+        )
 
     def _reconcile(
         self,
@@ -2423,225 +644,18 @@ class DisaggregationEngine:
         matrix: MeasurementMatrix,
         diagnostics: dict[str, Any],
     ) -> Reconciliation:
-        inferred_w = sum(r.power_w for r in results if r.source == Source.INFERRED)
-        model_w = sum(r.power_w for r in results if r.source == Source.MODEL_ESTIMATED)
-        prior_w = sum(r.power_w for r in results if r.source == Source.CONFIGURED_PRIOR)
-        accounted = inferred_w + model_w + prior_w
-
-        main: MainPower = main_power_w(
-            graph, window.readings, phase_split_l1=self.phase_split_l1
-        )
-        diagnostics["main_power"] = main.as_dict()
-
-        if main.errors or not main.usable:
-            unknown_residual = 0.0
-            diagnostics["warnings"].append("main_power_unavailable")
-        else:
-            unknown_residual = main.total_w - accounted
-            # A residual large enough to matter, with no state transition in
-            # this cycle, is an event the state layer never saw: a load cycling
-            # on its own, a device with no state entity, or a manual switch.
-            # The engine cannot attribute it and must not invent a claimant, so
-            # it records the fact and leaves the power in the residual.  This is
-            # a diagnostic, not an ambiguity: ambiguity requires two candidates.
-            has_transition = any(
-                event.get("direction") for event in diagnostics.get("events", ())
-            )
-            if (
-                not has_transition
-                and main.complete
-                and unknown_residual > max(50.0, 0.05 * abs(main.total_w))
-            ):
-                diagnostics["unexplained_residual_without_transition"] = {
-                    "residual_w": unknown_residual,
-                    "main_power_w": main.total_w,
-                    "reason": (
-                        "measured power is not explained by any device or state "
-                        "transition; left unattributed rather than fabricated"
-                    ),
-                }
-
-        # The residual and the meter-to-meter spread are *different kinds of
-        # number* and must not be forced into one sum.
-        #
-        # ``unknown_residual`` is a bounded accounting remainder: it is exactly
-        # ``main - accounted`` for the one canonical meter, and
-        # ``accounted + unknown_residual == main.total_w`` depends on that.
-        #
-        # ``meter_spread`` is ``|canonical total - alias total|``: an
-        # independent property of two instruments clamped on the same
-        # conductors, with no upper bound at all.  On the reference install it
-        # is ~349 W while the whole residual is ~166 W, so the spread is larger
-        # than the residual and can never be "inside" it.
-        #
-        # What *is* a part of the residual is the disagreement's *contribution*
-        # to it: at most the whole residual, because a residual cannot contain
-        # more of anything than itself.  Hence:
-        #
-        #     meter_disagreement = clip(meter_spread, 0, residual)
-        #     unmonitored        = residual - meter_disagreement
-        #
-        # which is additive by construction.  When the spread exceeds the
-        # residual the whole residual is attributable to the instruments, and
-        # ``meter_spread_exceeds_residual`` says so loudly: the residual is then
-        # *not* evidence of unmonitored load.  Nothing is re-estimated, and the
-        # residual itself is never rewritten.
-        meter_spread = 0.0
-        meter_disagreement = 0.0
-        meter_spread_exceeds_residual = False
-        if not (main.errors or not main.usable):
-            meter_spread, disagreeing_cts = meter_spread_w(
-                graph,
-                window.readings,
-                canonical_total_w=main.total_w,
-                max_age_s=self.max_measurement_age_s,
-                phase_split_l1=self.phase_split_l1,
-            )
-            if meter_spread > 0.0:
-                # A residual below zero is a sample-vintage artefact, not a
-                # quantity that can contain any part of a spread, so the
-                # contribution is clipped at zero for it.
-                meter_disagreement = min(meter_spread, max(0.0, unknown_residual))
-                meter_spread_exceeds_residual = meter_spread > unknown_residual
-                diagnostics["meter_disagreement"] = {
-                    "spread_w": meter_spread,
-                    "disagreement_w": meter_disagreement,
-                    "channels": list(disagreeing_cts),
-                    "exceeds_residual": meter_spread_exceeds_residual,
-                    "reason": (
-                        "two CTs on the same conductors report different totals; "
-                        "only the part that fits inside the residual is charged to "
-                        "it, and the spread itself is an unbounded instrument "
-                        "diagnostic, not load"
-                    ),
-                }
-        # Additive by construction.  For a non-negative residual both parts are
-        # non-negative; a negative residual keeps its sign (it is a
-        # sample-vintage artefact and is reported as-is, never clamped away).
-        unmonitored = unknown_residual - meter_disagreement
-
-        # Measurement-fit error: how well all attributed device power explains
-        # the CT rows.  This is a *fit* diagnostic, not the power balance.
-        prepared = matrix.prepare(window.readings)
-        # matrix columns are the topology device order; build the vector by id.
-        by_id = {r.device_id: r.power_w for r in results}
-        x_all = np.array([by_id.get(d, 0.0) for d in matrix.col_device_ids], dtype=float)
-        predictions = matrix.predict(x_all)
-        row_errors = np.abs(prepared.y - predictions)
-        # A topology whose devices are only visible through the home total has no
-        # measurement rows at all.  ``np.array([])`` is float64 while ``mask`` is
-        # bool, and ``&`` between them raises instead of yielding an empty result,
-        # so build the row-support mask with an explicit dtype (defect #22).
-        row_support = np.array(
-            [np.any(np.abs(matrix.A[i]) > 0) for i in range(matrix.shape[0])],
-            dtype=bool,
-        )
-        usable_rows = prepared.mask & row_support
-        recon_error = float(np.sum(row_errors[usable_rows])) if np.any(usable_rows) else 0.0
-        uncertainty = float(
-            np.sqrt(np.sum(matrix.row_sigma[usable_rows] ** 2))
-        ) if np.any(usable_rows) else 0.0
-
-        denom = abs(main.total_w) if abs(main.total_w) > 1e-9 else None
-        ratio = recon_error / denom if denom else 0.0
-        if main.complete and main.total_w > 0:
-            accounted_fraction = min(max(accounted / main.total_w, 0.0), 1.0)
-        else:
-            accounted_fraction = 0.0
-
-        quality = QualityStatus.GOOD
-        if (
-            diagnostics["errors"]
-            or diagnostics["ambiguity"]["ambiguous"]
-            or diagnostics.get("excluded_rows")
-            or main.missing_channels
-            or main.errors
-        ):
-            quality = QualityStatus.DEGRADED
-        if not main.complete:
-            quality = QualityStatus.MISSING if not main.usable else QualityStatus.DEGRADED
-
-        explanation = [
-            "main_power_sum_of_parallel_mains",
-            "residual_never_redistributed",
-        ]
-        if meter_disagreement > 0.0:
-            explanation.append(
-                f"residual_includes_meter_disagreement:{meter_disagreement:.1f}W"
-                f"_of_{unknown_residual:.1f}W"
-            )
-        if unmonitored > 0.0 and meter_disagreement > 0.0:
-            explanation.append(
-                f"unmonitored_residual_excludes_meter_disagreement:{unmonitored:.1f}W"
-            )
-        if meter_spread_exceeds_residual:
-            # Never hidden: when the two meters disagree by more than the whole
-            # residual, the residual is *not* evidence of unmonitored load.  An
-            # operator reading only ``unmonitored_w == 0`` could mistake that
-            # for "everything is metered", which is the opposite of the fact
-            # recorded here.
-            explanation.append(
-                f"meter_spread_exceeds_residual:{meter_spread:.1f}W"
-                f"_vs_{unknown_residual:.1f}W"
-            )
-        if main.has_export:
-            explanation.append("negative_power_export_preserved")
-        if main.missing_channels:
-            explanation.append("main_measurement_incomplete")
-        if diagnostics["ambiguity"]["ambiguous"]:
-            explanation.append("ambiguous_concurrent_events")
-        if diagnostics["errors"]:
-            explanation.append("per_device_error_isolated")
-        # A negative residual means accounted power exceeds the measured main.
-        # That is physically impossible for a snapshot taken at one instant, so
-        # it is always a *sample-vintage* artefact: the mains and the branch CTs
-        # were sampled at different times.  It is never evidence of double
-        # counting (nested children are subtracted, mains are summed once), and
-        # the negative value is reported as-is rather than clamped to zero,
-        # because hiding it would hide a real data-quality problem.
-        if unknown_residual < -max(1.0, 0.002 * abs(main.total_w)):
-            explanation.append("negative_residual_sample_vintage_skew")
-            diagnostics["warnings"].append("negative_residual_sample_vintage_skew")
-
-        return Reconciliation(
-            timestamp=window.at,
-            topology_version=graph.topology.version,
-            main_power_w=main.total_w,
-            l1_power_w=main.l1_w,
-            l2_power_w=main.l2_w,
-            inferred_w=inferred_w,
-            model_estimated_w=model_w,
-            configured_prior_w=prior_w,
-            unknown_residual_w=unknown_residual,
-            unmonitored_w=unmonitored,
-            meter_disagreement_w=meter_disagreement,
-            meter_spread_w=meter_spread,
-            meter_spread_exceeds_residual=meter_spread_exceeds_residual,
-            reconciliation_error_w=recon_error,
-            reconciliation_error_ratio=ratio,
-            accounted_fraction=accounted_fraction,
-            measurement_uncertainty_w=uncertainty,
-            quality_status=quality,
-            explanation=explanation,
-            topology_confirmed=(
-                str(getattr(graph.topology.status, "value", graph.topology.status))
-                == TopologyStatus.CONFIRMED.value
-            ),
+        return _reconcile(
+            graph,
+            window,
+            results,
+            matrix,
+            diagnostics,
+            max_measurement_age_s=self.max_measurement_age_s,
+            phase_split_l1=self.phase_split_l1,
         )
 
-    # ------------------------------------------------------------------ #
-    # Small helpers
-    # ------------------------------------------------------------------ #
     def _support_sigma(self, graph: TopologyGraph, channels: Sequence[str]) -> float:
-        vals = []
-        for cid in channels:
-            ch = graph.channels.get(cid)
-            if ch is None:
-                continue
-            res = ch.resolution_w or 0.0
-            rel = ch.reliability or 1.0
-            vals.append(max(self.noise_floor_w, res / 2.0) / max(rel, 0.05))
-        return float(np.sqrt(sum(v * v for v in vals))) if vals else self.noise_floor_w
+        return _support_sigma(graph, channels, noise_floor_w=self.noise_floor_w)
 
     def _unknown_result(
         self,
@@ -2654,70 +668,38 @@ class DisaggregationEngine:
         *,
         provenance: Mapping[str, Any] | None = None,
     ) -> InferenceResult:
-        return InferenceResult(
-            device_id=device_id,
-            timestamp=at,
-            power_w=0.0,
-            source=Source.UNKNOWN,
-            confidence=min(max(confidence, 0.0), 0.25),
-            quality_status=quality,
-            supporting_ct_channels=list(supporting),
-            explanation=list(dict.fromkeys([*explanation, "power_left_unattributed"])),
-            provenance={
-                **dict(provenance or {}),
-                "power_w_is_placeholder": True,
-                "actual_power_accounted_in": "Reconciliation.unknown_residual_w",
-            },
-            confidence_is_calibrated=False,
-            power_state=PowerState.UNKNOWN,
+        return _unknown_result(
+            device_id,
+            at,
+            confidence,
+            quality,
+            supporting,
+            explanation,
+            provenance=provenance,
         )
 
     def _fallback_result(self, device_id: str, at: datetime, exc: Exception) -> InferenceResult:
-        return InferenceResult(
-            device_id=device_id,
-            timestamp=at,
-            power_w=0.0,
-            source=Source.UNKNOWN,
-            confidence=0.05,
-            quality_status=QualityStatus.BAD,
-            explanation=["device_inference_error", "power_left_unattributed"],
-            provenance={
-                "error": type(exc).__name__,
-                "power_w_is_placeholder": True,
-            },
-            confidence_is_calibrated=False,
-            power_state=PowerState.UNKNOWN,
+        return _fallback_result(device_id, at, exc)
+
+    @staticmethod
+    def _source_ledger(
+        *,
+        graph: TopologyGraph,
+        window: CoercedWindow,
+        matrix: MeasurementMatrix,
+        models: Mapping[str, ModelView | None],
+        results: Sequence[InferenceResult],
+        diagnostics: Mapping[str, Any],
+        state_pinned: frozenset[str] | set[str] = frozenset(),
+        residual_events: Sequence[Any] | None = None,
+    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+        return _source_ledger(
+            graph=graph,
+            window=window,
+            matrix=matrix,
+            models=models,
+            results=results,
+            diagnostics=diagnostics,
+            state_pinned=state_pinned,
+            residual_events=residual_events,
         )
-
-
-def _is_solo_row(matrix: MeasurementMatrix, col: int) -> bool:
-    """True when exactly one device has a non-zero coefficient in each of the
-    device's attribution rows (that row measures this device and nothing else)."""
-    rows = np.flatnonzero(np.abs(matrix.A[:, col]) > 0)
-    if rows.size == 0:
-        return False
-    for row in rows:
-        others = np.count_nonzero(np.abs(np.delete(matrix.A[row], col)) > 0)
-        if others > 0:
-            return False
-    return True
-
-
-def _worst(qualities: Sequence[QualityStatus]) -> QualityStatus:
-    order = {
-        QualityStatus.GOOD: 0,
-        QualityStatus.DEGRADED: 1,
-        QualityStatus.STALE: 2,
-        QualityStatus.MISSING: 3,
-        QualityStatus.BAD: 4,
-    }
-    return max(qualities, key=lambda q: order.get(q, 4))
-
-
-def _used_support(
-    graph: TopologyGraph, device_id: str, supporting: Sequence[str]
-) -> list[str]:
-    attribution = set(graph.attribution_ct_ids(device_id))
-    used = [c for c in supporting if c in attribution]
-    return used or list(supporting)
-
