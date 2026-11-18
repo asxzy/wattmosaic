@@ -1,17 +1,26 @@
 """Raw per-reader samples: the ``ct_samples`` table.
 
-One ring of readings per measurement endpoint.  Until migration 16 this table
-holds only the four columns a caller reads; S16 adds the rest of the HB §2.1
-measurement as nullable columns and extends :meth:`SamplesRepository.insert_ct_samples`.
+One ring of readings per measurement endpoint.  Migration 16 adds the rest of
+the HB §2.1 measurement as nullable columns; :meth:`SamplesRepository.insert_readings`
+persists every field of a :class:`~wattmosaic_engine.contracts.ReaderMeasurement`.
+The legacy :meth:`insert_ct_samples` stays for the pre-v3 ingest path.
 """
 
 from __future__ import annotations
 
+import json
+import sqlite3
 from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
-from ..repositories import SAMPLE_FETCH_CHUNK, Repository, as_utc, iso
+from ...contracts import (
+    MeasurementBasis,
+    MeasurementType,
+    QualityFlag,
+    ReaderMeasurement,
+)
+from ..repositories import SAMPLE_FETCH_CHUNK, Repository, as_utc, enum_value, iso
 
 
 class SamplesRepository(Repository):
@@ -40,6 +49,126 @@ class SamplesRepository(Repository):
                 self._conn.execute("ROLLBACK")
                 raise
         return len(payload)
+
+    # -- reader samples v2 (migration 16) ---------------------------------- #
+    def insert_readings(self, readings: Iterable[ReaderMeasurement]) -> int:
+        """Persist every HB §2.1 field of a batch of :class:`ReaderMeasurement`.
+
+        ``ct_samples.value_w`` and ``raw_value`` are still ``NOT NULL`` (SQLite
+        cannot relax that with ``ALTER TABLE``; Z1 may rebuild the table), so
+        they keep a zero sentinel for the legacy reader.  The authoritative v2
+        column ``active_power_v2_w`` is nullable: an energy-only reading keeps
+        ``None`` there, and :meth:`reading_from_row` reads it in preference to
+        the sentinel.  Absence is therefore preserved as ``None``, never turned
+        into ``0`` (HB §18).  Every other HB §2.1 field is retained verbatim.
+        """
+        payload = [self._reading_row(r) for r in readings]
+        if not payload:
+            return 0
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.executemany(
+                    """INSERT INTO ct_samples(
+                        ct_id, entity_id, value_w, raw_value, unit, state_timestamp, received_at,
+                        physical_timestamp, quality, repeated, sequence,
+                        active_power_v2_w, current_rms_a, voltage_rms_v, reactive_power_var,
+                        power_factor, energy_wh, phase, leg, measurement_type,
+                        measurement_window_ms, calibration_version, quality_flags_json,
+                        measurement_basis, observed_at, voltage_reference_v)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    payload,
+                )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+        return len(payload)
+
+    @staticmethod
+    def _reading_row(reading: ReaderMeasurement) -> tuple[Any, ...]:
+        """One ``ct_samples`` row from a :class:`ReaderMeasurement`."""
+        power = reading.active_power_w
+        flags = [enum_value(flag) for flag in reading.quality_flags]
+        return (
+            reading.reader_id,                       # ct_id
+            reading.reader_id,                       # entity_id (no separate field on the contract)
+            0.0 if power is None else float(power),  # value_w (legacy NOT NULL)
+            0.0 if power is None else float(power),  # raw_value (legacy NOT NULL)
+            "W",                                     # unit
+            iso(reading.observed_at),                # state_timestamp
+            iso(reading.received_at),
+            None,                                    # physical_timestamp
+            "good",                                  # quality (legacy; flags are authoritative)
+            int(any(f == "repeated" for f in flags)),
+            int(reading.sequence),
+            power,                                   # active_power_v2_w (nullable, authoritative)
+            reading.current_rms_a,
+            reading.voltage_rms_v,
+            reading.reactive_power_var,
+            reading.power_factor,
+            reading.energy_wh,
+            reading.phase,
+            reading.leg,
+            enum_value(reading.measurement_type),
+            reading.measurement_window_ms,
+            reading.calibration_version,
+            json.dumps(flags),
+            enum_value(reading.measurement_basis),
+            iso(reading.observed_at),
+            reading.voltage_reference_v,
+        )
+
+    @staticmethod
+    def reading_from_row(row: sqlite3.Row | dict[str, Any]) -> ReaderMeasurement:
+        """Rebuild a :class:`ReaderMeasurement` from a v2 ``ct_samples`` row."""
+        data = dict(row)
+        flags = json.loads(data.get("quality_flags_json") or "[]")
+        phase = data.get("phase") or "unknown"
+        return ReaderMeasurement(
+            reader_id=data["ct_id"],
+            observed_at=as_utc(data.get("observed_at") or data["state_timestamp"]),
+            received_at=as_utc(data["received_at"]),
+            active_power_w=(
+                data["active_power_v2_w"]
+                if "active_power_v2_w" in data
+                else data["value_w"]
+            ),
+            current_rms_a=data.get("current_rms_a"),
+            voltage_rms_v=data.get("voltage_rms_v"),
+            reactive_power_var=data.get("reactive_power_var"),
+            power_factor=data.get("power_factor"),
+            energy_wh=data.get("energy_wh"),
+            phase=phase,
+            leg=data.get("leg"),
+            voltage_reference_v=data.get("voltage_reference_v"),
+            measurement_type=MeasurementType(data.get("measurement_type") or "instantaneous"),
+            measurement_window_ms=data.get("measurement_window_ms"),
+            calibration_version=data.get("calibration_version") or "unknown",
+            measurement_basis=MeasurementBasis(data.get("measurement_basis") or "unknown").value,
+            quality_flags=[QualityFlag(f) for f in flags],
+            sequence=int(data.get("sequence") or 0),
+        )
+
+    def readings_between(
+        self, reader_id: str, start: datetime, end: datetime
+    ) -> list[ReaderMeasurement]:
+        """Reader measurements for one endpoint in a closed ``observed_at`` window."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM ct_samples WHERE ct_id=? AND observed_at >= ? AND observed_at <= ? "
+                "ORDER BY observed_at, sequence",
+                (reader_id, iso(start), iso(end)),
+            ).fetchall()
+        return [self.reading_from_row(row) for row in rows]
+
+    def latest_reading(self, reader_id: str) -> ReaderMeasurement | None:
+        """The newest persisted reader measurement for one endpoint, or ``None``."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM ct_samples WHERE ct_id=? ORDER BY id DESC LIMIT 1", (reader_id,)
+            ).fetchone()
+        return None if row is None else self.reading_from_row(row)
 
     def ct_samples_between(
         self, start: datetime, end: datetime, ct_ids: list[str] | None = None
