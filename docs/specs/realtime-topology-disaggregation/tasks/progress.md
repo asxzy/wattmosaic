@@ -36,22 +36,22 @@
 | X06 | 0 | VERIFIED | | | |
 | X07 | 0 | VERIFIED | | | |
 | K00 | 1 | VERIFIED | | | |
-| K01 | 1 | NOT_STARTED | | | |
-| K02 | 1 | NOT_STARTED | | | |
-| K03 | 1 | NOT_STARTED | | | |
-| K04 | 1 | NOT_STARTED | | | |
-| K05 | 1 | NOT_STARTED | | | |
-| K06 | 1 | NOT_STARTED | | | |
-| K07 | 1 | NOT_STARTED | | | |
-| K08 | 1 | NOT_STARTED | | | |
-| S13 | 2 | NOT_STARTED | | | |
-| S14 | 2 | NOT_STARTED | | | |
-| S15 | 2 | NOT_STARTED | | | |
-| S16 | 2 | NOT_STARTED | | | |
-| S17 | 2 | NOT_STARTED | | | |
-| S18 | 2 | NOT_STARTED | | | |
-| S19 | 2 | NOT_STARTED | | | |
-| P1 | 3 | NOT_STARTED | | | DEF-01 test first |
+| K01 | 1 | VERIFIED |  |  |  |
+| K02 | 1 | VERIFIED |  |  |  |
+| K03 | 1 | VERIFIED |  |  |  |
+| K04 | 1 | VERIFIED |  |  | K04b follow-up wired real types |
+| K05 | 1 | VERIFIED |  |  | K05b follow-up reuses topology enums |
+| K06 | 1 | VERIFIED |  |  |  |
+| K07 | 1 | IN_PROGRESS |  |  |  |
+| K08 | 1 | VERIFIED |  |  |  |
+| S13 | 2 | VERIFIED |  |  |  |
+| S14 | 2 | IN_PROGRESS |  |  |  |
+| S15 | 2 | IN_PROGRESS |  |  |  |
+| S16 | 2 | VERIFIED |  |  |  |
+| S17 | 2 | VERIFIED |  |  | insert_reconciliation bug did not exist; round-trip test added |
+| S18 | 2 | IN_PROGRESS |  |  |  |
+| S19 | 2 | VERIFIED |  |  |  |
+| P1 | 3 | IN_PROGRESS |  |  | DEF-01 test first |
 | P2 | 3 | NOT_STARTED | | | |
 | P3 | 3 | NOT_STARTED | | | |
 | P4 | 3 | NOT_STARTED | | | |
@@ -60,18 +60,18 @@
 | T2 | 3 | NOT_STARTED | | | |
 | T3 | 3 | NOT_STARTED | | | |
 | T4 | 3 | NOT_STARTED | | | |
-| I1 | 3 | NOT_STARTED | | AT-10 | |
-| I2 | 3 | NOT_STARTED | | AT-05 | |
-| I3 | 3 | NOT_STARTED | | AT-06, 08, 09 | |
-| I4 | 3 | NOT_STARTED | | AT-07 | 250 W test first |
-| M1 | 3 | NOT_STARTED | | AT-01, 13 | |
+| I1 | 3 | IN_PROGRESS |  | AT-10 |  |
+| I2 | 3 | IN_PROGRESS |  | AT-05 |  |
+| I3 | 3 | IN_PROGRESS |  | AT-06, 08, 09 |  |
+| I4 | 3 | IN_PROGRESS |  | AT-07 | 250 W test first |
+| M1 | 3 | IN_PROGRESS |  | AT-01, 13 |  |
 | L1 | 3 | NOT_STARTED | | | |
 | L2 | 3 | NOT_STARTED | | AT-03 | |
 | L3 | 3 | NOT_STARTED | | | |
 | D1 | 3 | NOT_STARTED | | | |
 | D2 | 3 | NOT_STARTED | | | |
 | D3 | 3 | NOT_STARTED | | AT-17 | |
-| U1 | 3 | NOT_STARTED | | AT-12 | |
+| U1 | 3 | VERIFIED |  | AT-12 |  |
 | I5 | 4 | NOT_STARTED | | AT-14 | |
 | I6 | 4 | NOT_STARTED | | AT-18 | |
 | I7 | 4 | NOT_STARTED | | | |
@@ -96,3 +96,4 @@
 | V1 | 6 | NOT_STARTED | | all 20 | |
 | V2 | 6 | NOT_STARTED | | | |
 | L8 | 6 | NOT_STARTED | | | optional |
+| S00 | ? | VERIFIED | | | seam added by orchestrator: migration numbering, fresh-DB backup |
