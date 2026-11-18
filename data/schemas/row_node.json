@@ -1,0 +1,75 @@
+{
+  "$defs": {
+    "RowKind": {
+      "description": "The row families of the matrix (DEC-27).",
+      "enum": [
+        "device",
+        "component",
+        "group",
+        "unknown_profile",
+        "reader_residual",
+        "summary"
+      ],
+      "title": "RowKind",
+      "type": "string"
+    },
+    "RowNode": {
+      "additionalProperties": false,
+      "description": "One node of the row tree; ``room``/``folder`` are grouping nodes.",
+      "properties": {
+        "node_id": {
+          "title": "Node Id",
+          "type": "string"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RowKind"
+            },
+            {
+              "enum": [
+                "room",
+                "folder"
+              ],
+              "type": "string"
+            }
+          ],
+          "title": "Kind"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "row_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Row Id"
+        },
+        "children": {
+          "items": {
+            "$ref": "#/$defs/RowNode"
+          },
+          "title": "Children",
+          "type": "array"
+        }
+      },
+      "required": [
+        "node_id",
+        "kind",
+        "label"
+      ],
+      "title": "RowNode",
+      "type": "object"
+    }
+  },
+  "$ref": "#/$defs/RowNode",
+  "$id": "https://wattmosaic.local/schemas/row_node.json",
+  "x-contract-version": "2.4.0"
+}

@@ -33,6 +33,21 @@
     "version_triple": "version_triple.json",
     "evidence_ref": "evidence_ref.json",
     "bounds": "bounds.json",
-    "confidence_vector_v3": "confidence_vector_v3.json"
+    "confidence_vector_v3": "confidence_vector_v3.json",
+    "cell_mapping": "cell_mapping.json",
+    "cell_power": "cell_power.json",
+    "cell_events": "cell_events.json",
+    "cell_provenance": "cell_provenance.json",
+    "cell_timestamps": "cell_timestamps.json",
+    "mapping_cell_v3": "mapping_cell_v3.json",
+    "column_annotation": "column_annotation.json",
+    "column_node": "column_node.json",
+    "row_node": "row_node.json",
+    "reader_column_summary": "reader_column_summary.json",
+    "physical_total": "physical_total.json",
+    "matrix_payload": "matrix_payload.json",
+    "cell_detail": "cell_detail.json",
+    "reader_detail": "reader_detail.json",
+    "row_detail": "row_detail.json"
   }
 }

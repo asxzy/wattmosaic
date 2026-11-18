@@ -1,0 +1,1058 @@
+{
+  "$defs": {
+    "Bounds": {
+      "additionalProperties": false,
+      "description": "A justified interval for an estimate.\n\n``lower_w`` and ``upper_w`` are nullable (HB \u00a718).  When both are present\nthe validator requires ``lower_w <= upper_w``.  A zero-width interval\n(a point) is only possible through the private :meth:`_point` constructor,\nwhich represents an IDENTIFIABLE or MEASURED result; the ``allow_point``\nflag is *not* a field and never appears in the model or its JSON schema.",
+      "properties": {
+        "lower_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lower W"
+        },
+        "upper_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Upper W"
+        },
+        "basis": {
+          "anyOf": [
+            {
+              "enum": [
+                "non_negativity",
+                "group_sum",
+                "reader_ceiling",
+                "posterior",
+                "declared_ceiling"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Basis"
+        }
+      },
+      "title": "Bounds",
+      "type": "object"
+    },
+    "CellEvents": {
+      "additionalProperties": false,
+      "description": "Independent event-association counts (HB \u00a710.3: 100 samples \u2260 100 events).",
+      "properties": {
+        "matched_event_count": {
+          "default": 0,
+          "title": "Matched Event Count",
+          "type": "integer"
+        },
+        "confirmed_match_count": {
+          "default": 0,
+          "title": "Confirmed Match Count",
+          "type": "integer"
+        },
+        "provisional_match_count": {
+          "default": 0,
+          "title": "Provisional Match Count",
+          "type": "integer"
+        },
+        "avg_response_delay_ms": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Avg Response Delay Ms"
+        },
+        "response_signature": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response Signature"
+        },
+        "last_matched_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Matched At"
+        }
+      },
+      "title": "CellEvents",
+      "type": "object"
+    },
+    "CellMapping": {
+      "additionalProperties": false,
+      "description": "The mapping block of a cell: how the reader observes the load.",
+      "properties": {
+        "observability": {
+          "$ref": "#/$defs/ObservabilityV3"
+        },
+        "relation_type": {
+          "enum": [
+            "DIRECT_ENDPOINT",
+            "CONTAINS",
+            "SHARED_LOAD",
+            "PAIRED_LEG",
+            "CORRELATED",
+            "SAME_CONDUCTOR",
+            "UNKNOWN"
+          ],
+          "title": "Relation Type",
+          "type": "string"
+        },
+        "mapping_status": {
+          "$ref": "#/$defs/MappingStatus"
+        },
+        "mapping_confidence": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mapping Confidence"
+        },
+        "valid_from": {
+          "format": "date-time",
+          "title": "Valid From",
+          "type": "string"
+        },
+        "valid_until": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Valid Until"
+        }
+      },
+      "required": [
+        "observability",
+        "relation_type",
+        "mapping_status",
+        "valid_from"
+      ],
+      "title": "CellMapping",
+      "type": "object"
+    },
+    "CellPower": {
+      "additionalProperties": false,
+      "description": "The power block of a cell: contribution, bounds and operating state.\n\n``estimated_power_w`` is ``None`` when the mapping is not observable or the\ncell is group-only; it is never defaulted to ``0`` (HB \u00a718).",
+      "properties": {
+        "measurement_status": {
+          "$ref": "#/$defs/EstimateStatus"
+        },
+        "estimated_power_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Estimated Power W"
+        },
+        "bounds": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bounds"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "standby_power_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Standby Power W"
+        },
+        "operating_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PowerLevel"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "expected_profile_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Profile Ref"
+        },
+        "uncertainty_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Uncertainty W"
+        }
+      },
+      "required": [
+        "measurement_status"
+      ],
+      "title": "CellPower",
+      "type": "object"
+    },
+    "CellProvenance": {
+      "additionalProperties": false,
+      "description": "Typed, resolvable provenance for a cell (HB \u00a79.6 / \u00a718).",
+      "properties": {
+        "sources_used": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Sources Used",
+          "type": "array"
+        },
+        "evidence_refs": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "topology_version_id": {
+          "title": "Topology Version Id",
+          "type": "string"
+        },
+        "model_version_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Version Id"
+        },
+        "mapping_version_id": {
+          "title": "Mapping Version Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "topology_version_id",
+        "mapping_version_id"
+      ],
+      "title": "CellProvenance",
+      "type": "object"
+    },
+    "CellTimestamps": {
+      "additionalProperties": false,
+      "description": "The observation/validation/refresh times of a cell.",
+      "properties": {
+        "first_observed_at": {
+          "format": "date-time",
+          "title": "First Observed At",
+          "type": "string"
+        },
+        "last_observed_at": {
+          "format": "date-time",
+          "title": "Last Observed At",
+          "type": "string"
+        },
+        "last_validated_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Validated At"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "first_observed_at",
+        "last_observed_at",
+        "updated_at"
+      ],
+      "title": "CellTimestamps",
+      "type": "object"
+    },
+    "CellVisual": {
+      "description": "The eight deterministic visual categories (HB \u00a719.3 / design \u00a78).",
+      "enum": [
+        "directly_measured",
+        "confirmed_inferred",
+        "provisional",
+        "group_only",
+        "unknown",
+        "not_observable",
+        "conflicted",
+        "retired"
+      ],
+      "title": "CellVisual",
+      "type": "string"
+    },
+    "ColumnAnnotation": {
+      "additionalProperties": false,
+      "description": "A secondary edge on a reader leaf \u2014 never an extra column (design \u00a78).",
+      "properties": {
+        "kind": {
+          "enum": [
+            "SHARED_LOAD",
+            "PAIRED_LEG",
+            "SAME_CONDUCTOR",
+            "CORRELATED",
+            "CONTAINS",
+            "ALIAS"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "related_reader_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Related Reader Id"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "ColumnAnnotation",
+      "type": "object"
+    },
+    "ColumnNode": {
+      "additionalProperties": false,
+      "description": "One node of the L0\u2013L4 column tree.\n\nA ``reader`` node is a leaf: it has ``reader_id`` set and no children.  Any\nother kind is an internal node with no ``reader_id``.  Secondary relations\nlive in ``annotations`` so they never duplicate a reader leaf.",
+      "properties": {
+        "node_id": {
+          "title": "Node Id",
+          "type": "string"
+        },
+        "level": {
+          "enum": [
+            "L0",
+            "L1",
+            "L2",
+            "L3",
+            "L4"
+          ],
+          "title": "Level",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "domain",
+            "panel",
+            "subpanel",
+            "circuit",
+            "reader",
+            "unassigned"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "reader_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reader Id"
+        },
+        "children": {
+          "items": {
+            "$ref": "#/$defs/ColumnNode"
+          },
+          "title": "Children",
+          "type": "array"
+        },
+        "annotations": {
+          "items": {
+            "$ref": "#/$defs/ColumnAnnotation"
+          },
+          "title": "Annotations",
+          "type": "array"
+        }
+      },
+      "required": [
+        "node_id",
+        "level",
+        "label",
+        "kind"
+      ],
+      "title": "ColumnNode",
+      "type": "object"
+    },
+    "ConfidenceVectorV3": {
+      "additionalProperties": false,
+      "description": "Seven-component confidence vector for a v3 estimate.\n\nEach component is an *uncalibrated engineering score* in ``[0, 1]`` or\n``None`` when not assessed.  **This is not a probability** (ADR-0007): the\nnumbers are not calibrated, do not sum to one, and must not be interpreted\nas likelihoods.  There is deliberately **no blended scalar** field, no\n``__float__`` and no arithmetic -- a consumer must name the component it\nmeans (DEC-24; HB \u00a79.6).  This v3 type supersedes the legacy six-dimension\n``ConfidenceVector`` and is intentionally a distinct public name.",
+      "properties": {
+        "measurement_quality": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Measurement Quality"
+        },
+        "event_association": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event Association"
+        },
+        "model_fit": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Fit"
+        },
+        "topology_consistency": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Topology Consistency"
+        },
+        "identifiability": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Identifiability"
+        },
+        "sample_coverage": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sample Coverage"
+        },
+        "freshness": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Freshness"
+        }
+      },
+      "title": "ConfidenceVectorV3",
+      "type": "object"
+    },
+    "EstimateStatus": {
+      "description": "What kind of value an estimate is (HB \u00a78.5).",
+      "enum": [
+        "measured",
+        "estimated",
+        "allocated",
+        "unknown"
+      ],
+      "title": "EstimateStatus",
+      "type": "string"
+    },
+    "EvidenceRef": {
+      "additionalProperties": false,
+      "description": "A typed, resolvable reference to a piece of evidence (D4's resolver).",
+      "properties": {
+        "kind": {
+          "enum": [
+            "sample",
+            "event_evidence",
+            "event_group",
+            "ha_event",
+            "edge",
+            "mapping_edge",
+            "model_version",
+            "configuration_event",
+            "observation"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "title": "EvidenceRef",
+      "type": "object"
+    },
+    "IdentifiabilityStatus": {
+      "description": "Identifiability of an estimate (HB \u00a78.4).",
+      "enum": [
+        "identifiable",
+        "partially_identifiable",
+        "group_identifiable",
+        "non_identifiable",
+        "insufficient_evidence"
+      ],
+      "title": "IdentifiabilityStatus",
+      "type": "string"
+    },
+    "MappingCell": {
+      "additionalProperties": false,
+      "description": "One device/component \u00d7 reader cell of the matrix (HB \u00a79.6).",
+      "properties": {
+        "row_kind": {
+          "$ref": "#/$defs/RowKind"
+        },
+        "row_id": {
+          "title": "Row Id",
+          "type": "string"
+        },
+        "load_component_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Load Component Id"
+        },
+        "reader_id": {
+          "title": "Reader Id",
+          "type": "string"
+        },
+        "mapping": {
+          "$ref": "#/$defs/CellMapping"
+        },
+        "power": {
+          "$ref": "#/$defs/CellPower"
+        },
+        "identifiability": {
+          "$ref": "#/$defs/IdentifiabilityStatus"
+        },
+        "group_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group Id"
+        },
+        "event_association": {
+          "$ref": "#/$defs/CellEvents"
+        },
+        "confidence": {
+          "$ref": "#/$defs/ConfidenceVectorV3"
+        },
+        "provenance": {
+          "$ref": "#/$defs/CellProvenance"
+        },
+        "timestamps": {
+          "$ref": "#/$defs/CellTimestamps"
+        },
+        "visual": {
+          "$ref": "#/$defs/CellVisual"
+        },
+        "derived": {
+          "default": false,
+          "title": "Derived",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "row_kind",
+        "row_id",
+        "reader_id",
+        "mapping",
+        "power",
+        "identifiability",
+        "event_association",
+        "confidence",
+        "provenance",
+        "timestamps",
+        "visual"
+      ],
+      "title": "MappingCell",
+      "type": "object"
+    },
+    "MappingStatus": {
+      "description": "The epistemic state of one device\u2194reader mapping (HB \u00a79.7).\n\nDeliberately contains **no** identifiability value (``analysis/E-\u2026`` C1):\nidentifiability is a separate axis, carried by ``MappingCell.identifiability``\nas an :class:`~wattmosaic_engine.contracts.foundation.IdentifiabilityStatus`.",
+      "enum": [
+        "unknown",
+        "learning",
+        "provisional",
+        "confirmed",
+        "suspected_change",
+        "conflicted",
+        "retired"
+      ],
+      "title": "MappingStatus",
+      "type": "string"
+    },
+    "ObservabilityV3": {
+      "description": "The seven HB \u00a79.7 observability states.\n\nThis is the ``V3``-suffixed public name because the legacy surface owns the\nfour-state ``MappingObservability`` vocabulary.  K03 publishes the same\nseven-state set as ``Observability``; a cell's ``mapping.observability`` is\nstored as one of these values.",
+      "enum": [
+        "direct",
+        "expected",
+        "inferred",
+        "partial",
+        "unknown",
+        "not_observable",
+        "conflicted"
+      ],
+      "title": "ObservabilityV3",
+      "type": "string"
+    },
+    "PhysicalTotal": {
+      "additionalProperties": false,
+      "description": "The household physical total \u2014 each load counted once (design \u00a78).",
+      "properties": {
+        "measured_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Measured W"
+        },
+        "identified_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Identified W"
+        },
+        "group_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group W"
+        },
+        "unknown_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unknown W"
+        },
+        "residual_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Residual W"
+        },
+        "total_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total W"
+        }
+      },
+      "title": "PhysicalTotal",
+      "type": "object"
+    },
+    "PowerLevel": {
+      "description": "Which of a device's four power levels a published value belongs to.\n\n``06-device-and-load-model-spec.md`` \u00a75.1 names four levels -- standby,\nidle, active, transient -- and ``ExpectedPower`` carries the envelope\n(``standby_w``, ``idle_w``, ``on_w``, ``startup_w`` / ``shutdown_w``).\nThis enum is the label a *published* value carries.\n\nIt is a **different axis** from ``PowerState`` and must never be conflated\nwith it.  ``PowerState`` is a *provenance* label (``measured`` /\n``estimated`` / ``allocated`` / ``unknown``) derived by ``power_state_for``\nfrom ``Source`` and ``MeasurementBasis``; ``PowerLevel`` is the *operating\nlevel* the number sits at.  A value can be both ``measured`` and\n``standby``: the two fields answer different questions and coexist on\n``InferenceResult``.\n\n``UNKNOWN`` is the neutral default, so a payload that does not name a level\nreads as \"not stated\" rather than as a claim.",
+      "enum": [
+        "standby",
+        "idle",
+        "active",
+        "transient",
+        "unknown"
+      ],
+      "title": "PowerLevel",
+      "type": "string"
+    },
+    "ReaderColumnSummary": {
+      "additionalProperties": false,
+      "description": "Per-reader totals; never summed across readers (design \u00a78).",
+      "properties": {
+        "measured_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Measured W"
+        },
+        "known_contrib_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Known Contrib W"
+        },
+        "residual_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Residual W"
+        },
+        "unknown_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unknown W"
+        }
+      },
+      "title": "ReaderColumnSummary",
+      "type": "object"
+    },
+    "RowKind": {
+      "description": "The row families of the matrix (DEC-27).",
+      "enum": [
+        "device",
+        "component",
+        "group",
+        "unknown_profile",
+        "reader_residual",
+        "summary"
+      ],
+      "title": "RowKind",
+      "type": "string"
+    },
+    "RowNode": {
+      "additionalProperties": false,
+      "description": "One node of the row tree; ``room``/``folder`` are grouping nodes.",
+      "properties": {
+        "node_id": {
+          "title": "Node Id",
+          "type": "string"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RowKind"
+            },
+            {
+              "enum": [
+                "room",
+                "folder"
+              ],
+              "type": "string"
+            }
+          ],
+          "title": "Kind"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "row_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Row Id"
+        },
+        "children": {
+          "items": {
+            "$ref": "#/$defs/RowNode"
+          },
+          "title": "Children",
+          "type": "array"
+        }
+      },
+      "required": [
+        "node_id",
+        "kind",
+        "label"
+      ],
+      "title": "RowNode",
+      "type": "object"
+    },
+    "VersionTriple": {
+      "additionalProperties": false,
+      "description": "The independent topology/mapping/model version triple (rule 20).",
+      "properties": {
+        "topology_version_id": {
+          "title": "Topology Version Id",
+          "type": "string"
+        },
+        "mapping_version_id": {
+          "title": "Mapping Version Id",
+          "type": "string"
+        },
+        "model_set_id": {
+          "title": "Model Set Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "topology_version_id",
+        "mapping_version_id",
+        "model_set_id"
+      ],
+      "title": "VersionTriple",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "The full matrix view: version, trees, sparse cells and totals.",
+  "properties": {
+    "mapping_version_id": {
+      "title": "Mapping Version Id",
+      "type": "string"
+    },
+    "versions": {
+      "$ref": "#/$defs/VersionTriple"
+    },
+    "generated_at": {
+      "format": "date-time",
+      "title": "Generated At",
+      "type": "string"
+    },
+    "columns": {
+      "items": {
+        "$ref": "#/$defs/ColumnNode"
+      },
+      "title": "Columns",
+      "type": "array"
+    },
+    "rows": {
+      "items": {
+        "$ref": "#/$defs/RowNode"
+      },
+      "title": "Rows",
+      "type": "array"
+    },
+    "cells": {
+      "items": {
+        "$ref": "#/$defs/MappingCell"
+      },
+      "title": "Cells",
+      "type": "array"
+    },
+    "reader_totals": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ReaderColumnSummary"
+      },
+      "title": "Reader Totals",
+      "type": "object"
+    },
+    "physical_total": {
+      "$ref": "#/$defs/PhysicalTotal"
+    }
+  },
+  "required": [
+    "mapping_version_id",
+    "versions",
+    "generated_at",
+    "columns",
+    "rows",
+    "cells",
+    "reader_totals",
+    "physical_total"
+  ],
+  "title": "MatrixPayload",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/matrix_payload.json",
+  "x-contract-version": "2.4.0"
+}

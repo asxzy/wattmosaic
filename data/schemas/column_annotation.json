@@ -1,0 +1,49 @@
+{
+  "additionalProperties": false,
+  "description": "A secondary edge on a reader leaf \u2014 never an extra column (design \u00a78).",
+  "properties": {
+    "kind": {
+      "enum": [
+        "SHARED_LOAD",
+        "PAIRED_LEG",
+        "SAME_CONDUCTOR",
+        "CORRELATED",
+        "CONTAINS",
+        "ALIAS"
+      ],
+      "title": "Kind",
+      "type": "string"
+    },
+    "related_reader_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Related Reader Id"
+    },
+    "note": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Note"
+    }
+  },
+  "required": [
+    "kind"
+  ],
+  "title": "ColumnAnnotation",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/column_annotation.json",
+  "x-contract-version": "2.4.0"
+}

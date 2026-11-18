@@ -1,0 +1,95 @@
+{
+  "$defs": {
+    "MappingStatus": {
+      "description": "The epistemic state of one device\u2194reader mapping (HB \u00a79.7).\n\nDeliberately contains **no** identifiability value (``analysis/E-\u2026`` C1):\nidentifiability is a separate axis, carried by ``MappingCell.identifiability``\nas an :class:`~wattmosaic_engine.contracts.foundation.IdentifiabilityStatus`.",
+      "enum": [
+        "unknown",
+        "learning",
+        "provisional",
+        "confirmed",
+        "suspected_change",
+        "conflicted",
+        "retired"
+      ],
+      "title": "MappingStatus",
+      "type": "string"
+    },
+    "ObservabilityV3": {
+      "description": "The seven HB \u00a79.7 observability states.\n\nThis is the ``V3``-suffixed public name because the legacy surface owns the\nfour-state ``MappingObservability`` vocabulary.  K03 publishes the same\nseven-state set as ``Observability``; a cell's ``mapping.observability`` is\nstored as one of these values.",
+      "enum": [
+        "direct",
+        "expected",
+        "inferred",
+        "partial",
+        "unknown",
+        "not_observable",
+        "conflicted"
+      ],
+      "title": "ObservabilityV3",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "The mapping block of a cell: how the reader observes the load.",
+  "properties": {
+    "observability": {
+      "$ref": "#/$defs/ObservabilityV3"
+    },
+    "relation_type": {
+      "enum": [
+        "DIRECT_ENDPOINT",
+        "CONTAINS",
+        "SHARED_LOAD",
+        "PAIRED_LEG",
+        "CORRELATED",
+        "SAME_CONDUCTOR",
+        "UNKNOWN"
+      ],
+      "title": "Relation Type",
+      "type": "string"
+    },
+    "mapping_status": {
+      "$ref": "#/$defs/MappingStatus"
+    },
+    "mapping_confidence": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Mapping Confidence"
+    },
+    "valid_from": {
+      "format": "date-time",
+      "title": "Valid From",
+      "type": "string"
+    },
+    "valid_until": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Valid Until"
+    }
+  },
+  "required": [
+    "observability",
+    "relation_type",
+    "mapping_status",
+    "valid_from"
+  ],
+  "title": "CellMapping",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/cell_mapping.json",
+  "x-contract-version": "2.4.0"
+}

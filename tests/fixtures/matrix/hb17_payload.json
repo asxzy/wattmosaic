@@ -1,0 +1,1126 @@
+{
+  "mapping_version_id": "map-7",
+  "versions": {
+    "topology_version_id": "topo-3",
+    "mapping_version_id": "map-7",
+    "model_set_id": "mset-0123456789ab"
+  },
+  "generated_at": "2026-01-02T12:00:00Z",
+  "columns": [
+    {
+      "node_id": "col-domain-home",
+      "level": "L0",
+      "label": "Home",
+      "kind": "domain",
+      "reader_id": null,
+      "children": [
+        {
+          "node_id": "col-panel-main",
+          "level": "L1",
+          "label": "Main panel",
+          "kind": "panel",
+          "reader_id": null,
+          "children": [
+            {
+              "node_id": "col-subpanel-a",
+              "level": "L2",
+              "label": "Subpanel A",
+              "kind": "subpanel",
+              "reader_id": null,
+              "children": [
+                {
+                  "node_id": "col-circuit-a",
+                  "level": "L3",
+                  "label": "Circuit A (lights)",
+                  "kind": "circuit",
+                  "reader_id": null,
+                  "children": [
+                    {
+                      "node_id": "col-reader-ca",
+                      "level": "L4",
+                      "label": "Circuit A",
+                      "kind": "reader",
+                      "reader_id": "ct_circuit_a",
+                      "children": [],
+                      "annotations": []
+                    }
+                  ],
+                  "annotations": []
+                },
+                {
+                  "node_id": "col-circuit-b",
+                  "level": "L3",
+                  "label": "Circuit B",
+                  "kind": "circuit",
+                  "reader_id": null,
+                  "children": [
+                    {
+                      "node_id": "col-reader-cb",
+                      "level": "L4",
+                      "label": "Circuit B",
+                      "kind": "reader",
+                      "reader_id": "ct_circuit_b",
+                      "children": [],
+                      "annotations": []
+                    }
+                  ],
+                  "annotations": []
+                }
+              ],
+              "annotations": []
+            },
+            {
+              "node_id": "col-circuit-c",
+              "level": "L3",
+              "label": "Circuit C (kitchen)",
+              "kind": "circuit",
+              "reader_id": null,
+              "children": [
+                {
+                  "node_id": "col-reader-cc",
+                  "level": "L4",
+                  "label": "Circuit C",
+                  "kind": "reader",
+                  "reader_id": "ct_circuit_c",
+                  "children": [],
+                  "annotations": []
+                }
+              ],
+              "annotations": []
+            },
+            {
+              "node_id": "col-unassigned",
+              "level": "L1",
+              "label": "Unassigned measurements",
+              "kind": "unassigned",
+              "reader_id": null,
+              "children": [
+                {
+                  "node_id": "col-reader-plug",
+                  "level": "L4",
+                  "label": "TV Smart Plug",
+                  "kind": "reader",
+                  "reader_id": "plug_tv",
+                  "children": [],
+                  "annotations": []
+                }
+              ],
+              "annotations": []
+            },
+            {
+              "node_id": "col-reader-subpanel",
+              "level": "L4",
+              "label": "Subpanel A",
+              "kind": "reader",
+              "reader_id": "ct_subpanel",
+              "children": [],
+              "annotations": []
+            },
+            {
+              "node_id": "col-reader-main",
+              "level": "L4",
+              "label": "Main CT",
+              "kind": "reader",
+              "reader_id": "ct_main",
+              "children": [],
+              "annotations": []
+            }
+          ],
+          "annotations": []
+        }
+      ],
+      "annotations": []
+    }
+  ],
+  "rows": [
+    {
+      "node_id": "row-room-living",
+      "kind": "room",
+      "label": "Living room",
+      "row_id": null,
+      "children": [
+        {
+          "node_id": "row-light-1",
+          "kind": "device",
+          "label": "Living room light 1",
+          "row_id": "pd_light_1",
+          "children": []
+        },
+        {
+          "node_id": "row-light-2",
+          "kind": "device",
+          "label": "Living room light 2",
+          "row_id": "pd_light_2",
+          "children": []
+        },
+        {
+          "node_id": "row-lights-group",
+          "kind": "group",
+          "label": "Living room lights (group)",
+          "row_id": "grp_living_lights",
+          "children": [
+            {
+              "node_id": "row-light-1-ref",
+              "kind": "device",
+              "label": "Living room light 1",
+              "row_id": "pd_light_1",
+              "children": []
+            },
+            {
+              "node_id": "row-light-2-ref",
+              "kind": "device",
+              "label": "Living room light 2",
+              "row_id": "pd_light_2",
+              "children": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "node_id": "row-room-kitchen",
+      "kind": "room",
+      "label": "Kitchen",
+      "row_id": null,
+      "children": [
+        {
+          "node_id": "row-fridge",
+          "kind": "unknown_profile",
+          "label": "Unknown load (fridge)",
+          "row_id": "ulp_kitchen_fridge",
+          "children": []
+        }
+      ]
+    },
+    {
+      "node_id": "row-tv",
+      "kind": "device",
+      "label": "Television",
+      "row_id": "pd_tv",
+      "children": []
+    },
+    {
+      "node_id": "row-residual-main",
+      "kind": "reader_residual",
+      "label": "Main CT residual",
+      "row_id": "ct_main",
+      "children": []
+    },
+    {
+      "node_id": "row-summary",
+      "kind": "summary",
+      "label": "Physical total",
+      "row_id": "physical_total",
+      "children": []
+    }
+  ],
+  "cells": [
+    {
+      "row_kind": "device",
+      "row_id": "pd_light_1",
+      "load_component_id": null,
+      "reader_id": "ct_circuit_a",
+      "mapping": {
+        "observability": "partial",
+        "relation_type": "CONTAINS",
+        "mapping_status": "confirmed",
+        "mapping_confidence": 0.85,
+        "valid_from": "2026-01-01T00:00:00Z",
+        "valid_until": null
+      },
+      "power": {
+        "measurement_status": "estimated",
+        "estimated_power_w": null,
+        "bounds": null,
+        "standby_power_w": null,
+        "operating_state": null,
+        "expected_profile_ref": null,
+        "uncertainty_w": null
+      },
+      "identifiability": "non_identifiable",
+      "group_id": "grp_living_lights",
+      "event_association": {
+        "matched_event_count": 2,
+        "confirmed_match_count": 2,
+        "provisional_match_count": 0,
+        "avg_response_delay_ms": null,
+        "response_signature": null,
+        "last_matched_at": "2026-01-02T12:00:00Z"
+      },
+      "confidence": {
+        "measurement_quality": 0.8,
+        "event_association": 0.7,
+        "model_fit": 0.6,
+        "topology_consistency": 0.9,
+        "identifiability": 0.5,
+        "sample_coverage": 0.7,
+        "freshness": 0.9
+      },
+      "provenance": {
+        "sources_used": [
+          "reader_measurement",
+          "event_group"
+        ],
+        "evidence_refs": [
+          {
+            "kind": "sample",
+            "id": "sample-main"
+          }
+        ],
+        "topology_version_id": "topo-3",
+        "model_version_id": "mdl-pd_light_1-1",
+        "mapping_version_id": "map-7"
+      },
+      "timestamps": {
+        "first_observed_at": "2026-01-01T00:00:00Z",
+        "last_observed_at": "2026-01-02T12:00:00Z",
+        "last_validated_at": "2026-01-02T12:00:00Z",
+        "updated_at": "2026-01-02T12:00:00Z"
+      },
+      "visual": "group_only",
+      "derived": false
+    },
+    {
+      "row_kind": "device",
+      "row_id": "pd_light_1",
+      "load_component_id": null,
+      "reader_id": "ct_subpanel",
+      "mapping": {
+        "observability": "partial",
+        "relation_type": "CONTAINS",
+        "mapping_status": "confirmed",
+        "mapping_confidence": 0.85,
+        "valid_from": "2026-01-01T00:00:00Z",
+        "valid_until": null
+      },
+      "power": {
+        "measurement_status": "estimated",
+        "estimated_power_w": null,
+        "bounds": null,
+        "standby_power_w": null,
+        "operating_state": null,
+        "expected_profile_ref": null,
+        "uncertainty_w": null
+      },
+      "identifiability": "non_identifiable",
+      "group_id": "grp_living_lights",
+      "event_association": {
+        "matched_event_count": 2,
+        "confirmed_match_count": 2,
+        "provisional_match_count": 0,
+        "avg_response_delay_ms": null,
+        "response_signature": null,
+        "last_matched_at": "2026-01-02T12:00:00Z"
+      },
+      "confidence": {
+        "measurement_quality": 0.8,
+        "event_association": 0.7,
+        "model_fit": 0.6,
+        "topology_consistency": 0.9,
+        "identifiability": 0.5,
+        "sample_coverage": 0.7,
+        "freshness": 0.9
+      },
+      "provenance": {
+        "sources_used": [
+          "reader_measurement",
+          "event_group"
+        ],
+        "evidence_refs": [
+          {
+            "kind": "sample",
+            "id": "sample-main"
+          }
+        ],
+        "topology_version_id": "topo-3",
+        "model_version_id": "mdl-pd_light_1-1",
+        "mapping_version_id": "map-7"
+      },
+      "timestamps": {
+        "first_observed_at": "2026-01-01T00:00:00Z",
+        "last_observed_at": "2026-01-02T12:00:00Z",
+        "last_validated_at": "2026-01-02T12:00:00Z",
+        "updated_at": "2026-01-02T12:00:00Z"
+      },
+      "visual": "group_only",
+      "derived": false
+    },
+    {
+      "row_kind": "device",
+      "row_id": "pd_light_1",
+      "load_component_id": null,
+      "reader_id": "ct_main",
+      "mapping": {
+        "observability": "partial",
+        "relation_type": "CONTAINS",
+        "mapping_status": "confirmed",
+        "mapping_confidence": 0.85,
+        "valid_from": "2026-01-01T00:00:00Z",
+        "valid_until": null
+      },
+      "power": {
+        "measurement_status": "estimated",
+        "estimated_power_w": null,
+        "bounds": null,
+        "standby_power_w": null,
+        "operating_state": null,
+        "expected_profile_ref": null,
+        "uncertainty_w": null
+      },
+      "identifiability": "non_identifiable",
+      "group_id": "grp_living_lights",
+      "event_association": {
+        "matched_event_count": 2,
+        "confirmed_match_count": 2,
+        "provisional_match_count": 0,
+        "avg_response_delay_ms": null,
+        "response_signature": null,
+        "last_matched_at": "2026-01-02T12:00:00Z"
+      },
+      "confidence": {
+        "measurement_quality": 0.8,
+        "event_association": 0.7,
+        "model_fit": 0.6,
+        "topology_consistency": 0.9,
+        "identifiability": 0.5,
+        "sample_coverage": 0.7,
+        "freshness": 0.9
+      },
+      "provenance": {
+        "sources_used": [
+          "reader_measurement",
+          "event_group"
+        ],
+        "evidence_refs": [
+          {
+            "kind": "sample",
+            "id": "sample-main"
+          }
+        ],
+        "topology_version_id": "topo-3",
+        "model_version_id": "mdl-pd_light_1-1",
+        "mapping_version_id": "map-7"
+      },
+      "timestamps": {
+        "first_observed_at": "2026-01-01T00:00:00Z",
+        "last_observed_at": "2026-01-02T12:00:00Z",
+        "last_validated_at": "2026-01-02T12:00:00Z",
+        "updated_at": "2026-01-02T12:00:00Z"
+      },
+      "visual": "group_only",
+      "derived": false
+    },
+    {
+      "row_kind": "device",
+      "row_id": "pd_light_2",
+      "load_component_id": null,
+      "reader_id": "ct_circuit_a",
+      "mapping": {
+        "observability": "partial",
+        "relation_type": "CONTAINS",
+        "mapping_status": "confirmed",
+        "mapping_confidence": 0.85,
+        "valid_from": "2026-01-01T00:00:00Z",
+        "valid_until": null
+      },
+      "power": {
+        "measurement_status": "estimated",
+        "estimated_power_w": null,
+        "bounds": null,
+        "standby_power_w": null,
+        "operating_state": null,
+        "expected_profile_ref": null,
+        "uncertainty_w": null
+      },
+      "identifiability": "non_identifiable",
+      "group_id": "grp_living_lights",
+      "event_association": {
+        "matched_event_count": 2,
+        "confirmed_match_count": 2,
+        "provisional_match_count": 0,
+        "avg_response_delay_ms": null,
+        "response_signature": null,
+        "last_matched_at": "2026-01-02T12:00:00Z"
+      },
+      "confidence": {
+        "measurement_quality": 0.8,
+        "event_association": 0.7,
+        "model_fit": 0.6,
+        "topology_consistency": 0.9,
+        "identifiability": 0.5,
+        "sample_coverage": 0.7,
+        "freshness": 0.9
+      },
+      "provenance": {
+        "sources_used": [
+          "reader_measurement",
+          "event_group"
+        ],
+        "evidence_refs": [
+          {
+            "kind": "sample",
+            "id": "sample-main"
+          }
+        ],
+        "topology_version_id": "topo-3",
+        "model_version_id": "mdl-pd_light_2-1",
+        "mapping_version_id": "map-7"
+      },
+      "timestamps": {
+        "first_observed_at": "2026-01-01T00:00:00Z",
+        "last_observed_at": "2026-01-02T12:00:00Z",
+        "last_validated_at": "2026-01-02T12:00:00Z",
+        "updated_at": "2026-01-02T12:00:00Z"
+      },
+      "visual": "group_only",
+      "derived": false
+    },
+    {
+      "row_kind": "device",
+      "row_id": "pd_light_2",
+      "load_component_id": null,
+      "reader_id": "ct_subpanel",
+      "mapping": {
+        "observability": "partial",
+        "relation_type": "CONTAINS",
+        "mapping_status": "confirmed",
+        "mapping_confidence": 0.85,
+        "valid_from": "2026-01-01T00:00:00Z",
+        "valid_until": null
+      },
+      "power": {
+        "measurement_status": "estimated",
+        "estimated_power_w": null,
+        "bounds": null,
+        "standby_power_w": null,
+        "operating_state": null,
+        "expected_profile_ref": null,
+        "uncertainty_w": null
+      },
+      "identifiability": "non_identifiable",
+      "group_id": "grp_living_lights",
+      "event_association": {
+        "matched_event_count": 2,
+        "confirmed_match_count": 2,
+        "provisional_match_count": 0,
+        "avg_response_delay_ms": null,
+        "response_signature": null,
+        "last_matched_at": "2026-01-02T12:00:00Z"
+      },
+      "confidence": {
+        "measurement_quality": 0.8,
+        "event_association": 0.7,
+        "model_fit": 0.6,
+        "topology_consistency": 0.9,
+        "identifiability": 0.5,
+        "sample_coverage": 0.7,
+        "freshness": 0.9
+      },
+      "provenance": {
+        "sources_used": [
+          "reader_measurement",
+          "event_group"
+        ],
+        "evidence_refs": [
+          {
+            "kind": "sample",
+            "id": "sample-main"
+          }
+        ],
+        "topology_version_id": "topo-3",
+        "model_version_id": "mdl-pd_light_2-1",
+        "mapping_version_id": "map-7"
+      },
+      "timestamps": {
+        "first_observed_at": "2026-01-01T00:00:00Z",
+        "last_observed_at": "2026-01-02T12:00:00Z",
+        "last_validated_at": "2026-01-02T12:00:00Z",
+        "updated_at": "2026-01-02T12:00:00Z"
+      },
+      "visual": "group_only",
+      "derived": false
+    },
+    {
+      "row_kind": "device",
+      "row_id": "pd_light_2",
+      "load_component_id": null,
+      "reader_id": "ct_main",
+      "mapping": {
+        "observability": "partial",
+        "relation_type": "CONTAINS",
+        "mapping_status": "confirmed",
+        "mapping_confidence": 0.85,
+        "valid_from": "2026-01-01T00:00:00Z",
+        "valid_until": null
+      },
+      "power": {
+        "measurement_status": "estimated",
+        "estimated_power_w": null,
+        "bounds": null,
+        "standby_power_w": null,
+        "operating_state": null,
+        "expected_profile_ref": null,
+        "uncertainty_w": null
+      },
+      "identifiability": "non_identifiable",
+      "group_id": "grp_living_lights",
+      "event_association": {
+        "matched_event_count": 2,
+        "confirmed_match_count": 2,
+        "provisional_match_count": 0,
+        "avg_response_delay_ms": null,
+        "response_signature": null,
+        "last_matched_at": "2026-01-02T12:00:00Z"
+      },
+      "confidence": {
+        "measurement_quality": 0.8,
+        "event_association": 0.7,
+        "model_fit": 0.6,
+        "topology_consistency": 0.9,
+        "identifiability": 0.5,
+        "sample_coverage": 0.7,
+        "freshness": 0.9
+      },
+      "provenance": {
+        "sources_used": [
+          "reader_measurement",
+          "event_group"
+        ],
+        "evidence_refs": [
+          {
+            "kind": "sample",
+            "id": "sample-main"
+          }
+        ],
+        "topology_version_id": "topo-3",
+        "model_version_id": "mdl-pd_light_2-1",
+        "mapping_version_id": "map-7"
+      },
+      "timestamps": {
+        "first_observed_at": "2026-01-01T00:00:00Z",
+        "last_observed_at": "2026-01-02T12:00:00Z",
+        "last_validated_at": "2026-01-02T12:00:00Z",
+        "updated_at": "2026-01-02T12:00:00Z"
+      },
+      "visual": "group_only",
+      "derived": false
+    },
+    {
+      "row_kind": "group",
+      "row_id": "grp_living_lights",
+      "load_component_id": null,
+      "reader_id": "ct_circuit_a",
+      "mapping": {
+        "observability": "inferred",
+        "relation_type": "CONTAINS",
+        "mapping_status": "confirmed",
+        "mapping_confidence": 0.85,
+        "valid_from": "2026-01-01T00:00:00Z",
+        "valid_until": null
+      },
+      "power": {
+        "measurement_status": "estimated",
+        "estimated_power_w": 45.0,
+        "bounds": {
+          "lower_w": 40.0,
+          "upper_w": 50.0,
+          "basis": "posterior"
+        },
+        "standby_power_w": null,
+        "operating_state": null,
+        "expected_profile_ref": null,
+        "uncertainty_w": null
+      },
+      "identifiability": "group_identifiable",
+      "group_id": "grp_living_lights",
+      "event_association": {
+        "matched_event_count": 2,
+        "confirmed_match_count": 2,
+        "provisional_match_count": 0,
+        "avg_response_delay_ms": null,
+        "response_signature": null,
+        "last_matched_at": "2026-01-02T12:00:00Z"
+      },
+      "confidence": {
+        "measurement_quality": 0.8,
+        "event_association": 0.7,
+        "model_fit": 0.6,
+        "topology_consistency": 0.9,
+        "identifiability": 0.5,
+        "sample_coverage": 0.7,
+        "freshness": 0.9
+      },
+      "provenance": {
+        "sources_used": [
+          "reader_measurement",
+          "event_group"
+        ],
+        "evidence_refs": [
+          {
+            "kind": "sample",
+            "id": "sample-main"
+          }
+        ],
+        "topology_version_id": "topo-3",
+        "model_version_id": "mdl-grp_living_lights-1",
+        "mapping_version_id": "map-7"
+      },
+      "timestamps": {
+        "first_observed_at": "2026-01-01T00:00:00Z",
+        "last_observed_at": "2026-01-02T12:00:00Z",
+        "last_validated_at": "2026-01-02T12:00:00Z",
+        "updated_at": "2026-01-02T12:00:00Z"
+      },
+      "visual": "confirmed_inferred",
+      "derived": false
+    },
+    {
+      "row_kind": "group",
+      "row_id": "grp_living_lights",
+      "load_component_id": null,
+      "reader_id": "ct_subpanel",
+      "mapping": {
+        "observability": "inferred",
+        "relation_type": "CONTAINS",
+        "mapping_status": "confirmed",
+        "mapping_confidence": 0.85,
+        "valid_from": "2026-01-01T00:00:00Z",
+        "valid_until": null
+      },
+      "power": {
+        "measurement_status": "estimated",
+        "estimated_power_w": 45.0,
+        "bounds": {
+          "lower_w": 40.0,
+          "upper_w": 50.0,
+          "basis": "posterior"
+        },
+        "standby_power_w": null,
+        "operating_state": null,
+        "expected_profile_ref": null,
+        "uncertainty_w": null
+      },
+      "identifiability": "group_identifiable",
+      "group_id": "grp_living_lights",
+      "event_association": {
+        "matched_event_count": 2,
+        "confirmed_match_count": 2,
+        "provisional_match_count": 0,
+        "avg_response_delay_ms": null,
+        "response_signature": null,
+        "last_matched_at": "2026-01-02T12:00:00Z"
+      },
+      "confidence": {
+        "measurement_quality": 0.8,
+        "event_association": 0.7,
+        "model_fit": 0.6,
+        "topology_consistency": 0.9,
+        "identifiability": 0.5,
+        "sample_coverage": 0.7,
+        "freshness": 0.9
+      },
+      "provenance": {
+        "sources_used": [
+          "reader_measurement",
+          "event_group"
+        ],
+        "evidence_refs": [
+          {
+            "kind": "sample",
+            "id": "sample-main"
+          }
+        ],
+        "topology_version_id": "topo-3",
+        "model_version_id": "mdl-grp_living_lights-1",
+        "mapping_version_id": "map-7"
+      },
+      "timestamps": {
+        "first_observed_at": "2026-01-01T00:00:00Z",
+        "last_observed_at": "2026-01-02T12:00:00Z",
+        "last_validated_at": "2026-01-02T12:00:00Z",
+        "updated_at": "2026-01-02T12:00:00Z"
+      },
+      "visual": "confirmed_inferred",
+      "derived": false
+    },
+    {
+      "row_kind": "group",
+      "row_id": "grp_living_lights",
+      "load_component_id": null,
+      "reader_id": "ct_main",
+      "mapping": {
+        "observability": "inferred",
+        "relation_type": "CONTAINS",
+        "mapping_status": "confirmed",
+        "mapping_confidence": 0.85,
+        "valid_from": "2026-01-01T00:00:00Z",
+        "valid_until": null
+      },
+      "power": {
+        "measurement_status": "estimated",
+        "estimated_power_w": 45.0,
+        "bounds": {
+          "lower_w": 40.0,
+          "upper_w": 50.0,
+          "basis": "posterior"
+        },
+        "standby_power_w": null,
+        "operating_state": null,
+        "expected_profile_ref": null,
+        "uncertainty_w": null
+      },
+      "identifiability": "group_identifiable",
+      "group_id": "grp_living_lights",
+      "event_association": {
+        "matched_event_count": 2,
+        "confirmed_match_count": 2,
+        "provisional_match_count": 0,
+        "avg_response_delay_ms": null,
+        "response_signature": null,
+        "last_matched_at": "2026-01-02T12:00:00Z"
+      },
+      "confidence": {
+        "measurement_quality": 0.8,
+        "event_association": 0.7,
+        "model_fit": 0.6,
+        "topology_consistency": 0.9,
+        "identifiability": 0.5,
+        "sample_coverage": 0.7,
+        "freshness": 0.9
+      },
+      "provenance": {
+        "sources_used": [
+          "reader_measurement",
+          "event_group"
+        ],
+        "evidence_refs": [
+          {
+            "kind": "sample",
+            "id": "sample-main"
+          }
+        ],
+        "topology_version_id": "topo-3",
+        "model_version_id": "mdl-grp_living_lights-1",
+        "mapping_version_id": "map-7"
+      },
+      "timestamps": {
+        "first_observed_at": "2026-01-01T00:00:00Z",
+        "last_observed_at": "2026-01-02T12:00:00Z",
+        "last_validated_at": "2026-01-02T12:00:00Z",
+        "updated_at": "2026-01-02T12:00:00Z"
+      },
+      "visual": "confirmed_inferred",
+      "derived": false
+    },
+    {
+      "row_kind": "device",
+      "row_id": "pd_tv",
+      "load_component_id": null,
+      "reader_id": "plug_tv",
+      "mapping": {
+        "observability": "direct",
+        "relation_type": "DIRECT_ENDPOINT",
+        "mapping_status": "confirmed",
+        "mapping_confidence": 0.85,
+        "valid_from": "2026-01-01T00:00:00Z",
+        "valid_until": null
+      },
+      "power": {
+        "measurement_status": "measured",
+        "estimated_power_w": 3.0,
+        "bounds": null,
+        "standby_power_w": 3.0,
+        "operating_state": "standby",
+        "expected_profile_ref": null,
+        "uncertainty_w": null
+      },
+      "identifiability": "identifiable",
+      "group_id": null,
+      "event_association": {
+        "matched_event_count": 0,
+        "confirmed_match_count": 0,
+        "provisional_match_count": 0,
+        "avg_response_delay_ms": null,
+        "response_signature": null,
+        "last_matched_at": null
+      },
+      "confidence": {
+        "measurement_quality": 0.8,
+        "event_association": 0.7,
+        "model_fit": 0.6,
+        "topology_consistency": 0.9,
+        "identifiability": 0.5,
+        "sample_coverage": 0.7,
+        "freshness": 0.9
+      },
+      "provenance": {
+        "sources_used": [
+          "plug_power_entity"
+        ],
+        "evidence_refs": [
+          {
+            "kind": "sample",
+            "id": "plug-tv-001"
+          }
+        ],
+        "topology_version_id": "topo-3",
+        "model_version_id": "mdl-pd_tv-1",
+        "mapping_version_id": "map-7"
+      },
+      "timestamps": {
+        "first_observed_at": "2026-01-01T00:00:00Z",
+        "last_observed_at": "2026-01-02T12:00:00Z",
+        "last_validated_at": "2026-01-02T12:00:00Z",
+        "updated_at": "2026-01-02T12:00:00Z"
+      },
+      "visual": "directly_measured",
+      "derived": false
+    },
+    {
+      "row_kind": "unknown_profile",
+      "row_id": "ulp_kitchen_fridge",
+      "load_component_id": null,
+      "reader_id": "ct_circuit_c",
+      "mapping": {
+        "observability": "inferred",
+        "relation_type": "CONTAINS",
+        "mapping_status": "provisional",
+        "mapping_confidence": 0.85,
+        "valid_from": "2026-01-01T00:00:00Z",
+        "valid_until": null
+      },
+      "power": {
+        "measurement_status": "estimated",
+        "estimated_power_w": 120.0,
+        "bounds": {
+          "lower_w": 100.0,
+          "upper_w": 140.0,
+          "basis": "posterior"
+        },
+        "standby_power_w": null,
+        "operating_state": null,
+        "expected_profile_ref": null,
+        "uncertainty_w": null
+      },
+      "identifiability": "insufficient_evidence",
+      "group_id": null,
+      "event_association": {
+        "matched_event_count": 0,
+        "confirmed_match_count": 0,
+        "provisional_match_count": 0,
+        "avg_response_delay_ms": null,
+        "response_signature": null,
+        "last_matched_at": null
+      },
+      "confidence": {
+        "measurement_quality": 0.8,
+        "event_association": 0.7,
+        "model_fit": 0.6,
+        "topology_consistency": 0.9,
+        "identifiability": 0.5,
+        "sample_coverage": 0.7,
+        "freshness": 0.9
+      },
+      "provenance": {
+        "sources_used": [
+          "reader_step"
+        ],
+        "evidence_refs": [
+          {
+            "kind": "sample",
+            "id": "sample-main"
+          }
+        ],
+        "topology_version_id": "topo-3",
+        "model_version_id": "mdl-ulp_kitchen_fridge-1",
+        "mapping_version_id": "map-7"
+      },
+      "timestamps": {
+        "first_observed_at": "2026-01-01T00:00:00Z",
+        "last_observed_at": "2026-01-02T12:00:00Z",
+        "last_validated_at": "2026-01-02T12:00:00Z",
+        "updated_at": "2026-01-02T12:00:00Z"
+      },
+      "visual": "provisional",
+      "derived": false
+    },
+    {
+      "row_kind": "reader_residual",
+      "row_id": "ct_main",
+      "load_component_id": null,
+      "reader_id": "ct_main",
+      "mapping": {
+        "observability": "direct",
+        "relation_type": "CONTAINS",
+        "mapping_status": "confirmed",
+        "mapping_confidence": 0.85,
+        "valid_from": "2026-01-01T00:00:00Z",
+        "valid_until": null
+      },
+      "power": {
+        "measurement_status": "measured",
+        "estimated_power_w": 600.0,
+        "bounds": null,
+        "standby_power_w": null,
+        "operating_state": null,
+        "expected_profile_ref": null,
+        "uncertainty_w": null
+      },
+      "identifiability": "identifiable",
+      "group_id": null,
+      "event_association": {
+        "matched_event_count": 0,
+        "confirmed_match_count": 0,
+        "provisional_match_count": 0,
+        "avg_response_delay_ms": null,
+        "response_signature": null,
+        "last_matched_at": null
+      },
+      "confidence": {
+        "measurement_quality": 0.8,
+        "event_association": 0.7,
+        "model_fit": 0.6,
+        "topology_consistency": 0.9,
+        "identifiability": 0.5,
+        "sample_coverage": 0.7,
+        "freshness": 0.9
+      },
+      "provenance": {
+        "sources_used": [
+          "reader_measurement"
+        ],
+        "evidence_refs": [
+          {
+            "kind": "sample",
+            "id": "sample-main"
+          }
+        ],
+        "topology_version_id": "topo-3",
+        "model_version_id": "mdl-ct_main-1",
+        "mapping_version_id": "map-7"
+      },
+      "timestamps": {
+        "first_observed_at": "2026-01-01T00:00:00Z",
+        "last_observed_at": "2026-01-02T12:00:00Z",
+        "last_validated_at": "2026-01-02T12:00:00Z",
+        "updated_at": "2026-01-02T12:00:00Z"
+      },
+      "visual": "directly_measured",
+      "derived": false
+    },
+    {
+      "row_kind": "summary",
+      "row_id": "physical_total",
+      "load_component_id": null,
+      "reader_id": "ct_main",
+      "mapping": {
+        "observability": "direct",
+        "relation_type": "CONTAINS",
+        "mapping_status": "confirmed",
+        "mapping_confidence": 0.85,
+        "valid_from": "2026-01-01T00:00:00Z",
+        "valid_until": null
+      },
+      "power": {
+        "measurement_status": "measured",
+        "estimated_power_w": 1500.0,
+        "bounds": {
+          "lower_w": 1380.0,
+          "upper_w": 1620.0,
+          "basis": "reader_ceiling"
+        },
+        "standby_power_w": null,
+        "operating_state": null,
+        "expected_profile_ref": null,
+        "uncertainty_w": null
+      },
+      "identifiability": "identifiable",
+      "group_id": null,
+      "event_association": {
+        "matched_event_count": 0,
+        "confirmed_match_count": 0,
+        "provisional_match_count": 0,
+        "avg_response_delay_ms": null,
+        "response_signature": null,
+        "last_matched_at": null
+      },
+      "confidence": {
+        "measurement_quality": 0.8,
+        "event_association": 0.7,
+        "model_fit": 0.6,
+        "topology_consistency": 0.9,
+        "identifiability": 0.5,
+        "sample_coverage": 0.7,
+        "freshness": 0.9
+      },
+      "provenance": {
+        "sources_used": [
+          "reader_measurement"
+        ],
+        "evidence_refs": [
+          {
+            "kind": "sample",
+            "id": "sample-main"
+          }
+        ],
+        "topology_version_id": "topo-3",
+        "model_version_id": "mdl-physical_total-1",
+        "mapping_version_id": "map-7"
+      },
+      "timestamps": {
+        "first_observed_at": "2026-01-01T00:00:00Z",
+        "last_observed_at": "2026-01-02T12:00:00Z",
+        "last_validated_at": "2026-01-02T12:00:00Z",
+        "updated_at": "2026-01-02T12:00:00Z"
+      },
+      "visual": "directly_measured",
+      "derived": true
+    }
+  ],
+  "reader_totals": {
+    "ct_main": {
+      "measured_w": 1500.0,
+      "known_contrib_w": 48.0,
+      "residual_w": 600.0,
+      "unknown_w": 120.0
+    },
+    "ct_subpanel": {
+      "measured_w": 800.0,
+      "known_contrib_w": 45.0,
+      "residual_w": 0.0,
+      "unknown_w": null
+    },
+    "ct_circuit_a": {
+      "measured_w": 300.0,
+      "known_contrib_w": 45.0,
+      "residual_w": 0.0,
+      "unknown_w": null
+    },
+    "ct_circuit_b": {
+      "measured_w": 200.0,
+      "known_contrib_w": null,
+      "residual_w": null,
+      "unknown_w": null
+    },
+    "ct_circuit_c": {
+      "measured_w": 400.0,
+      "known_contrib_w": null,
+      "residual_w": 280.0,
+      "unknown_w": 120.0
+    },
+    "plug_tv": {
+      "measured_w": 3.0,
+      "known_contrib_w": 3.0,
+      "residual_w": null,
+      "unknown_w": null
+    }
+  },
+  "physical_total": {
+    "measured_w": 1500.0,
+    "identified_w": 51.0,
+    "group_w": 45.0,
+    "unknown_w": 120.0,
+    "residual_w": 600.0,
+    "total_w": 1500.0
+  }
+}
