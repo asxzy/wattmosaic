@@ -706,6 +706,9 @@
 
   function applyRoute() {
     const route = parseHash();
+    // Cancel any in-flight discovery poll: its cached generation no longer
+    // matches, so it will not issue another status GET after this navigation.
+    discoveryGeneration += 1;
     state.view = route.view;
     state.deviceId = route.deviceId;
     for (const link of document.querySelectorAll('[data-nav]')) {
@@ -3533,6 +3536,11 @@
   //: Only one discovery runs at a time (``runDiscovery`` guards on ``running``).
   let discoverStartedAt = 0;
 
+  //: Bumped on navigation (``applyRoute``).  A discovery poll captures the value
+  //: when it starts and treats a mismatch as cancellation, so it never issues a
+  //: status GET after the user has left the view.
+  let discoveryGeneration = 0;
+
   //: Why the engine withheld or refused a fixture, in words a person can act on.
   //: Keys are the engine's own codes; an unlisted code still falls back to
   //: ``titleCase`` so a newer engine is legible rather than blank.
@@ -3678,6 +3686,9 @@
         el('span', {},
           `Comparing fixture transitions with the CT rows over the last ${discoverWindowLabel(hours)}…`),
       ]),
+      //: Updated by runDiscovery's status callback on each status answer.
+      el('p', { class: 'stat-hint discover-job-status', id: 'topology-discover-job-status' },
+        'Starting discovery job…'),
     ];
     if (long) {
       // Say what the wait is.  168 h measured 155 s on production recorder
@@ -3738,6 +3749,106 @@
     );
   }
 
+  /* DISCOVERY_STATUS_OUTCOME_START */
+  /**
+   * Pure mapping from a discovery-job status payload to a render outcome.
+   *
+   * The start endpoint returns a handle (no ``status``), so a payload with no
+   * ``status`` is the legacy synchronous result and renders directly.  A
+   * ``running`` job is not done yet.  ``complete`` carries ``result`` and
+   * ``failed`` carries ``error`` -- the engine's own failure detail, which is a
+   * string (or an object with ``message``/``detail``).  This function is pure so
+   * the source slice between these markers can be run directly under node.
+   */
+  function discoveryStatusOutcome(payload) {
+    const job = payload || {};
+    const status = job.status;
+    if (status === 'running' || status === 'pending') return { done: false };
+    if (status === 'complete') return { done: true, result: job.result };
+    if (status === 'failed') {
+      const raw = job.error;
+      let message;
+      if (raw && typeof raw === 'object') {
+        message = raw.message || raw.detail || raw.error || String(raw);
+      } else {
+        message = raw;
+      }
+      return { done: true, error: message || 'Discovery failed.' };
+    }
+    // No status field: a legacy synchronous full result, already final.
+    return { done: true, result: payload };
+  }
+  /* DISCOVERY_STATUS_OUTCOME_END */
+
+  //: A bounded poll: at most this many status GETs (one every ~2 s, so ~20 min
+  //: of waiting) before reporting a timeout instead of polling forever.
+  const DISCOVERY_MAX_POLLS = 600;
+  const DISCOVERY_POLL_MS = 2000;
+
+  /**
+   * Start a discovery job and poll its status until it is done.
+   *
+   * POSTs ``body`` to get a handle.  A handle with a ``job_id`` is polled with
+   * GET on ``DISCOVER_PATH/job_id`` through ``discoveryStatusOutcome``.  A
+   * legacy synchronous response (no ``job_id``) is returned directly.  Resolves
+   * ``{result}`` on success, ``{error}`` on a failed job, ``{timedOut:true}``
+   * when the bound is hit, or ``{cancelled:true}`` when the navigation token
+   * changes.  ``onProgress(payload)`` is called after each status answer.  The
+   * timer is cleared on every terminal path so no GET follows a navigation.
+   */
+  function startDiscoveryJob(body, onProgress, isCancelled) {
+    return new Promise((resolve) => {
+      let timer = null;
+      let polls = 0;
+      // One navigation token per job; mismatch means the user navigated away.
+      const token = discoveryGeneration;
+      const cancelled = () => (isCancelled ? isCancelled() : false) || token !== discoveryGeneration;
+      const finish = (value) => {
+        if (timer !== null) { clearTimeout(timer); timer = null; }
+        resolve(value);
+      };
+      const poll = async (jobId) => {
+        if (cancelled()) { finish({ cancelled: true }); return; }
+        if (polls >= DISCOVERY_MAX_POLLS) { finish({ timedOut: true }); return; }
+        polls += 1;
+        try {
+          const payload = await get(`${DISCOVER_PATH}/${encodeURIComponent(jobId)}`);
+          if (cancelled()) { finish({ cancelled: true }); return; }
+          if (onProgress) onProgress(payload);
+          const outcome = discoveryStatusOutcome(payload);
+          if (!outcome.done) {
+            timer = setTimeout(() => poll(jobId), DISCOVERY_POLL_MS);
+            return;
+          }
+          if (Object.prototype.hasOwnProperty.call(outcome, 'error')) {
+            finish({ error: outcome.error });
+          } else {
+            finish({ result: outcome.result });
+          }
+        } catch (err) {
+          // A transport error during polling is a real failure; surface its
+          // message (never a generic "Discovery failed") the way a job error is.
+          finish({ error: err });
+        }
+      };
+      (async () => {
+        try {
+          const start = await post(DISCOVER_PATH, body);
+          if (cancelled()) { finish({ cancelled: true }); return; }
+          const handle = start || {};
+          if (!handle.job_id) {
+            // Legacy synchronous result: render it directly.
+            finish({ result: start });
+            return;
+          }
+          poll(handle.job_id);
+        } catch (err) {
+          finish({ error: err });
+        }
+      })();
+    });
+  }
+
   async function runDiscovery() {
     if (state.discover.running) return;
     // The window is read once, before the request, and pinned for the whole
@@ -3767,25 +3878,58 @@
       // The read-only request carries the window the user is looking at, and
       // writes nothing: ``apply`` stays false.  The apply path below sends the
       // same selection, so an apply writes the window that was reviewed.
-      const data = await post(DISCOVER_PATH, {
+      // Starting now goes through a job handle that we poll; the *result* shape
+      // on completion is byte-for-byte the old synchronous payload.
+      const outcome = await startDiscoveryJob({
         apply: false,
         include_groups: true,
         lookback_hours: hours,
+      }, (payload) => {
+        // Progress: each status answer confirms the job is still being worked.
+        const node = document.getElementById('topology-discover-job-status');
+        if (node) {
+          node.textContent = payload && payload.status === 'complete'
+            ? 'Finished; rendering the result…'
+            : 'Discovery job is running…';
+        }
       });
+      if (outcome.cancelled) {
+        // The user navigated away; no status GET follows the cancel (the helper
+        // guards on the generation token), so there is nothing to paint here.
+        state.discover = { ...state.discover, running: false };
+        return;
+      }
+      if (outcome.timedOut) {
+        const message =
+          'Discovery is taking longer than expected and timed out. The engine may still be working; try a shorter window or retry.';
+        state.discover = {
+          data: null, running: false, error: { message }, window: hours, ranWindow: hours,
+        };
+        swapDiscover(discoverErrorCard({ message }));
+        notify('Discovery timed out', message, 'bad');
+        return;
+      }
+      if (Object.prototype.hasOwnProperty.call(outcome, 'error')) {
+        // Surface the engine's real failure detail from the job status payload,
+        // never a generic "Discovery failed" string.  ``describeError`` relays a
+        // job error string verbatim and still explains a 404 start response.
+        const err = outcome.error;
+        state.discover = {
+          data: null, running: false, error: err, window: hours, ranWindow: hours,
+        };
+        swapDiscover(discoverErrorCard(err));
+        if (err && err.status === 404) {
+          notify('Discovery unavailable', 'This engine does not serve /discover/placements.', 'bad');
+        } else {
+          notify('Discovery failed', describeError(err), 'bad');
+        }
+        return;
+      }
+      const data = outcome.result;
       state.discover = {
         data, running: false, error: null, window: hours, ranWindow: hours,
       };
       swapDiscover(discoverCard(data));
-    } catch (err) {
-      state.discover = {
-        data: null, running: false, error: err, window: hours, ranWindow: hours,
-      };
-      swapDiscover(discoverErrorCard(err));
-      if (err && err.status === 404) {
-        notify('Discovery unavailable', 'This engine does not serve /discover/placements.', 'bad');
-      } else {
-        notify('Discovery failed', describeError(err), 'bad');
-      }
     } finally {
       clearInterval(ticker);
       discoverStartedAt = 0;
@@ -4123,7 +4267,10 @@
           // the selector's current value: an apply must write the evidence the
           // user just reviewed.  ``runDiscovery`` pins that value in
           // ``state.discover.ranWindow`` when the read-only request is sent.
-          const result = await post(DISCOVER_PATH, {
+          // Apply is asynchronous too: start the job and poll until it finishes,
+          // then read the write result from ``outcome.result``.  ``startDiscoveryJob``
+          // cleans up its timer on every terminal path.
+          const outcome = await startDiscoveryJob({
             apply: true,
             // ``ranWindow`` is null only before any run; there is no card to
             // apply from then, so the selected window is the safe fallback.
@@ -4131,6 +4278,11 @@
               ? state.discover.ranWindow
               : state.discover.window,
           });
+          if (outcome.error || outcome.timedOut) {
+            throw outcome.error || new Error('Applying the placements timed out.');
+          }
+          if (outcome.cancelled) return;
+          const result = outcome.result;
           if (result && result.applied === true) {
             notify(
               'Placements applied',

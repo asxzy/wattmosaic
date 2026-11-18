@@ -1126,3 +1126,55 @@ def test_learning_banner_with_topology_note_is_informational(
         assert stale.lower() not in banner.lower(), (
             f"stale gating text {stale!r} reappeared in the learning banner"
         )
+
+
+# The pure discovery-job outcome mapper, delimited by markers in app.js.  Loading
+# only this slice under node exercises the shipped mapping with no DOM, no fetch
+# and no timer harness -- it is a pure function.
+_DISCOVERY_OUTCOME_START = "/* DISCOVERY_STATUS_OUTCOME_START */"
+_DISCOVERY_OUTCOME_END = "/* DISCOVERY_STATUS_OUTCOME_END */"
+
+
+def test_discovery_status_outcome_maps_states() -> None:
+    """The pure helper maps running/complete/failed, surfacing the real error text.
+
+    A failed job's ``error`` is a string in the status payload (the engine writes
+    ``str(exc)``); the mapper must return it verbatim so the UI can show it rather
+    than a generic "Discovery failed".
+    """
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed; the panel does not need it at runtime")
+
+    script = APP_JS.read_text(encoding="utf-8")
+    start = script.index(_DISCOVERY_OUTCOME_START)
+    end = script.index(_DISCOVERY_OUTCOME_END, start)
+    block = script[start:end]
+
+    program = (
+        block
+        + "\n"
+        + "const out = {\n"
+        + "  running: discoveryStatusOutcome({ job_id: 'j', status: 'running' }),\n"
+        + "  complete: discoveryStatusOutcome({ job_id: 'j', status: 'complete', result: { accepted: [1] } }),\n"
+        + "  failed: discoveryStatusOutcome({ job_id: 'j', status: 'failed', error: 'CT row measures the whole installation' }),\n"
+        + "  failedObject: discoveryStatusOutcome({ job_id: 'j', status: 'failed', error: { message: 'engine exploded' } }),\n"
+        + "};\n"
+        + "console.log(JSON.stringify(out));\n"
+    )
+    completed = subprocess.run(
+        [node, "-e", program],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    out = json.loads(completed.stdout)
+
+    assert out["running"] == {"done": False}
+    assert out["complete"]["done"] is True
+    assert out["complete"]["result"] == {"accepted": [1]}
+    assert out["failed"]["done"] is True
+    assert out["failed"]["error"] == "CT row measures the whole installation", (
+        "a failed job must surface the actual error text from the status payload"
+    )
+    assert out["failedObject"]["error"] == "engine exploded"

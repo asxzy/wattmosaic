@@ -475,7 +475,7 @@ def test_apply_toast_is_branched_on_the_applied_flag() -> None:
     """
     script = _app_js()
     handler = re.search(
-        r"const result = await post\(DISCOVER_PATH, \{.*?\}\);(?P<body>.*?)\n        \} catch",
+        r"const result = outcome\.result;(?P<body>.*?)\n        \} catch",
         script,
         re.DOTALL,
     )
@@ -532,7 +532,7 @@ def test_refusal_detail_reaches_the_user_through_the_apply_toast() -> None:
     """
     script = _app_js()
     handler = re.search(
-        r"const result = await post\(DISCOVER_PATH, \{.*?\}\);(?P<body>.*?)\n        \} catch",
+        r"const result = outcome\.result;(?P<body>.*?)\n        \} catch",
         script,
         re.DOTALL,
     )
@@ -790,7 +790,7 @@ def test_discover_request_posts_the_selected_window() -> None:
     """
     script = _app_js()
     call = re.search(
-        r"const data = await post\(DISCOVER_PATH, \{(?P<body>.*?)\n      \}\);",
+        r"const outcome = await startDiscoveryJob\(\{(?P<body>.*?)\n      \}, \(payload\)",
         script,
         re.DOTALL,
     )
@@ -819,7 +819,7 @@ def test_apply_request_reuses_the_reviewed_window() -> None:
     """
     script = _app_js()
     call = re.search(
-        r"const result = await post\(DISCOVER_PATH, \{(?P<body>.*?)\n          \}\);",
+        r"const outcome = await startDiscoveryJob\(\{(?=\s*apply: true)(?P<body>.*?)\n          \}\);",
         script,
         re.DOTALL,
     )
@@ -836,6 +836,66 @@ def test_apply_request_reuses_the_reviewed_window() -> None:
     # Both call sites must agree: the same pinned field feeds discover, footer
     # and apply, so there is one selected window rather than two opinions.
     assert body.count("lookback_hours") == 1
+
+
+def test_discovery_polls_status_and_shows_error() -> None:
+    """Discovery must start a job, poll its GET status, and surface the real error.
+
+    Replaces the old single blocking POST.  The start helper must call the
+    status GET with the job id, must map the answer through
+    ``discoveryStatusOutcome``, and ``runDiscovery`` must render the outcome's
+    ``error`` text on a failed job (not a generic "Discovery failed").  These are
+    source-shape guards: removing the poll or the error rendering breaks them.
+    """
+    script = _app_js()
+
+    # The poll helper GETs the status route with the returned job id and maps
+    # every answer through the pure outcome helper.
+    helper = script[
+        script.index("function startDiscoveryJob(") : script.index(
+            "async function runDiscovery()"
+        )
+    ]
+    assert "`${DISCOVER_PATH}/${encodeURIComponent(jobId)}`" in helper, (
+        "the poll no longer GETs /discover/placements/{job_id}"
+    )
+    assert "discoveryStatusOutcome(payload)" in helper, (
+        "the poll does not map the status answer through discoveryStatusOutcome"
+    )
+    assert "setTimeout(() => poll(jobId)" in helper, (
+        "the poll is not a bounded setTimeout loop"
+    )
+    assert "clearTimeout(timer)" in helper, "the poll timer is not cleaned up"
+    assert "hasOwnProperty.call(outcome, 'error')" in helper, (
+        "a failed outcome is not distinguished from a completed one"
+    )
+    # The cancel guard: navigation bumps the token and no GET follows a cancel.
+    assert "token !== discoveryGeneration" in helper, (
+        "the poll has no navigation cancel guard"
+    )
+    assert "discoveryGeneration += 1" in script[script.index("function applyRoute()") :], (
+        "navigation does not signal the discovery poll to cancel"
+    )
+
+    # runDiscovery renders the failed job's real error text and the completed
+    # result via the existing renderer.
+    run = script[
+        script.index("async function runDiscovery()") : script.index(
+            "function discoverCard("
+        )
+    ]
+    assert "const err = outcome.error;" in run, (
+        "runDiscovery does not read the actual error from the job status payload"
+    )
+    assert "discoverErrorCard(err)" in run, (
+        "runDiscovery does not render the failed job's error text"
+    )
+    assert "discoverCard(data)" in run, (
+        "runDiscovery no longer renders a completed result with the existing card"
+    )
+    assert "notify('Discovery timed out'" in run, (
+        "runDiscovery has no bounded-timeout message"
+    )
 
 
 def test_long_window_loading_state_says_the_wait_is_long() -> None:
