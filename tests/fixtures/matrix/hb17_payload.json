@@ -222,7 +222,7 @@
       "reader_id": "ct_circuit_a",
       "mapping": {
         "observability": "partial",
-        "relation_type": "CONTAINS",
+        "relation_type": "contains",
         "mapping_status": "confirmed",
         "mapping_confidence": 0.85,
         "valid_from": "2026-01-01T00:00:00Z",
@@ -287,7 +287,7 @@
       "reader_id": "ct_subpanel",
       "mapping": {
         "observability": "partial",
-        "relation_type": "CONTAINS",
+        "relation_type": "contains",
         "mapping_status": "confirmed",
         "mapping_confidence": 0.85,
         "valid_from": "2026-01-01T00:00:00Z",
@@ -352,7 +352,7 @@
       "reader_id": "ct_main",
       "mapping": {
         "observability": "partial",
-        "relation_type": "CONTAINS",
+        "relation_type": "contains",
         "mapping_status": "confirmed",
         "mapping_confidence": 0.85,
         "valid_from": "2026-01-01T00:00:00Z",
@@ -417,7 +417,7 @@
       "reader_id": "ct_circuit_a",
       "mapping": {
         "observability": "partial",
-        "relation_type": "CONTAINS",
+        "relation_type": "contains",
         "mapping_status": "confirmed",
         "mapping_confidence": 0.85,
         "valid_from": "2026-01-01T00:00:00Z",
@@ -482,7 +482,7 @@
       "reader_id": "ct_subpanel",
       "mapping": {
         "observability": "partial",
-        "relation_type": "CONTAINS",
+        "relation_type": "contains",
         "mapping_status": "confirmed",
         "mapping_confidence": 0.85,
         "valid_from": "2026-01-01T00:00:00Z",
@@ -547,7 +547,7 @@
       "reader_id": "ct_main",
       "mapping": {
         "observability": "partial",
-        "relation_type": "CONTAINS",
+        "relation_type": "contains",
         "mapping_status": "confirmed",
         "mapping_confidence": 0.85,
         "valid_from": "2026-01-01T00:00:00Z",
@@ -612,7 +612,7 @@
       "reader_id": "ct_circuit_a",
       "mapping": {
         "observability": "inferred",
-        "relation_type": "CONTAINS",
+        "relation_type": "contains",
         "mapping_status": "confirmed",
         "mapping_confidence": 0.85,
         "valid_from": "2026-01-01T00:00:00Z",
@@ -681,7 +681,7 @@
       "reader_id": "ct_subpanel",
       "mapping": {
         "observability": "inferred",
-        "relation_type": "CONTAINS",
+        "relation_type": "contains",
         "mapping_status": "confirmed",
         "mapping_confidence": 0.85,
         "valid_from": "2026-01-01T00:00:00Z",
@@ -750,7 +750,7 @@
       "reader_id": "ct_main",
       "mapping": {
         "observability": "inferred",
-        "relation_type": "CONTAINS",
+        "relation_type": "contains",
         "mapping_status": "confirmed",
         "mapping_confidence": 0.85,
         "valid_from": "2026-01-01T00:00:00Z",
@@ -819,7 +819,7 @@
       "reader_id": "plug_tv",
       "mapping": {
         "observability": "direct",
-        "relation_type": "DIRECT_ENDPOINT",
+        "relation_type": "direct_endpoint",
         "mapping_status": "confirmed",
         "mapping_confidence": 0.85,
         "valid_from": "2026-01-01T00:00:00Z",
@@ -883,7 +883,7 @@
       "reader_id": "ct_circuit_c",
       "mapping": {
         "observability": "inferred",
-        "relation_type": "CONTAINS",
+        "relation_type": "contains",
         "mapping_status": "provisional",
         "mapping_confidence": 0.85,
         "valid_from": "2026-01-01T00:00:00Z",
@@ -951,7 +951,7 @@
       "reader_id": "ct_main",
       "mapping": {
         "observability": "direct",
-        "relation_type": "CONTAINS",
+        "relation_type": "contains",
         "mapping_status": "confirmed",
         "mapping_confidence": 0.85,
         "valid_from": "2026-01-01T00:00:00Z",
@@ -1015,7 +1015,7 @@
       "reader_id": "ct_main",
       "mapping": {
         "observability": "direct",
-        "relation_type": "CONTAINS",
+        "relation_type": "contains",
         "mapping_status": "confirmed",
         "mapping_confidence": 0.85,
         "valid_from": "2026-01-01T00:00:00Z",

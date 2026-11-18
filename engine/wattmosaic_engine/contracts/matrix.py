@@ -17,9 +17,15 @@ suffixed with ``V3``:
   -> :class:`foundation.ConfidenceVectorV3` (seven scoped components), used for
   ``MappingCell.confidence``.
 * legacy ``MappingObservability`` (four states)
-  -> :class:`ObservabilityV3` here (the same seven-state set K03 publishes as
-  ``Observability``).  The legacy ``MappingCellStatus`` is not reused; the v3
-  vocabulary is :class:`MappingStatus`.
+  -> :class:`~wattmosaic_engine.contracts.topology.Observability` (K03's shared
+  seven-state set), which :class:`CellMapping` now reuses directly.  The legacy
+  ``MappingCellStatus`` is not reused; the v3 vocabulary is
+  :class:`MappingStatus`.
+* ``Observability`` and ``RelationType`` are imported from
+  :mod:`wattmosaic_engine.contracts.topology` rather than redefined here, so the
+  seven HB §9.7 observability values and the §4.2 relation values have a single
+  source of truth.  ``RelationType`` is widened with the lowercase literal
+  ``"direct_endpoint"`` (a single-subject endpoint, DEC-05) and ``None``.
 * legacy ``PowerLevel`` already has the needed distinct members
   (STANDBY/IDLE/ACTIVE/TRANSIENT/UNKNOWN) and is reused for
   ``CellPower.operating_state``; no ``PowerLevelV3`` is required.
@@ -53,13 +59,13 @@ from .foundation import (
     VersionTriple,
 )
 from .legacy import Model, PowerLevel
+from .topology import Observability, RelationType
 
 __all__: list[str] = [
     # Enumerations (HB §9.7 / §8)
     "MappingStatus",
     "RowKind",
     "CellVisual",
-    "ObservabilityV3",
     # Structured cell (HB §9.6)
     "CellMapping",
     "CellPower",
@@ -127,42 +133,11 @@ class CellVisual(str, Enum):
     RETIRED = "retired"
 
 
-class ObservabilityV3(str, Enum):
-    """The seven HB §9.7 observability states.
-
-    This is the ``V3``-suffixed public name because the legacy surface owns the
-    four-state ``MappingObservability`` vocabulary.  K03 publishes the same
-    seven-state set as ``Observability``; a cell's ``mapping.observability`` is
-    stored as one of these values.
-    """
-
-    DIRECT = "direct"
-    EXPECTED = "expected"
-    INFERRED = "inferred"
-    PARTIAL = "partial"
-    UNKNOWN = "unknown"
-    NOT_OBSERVABLE = "not_observable"
-    CONFLICTED = "conflicted"
-
-
 # Observable levels that may carry an estimated power; UNKNOWN and
 # NOT_OBSERVABLE must not (validated on MappingCell).  Compared against the
 # stored string values (``use_enum_values=True``).
 _NO_ESTIMATE_LEVELS = frozenset(
-    {ObservabilityV3.UNKNOWN.value, ObservabilityV3.NOT_OBSERVABLE.value}
-)
-
-# relation_type is a typed electrical relation (analysis/E-… C3): the K03
-# RelationType values plus DIRECT_ENDPOINT / UNKNOWN.  Kept as a Literal so this
-# module has no import-time dependency on the parallel K03 task.
-_RELATION_TYPE_VALUES = (
-    "DIRECT_ENDPOINT",
-    "CONTAINS",
-    "SHARED_LOAD",
-    "PAIRED_LEG",
-    "CORRELATED",
-    "SAME_CONDUCTOR",
-    "UNKNOWN",
+    {Observability.UNKNOWN.value, Observability.NOT_OBSERVABLE.value}
 )
 
 # --------------------------------------------------------------------------- #
@@ -173,16 +148,8 @@ _RELATION_TYPE_VALUES = (
 class CellMapping(Model):
     """The mapping block of a cell: how the reader observes the load."""
 
-    observability: ObservabilityV3
-    relation_type: Literal[
-        "DIRECT_ENDPOINT",
-        "CONTAINS",
-        "SHARED_LOAD",
-        "PAIRED_LEG",
-        "CORRELATED",
-        "SAME_CONDUCTOR",
-        "UNKNOWN",
-    ]
+    observability: Observability
+    relation_type: RelationType | Literal["direct_endpoint"] | None
     mapping_status: MappingStatus
     mapping_confidence: float | None = None
     valid_from: datetime

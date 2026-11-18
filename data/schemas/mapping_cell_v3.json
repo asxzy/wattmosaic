@@ -117,20 +117,22 @@
       "description": "The mapping block of a cell: how the reader observes the load.",
       "properties": {
         "observability": {
-          "$ref": "#/$defs/ObservabilityV3"
+          "$ref": "#/$defs/Observability"
         },
         "relation_type": {
-          "enum": [
-            "DIRECT_ENDPOINT",
-            "CONTAINS",
-            "SHARED_LOAD",
-            "PAIRED_LEG",
-            "CORRELATED",
-            "SAME_CONDUCTOR",
-            "UNKNOWN"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RelationType"
+            },
+            {
+              "const": "direct_endpoint",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "title": "Relation Type",
-          "type": "string"
+          "title": "Relation Type"
         },
         "mapping_status": {
           "$ref": "#/$defs/MappingStatus"
@@ -535,8 +537,8 @@
       "title": "MappingStatus",
       "type": "string"
     },
-    "ObservabilityV3": {
-      "description": "The seven HB \u00a79.7 observability states.\n\nThis is the ``V3``-suffixed public name because the legacy surface owns the\nfour-state ``MappingObservability`` vocabulary.  K03 publishes the same\nseven-state set as ``Observability``; a cell's ``mapping.observability`` is\nstored as one of these values.",
+    "Observability": {
+      "description": "The seven HB \u00a79.7 observability states (in the handbook's order).",
       "enum": [
         "direct",
         "expected",
@@ -546,7 +548,7 @@
         "not_observable",
         "conflicted"
       ],
-      "title": "ObservabilityV3",
+      "title": "Observability",
       "type": "string"
     },
     "PowerLevel": {
@@ -559,6 +561,18 @@
         "unknown"
       ],
       "title": "PowerLevel",
+      "type": "string"
+    },
+    "RelationType": {
+      "description": "The five reader\u2194reader relation kinds of HB \u00a74.2 (DEC-10, DEC-11).",
+      "enum": [
+        "contains",
+        "shared_load",
+        "paired_leg",
+        "correlated",
+        "same_conductor"
+      ],
+      "title": "RelationType",
       "type": "string"
     },
     "RowKind": {
