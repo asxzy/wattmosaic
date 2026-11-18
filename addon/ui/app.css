@@ -418,6 +418,7 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 .notice[data-tone="warn"] { background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 28%, transparent); }
 .notice[data-tone="bad"] { background: var(--bad-soft); border-color: color-mix(in srgb, var(--bad) 28%, transparent); }
 .notice[data-tone="ok"] { background: var(--ok-soft); border-color: color-mix(in srgb, var(--ok) 28%, transparent); }
+.notice[data-tone="info"] { background: var(--info-soft); border-color: color-mix(in srgb, var(--info) 28%, transparent); }
 .notice strong { color: var(--text); }
 
 .spark { display: block; width: 100%; height: 56px; overflow: visible; }

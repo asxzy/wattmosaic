@@ -903,3 +903,168 @@ def test_reset_success_shows_backup_path() -> None:
     assert SAMPLE_RESET["backup_path"] in text
     assert "backup" in text.lower()
     assert "Schema version 7" in text
+
+
+# ---------------------------------------------------------------------------
+# OD-51: dynamic-topology messaging must not present a confirmation gate.
+#
+# Since the owner decision, the current topology is always authoritative for
+# inference and learning; candidate wiring only carries reduced confidence.
+# These tests execute the real shipped render functions under node (reusing the
+# DOM shim above) against real backend payload shapes -- ``status.learning``
+# with an informational ``topology_note`` and ``remedy: None`` -- and assert the
+# on-screen text never reverts to a "learning paused / confirm to start" gate.
+# ---------------------------------------------------------------------------
+
+# Strings that must NEVER appear in the dynamic-topology messaging.  They are
+# the old confirmation-gated wording; if any is restored the tests below fail.
+_STALE_GATING_STRINGS = (
+    "Learning is paused",
+    "confirm the topology to start",
+    "being rejected as ambiguous",
+    "until the topology is confirmed",
+    "penalty until",
+)
+
+# Verbatim informational note the backend publishes for a dynamic topology
+# (engine/wattmosaic_engine/learning/reporting.py::DYNAMIC_TOPOLOGY_NOTE).
+_DYNAMIC_TOPOLOGY_NOTE = (
+    "Topology is dynamic (candidate); it is authoritative for inference and "
+    "learning and carries a reduced confidence (candidate 0.6 vs confirmed "
+    "1.0). No confirmation is required."
+)
+
+# A real /status payload shape (main.py): ``learning.topology_note`` and
+# ``remedy: None`` for a dynamic topology that is running/learning.
+SAMPLE_DYNAMIC_STATUS = {
+    "learning": {
+        "active": True,
+        "effective_state": "learning",
+        "topology_note": _DYNAMIC_TOPOLOGY_NOTE,
+        "remedy": None,
+    },
+}
+
+# A candidate (non-confirmed) topology object as /topology serves it.
+SAMPLE_CANDIDATE_TOPOLOGY = {
+    "version": 7,
+    "status": "candidate",
+    "channels": [
+        {"ct_type": "main", "parent_ct_id": None},
+        {"ct_type": "branch", "parent_ct_id": "ct_main"},
+    ],
+    "devices": [{"device_id": "light.kitchen"}, {"device_id": "light.hall"}],
+    "created_at": "2026-11-16T10:00:00+00:00",
+}
+
+
+def _render_topology_messaging() -> dict[str, str | bool]:
+    """Render the two dynamic-topology surfaces under node.
+
+    Extracts the real ``topologySummary`` and ``topologyLearningBanner``
+    functions plus the helpers they close over (``el``/``frag``/``notice``,
+    ``STRINGS``, ``statCard``, ``label``, ``toneFor``, ``ago``, ``titleCase``)
+    and a stub ``confirmTopology`` so no network/DOM boot code runs.  Returns
+    each surface's on-screen text plus whether a banner was produced.
+    """
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed; the panel does not need it at runtime")
+
+    script = APP_JS.read_text(encoding="utf-8")
+    # Everything from `el` up to systemCard contains the shared DOM/formatting
+    # helpers and the two functions' dependencies (STRINGS, statCard, notice...).
+    helpers_start = script.index(_SLICE_START)
+    helpers_end = script.index(_SLICE_END, helpers_start)
+    helpers = script[helpers_start:helpers_end]
+
+    def _fn(name: str, next_marker: str) -> str:
+        start = script.index(f"function {name}(")
+        end = script.index(next_marker, start)
+        return script[start:end]
+
+    summary_fn = _fn("topologySummary", "/* --- The hierarchy")
+    banner_fn = _fn("topologyLearningBanner", "/* --- Quality")
+
+    literals = "\n".join(
+        [
+            f"const STATUS = {json.dumps(SAMPLE_DYNAMIC_STATUS)};",
+            f"const TOPOLOGY = {json.dumps(SAMPLE_CANDIDATE_TOPOLOGY)};",
+        ]
+    )
+    # The banner wires an ``onclick`` handler, so the base shim needs a minimal
+    # ``addEventListener`` (the read-only-card shim above deliberately omits it).
+    shim = _DOM_SHIM + "\nNode.prototype.addEventListener = function () {};\n"
+    program = (
+        shim
+        + "\n"
+        + helpers
+        + "\n"
+        + "const confirmTopology = () => {};\n"
+        + summary_fn
+        + "\n"
+        + banner_fn
+        + "\n"
+        + literals
+        + "\n"
+        + "const summary = topologySummary(TOPOLOGY, null);\n"
+        + "const banner = topologyLearningBanner(STATUS, TOPOLOGY);\n"
+        + "console.log(JSON.stringify({\n"
+        + "  summary: summary.textContent,\n"
+        + "  hasBanner: banner !== null,\n"
+        + "  banner: banner ? banner.textContent : '',\n"
+        + "  bannerTone: banner ? banner.dataset.tone : null,\n"
+        + "}));\n"
+    )
+    completed = subprocess.run(
+        [node, "-e", program],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(completed.stdout)
+
+
+@pytest.fixture(scope="module")
+def topology_messaging() -> dict[str, str | bool]:
+    return _render_topology_messaging()
+
+
+def test_topology_messaging_is_dynamic_not_gated(
+    topology_messaging: dict[str, str | bool],
+) -> None:
+    """Topology surfaces carry dynamic/confidence messaging, never a gate."""
+    combined = (
+        str(topology_messaging["summary"]) + " " + str(topology_messaging["banner"])
+    )
+    # The old confirmation-gated wording must be gone from BOTH surfaces.
+    for stale in _STALE_GATING_STRINGS:
+        assert stale.lower() not in combined.lower(), (
+            f"stale gating text {stale!r} reappeared in dynamic-topology messaging"
+        )
+    # A dynamic / authoritative message and the confidence/status framing ARE
+    # present: the no-devices empty state no longer demands confirmation, and a
+    # candidate topology is described as authoritative with its confidence.
+    assert "Dynamic topology" in combined
+    assert "authoritative" in combined
+    assert "reduced confidence" in combined
+    assert "optional" in combined
+
+
+def test_learning_banner_with_topology_note_is_informational(
+    topology_messaging: dict[str, str | bool],
+) -> None:
+    """A `topology_note` payload renders as info status, not a paused banner."""
+    assert topology_messaging["hasBanner"] is True
+    # Informational tone, never a warning/bad gate tone.
+    assert topology_messaging["bannerTone"] == "info"
+    banner = str(topology_messaging["banner"])
+    # The backend's real note text is surfaced verbatim, plus the active framing.
+    assert _DYNAMIC_TOPOLOGY_NOTE in banner
+    assert "learning is active" in banner.lower()
+    assert "confirm topology" in banner.lower()  # optional action, not a prerequisite
+    # And crucially it is NOT a paused/rejected/ambiguous block.
+    for stale in _STALE_GATING_STRINGS:
+        assert stale.lower() not in banner.lower(), (
+            f"stale gating text {stale!r} reappeared in the learning banner"
+        )

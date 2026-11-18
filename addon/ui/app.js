@@ -326,6 +326,12 @@
     ct_measurement: 'CT measurement',
     residual_events: 'Residual events',
     learned_models: 'Learned models',
+    // Dynamic-topology messaging (OD-51).  The current topology is always
+    // authoritative for inference and learning; candidate/unconfirmed states
+    // publish a reduced confidence rather than gating.  These read as status,
+    // never as a block or a required confirmation.
+    topology_dynamic: 'Dynamic topology',
+    topology_confirm_optional: 'Confirm topology (optional — raises confidence)',
   };
   const label = (value) => STRINGS[value] || titleCase(value || 'unknown');
 
@@ -1857,7 +1863,7 @@
       root.append(
         emptyState(
           'No devices in the topology',
-          'The engine has no devices to disaggregate. Map CTs and devices in the WattMosaic integration, then confirm the topology.',
+          'The engine has no devices to disaggregate. Map CTs and devices in the WattMosaic integration; the active topology is used automatically as soon as devices appear.',
           { action: el('a', { class: 'btn btn-primary', href: '#/topology' }, 'View topology') }
         )
       );
@@ -2393,8 +2399,13 @@
           onclick: () => runDiscovery(),
           disabled: state.discover.running ? true : null,
         }, state.discover.running ? 'Discovering…' : 'Discover devices'),
-        topology && topology.status !== 'confirmed'
-          ? el('button', { class: 'btn btn-primary', type: 'button', onclick: confirmTopology }, 'Confirm topology')
+        topology
+          ? el('button', {
+            class: 'btn',
+            type: 'button',
+            onclick: confirmTopology,
+            title: 'Optional — raises wiring confidence; learning and results already use the active topology',
+          }, STRINGS.topology_confirm_optional)
           : null,
       ]),
     ]);
@@ -2525,13 +2536,16 @@
       ? (Number(stats.unplaced_devices) || 0) + (Number(stats.unplaced_circuits) || 0)
       : 0;
 
+    // OD-51: a candidate topology is dynamic and authoritative for inference
+    // and learning — never a gate.  Show its published confidence as status,
+    // not as a "confirm to proceed" warning.
     const configured =
       topology.status === 'confirmed'
         ? null
         : notice(
-            'This topology is a candidate',
-            'Results carry a topology-uncertainty penalty until the topology is confirmed. Confirm it only when the CT roles match your wiring.',
-            'warn'
+            STRINGS.topology_dynamic + ' — authoritative for inference and learning',
+            'The current topology drives results and learning now. Candidate wiring carries a reduced confidence score; samples are collected with topology confidence tracked. Confirming the CT roles is optional and raises that confidence.',
+            'info'
           );
 
     return frag([
@@ -3376,7 +3390,7 @@
   async function confirmTopology() {
     try {
       await post('/topology/confirm', {});
-      notify('Topology confirmed', 'The engine now treats this topology as authoritative.');
+      notify('Topology confirmed', 'Confidence for this topology is now at its maximum. Learning and results were already using it.');
       render();
     } catch (err) {
       notify('Could not confirm topology', describeError(err), 'bad');
@@ -4202,40 +4216,67 @@
     ]);
   }
 
-  /* --- Learning blocked banner (contract §5.4 item 7) ------------------- */
+  /* --- Dynamic-topology learning banner (contract §5.4 item 7, OD-51) ---- *
+   * Since OD-51 the current topology is always authoritative for inference
+   * and learning.  The backend now publishes an informational ``topology_note``
+   * (with ``remedy: None``) for a dynamic topology, and ``blocked`` reflects
+   * only genuinely contradictory sample evidence — never an unconfirmed
+   * topology.  This banner surfaces that note as status, not as a gate.  It
+   * also tolerates older payloads that still report ``topology_not_confirmed``
+   * as a block: those render as the same informational note, never as a
+   * halt-and-confirm gate.
+   * ---------------------------------------------------------------------- */
 
   function topologyLearningBanner(status, topology) {
     const learning = (status && status.learning) || {};
-    const detail = (status && status.learning_status) || {};
+    // ``/status`` nests the full accounting under ``details`` in some payloads;
+    // older engines used a top-level ``learning_status``.  Accept either so a
+    // stale backend cannot reintroduce the old "paused" message.
+    const detail = (status && status.learning_status)
+      || ((status && status.details && status.details.learning_status) || {});
     const effective = String(learning.effective_state || detail.effective_state || '');
     const blockedDetail = learning.blocked_reason_detail || detail.blocked_reason_detail || null;
     const blockedBy = learning.blocked_by || detail.blocked_by || null;
-    if (effective !== 'blocked') return null;
-    // The contract's explicit key is ``blocked_reason_detail``; the engine also
-    // reports the same condition as ``blocked_by: "unconfirmed_topology"``, and
-    // older engines as ``blocked_by: "observed_rejections"`` with a candidate
-    // topology.  All three mean "the wiring is unconfirmed", which is the one
-    // thing this banner offers to fix — no other blocked reason shows it.
+    const topologyNote = learning.topology_note || detail.topology_note || null;
     const quality = String(
       learning.topology_quality || detail.topology_quality || ''
     ).toLowerCase();
-    const unconfirmed =
-      blockedDetail === 'topology_not_confirmed'
-      || blockedBy === 'unconfirmed_topology'
-      || (blockedBy === 'observed_rejections' && quality === 'candidate');
-    if (!unconfirmed) return null;
+
+    // A confirmed topology has no reduced-confidence note to show.
     if (topology && topology.status === 'confirmed') return null;
 
-    return el('div', { class: 'notice', dataset: { tone: 'warn' } }, [
-      el('div', { class: 'banner-icon', 'aria-hidden': 'true' }, '!'),
+    // The backend's informational note is the primary signal now.  Fall back
+    // to a candidate quality when a payload predates the note field.
+    const dynamic =
+      Boolean(topologyNote)
+      || quality === 'candidate'
+      || quality === 'unconfirmed'
+      || quality === 'unknown';
+
+    // Gracefully treat a legacy topology-based block as informational.  It is
+    // NOT a reason to tell the user learning is halted or confirmation is due.
+    const legacyTopologyBlock =
+      effective === 'blocked'
+      && (blockedDetail === 'topology_not_confirmed'
+        || blockedBy === 'unconfirmed_topology'
+        || (blockedBy === 'observed_rejections' && quality === 'candidate'));
+    if (!dynamic && !legacyTopologyBlock) return null;
+
+    const note = topologyNote
+      || 'The current topology is authoritative for inference and learning. '
+        + 'Candidate wiring carries a reduced confidence score; samples are '
+        + 'collected with topology confidence tracked.';
+    return el('div', { class: 'notice', dataset: { tone: 'info' } }, [
+      el('div', { class: 'banner-icon', 'aria-hidden': 'true' }, 'i'),
       el('div', { class: 'notice-body' }, [
-        el('strong', {}, 'Learning is paused — confirm the topology to start collecting samples'),
-        el('p', {}, 'Every sample is being rejected as ambiguous until the wiring is confirmed. Confirm only when the CT roles match your wiring.'),
+        el('strong', {}, STRINGS.topology_dynamic + ' — learning is active'),
+        el('p', {}, note),
         el('button', {
-          class: 'btn btn-sm btn-primary',
+          class: 'btn btn-sm',
           type: 'button',
           onclick: confirmTopology,
-        }, 'Confirm topology'),
+          title: 'Optional — raises wiring confidence; learning and results already use the active topology',
+        }, STRINGS.topology_confirm_optional),
       ]),
     ]);
   }
