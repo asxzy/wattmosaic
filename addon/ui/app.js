@@ -4465,7 +4465,140 @@
         el('pre', { class: 'code' }, JSON.stringify(report, null, 2)),
       ])
     );
+
+    // Destructive admin action lives at the bottom of Diagnostics, past the
+    // read-only support data, so it cannot be reached by a stray click.
+    root.append(resetDatabaseCard());
   }
+
+  /* --- Database reset (destructive) -------------------------------------- */
+  /* RESET_UI_BLOCK_START */
+  //: A true fresh start wipes ALL app data.  The panel offers no other undo, so
+  //: the action is guarded twice: the control sits at the end of Diagnostics, and
+  //: the dialog requires the operator to TYPE ``RESET`` before confirm is enabled.
+  //: The engine takes a timestamped backup first and returns its path, which the
+  //: dialog shows on success.
+  const RESET_CONFIRM_WORD = 'RESET';
+
+  function resetDatabaseCard() {
+    return card(
+      'Reset database',
+      [
+        notice(
+          'Danger: this erases all app data',
+          'Learned models, topology history, events, device state and configuration are all wiped. '
+          + 'The engine writes a timestamped backup first; its path is shown after the reset.'
+        ),
+        el('div', { class: 'reset-card-actions' }, [
+          el('button', {
+            class: 'btn btn-danger',
+            type: 'button',
+            id: 'reset-db-button',
+            onclick: openResetDatabaseDialog,
+          }, 'Reset database'),
+        ]),
+      ],
+      { foot: 'Destructive administrator action. A backup is created before any data is removed.' }
+    );
+  }
+
+  function openResetDatabaseDialog() {
+    // One dialog at a time — a second click on the card button is a no-op.
+    if (document.getElementById('reset-db-dialog')) return null;
+
+    const input = el('input', {
+      class: 'reset-confirm-input',
+      type: 'text',
+      id: 'reset-db-confirm-input',
+      autocomplete: 'off',
+      placeholder: `Type ${RESET_CONFIRM_WORD}`,
+      'aria-label': `Type ${RESET_CONFIRM_WORD} to confirm the reset`,
+    });
+    const confirmBtn = el('button', {
+      class: 'btn btn-danger',
+      type: 'button',
+      id: 'reset-db-confirm',
+      disabled: true,
+      onclick: () => confirmResetDatabase(input, confirmBtn),
+    }, 'Erase all data');
+    const cancelBtn = el('button', {
+      class: 'btn',
+      type: 'button',
+      id: 'reset-db-cancel',
+      onclick: closeResetDatabaseDialog,
+    }, 'Cancel');
+
+    // Confirm stays disabled until the field holds the exact token.  A wrong
+    // value (including trailing whitespace) never enables the destructive path.
+    input.addEventListener('input', () => {
+      confirmBtn.disabled = input.value !== RESET_CONFIRM_WORD;
+    });
+
+    const result = el('div', {
+      class: 'reset-result',
+      id: 'reset-db-dialog-result',
+      role: 'status',
+    });
+    const dialog = el('dialog', { class: 'reset-dialog', id: 'reset-db-dialog' }, [
+      el('h2', {}, 'Reset the database?'),
+      notice(
+        'This wipes ALL app data',
+        'Every learned model, topology version, event, device record and saved setting is erased. '
+        + 'This cannot be undone from the panel. A timestamped backup is created before anything is removed.'
+      ),
+      el('p', {}, `Type ${RESET_CONFIRM_WORD} to confirm:`),
+      input,
+      el('div', { class: 'reset-dialog-actions' }, [cancelBtn, confirmBtn]),
+      result,
+    ]);
+    document.body.append(dialog);
+    if (typeof dialog.showModal === 'function') dialog.showModal();
+    else dialog.setAttribute('open', '');
+    return dialog;
+  }
+
+  function closeResetDatabaseDialog() {
+    const dialog = document.getElementById('reset-db-dialog');
+    if (!dialog) return;
+    if (typeof dialog.close === 'function') dialog.close();
+    dialog.remove();
+  }
+
+  async function confirmResetDatabase(input, confirmBtn) {
+    // Typed confirmation is mandatory even if a caller reaches this handler
+    // directly (a disabled button is a visual guard, not the only one).
+    if (!input || input.value !== RESET_CONFIRM_WORD) return;
+    if (confirmBtn) confirmBtn.disabled = true;
+
+    const result = document.getElementById('reset-db-dialog-result');
+    const show = (node) => {
+      if (!result) return;
+      clear(result);
+      result.append(node);
+    };
+
+    try {
+      const data = await post('/commands/reset-db', { confirm: RESET_CONFIRM_WORD }) || {};
+      const backup = data.backup_path || 'unknown';
+      const schema = data.schema_version ?? '—';
+      show(notice(
+        'Database reset — backup created',
+        `All app data was wiped. A timestamped backup was saved at ${backup}. `
+        + `Schema version ${schema}. Reload to see the empty state.`,
+        'ok'
+      ));
+      const done = el('button', {
+        class: 'btn btn-primary',
+        type: 'button',
+        onclick: () => { closeResetDatabaseDialog(); render(); },
+      }, 'Reload panel');
+      if (result) result.append(done);
+    } catch (err) {
+      show(notice('Reset failed', describeError(err), 'bad'));
+      if (confirmBtn) confirmBtn.disabled = false;
+    }
+  }
+  /* RESET_UI_BLOCK_END */
 
   function modelsTable(models) {
     const devices = models.devices || {};

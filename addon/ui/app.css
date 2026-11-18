@@ -849,6 +849,28 @@ pre.code {
 .log-row .lvl[data-l="info"] { color: var(--info); }
 .log-row .msg { overflow-wrap: anywhere; }
 
+/* Destructive database reset: an admin card at the end of Diagnostics and a
+   blocking dialog that requires the operator to type RESET. */
+.reset-card-actions, .reset-dialog-actions {
+  display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px;
+}
+.reset-dialog {
+  border: 1px solid var(--line-strong); border-radius: var(--radius);
+  background: var(--bg-elev); color: var(--text);
+  padding: 22px; max-width: 480px; width: calc(100% - 32px);
+  box-shadow: var(--shadow-pop);
+}
+.reset-dialog::backdrop { background: rgba(0, 0, 0, .6); }
+.reset-dialog h2 { margin: 0 0 12px; }
+.reset-dialog p { color: var(--text-dim); margin: 10px 0 6px; }
+.reset-confirm-input {
+  width: 100%; padding: 10px 12px; color: var(--text);
+  background: var(--bg-sunken); border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm); font-family: var(--mono); font-size: 14px;
+}
+.reset-result { margin-top: 12px; }
+.reset-result .notice p { overflow-wrap: anywhere; }
+
 /* --- 9. states ----------------------------------------------------------- */
 
 .state {

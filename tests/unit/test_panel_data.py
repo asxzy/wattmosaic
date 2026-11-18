@@ -661,3 +661,245 @@ def test_matrix_view_identifiability_no_fabrication(rendered_matrix: dict[str, s
     # per-device "Estimated power" figure may be presented for this group.
     assert "0.00 W" not in text
     assert "Estimated power" not in text
+
+
+# ---------------------------------------------------------------------------
+# Database reset: a destructive admin control with a mandatory typed
+# confirmation.  These tests execute the real reset block (and the real ``api``
+# / ``post`` helpers it calls) under node against an event-capable DOM shim,
+# rather than pattern-matching source.  The shim lives here in the test file only.
+# ---------------------------------------------------------------------------
+
+_RESET_BLOCK_START = "/* RESET_UI_BLOCK_START */"
+_RESET_BLOCK_END = "/* RESET_UI_BLOCK_END */"
+# The real api/get/post helpers and ApiError live before the el slice; include
+# them so the driver exercises the shipped request path, not a reimplementation.
+_API_SLICE_START = "  const BASE = (() => {"
+
+SAMPLE_RESET = {
+    "reset": True,
+    "backup_path": "/data/wattmosaic.reset-backup.2026-11-17T10-00-00.db",
+    "schema_version": 7,
+    "latest_schema_version": 7,
+}
+
+# An event-capable DOM stand-in.  It extends the primitives the read-only cards
+# need with: id lookup, ``value``/``disabled`` properties, event listeners plus
+# a ``fire`` helper, and body/URL/storage globals so the real ``api`` helper can
+# run.  ``fetch`` is stubbed by each driver to capture the outgoing request.
+_RESET_DOM_SHIM = r"""
+class Node {
+  constructor() {
+    this.children = [];
+    this._text = '';
+    this.dataset = {};
+    this.attrs = {};
+    this.className = '';
+    this._listeners = {};
+    this._parent = null;
+    this.value = '';
+    this.disabled = false;
+    this.id = '';
+    this.tagName = '';
+  }
+  set textContent(v) { this._text = String(v); this.children = []; }
+  get textContent() {
+    return this._text + this.children.map(
+      (c) => (c instanceof Node ? c.textContent : String(c))
+    ).join('');
+  }
+  setAttribute(k, v) { this.attrs[k] = String(v); if (k === 'id') this.id = String(v); }
+  getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
+  addEventListener(type, fn) { (this._listeners[type] ||= []).push(fn); }
+  fire(type, ev) {
+    for (const fn of (this._listeners[type] || [])) fn.call(this, ev || { target: this });
+  }
+  append(...cs) {
+    for (const c of cs) {
+      if (c instanceof Node) c._parent = this;
+      this.children.push(c);
+    }
+  }
+  remove() {
+    if (this._parent) {
+      const i = this._parent.children.indexOf(this);
+      if (i >= 0) this._parent.children.splice(i, 1);
+      this._parent = null;
+    }
+  }
+  get firstChild() { return this.children[0] || null; }
+  removeChild(c) { const i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); }
+}
+global.Node = Node;
+function _walk(node, out) {
+  for (const c of node.children) {
+    if (c instanceof Node) { if (c.id) out.push(c); _walk(c, out); }
+  }
+  return out;
+}
+const _body = new Node(); _body.tagName = 'body';
+global.document = {
+  baseURI: 'http://localhost/',
+  body: _body,
+  createElement: (tag) => { const n = new Node(); n.tagName = tag; return n; },
+  createTextNode: (t) => { const n = new Node(); n._text = String(t); return n; },
+  createDocumentFragment: () => new Node(),
+  getElementById: (id) => _walk(_body, []).find((n) => n.id === id) || null,
+  querySelectorAll: () => [],
+};
+global.location = { href: 'http://localhost/', hash: '', replace() {} };
+global.sessionStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+"""
+
+
+def _run_reset_driver(driver_js: str, *, reset_payload: dict | None = None) -> dict:
+    """Evaluate the real api/post helpers + reset block, then a node driver.
+
+    ``driver_js`` may use ``global.__calls`` (captured fetch calls), ``byId`` and
+    the ``SAMPLE_RESET`` payload.  It must finish with a ``console.log(JSON...)``.
+    """
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed; the panel does not need it at runtime")
+
+    script = APP_JS.read_text(encoding="utf-8")
+    api_start = script.index(_API_SLICE_START)
+    core_start = script.index(_SLICE_START)
+    core_end = script.index(_SLICE_END, core_start)
+    api = script[api_start:core_start]
+    core = script[core_start:core_end]
+    reset_start = script.index(_RESET_BLOCK_START)
+    reset_end = script.index(_RESET_BLOCK_END, reset_start)
+    reset_block = script[reset_start:reset_end]
+
+    payload = json.dumps(reset_payload if reset_payload is not None else SAMPLE_RESET)
+    preamble = (
+        "global.__calls = [];\n"
+        + "global.fetch = async (url, init) => {\n"
+        + "  global.__calls.push({ url, init });\n"
+        + "  return { ok: true, status: 200, text: async () => JSON.stringify(" + payload + ") };\n"
+        + "};\n"
+        + "const byId = (id) => document.getElementById(id);\n"
+    )
+    program = (
+        _RESET_DOM_SHIM + "\n" + preamble + "\n"
+        + api + "\n" + core + "\n" + reset_block + "\n" + driver_js + "\n"
+    )
+    completed = subprocess.run(
+        [node, "-e", program],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(completed.stdout)
+
+
+_RESET_DRIVER_GUARD = r"""
+(async () => {
+  document.body.append(resetDatabaseCard());
+  byId('reset-db-button').fire('click');
+  const dialog = byId('reset-db-dialog');
+  const input = byId('reset-db-confirm-input');
+  const confirm = byId('reset-db-confirm');
+  const opened = !!dialog;
+  const startsDisabled = confirm ? confirm.disabled : null;
+
+  // Clicking confirm WITHOUT typing RESET must not fetch.
+  confirm.fire('click');
+  await new Promise((r) => setTimeout(r, 0));
+  const fetchAfterBareClick = global.__calls.length;
+
+  // A wrong token still leaves confirm disabled and fetches nothing.
+  input.value = 'reset';
+  input.fire('input');
+  const disabledOnWrong = confirm.disabled;
+  confirm.fire('click');
+  await new Promise((r) => setTimeout(r, 0));
+  const fetchAfterWrong = global.__calls.length;
+
+  // The exact token enables confirm.
+  input.value = 'RESET';
+  input.fire('input');
+  const enabledOnExact = !confirm.disabled;
+
+  // Cancel removes the dialog and fetches nothing more.
+  byId('reset-db-cancel').fire('click');
+  const closed = !byId('reset-db-dialog');
+
+  console.log(JSON.stringify({
+    hasButton: !!byId('reset-db-button'),
+    opened, startsDisabled, fetchAfterBareClick,
+    disabledOnWrong, fetchAfterWrong, enabledOnExact, closed,
+    totalFetches: global.__calls.length,
+  }));
+})();
+"""
+
+
+def test_reset_button_requires_typed_confirmation() -> None:
+    """The button opens a dialog whose confirm stays inert until RESET is typed."""
+    result = _run_reset_driver(_RESET_DRIVER_GUARD)
+    assert result["hasButton"] is True
+    assert result["opened"] is True
+    assert result["startsDisabled"] is True
+    # A single click (bare confirm) causes NO request: the typed guard holds.
+    assert result["fetchAfterBareClick"] == 0
+    assert result["disabledOnWrong"] is True
+    assert result["fetchAfterWrong"] == 0
+    assert result["enabledOnExact"] is True
+    assert result["closed"] is True
+    assert result["totalFetches"] == 0
+
+
+_RESET_DRIVER_POST = r"""
+(async () => {
+  document.body.append(resetDatabaseCard());
+  byId('reset-db-button').fire('click');
+  const input = byId('reset-db-confirm-input');
+  input.value = 'RESET';
+  input.fire('input');
+  byId('reset-db-confirm').fire('click');
+  await new Promise((r) => setTimeout(r, 0));
+  console.log(JSON.stringify({ calls: global.__calls }));
+})();
+"""
+
+
+def test_reset_posts_correct_request() -> None:
+    """Confirming with the typed token POSTs the exact guarded body to the route."""
+    result = _run_reset_driver(_RESET_DRIVER_POST)
+    calls = result["calls"]
+    assert len(calls) == 1, f"expected exactly one fetch, got {calls!r}"
+    call = calls[0]
+    assert call["url"] == "/api/v1/commands/reset-db"
+    assert call["init"]["method"] == "POST"
+    assert json.loads(call["init"]["body"]) == {"confirm": "RESET"}
+    # Auth/envelope conventions: credentials and JSON Accept/Content-Type headers.
+    assert call["init"]["credentials"] == "same-origin"
+    assert call["init"]["headers"]["Accept"] == "application/json"
+    assert call["init"]["headers"]["Content-Type"] == "application/json"
+
+
+_RESET_DRIVER_SUCCESS = r"""
+(async () => {
+  document.body.append(resetDatabaseCard());
+  byId('reset-db-button').fire('click');
+  const input = byId('reset-db-confirm-input');
+  input.value = 'RESET';
+  input.fire('input');
+  byId('reset-db-confirm').fire('click');
+  await new Promise((r) => setTimeout(r, 0));
+  console.log(JSON.stringify({
+    result: byId('reset-db-dialog-result').textContent,
+  }));
+})();
+"""
+
+
+def test_reset_success_shows_backup_path() -> None:
+    """Success renders the returned timestamped backup path and schema version."""
+    result = _run_reset_driver(_RESET_DRIVER_SUCCESS)
+    text = result["result"]
+    assert SAMPLE_RESET["backup_path"] in text
+    assert "backup" in text.lower()
+    assert "Schema version 7" in text
