@@ -1,0 +1,399 @@
+{
+  "$defs": {
+    "Bounds": {
+      "additionalProperties": false,
+      "description": "A justified interval for an estimate.\n\n``lower_w`` and ``upper_w`` are nullable (HB \u00a718).  When both are present\nthe validator requires ``lower_w <= upper_w``.  A zero-width interval\n(a point) is only possible through the private :meth:`_point` constructor,\nwhich represents an IDENTIFIABLE or MEASURED result; the ``allow_point``\nflag is *not* a field and never appears in the model or its JSON schema.",
+      "properties": {
+        "lower_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lower W"
+        },
+        "upper_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Upper W"
+        },
+        "basis": {
+          "anyOf": [
+            {
+              "enum": [
+                "non_negativity",
+                "group_sum",
+                "reader_ceiling",
+                "posterior",
+                "declared_ceiling"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Basis"
+        }
+      },
+      "title": "Bounds",
+      "type": "object"
+    },
+    "ConfidenceVectorV3": {
+      "additionalProperties": false,
+      "description": "Seven-component confidence vector for a v3 estimate.\n\nEach component is an *uncalibrated engineering score* in ``[0, 1]`` or\n``None`` when not assessed.  **This is not a probability** (ADR-0007): the\nnumbers are not calibrated, do not sum to one, and must not be interpreted\nas likelihoods.  There is deliberately **no blended scalar** field, no\n``__float__`` and no arithmetic -- a consumer must name the component it\nmeans (DEC-24; HB \u00a79.6).  This v3 type supersedes the legacy six-dimension\n``ConfidenceVector`` and is intentionally a distinct public name.",
+      "properties": {
+        "measurement_quality": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Measurement Quality"
+        },
+        "event_association": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event Association"
+        },
+        "model_fit": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Fit"
+        },
+        "topology_consistency": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Topology Consistency"
+        },
+        "identifiability": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Identifiability"
+        },
+        "sample_coverage": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sample Coverage"
+        },
+        "freshness": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Freshness"
+        }
+      },
+      "title": "ConfidenceVectorV3",
+      "type": "object"
+    },
+    "EstimateStatus": {
+      "description": "What kind of value an estimate is (HB \u00a78.5).",
+      "enum": [
+        "measured",
+        "estimated",
+        "allocated",
+        "unknown"
+      ],
+      "title": "EstimateStatus",
+      "type": "string"
+    },
+    "EvidenceRef": {
+      "additionalProperties": false,
+      "description": "A typed, resolvable reference to a piece of evidence (D4's resolver).",
+      "properties": {
+        "kind": {
+          "enum": [
+            "sample",
+            "event_evidence",
+            "event_group",
+            "ha_event",
+            "edge",
+            "mapping_edge",
+            "model_version",
+            "configuration_event",
+            "observation"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "title": "EvidenceRef",
+      "type": "object"
+    },
+    "IdentifiabilityStatus": {
+      "description": "Identifiability of an estimate (HB \u00a78.4).",
+      "enum": [
+        "identifiable",
+        "partially_identifiable",
+        "group_identifiable",
+        "non_identifiable",
+        "insufficient_evidence"
+      ],
+      "title": "IdentifiabilityStatus",
+      "type": "string"
+    },
+    "InferenceMethod": {
+      "description": "How an estimate was obtained.",
+      "enum": [
+        "direct_reading",
+        "joint_delta",
+        "joint_absolute",
+        "model_prior",
+        "declared",
+        "none"
+      ],
+      "title": "InferenceMethod",
+      "type": "string"
+    },
+    "PowerLevel": {
+      "description": "Which of a device's four power levels a published value belongs to.\n\n``06-device-and-load-model-spec.md`` \u00a75.1 names four levels -- standby,\nidle, active, transient -- and ``ExpectedPower`` carries the envelope\n(``standby_w``, ``idle_w``, ``on_w``, ``startup_w`` / ``shutdown_w``).\nThis enum is the label a *published* value carries.\n\nIt is a **different axis** from ``PowerState`` and must never be conflated\nwith it.  ``PowerState`` is a *provenance* label (``measured`` /\n``estimated`` / ``allocated`` / ``unknown``) derived by ``power_state_for``\nfrom ``Source`` and ``MeasurementBasis``; ``PowerLevel`` is the *operating\nlevel* the number sits at.  A value can be both ``measured`` and\n``standby``: the two fields answer different questions and coexist on\n``InferenceResult``.\n\n``UNKNOWN`` is the neutral default, so a payload that does not name a level\nreads as \"not stated\" rather than as a claim.",
+      "enum": [
+        "standby",
+        "idle",
+        "active",
+        "transient",
+        "unknown"
+      ],
+      "title": "PowerLevel",
+      "type": "string"
+    },
+    "VersionTriple": {
+      "additionalProperties": false,
+      "description": "The independent topology/mapping/model version triple (rule 20).",
+      "properties": {
+        "topology_version_id": {
+          "title": "Topology Version Id",
+          "type": "string"
+        },
+        "mapping_version_id": {
+          "title": "Mapping Version Id",
+          "type": "string"
+        },
+        "model_set_id": {
+          "title": "Model Set Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "topology_version_id",
+        "mapping_version_id",
+        "model_set_id"
+      ],
+      "title": "VersionTriple",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "A first-class estimate of one device or load component.\n\nA non-identifiable member has ``point_w is None`` and justified bounds,\nnever a fabricated number (DEC-19, HB \u00a78.4).",
+  "properties": {
+    "subject_kind": {
+      "enum": [
+        "device",
+        "component"
+      ],
+      "title": "Subject Kind",
+      "type": "string"
+    },
+    "subject_id": {
+      "title": "Subject Id",
+      "type": "string"
+    },
+    "point_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Point W"
+    },
+    "bounds": {
+      "$ref": "#/$defs/Bounds"
+    },
+    "status": {
+      "$ref": "#/$defs/EstimateStatus"
+    },
+    "identifiability": {
+      "$ref": "#/$defs/IdentifiabilityStatus"
+    },
+    "group_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Group Id"
+    },
+    "level": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PowerLevel"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "method": {
+      "$ref": "#/$defs/InferenceMethod"
+    },
+    "allocation_rule": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Allocation Rule"
+    },
+    "confidence": {
+      "$ref": "#/$defs/ConfidenceVectorV3"
+    },
+    "source_reader_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Source Reader Ids",
+      "type": "array"
+    },
+    "evidence_refs": {
+      "items": {
+        "$ref": "#/$defs/EvidenceRef"
+      },
+      "title": "Evidence Refs",
+      "type": "array"
+    },
+    "versions": {
+      "$ref": "#/$defs/VersionTriple"
+    },
+    "model_version_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model Version Id"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    },
+    "provisional": {
+      "default": false,
+      "title": "Provisional",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "subject_kind",
+    "subject_id",
+    "bounds",
+    "status",
+    "identifiability",
+    "method",
+    "confidence",
+    "source_reader_ids",
+    "evidence_refs",
+    "versions",
+    "updated_at"
+  ],
+  "title": "DeviceEstimate",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/device_estimate_v3.json",
+  "x-contract-version": "2.4.0"
+}

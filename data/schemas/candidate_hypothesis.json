@@ -1,0 +1,98 @@
+{
+  "$defs": {
+    "CandidateSource": {
+      "description": "Where a candidate hypothesis came from (HB \u00a77.1, ten sources).",
+      "enum": [
+        "ha_state",
+        "ha_attribute",
+        "learned_profile",
+        "prior_mapping",
+        "plug",
+        "unknown_profile",
+        "topology_visible",
+        "delayed_response",
+        "device_group",
+        "unknown_scope"
+      ],
+      "title": "CandidateSource",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One hypothesis explaining an observed event (HB \u00a77, evidence A..H).",
+  "properties": {
+    "candidate_id": {
+      "title": "Candidate Id",
+      "type": "string"
+    },
+    "subject_kind": {
+      "enum": [
+        "device",
+        "component",
+        "group",
+        "unknown_profile",
+        "unknown_scope"
+      ],
+      "title": "Subject Kind",
+      "type": "string"
+    },
+    "subject_id": {
+      "title": "Subject Id",
+      "type": "string"
+    },
+    "sources": {
+      "items": {
+        "$ref": "#/$defs/CandidateSource"
+      },
+      "title": "Sources",
+      "type": "array"
+    },
+    "transition": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Transition"
+    },
+    "evidence_terms": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "title": "Evidence Terms",
+      "type": "object"
+    },
+    "filtered": {
+      "default": false,
+      "title": "Filtered",
+      "type": "boolean"
+    },
+    "filter_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Filter Reason"
+    }
+  },
+  "required": [
+    "candidate_id",
+    "subject_kind",
+    "subject_id",
+    "sources",
+    "evidence_terms"
+  ],
+  "title": "CandidateHypothesis",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/candidate_hypothesis.json",
+  "x-contract-version": "2.4.0"
+}

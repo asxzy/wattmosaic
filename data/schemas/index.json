@@ -33,6 +33,14 @@
     "version_triple": "version_triple.json",
     "evidence_ref": "evidence_ref.json",
     "bounds": "bounds.json",
-    "confidence_vector_v3": "confidence_vector_v3.json"
+    "confidence_vector_v3": "confidence_vector_v3.json",
+    "candidate_hypothesis": "candidate_hypothesis.json",
+    "device_estimate_v3": "device_estimate_v3.json",
+    "device_group_estimate": "device_group_estimate.json",
+    "unknown_estimate": "unknown_estimate.json",
+    "joint_inference_result": "joint_inference_result.json",
+    "event_inference_record": "event_inference_record.json",
+    "reconciliation_v3": "reconciliation_v3.json",
+    "inference_snapshot": "inference_snapshot.json"
   }
 }

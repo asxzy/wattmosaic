@@ -1,0 +1,192 @@
+{
+  "$defs": {
+    "Bounds": {
+      "additionalProperties": false,
+      "description": "A justified interval for an estimate.\n\n``lower_w`` and ``upper_w`` are nullable (HB \u00a718).  When both are present\nthe validator requires ``lower_w <= upper_w``.  A zero-width interval\n(a point) is only possible through the private :meth:`_point` constructor,\nwhich represents an IDENTIFIABLE or MEASURED result; the ``allow_point``\nflag is *not* a field and never appears in the model or its JSON schema.",
+      "properties": {
+        "lower_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lower W"
+        },
+        "upper_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Upper W"
+        },
+        "basis": {
+          "anyOf": [
+            {
+              "enum": [
+                "non_negativity",
+                "group_sum",
+                "reader_ceiling",
+                "posterior",
+                "declared_ceiling"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Basis"
+        }
+      },
+      "title": "Bounds",
+      "type": "object"
+    },
+    "EvidenceRef": {
+      "additionalProperties": false,
+      "description": "A typed, resolvable reference to a piece of evidence (D4's resolver).",
+      "properties": {
+        "kind": {
+          "enum": [
+            "sample",
+            "event_evidence",
+            "event_group",
+            "ha_event",
+            "edge",
+            "mapping_edge",
+            "model_version",
+            "configuration_event",
+            "observation"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "title": "EvidenceRef",
+      "type": "object"
+    },
+    "IdentifiabilityStatus": {
+      "description": "Identifiability of an estimate (HB \u00a78.4).",
+      "enum": [
+        "identifiable",
+        "partially_identifiable",
+        "group_identifiable",
+        "non_identifiable",
+        "insufficient_evidence"
+      ],
+      "title": "IdentifiabilityStatus",
+      "type": "string"
+    },
+    "VersionTriple": {
+      "additionalProperties": false,
+      "description": "The independent topology/mapping/model version triple (rule 20).",
+      "properties": {
+        "topology_version_id": {
+          "title": "Topology Version Id",
+          "type": "string"
+        },
+        "mapping_version_id": {
+          "title": "Mapping Version Id",
+          "type": "string"
+        },
+        "model_set_id": {
+          "title": "Model Set Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "topology_version_id",
+        "mapping_version_id",
+        "model_set_id"
+      ],
+      "title": "VersionTriple",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "The identified sum of a non-separable device group (HB \u00a78.4).",
+  "properties": {
+    "group_id": {
+      "title": "Group Id",
+      "type": "string"
+    },
+    "member_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Member Ids",
+      "type": "array"
+    },
+    "point_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Point W"
+    },
+    "bounds": {
+      "$ref": "#/$defs/Bounds"
+    },
+    "identifiability": {
+      "$ref": "#/$defs/IdentifiabilityStatus"
+    },
+    "source_reader_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Source Reader Ids",
+      "type": "array"
+    },
+    "evidence_refs": {
+      "items": {
+        "$ref": "#/$defs/EvidenceRef"
+      },
+      "title": "Evidence Refs",
+      "type": "array"
+    },
+    "versions": {
+      "$ref": "#/$defs/VersionTriple"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "group_id",
+    "member_ids",
+    "bounds",
+    "identifiability",
+    "source_reader_ids",
+    "evidence_refs",
+    "versions",
+    "updated_at"
+  ],
+  "title": "DeviceGroupEstimate",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/device_group_estimate.json",
+  "x-contract-version": "2.4.0"
+}
