@@ -1,5 +1,13 @@
 # Release Notes
 
+## v0.2.1-dev.40 — 2026-11-18 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- fix(ui): add a static Matrix nav link so the tab is always visible
+
 ## v0.2.1-dev.39 — 2026-11-18 (development channel)
 
 Automatic development build.
