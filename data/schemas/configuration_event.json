@@ -1,0 +1,168 @@
+{
+  "$defs": {
+    "ChangeDetection": {
+      "description": "How a configuration change was learned (spec 09 \u00a77.6).",
+      "enum": [
+        "declared",
+        "observed",
+        "inferred"
+      ],
+      "title": "ChangeDetection",
+      "type": "string"
+    },
+    "ChangeStatus": {
+      "description": "Whether a recorded configuration change is established (spec 09 \u00a77.6).\n\nContract 2.4.0 adds this as a vocabulary distinct from ``ChangeDetection``:\n``detection`` says *how* the engine learned of the change, while ``status``\nsays *whether* the change is established.  A ``SUSPECTED`` change is an\nuncertain, not-auto-confirmed proposal that leaves the live configuration\nuntouched until validated (REQ-CHANGE-002/005); only ``CONFIRMED`` reads\nas established.",
+      "enum": [
+        "suspected",
+        "confirmed"
+      ],
+      "title": "ChangeStatus",
+      "type": "string"
+    },
+    "ConfigurationChangeKind": {
+      "description": "The nine kinds of configuration change (spec 09 \u00a77.6).\n\nExactly nine members, and the set is not extensible: a residual baseline\ndrift is **not** a configuration change, so the change surface's\ndiscriminator is a separate, wider vocabulary (09 \u00a77.10).",
+      "enum": [
+        "smart_plug_relocation",
+        "ct_reader_relocation",
+        "reader_replacement",
+        "ct_direction_change",
+        "calibration_change",
+        "circuit_reconfiguration",
+        "reader_installation",
+        "reader_removal",
+        "measurement_scope_change"
+      ],
+      "title": "ConfigurationChangeKind",
+      "type": "string"
+    },
+    "EvidenceRef": {
+      "additionalProperties": false,
+      "description": "A typed, resolvable reference to a piece of evidence (D4's resolver).",
+      "properties": {
+        "kind": {
+          "enum": [
+            "sample",
+            "event_evidence",
+            "event_group",
+            "ha_event",
+            "edge",
+            "mapping_edge",
+            "model_version",
+            "configuration_event",
+            "observation"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "title": "EvidenceRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "A declared or inferred configuration change (HB \u00a714, \u00a74).\n\nThe ``kind``, ``detection`` and ``status`` enums are the existing v2 ones,\nreused verbatim from ``contracts.legacy``.",
+  "properties": {
+    "event_id": {
+      "title": "Event Id",
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/$defs/ConfigurationChangeKind"
+    },
+    "detection": {
+      "$ref": "#/$defs/ChangeDetection"
+    },
+    "status": {
+      "$ref": "#/$defs/ChangeStatus"
+    },
+    "affected_endpoint_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Affected Endpoint Ids",
+      "type": "array"
+    },
+    "affected_edge_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Affected Edge Ids",
+      "type": "array"
+    },
+    "affected_mapping_edge_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Affected Mapping Edge Ids",
+      "type": "array"
+    },
+    "candidate_topology_version_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Candidate Topology Version Id"
+    },
+    "candidate_mapping_version_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Candidate Mapping Version Id"
+    },
+    "evidence_refs": {
+      "items": {
+        "$ref": "#/$defs/EvidenceRef"
+      },
+      "title": "Evidence Refs",
+      "type": "array"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "resolved_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Resolved At"
+    }
+  },
+  "required": [
+    "event_id",
+    "kind",
+    "detection",
+    "status",
+    "created_at"
+  ],
+  "title": "ConfigurationEvent",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/configuration_event.json",
+  "x-contract-version": "2.4.0"
+}
