@@ -1,0 +1,124 @@
+{
+  "$defs": {
+    "LoadShape": {
+      "description": "The load-shape class -- a separate axis from ``ModelType``.\n\n``ModelType`` names *model implementations* (``BINARY``, ``DIMMABLE``, ...)\nand answers \"what shape is the power law?\".  ``LoadShape`` names *how a\ndevice draws power* and answers \"what is the character of the load?\".\nThe two are not the same axis and neither substitutes for the other; a\ndevice's ``ModelType`` may change as it is learned while its load shape is\na declared property of the appliance (spec ``06-...`` \u00a74.1, ADR-0011's\nfour-axis rule).\n\nThis refines ``OD-45``'s field-only reading (an additive optional\n``power_model_class: str | None``).  A closed ``Enum`` is what makes\n\"never inferred from a device name\" enforceable: a free string cannot be\nvalidated, so a typo or a heuristic could smuggle a class in.  The\ncontract change stays additive and optional -- ``UNKNOWN`` is the neutral\ndefault and no existing field is retyped.\n\nMapping onto the shipped taxonomy (spec ``06-...`` \u00a74.1's table): the six\nclasses are the load-shape view of ``ModelType`` and ``PowerBehavior``.\n\n* ``FIXED``     -- ``ModelType.BINARY`` / ``PowerBehavior.FIXED``\n* ``ADJUSTABLE`` -- ``ModelType.DIMMABLE`` / ``PowerBehavior.VARIABLE``\n* ``DYNAMIC``   -- ``ModelType.VARIABLE_SPEED`` / ``MULTI_STATE`` /\n  ``TIME_VARYING`` / ``PowerBehavior.VARIABLE`` or ``COMPLEX``\n* ``DELAYED``   -- no ``ModelType`` member; a response delay is orthogonal\n  to the power law (``response_delay_s``, ``OD-47``)\n* ``ALWAYS_ON`` -- no ``ModelType`` member; the absence of an OFF state\n  (``always_on``, ``OD-46``)\n* ``UNKNOWN``   -- ``ModelType.RESIDUAL`` / ``PowerBehavior.UNKNOWN``\n\nRule: a load shape is **declared**, never inferred.  No code path derives\nit from a device name, an entity id or any other naming surface.",
+      "enum": [
+        "fixed",
+        "adjustable",
+        "dynamic",
+        "delayed",
+        "always_on",
+        "unknown"
+      ],
+      "title": "LoadShape",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "A real-world appliance or load (HB \u00a71.1 A).\n\n``device_id`` is opaque and preserved verbatim for legacy devices; new ids\nfollow ``pd_<ulid>`` (DEC-04).  HA connectivity is optional: some devices\nhave no HA entity at all (HB \u00a71.2).",
+  "properties": {
+    "device_id": {
+      "title": "Device Id",
+      "type": "string"
+    },
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "device_type": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Device Type"
+    },
+    "load_shape": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LoadShape"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "sign_class": {
+      "default": "consumer",
+      "enum": [
+        "consumer",
+        "producer",
+        "bidirectional"
+      ],
+      "title": "Sign Class",
+      "type": "string"
+    },
+    "ha_device_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ha Device Id"
+    },
+    "area_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Area Id"
+    },
+    "origin": {
+      "enum": [
+        "user",
+        "ha_device",
+        "unknown_profile_promotion",
+        "migration"
+      ],
+      "title": "Origin",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "retired_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Retired At"
+    }
+  },
+  "required": [
+    "device_id",
+    "name",
+    "origin",
+    "created_at"
+  ],
+  "title": "PhysicalDevice",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/physical_device.json",
+  "x-contract-version": "2.4.0"
+}

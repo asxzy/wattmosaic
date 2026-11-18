@@ -1,0 +1,80 @@
+{
+  "$defs": {
+    "HaEntityRole": {
+      "description": "What one Home Assistant entity means for a physical device.\n\nA role makes \"many entities, one appliance\" a contract instead of a\nconvention, which is what makes double counting preventable.",
+      "enum": [
+        "load_state",
+        "mode_only",
+        "power_measurement",
+        "energy_counter",
+        "availability",
+        "unknown"
+      ],
+      "title": "HaEntityRole",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "A many-to-many link from an HA entity to a device or component (DEC-08).\n\nOne entity may link to several subjects; ``target_kind`` selects which id\nspace ``target_id`` belongs to.  ``valid_until > valid_from`` when set.",
+  "properties": {
+    "entity_id": {
+      "title": "Entity Id",
+      "type": "string"
+    },
+    "target_kind": {
+      "enum": [
+        "device",
+        "component"
+      ],
+      "title": "Target Kind",
+      "type": "string"
+    },
+    "target_id": {
+      "title": "Target Id",
+      "type": "string"
+    },
+    "role": {
+      "$ref": "#/$defs/HaEntityRole"
+    },
+    "valid_from": {
+      "format": "date-time",
+      "title": "Valid From",
+      "type": "string"
+    },
+    "valid_until": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Valid Until"
+    },
+    "declared_by": {
+      "enum": [
+        "user",
+        "ha_device_link",
+        "discovery",
+        "migration"
+      ],
+      "title": "Declared By",
+      "type": "string"
+    }
+  },
+  "required": [
+    "entity_id",
+    "target_kind",
+    "target_id",
+    "role",
+    "valid_from",
+    "declared_by"
+  ],
+  "title": "HaEntityLink",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/ha_entity_link.json",
+  "x-contract-version": "2.4.0"
+}

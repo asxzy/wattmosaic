@@ -1,0 +1,46 @@
+{
+  "additionalProperties": false,
+  "description": "A Home Assistant entity or control interface (HB \u00a71.1 C).\n\nAn entity is behavioural evidence, not automatically a physical load.",
+  "properties": {
+    "entity_id": {
+      "title": "Entity Id",
+      "type": "string"
+    },
+    "domain": {
+      "title": "Domain",
+      "type": "string"
+    },
+    "ha_device_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ha Device Id"
+    },
+    "first_seen": {
+      "format": "date-time",
+      "title": "First Seen",
+      "type": "string"
+    },
+    "last_seen": {
+      "format": "date-time",
+      "title": "Last Seen",
+      "type": "string"
+    }
+  },
+  "required": [
+    "entity_id",
+    "domain",
+    "first_seen",
+    "last_seen"
+  ],
+  "title": "HaEntity",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/ha_entity.json",
+  "x-contract-version": "2.4.0"
+}
