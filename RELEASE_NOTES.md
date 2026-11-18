@@ -1,5 +1,22 @@
 # Release Notes
 
+## v0.2.1-dev.42 — 2026-11-18 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- feat(learning): make training and reanalysis realtime on matured events
+- feat(ui): poll async discovery jobs instead of blocking the request
+- feat(api): run placement discovery as an async background job
+- test(mapping): cover the native bulk matrix read and lightweight poll
+- perf(ui/api): stop polling mapping/residuals and bulk-read models
+- feat(ui): render the matrix as a device-by-reader pivot grid
+- fix(mapping): make CTs the reader axis and real devices the matrix rows
+- fix(ui): present topology as dynamic instead of confirmation-gated
+- feat(learning): make topology dynamic and remove the confirmation gate
+- perf(storage): remove the full-table scan from latest-inference-results
+
 ## v0.2.1-dev.41 — 2026-11-18 (development channel)
 
 Automatic development build.
