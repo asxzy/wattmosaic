@@ -6,7 +6,7 @@
    ========================================================================== */
 
 import { badge, card, clock, el, emptyState, get, kv, label, num, state, statusBadge, watts } from './core.js';
-import { matrixConfidence, matrixContext } from './matrix-model.js';
+import { CATEGORIES, cellView, headerRows, matrixConfidence, matrixContext } from './matrix-model.js';
 
 function matrixTraceCard(trace, mapping) {
   const dbg = state.matrix;
@@ -318,10 +318,83 @@ function matrixCellsCard(mapping, ctx) {
   });
 }
 
+/* --- U1 — v3 matrix header, cells and legend --------------------------- *
+ * The nested L0–L4 header is built ONLY from the K05 column tree.  One <tr>
+ * per level, one <th> per node at that level, and colSpan from the pure
+ * model.  Σ colSpan per level equals the number of reader leaves (AT-12).
+ * ---------------------------------------------------------------------- */
+
+// Render the nested column header as a DOM <table> with one thead row per
+// level.  Exposed for the AT-12 acceptance test which inspects the DOM.
+function matrixHeaderTable(columns) {
+  const rows = headerRows(columns);
+  const thead = el('thead', {}, rows.map((row) => el('tr', { dataset: { level: row.level } },
+    row.cells.map((cell) => {
+      const chips = (Array.isArray(cell.annotations) ? cell.annotations : [])
+        .map((a) => el('span', {
+          class: 'matrix-anno',
+          title: String((a && (a.kind || a.label)) || 'secondary relation'),
+        }, String((a && a.label) || (a && a.kind) || '')));
+      const text = cell.kind === 'reader' && cell.readerId
+        ? `${cell.label} · ${cell.readerId}`
+        : cell.label;
+      return el('th', {
+        class: `matrix-hdr-${row.level.toLowerCase()}${cell.synthetic ? ' matrix-hdr-span' : ''}`,
+        colspan: String(cell.colSpan),
+        scope: 'colgroup',
+        dataset: {
+          level: row.level,
+          kind: cell.kind,
+          nodeId: cell.nodeId,
+          reader: cell.readerId || '',
+        },
+        title: cell.kind === 'reader' && cell.readerId ? String(cell.readerId) : cell.label,
+      }, [el('span', { class: 'matrix-hdr-text' }, text), ...chips]);
+    })
+  )));
+  return el('table', { class: 'data matrix-grid-header' }, [thead]);
+}
+
+// The legend lists all eight categories with their distinct text + glyph,
+// never relying on colour alone (HB §19.3).
+function matrixLegend() {
+  return el('div', { class: 'matrix-legend' }, CATEGORIES.map((c) =>
+    el('span', {
+      class: `matrix-legend-item matrix-cat-${c.category}`,
+      dataset: { category: c.category },
+      title: c.text,
+    }, [
+      el('span', { class: 'matrix-legend-glyph' }, c.glyph),
+      el('span', { class: 'matrix-legend-text' }, c.text),
+    ])
+  ));
+}
+
+// A compact cell: status glyph + text, value or interval, confidence glyph and
+// age.  Everything else lives in the drill-down (DEC-29).
+function matrixCompactCell(cell) {
+  const view = cellView(cell);
+  return el('span', {
+    class: `matrix-cell-compact matrix-cat-${view.category}`,
+    dataset: { category: view.category },
+    title: `${view.text}${view.interval ? ` · ${view.interval}` : ''}`,
+  }, [
+    el('span', { class: 'matrix-cell-glyph' }, view.glyph),
+    el('span', { class: 'matrix-cell-text' }, view.text),
+    el('span', { class: 'matrix-cell-value' }, view.value),
+    view.interval ? el('span', { class: 'matrix-cell-interval' }, view.interval) : null,
+    el('span', { class: 'matrix-cell-confidence' }, view.confidence),
+    el('span', { class: 'matrix-cell-age' }, view.age),
+  ]);
+}
+
 export {
   matrixTraceCard,
   matrixApplyFilter,
   matrixDeviceLabel,
   matrixPivotCard,
-  matrixCellsCard
+  matrixCellsCard,
+  matrixHeaderTable,
+  matrixLegend,
+  matrixCompactCell
 };
