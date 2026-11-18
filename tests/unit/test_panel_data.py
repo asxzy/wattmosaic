@@ -147,6 +147,10 @@ SAMPLE_RESIDUALS = {
 SAMPLE_MAPPING = {
     "reader_configuration_version": "cfg-2026-11-17",
     "topology_version": "v7",
+    # Additive device-major axes from the backend: real devices are rows, CT
+    # channels are columns.  CT ids must never appear in the devices axis.
+    "devices": ["light.kitchen", "light.hall"],
+    "readers": ["ct_kitchen", "ct_shared"],
     "cells": [
         {
             "device_id": "light.kitchen",
@@ -560,7 +564,7 @@ SAMPLE_SNAPSHOT = {
 
 
 def _render_matrix() -> dict[str, str]:
-    """Render the three matrix-view cards under node and return their text."""
+    """Render the matrix-view cards under node and return text + pivot structure."""
     node = shutil.which("node")
     if not node:
         pytest.skip("node is not installed; the panel does not need it at runtime")
@@ -584,7 +588,22 @@ def _render_matrix() -> dict[str, str]:
         + "\n"
         + literals
         + "\n"
+        + "const pivot = matrixPivotCard(SAMPLE_MAPPING);\n"
+        + "const all = [];\n"
+        + "const walk = (n) => { if (!(n instanceof Node)) return; all.push(n);"
+        + " (n.children || []).forEach(walk); };\n"
+        + "walk(pivot);\n"
+        + "const rows = all.filter((n) => n.tagName === 'th' && n.dataset && n.dataset.device)"
+        + ".map((n) => n.textContent);\n"
+        + "const cols = all.filter((n) => n.tagName === 'th' && n.dataset && n.dataset.reader)"
+        + ".map((n) => n.textContent);\n"
+        + "const details = all.filter((n) => n.className &&"
+        + " n.className.indexOf('matrix-pivot-detail') >= 0).map((n) => n.textContent);\n"
+        + "const empties = all.filter((n) => n.className &&"
+        + " n.className.indexOf('matrix-pivot-empty') >= 0).map((n) => n.textContent);\n"
         + "console.log(JSON.stringify({\n"
+        + "  pivot: pivot.textContent,\n"
+        + "  rows: rows, cols: cols, details: details, empties: empties,\n"
         + "  cells: matrixCellsCard(SAMPLE_MAPPING).textContent,\n"
         + "  ledger: matrixSourceLedgerCard(SAMPLE_DEVICES, SAMPLE_SNAPSHOT, SAMPLE_MAPPING).textContent,\n"
         + "  groups: matrixIdentifiabilityCard(SAMPLE_DEVICES, SAMPLE_SNAPSHOT).textContent,\n"
@@ -600,11 +619,50 @@ def _render_matrix() -> dict[str, str]:
 
 
 @pytest.fixture(scope="module")
-def rendered_matrix() -> dict[str, str]:
+def rendered_matrix() -> dict:
     return _render_matrix()
 
 
-def test_matrix_view_renders_cells(rendered_matrix: dict[str, str]) -> None:
+def test_matrix_pivot_rows_are_devices(rendered_matrix: dict) -> None:
+    """Device rows come from the backend devices axis; CT ids are never rows."""
+    rows = rendered_matrix["rows"]
+    assert "light.kitchen" in rows
+    assert "light.hall" in rows
+    assert "Device / reader" not in rows  # the corner header is not a device row
+    for ct in SAMPLE_MAPPING["readers"]:
+        assert ct not in rows, f"CT reader {ct!r} must not appear as a device row label"
+
+
+def test_matrix_pivot_columns_are_ct_readers(rendered_matrix: dict) -> None:
+    """Column headers come from the backend readers axis; devices are not columns."""
+    cols = rendered_matrix["cols"]
+    assert "ct_kitchen" in cols
+    assert "ct_shared" in cols
+    for device in SAMPLE_MAPPING["devices"]:
+        assert device not in cols, f"device {device!r} must not appear as a reader column"
+
+
+def test_matrix_pivot_cell_detail(rendered_matrix: dict) -> None:
+    """A mapped cell exposes full detail; unmapped cells show an honest dash."""
+    details = rendered_matrix["details"]
+    assert details, "mapped cells must carry a detail panel"
+    joined = "\n".join(details)
+    for value in (
+        "Confirmed", "Non-identifiable", "Direct", "Indirect",
+        "One-to-one", "Many-to-one", "40.0 W", "50.0 W", "10.0 W", "90.0 W",
+        "91%", "95%", "12", "5", "blend_v1", "v3", "v7", "cfg-2026-11-17",
+        "ct_measurement", "topology", "Unknown load",
+    ):
+        assert value in joined, f"missing pivot cell detail value {value!r}"
+    # The confirmed cell shows its point estimate; the non-identifiable cell does
+    # not get an invented per-device watt (only an honest range in its detail).
+    assert "45.0 W" in joined
+    # Unmapped device/reader pairs render a dash, never a fabricated value.
+    assert rendered_matrix["empties"], "grid should include unmapped pairs as dashes"
+    assert all(e == "—" for e in rendered_matrix["empties"])
+
+
+def test_matrix_view_renders_cells(rendered_matrix: dict) -> None:
     """The matrix cell table shows every published field with its actual value."""
     text = rendered_matrix["cells"]
     assert "Mapping matrix" in text

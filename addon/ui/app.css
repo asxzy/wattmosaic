@@ -991,6 +991,32 @@ pre.code {
    ledger/range rows and confidence chips need their own rules. */
 table.data.matrix-cells td { font-size: 12.5px; white-space: nowrap; }
 .matrix-confidence { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+
+/* Device × reader pivot.  The device column and the reader header row stay
+   visible when the grid scrolls in either direction. */
+.matrix-pivot-wrap { max-height: 60vh; overflow: auto; }
+table.data.matrix-pivot { min-width: 640px; border-collapse: separate; border-spacing: 0; }
+table.data.matrix-pivot th.matrix-pivot-corner,
+table.data.matrix-pivot th.matrix-pivot-reader,
+table.data.matrix-pivot th.matrix-pivot-device { position: sticky; background: var(--bg-elev); }
+table.data.matrix-pivot th.matrix-pivot-corner { left: 0; top: 0; z-index: 3; }
+table.data.matrix-pivot th.matrix-pivot-reader { top: 0; z-index: 2; }
+table.data.matrix-pivot th.matrix-pivot-device { left: 0; z-index: 2; font-weight: 600; }
+.matrix-pivot-cell { position: relative; white-space: nowrap; }
+.matrix-pivot-signal { display: inline-flex; align-items: center; gap: 8px; }
+.matrix-pivot-obs { color: var(--text-mute); font-size: 12px; }
+.matrix-pivot-watt { font-variant-numeric: tabular-nums; }
+.matrix-pivot-empty { color: var(--text-mute); text-align: center; }
+.matrix-pivot-detail {
+  display: none; position: absolute; left: 8px; top: 100%; z-index: 6;
+  min-width: 280px; max-width: 360px; padding: 12px 14px;
+  background: var(--bg-elev); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); box-shadow: 0 8px 24px rgb(0 0 0 / 30%);
+  white-space: normal; font-size: 12.5px;
+}
+.matrix-pivot-cell:hover > .matrix-pivot-detail,
+.matrix-pivot-cell:focus > .matrix-pivot-detail,
+.matrix-pivot-cell:focus-within > .matrix-pivot-detail { display: block; }
 .matrix-confidence .chip { font-size: 10.5px; padding: 1px 6px; font-variant-numeric: tabular-nums; }
 
 .matrix-ledger { display: flex; flex-direction: column; gap: 4px; }

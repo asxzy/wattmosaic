@@ -1102,6 +1102,7 @@
       }),
     ]));
 
+    root.append(matrixPivotCard(mapping));
     root.append(matrixCellsCard(mapping));
     root.append(matrixSourceLedgerCard(devices, snapshot, mapping));
     root.append(matrixIdentifiabilityCard(devices, snapshot));
@@ -1581,6 +1582,112 @@
           String((entry && entry.reason) || '—')),
       ]))
     );
+  }
+
+  // Device-major pivot of the mapping matrix, built from the backend's additive
+  // axes: rows are the real devices (``devices``), columns the CT readers
+  // (``readers``).  CT ids therefore only ever appear as column headers, never
+  // as row labels.  Each cell shows a compact signal (status + observability +
+  // contribution) and carries its full detail in a hover/focus panel, reusing
+  // the cell-detail helpers below.  A non-identifiable cell shows "—" for its
+  // contribution, never an invented per-device watt.  Older backends without
+  // both axes fall back to the flat cell list.
+  function matrixPivotCard(mapping) {
+    const data = mapping || {};
+    const devices = Array.isArray(data.devices) ? data.devices : [];
+    const readers = Array.isArray(data.readers) ? data.readers : [];
+    if (!devices.length || !readers.length) return matrixCellsCard(mapping);
+
+    const cells = Array.isArray(data.cells) ? data.cells : [];
+    const byPair = new Map();
+    cells.forEach((cell) => {
+      const c = cell || {};
+      byPair.set(`${c.device_id}|${c.reader_id}`, c);
+    });
+
+    const contributionOf = (c) => {
+      const status = String(c.status || 'unknown');
+      if (status.toLowerCase() === 'non_identifiable') return '—';
+      const estimate = c.estimated_contribution_w;
+      return estimate === null || estimate === undefined ? '—' : watts(estimate);
+    };
+
+    const detail = (c) => {
+      const status = String(c.status || 'unknown');
+      const low = c.min_contribution_w;
+      const high = c.max_contribution_w;
+      const bounds = (low === null || low === undefined) && (high === null || high === undefined)
+        ? '—' : `${watts(low)} – ${watts(high)}`;
+      const sources = (Array.isArray(c.sources_used) ? c.sources_used : [])
+        .map((s) => String((s && s.source) || 'unknown'));
+      return el('div', { class: 'matrix-pivot-detail' }, [
+        el('div', { class: 'stat-label' }, 'Cell detail'),
+        kv([
+          ['Status', label(status)],
+          ['Observability', label(c.observability || 'unknown')],
+          ['Relation', c.relation_type ? label(c.relation_type) : '—'],
+          ['Contribution', contributionOf(c)],
+          ['Bounds', bounds],
+          ['Evidence count', c.evidence_count === undefined || c.evidence_count === null
+            ? '—' : String(c.evidence_count)],
+          ['Model version', c.model_version === undefined || c.model_version === null
+            ? '—' : `v${c.model_version}`],
+          ['Topology version', c.topology_version ? String(c.topology_version) : '—'],
+          ['Reader config', data.reader_configuration_version
+            ? String(data.reader_configuration_version) : '—'],
+          ['Sources used', sources.length ? sources.join(', ') : '—'],
+          ['Unknown load', c.is_unknown_load ? badge('unknown load', 'warn') : '—'],
+        ]),
+        el('div', { class: 'stat-label', style: 'margin-top:8px' }, 'Confidence'),
+        matrixConfidence(c.confidence),
+      ]);
+    };
+
+    const header = el('tr', {}, [
+      el('th', { class: 'matrix-pivot-corner' }, 'Device / reader'),
+      ...readers.map((reader) => el('th', {
+        class: 'matrix-pivot-reader', dataset: { reader: String(reader) },
+      }, String(reader))),
+    ]);
+
+    const bodyRows = devices.map((device) => el('tr', {}, [
+      el('th', {
+        class: 'matrix-pivot-device', scope: 'row', dataset: { device: String(device) },
+      }, String(device)),
+      ...readers.map((reader) => {
+        const c = byPair.get(`${device}|${reader}`);
+        if (!c) {
+          return el('td', {
+            class: 'matrix-pivot-cell matrix-pivot-empty',
+            dataset: { device: String(device), reader: String(reader) },
+            title: `No mapping for ${device} / ${reader}`,
+          }, '—');
+        }
+        return el('td', {
+          class: 'matrix-pivot-cell', tabindex: '0',
+          dataset: { device: String(device), reader: String(reader) },
+          title: `${label(c.status || 'unknown')} · ${label(c.observability || 'unknown')}`,
+        }, [
+          el('span', { class: 'matrix-pivot-signal' }, [
+            statusBadge(String(c.status || 'unknown')),
+            el('span', { class: 'matrix-pivot-obs' }, label(c.observability || 'unknown')),
+            el('span', { class: 'matrix-pivot-watt' }, contributionOf(c)),
+          ]),
+          detail(c),
+        ]);
+      }),
+    ]));
+
+    return card('Mapping matrix — device × reader', [
+      el('div', { class: 'table-wrap matrix-pivot-wrap' }, [
+        el('table', { class: 'data matrix-pivot' }, [
+          el('thead', {}, header),
+          el('tbody', {}, bodyRows),
+        ]),
+      ]),
+    ], {
+      foot: 'Rows are real devices; columns are CT readers. A CT observes a conductor, so its id appears only as a column header. Hover or focus a cell for its full detail — bounds, confidence and provenance are the engine’s published values, never an invented per-device watt.',
+    });
   }
 
   // GET /api/v1/mapping -> {cells:[...], coverage:{counts, ...}, ...}.  Richer
