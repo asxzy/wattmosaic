@@ -42,34 +42,34 @@
 | K04 | 1 | VERIFIED |  |  | K04b follow-up wired real types |
 | K05 | 1 | VERIFIED |  |  | K05b follow-up reuses topology enums |
 | K06 | 1 | VERIFIED |  |  |  |
-| K07 | 1 | IN_PROGRESS |  |  |  |
+| K07 | 1 | VERIFIED |  |  | K07b follow-up: closed-test rule (CLOSED_BY), AT-12 closed by U1 |
 | K08 | 1 | VERIFIED |  |  |  |
 | S13 | 2 | VERIFIED |  |  |  |
-| S14 | 2 | IN_PROGRESS |  |  |  |
-| S15 | 2 | IN_PROGRESS |  |  |  |
+| S14 | 2 | VERIFIED |  |  |  |
+| S15 | 2 | VERIFIED |  |  |  |
 | S16 | 2 | VERIFIED |  |  |  |
 | S17 | 2 | VERIFIED |  |  | insert_reconciliation bug did not exist; round-trip test added |
-| S18 | 2 | IN_PROGRESS |  |  |  |
+| S18 | 2 | VERIFIED |  |  |  |
 | S19 | 2 | VERIFIED |  |  |  |
 | P1 | 3 | IN_PROGRESS |  |  | DEF-01 test first |
 | P2 | 3 | NOT_STARTED | | | |
 | P3 | 3 | NOT_STARTED | | | |
 | P4 | 3 | NOT_STARTED | | | |
 | P5 | 3 | NOT_STARTED | | | |
-| T1 | 3 | NOT_STARTED | | | |
+| T1 | 3 | IN_PROGRESS |  |  |  |
 | T2 | 3 | NOT_STARTED | | | |
 | T3 | 3 | NOT_STARTED | | | |
 | T4 | 3 | NOT_STARTED | | | |
-| I1 | 3 | IN_PROGRESS |  | AT-10 |  |
-| I2 | 3 | IN_PROGRESS |  | AT-05 |  |
+| I1 | 3 | VERIFIED |  | AT-10 | AT-10 property test in unit tests; marker flip pending |
+| I2 | 3 | VERIFIED |  | AT-05 | AT-05 scenario in unit tests; marker flip pending K07 |
 | I3 | 3 | IN_PROGRESS |  | AT-06, 08, 09 |  |
 | I4 | 3 | IN_PROGRESS |  | AT-07 | 250 W test first |
-| M1 | 3 | IN_PROGRESS |  | AT-01, 13 |  |
-| L1 | 3 | NOT_STARTED | | | |
+| M1 | 3 | VERIFIED |  | AT-01, 13 | AT-01/13 scenarios in unit tests; marker flip pending; reconcile primary_display_tree with T1 |
+| L1 | 3 | IN_PROGRESS |  |  |  |
 | L2 | 3 | NOT_STARTED | | AT-03 | |
 | L3 | 3 | NOT_STARTED | | | |
-| D1 | 3 | NOT_STARTED | | | |
-| D2 | 3 | NOT_STARTED | | | |
+| D1 | 3 | IN_PROGRESS |  |  |  |
+| D2 | 3 | IN_PROGRESS |  |  |  |
 | D3 | 3 | NOT_STARTED | | AT-17 | |
 | U1 | 3 | VERIFIED |  | AT-12 |  |
 | I5 | 4 | NOT_STARTED | | AT-14 | |
