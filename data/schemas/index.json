@@ -33,6 +33,12 @@
     "version_triple": "version_triple.json",
     "evidence_ref": "evidence_ref.json",
     "bounds": "bounds.json",
-    "confidence_vector_v3": "confidence_vector_v3.json"
+    "confidence_vector_v3": "confidence_vector_v3.json",
+    "measurement_endpoint": "measurement_endpoint.json",
+    "endpoint_config_revision": "endpoint_config_revision.json",
+    "physical_device": "physical_device.json",
+    "load_component": "load_component.json",
+    "ha_entity": "ha_entity.json",
+    "ha_entity_link": "ha_entity_link.json"
   }
 }

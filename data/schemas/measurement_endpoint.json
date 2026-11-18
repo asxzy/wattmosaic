@@ -1,0 +1,298 @@
+{
+  "$defs": {
+    "EndpointConfigRevision": {
+      "additionalProperties": false,
+      "description": "One immutable, append-only configuration revision of an endpoint.\n\n``valid_until > valid_from`` when set (open-ended revisions use ``None``).\n``declared_by`` records who introduced the revision; DEC-05 requires a\n``\"user\"`` declaration before a CT may have a confirmed SINGLE_SUBJECT\nscope.",
+      "properties": {
+        "endpoint_id": {
+          "title": "Endpoint Id",
+          "type": "string"
+        },
+        "revision": {
+          "title": "Revision",
+          "type": "integer"
+        },
+        "valid_from": {
+          "format": "date-time",
+          "title": "Valid From",
+          "type": "string"
+        },
+        "valid_until": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Valid Until"
+        },
+        "phase": {
+          "enum": [
+            "l1",
+            "l2",
+            "both",
+            "unknown"
+          ],
+          "title": "Phase",
+          "type": "string"
+        },
+        "leg": {
+          "anyOf": [
+            {
+              "enum": [
+                "l1",
+                "l2"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Leg"
+        },
+        "voltage_reference_v": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Voltage Reference V"
+        },
+        "polarity": {
+          "enum": [
+            "normal",
+            "inverted"
+          ],
+          "title": "Polarity",
+          "type": "string"
+        },
+        "multiplier": {
+          "title": "Multiplier",
+          "type": "number"
+        },
+        "calibration_version": {
+          "title": "Calibration Version",
+          "type": "string"
+        },
+        "measurement_type": {
+          "enum": [
+            "instantaneous",
+            "window_average",
+            "device_reported",
+            "calculated",
+            "accumulated_energy"
+          ],
+          "title": "Measurement Type",
+          "type": "string"
+        },
+        "measurement_window_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Measurement Window Ms"
+        },
+        "expected_interval_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Interval S"
+        },
+        "resolution_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resolution W"
+        },
+        "declared_by": {
+          "enum": [
+            "user",
+            "discovery",
+            "migration"
+          ],
+          "title": "Declared By",
+          "type": "string"
+        }
+      },
+      "required": [
+        "endpoint_id",
+        "revision",
+        "valid_from",
+        "phase",
+        "polarity",
+        "multiplier",
+        "calibration_version",
+        "measurement_type",
+        "declared_by"
+      ],
+      "title": "EndpointConfigRevision",
+      "type": "object"
+    },
+    "EndpointKind": {
+      "description": "What physical instrument produces the measurements (HB \u00a71.1 D).",
+      "enum": [
+        "ct",
+        "smart_plug",
+        "appliance_monitor",
+        "panel_main",
+        "virtual"
+      ],
+      "title": "EndpointKind",
+      "type": "string"
+    },
+    "EndpointScope": {
+      "description": "What an endpoint declares it measures (DEC-05).\n\nA *single-subject* scope is a property of an endpoint that physically\nmeasures one load (smart plug, appliance energy monitor).  It is a **candidate**\nuntil the user confirms it; a circuit CT never gets it automatically.",
+      "enum": [
+        "circuit",
+        "panel_feed",
+        "single_subject",
+        "unknown"
+      ],
+      "title": "EndpointScope",
+      "type": "string"
+    },
+    "ScopeStatus": {
+      "description": "Confirmation lifecycle of an endpoint's declared scope.",
+      "enum": [
+        "candidate",
+        "confirmed",
+        "rejected"
+      ],
+      "title": "ScopeStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "A source of electrical measurements with its own identity and scope.\n\nThere is deliberately **no** ``device_id`` foreign key: one reader may\nobserve many devices and many readers may observe the same device\n(HB \u00a71.2).  ``scope_subject_id`` is set iff ``scope == SINGLE_SUBJECT``.",
+  "properties": {
+    "endpoint_id": {
+      "title": "Endpoint Id",
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/$defs/EndpointKind"
+    },
+    "entity_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Entity Id"
+    },
+    "energy_entity_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Energy Entity Id"
+    },
+    "display_name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Display Name"
+    },
+    "scope": {
+      "$ref": "#/$defs/EndpointScope"
+    },
+    "scope_status": {
+      "$ref": "#/$defs/ScopeStatus"
+    },
+    "scope_subject_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Scope Subject Id"
+    },
+    "panel_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Panel Id"
+    },
+    "enabled": {
+      "title": "Enabled",
+      "type": "boolean"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "revisions": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/EndpointConfigRevision"
+      },
+      "title": "Revisions",
+      "type": "array"
+    }
+  },
+  "required": [
+    "endpoint_id",
+    "kind",
+    "entity_id",
+    "scope",
+    "scope_status",
+    "enabled",
+    "created_at"
+  ],
+  "title": "MeasurementEndpoint",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/measurement_endpoint.json",
+  "x-contract-version": "2.4.0"
+}
