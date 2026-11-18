@@ -29,6 +29,10 @@
     "snapshot_response": "snapshot_response.json",
     "error_response": "error_response.json",
     "service_command": "service_command.json",
-    "service_result": "service_result.json"
+    "service_result": "service_result.json",
+    "version_triple": "version_triple.json",
+    "evidence_ref": "evidence_ref.json",
+    "bounds": "bounds.json",
+    "confidence_vector_v3": "confidence_vector_v3.json"
   }
 }

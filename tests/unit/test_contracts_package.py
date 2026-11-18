@@ -166,16 +166,29 @@ def test_every_legacy_name_is_importable_from_the_package() -> None:
         assert hasattr(contracts, name), f"contracts facade lost {name!r}"
 
 
-def test_package_surface_has_no_unexpected_extra_names() -> None:
-    """No name beyond the legacy set and the package-inherent additions."""
+def test_package_surface_extras_come_only_from_v3_submodules() -> None:
+    """Facade extras are exactly the v3 submodule exports (K00..K06).
+
+    X01 wrote this as "no extras"; that held only while the submodules were
+    empty seams.  As the wave-1 contract tasks fill them, their ``__all__``
+    names are star-imported here by design.  The stronger invariant is that
+    *every* extra name is declared by a v3 submodule -- nothing appears by
+    accident -- and no v3 name shadows a legacy name.
+    """
     allowed = (
         LEGACY_PUBLIC_NAMES
         | LEGACY_PRIVATE_NAMES
         | MODULE_DUNDER_NAMES
         | PACKAGE_ONLY_NAMES
     )
+    v3_names: set[str] = set()
+    for module in (foundation, entities, measurement, topology, inference, matrix, power_models):
+        v3_names.update(module.__all__)
     extras = frozenset(dir(contracts)) - allowed
-    assert not extras, f"unexpected names on contracts facade: {sorted(extras)}"
+    assert extras == v3_names, (
+        f"facade extras {sorted(extras)} do not match v3 exports {sorted(v3_names)}"
+    )
+    assert not (v3_names & LEGACY_PUBLIC_NAMES), "a v3 export shadows a legacy name"
 
 
 def test_legacy_private_names_are_the_real_objects() -> None:
@@ -189,9 +202,21 @@ def test_legacy_private_names_are_the_real_objects() -> None:
     "module",
     [foundation, entities, measurement, topology, inference, matrix, power_models],
 )
-def test_new_submodules_start_with_empty_exports(module: ModuleType) -> None:
-    assert module.__all__ == []
-    assert module.SCHEMA_EXPORTS == []
+def test_submodule_exports_are_self_consistent(module: ModuleType) -> None:
+    """``__all__`` names resolve; exported models are registered in SCHEMA_EXPORTS.
+
+    Written generically so wave-1 tasks can fill their seam (K00..K06) without
+    ever editing this test: an empty seam passes trivially, a filled one must be
+    internally consistent.  The facade-surface test above enforces that no v3
+    export shadows a legacy name.
+    """
+    for name in module.__all__:
+        assert hasattr(module, name), f"{module.__name__}.__all__ lists missing {name!r}"
+    for _stem, model in module.SCHEMA_EXPORTS:
+        assert model.__name__ in module.__all__, (
+            f"{module.__name__} exports a schema model absent from __all__"
+        )
+    assert hasattr(module, "SCHEMA_EXPORTS")
 
 
 def test_schema_exports_discovery_finds_an_injected_dummy_model(

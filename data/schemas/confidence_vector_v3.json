@@ -1,0 +1,108 @@
+{
+  "additionalProperties": false,
+  "description": "Seven-component confidence vector for a v3 estimate.\n\nEach component is an *uncalibrated engineering score* in ``[0, 1]`` or\n``None`` when not assessed.  **This is not a probability** (ADR-0007): the\nnumbers are not calibrated, do not sum to one, and must not be interpreted\nas likelihoods.  There is deliberately **no blended scalar** field, no\n``__float__`` and no arithmetic -- a consumer must name the component it\nmeans (DEC-24; HB \u00a79.6).  This v3 type supersedes the legacy six-dimension\n``ConfidenceVector`` and is intentionally a distinct public name.",
+  "properties": {
+    "measurement_quality": {
+      "anyOf": [
+        {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Measurement Quality"
+    },
+    "event_association": {
+      "anyOf": [
+        {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Event Association"
+    },
+    "model_fit": {
+      "anyOf": [
+        {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model Fit"
+    },
+    "topology_consistency": {
+      "anyOf": [
+        {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Topology Consistency"
+    },
+    "identifiability": {
+      "anyOf": [
+        {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Identifiability"
+    },
+    "sample_coverage": {
+      "anyOf": [
+        {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Sample Coverage"
+    },
+    "freshness": {
+      "anyOf": [
+        {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Freshness"
+    }
+  },
+  "title": "ConfidenceVectorV3",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/confidence_vector_v3.json",
+  "x-contract-version": "2.4.0"
+}

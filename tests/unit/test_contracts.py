@@ -115,8 +115,12 @@ def test_the_committed_schemas_are_what_the_contract_generates() -> None:
     # can never disagree about which model produces which file.
     exporter = _export_schemas_module()
     checked = 0
+    # ``collect_models`` is the exporter's single source of truth: it merges the
+    # legacy ``MODELS`` set with each v3 submodule's ``SCHEMA_EXPORTS``.  New
+    # additive contracts (K00..K06) land in the latter, not in ``MODELS``.
+    all_models = exporter.collect_models()
     for name, filename in index["schemas"].items():
-        model = exporter.MODELS[name]
+        model = all_models[name]
         expected = model.model_json_schema(mode="serialization")
         expected["$id"] = f"https://wattmosaic.local/schemas/{name}.json"
         expected["x-contract-version"] = contracts.CONTRACT_VERSION
