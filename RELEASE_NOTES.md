@@ -1,5 +1,13 @@
 # Release Notes
 
+## v0.2.1-dev.39 — 2026-11-18 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- feat(ui): add a matrix diagnostic view for the internal process
+
 ## v0.2.1-dev.38 — 2026-11-17 (development channel)
 
 Automatic development build.
