@@ -102,6 +102,32 @@ async def test_panel_shell_is_served_to_ingress_peer(trusted: TestClient) -> Non
     assert 'href="ui/app.css"' in body
 
 
+async def test_panel_nav_includes_matrix_link(trusted: TestClient) -> None:
+    # The shell used to rely on app.js to inject the Matrix entry at boot, so a
+    # static read of index.html could not see it and a clipped/absent tab went
+    # unnoticed.  The nav is the contract the router reads, so pin the static
+    # link here: it must be present with the right href/data-nav from the first
+    # byte of HTML, before any JS runs.
+    response = await trusted.get("/", headers=INGRESS_USER)
+    assert response.status == 200
+    body = await response.text()
+    nav = re.search(r"<nav\b[^>]*>(.*?)</nav>", body, re.DOTALL)
+    assert nav is not None, "shell has no <nav> block"
+    links = re.findall(r"<a\b[^>]*>", nav.group(1))
+    matrix = [
+        link
+        for link in links
+        if re.search(r'href\s*=\s*["\']#/matrix["\']', link)
+        and re.search(r'data-nav\s*=\s*["\']matrix["\']', link)
+    ]
+    assert len(matrix) == 1, f"expected exactly one static Matrix nav link, got {matrix}"
+    # It must sit alongside (after) the five existing links, not replace one.
+    for name in ("overview", "devices", "topology", "quality", "diagnostics"):
+        assert any(f'data-nav="{name}"' in link for link in links), (
+            f"nav lost its {name} link"
+        )
+
+
 async def test_panel_shell_carries_the_strict_csp(trusted: TestClient) -> None:
     response = await trusted.get("/", headers=INGRESS_USER)
     csp = response.headers["Content-Security-Policy"]
