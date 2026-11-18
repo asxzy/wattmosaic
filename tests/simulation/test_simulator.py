@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -372,3 +373,149 @@ def test_scenario_summary_is_measurement_free() -> None:
     assert summary["channels"] == 36
     assert summary["simultaneous_event_anchors"] >= 1
     assert summary["midpoint_main_w"] > 0
+
+
+# --------------------------------------------------------------------------- #
+# WP-B8 / X07 simulator extensions
+# --------------------------------------------------------------------------- #
+def test_ha_state_changes_carry_a_context() -> None:
+    """Every HA state carries the top-level HA context (id/parent/user)."""
+    rec = next(iter(HouseholdScenario(seed=3, minutes=2, interval=20).records()))
+    assert rec["ha_states"]
+    for state in rec["ha_states"].values():
+        ctx = state["context"]
+        assert set(ctx) == {"id", "parent_id", "user_id"}
+        assert ctx["id"]
+
+
+def test_explicit_ha_contexts_are_copied_onto_states_and_events() -> None:
+    """A fixture-provided context (automation burst / decoy) survives verbatim."""
+    ctx = {"id": "ctx-1", "parent_id": "parent-automation", "user_id": None}
+    cfg = SimulatorConfig(seed=3, minutes=30, interval=20, ha_contexts={"tv": ctx})
+    recs = HouseholdScenario(cfg).to_list()
+    assert recs[0]["ha_states"]["media_player.tv"]["context"] == ctx
+    events = [e for r in recs for e in r["events"] if e["device_id"] == "tv"]
+    assert events
+    assert all(e["context"]["parent_id"] == "parent-automation" for e in events)
+
+
+def test_push_on_change_suppresses_unchanged_samples() -> None:
+    """A flat reader emits no sample while its reported truth is unchanged."""
+    from tools.simulator.topology import (
+        CTType,
+        HouseholdTopology,
+        Phase,
+        SimChannel,
+        SimDevice,
+        SimDeviceType,
+    )
+
+    # A constant load: its physical truth never changes, so push-on-change must
+    # produce a single sample then go silent for the rest of the horizon.
+    topo = HouseholdTopology(
+        channels=[SimChannel("ct_const", "sensor.const", "Const", CTType.MAIN, Phase.L1)],
+        devices=[SimDevice("dev_const", "Const", SimDeviceType.STEP, Phase.L1,
+                           {"ct_const": 1.0}, 500.0, "switch.const",
+                           metadata={"steps": [(0.0, 500.0)]})],
+    )
+    explicit_cfg = SimulatorConfig(seed=5, minutes=10, interval=5,
+                                   quality=QualityLevel.EXCELLENT,
+                                   channel_intervals={"ct_const": 2.0})
+    push_cfg = SimulatorConfig(seed=5, minutes=10, interval=5,
+                               quality=QualityLevel.EXCELLENT,
+                               channel_intervals={"ct_const": 2.0}, push_on_change=True)
+    explicit = [r["measurements"]["ct_const"] for r in
+                HouseholdScenario(explicit_cfg, topology=topo).to_list()
+                if "ct_const" in r["measurements"]]
+    pushed = [r["measurements"]["ct_const"] for r in
+              HouseholdScenario(push_cfg, topology=topo).to_list()
+              if "ct_const" in r["measurements"]]
+    assert len(explicit) > 10
+    assert 0 < len(pushed) < len(explicit)
+    # Every surviving sample carries the liveness timestamp.
+    assert all(m["last_reported"] for m in pushed)
+
+
+def test_measurement_window_ms_is_declared_on_samples() -> None:
+    """A per-reader averaging window is reported as observation metadata."""
+    cfg = SimulatorConfig(seed=5, minutes=3, interval=20,
+                          measurement_window_ms={"ct_main_l1": 1500.0})
+    rec = next(iter(HouseholdScenario(cfg).records()))
+    sample = rec["measurements"]["ct_main_l1"]
+    assert sample["measurement_window_ms"] == 1500.0
+    other = rec["measurements"]["ct_main_l2"]
+    assert other["measurement_window_ms"] is None
+
+
+def test_window_averaging_smeears_a_step() -> None:
+    """A windowed reported value moves gradually across a physical step."""
+    # A step profile whose single transition is inside the horizon.
+    from tools.simulator.scenario import HouseholdScenario as HS
+    from tools.simulator.topology import (
+        CTType,
+        HouseholdTopology,
+        Phase,
+        SimChannel,
+        SimDevice,
+        SimDeviceType,
+    )
+
+    topo = HouseholdTopology(
+        channels=[
+            SimChannel("ct_x", "sensor.x", "X", CTType.MAIN, Phase.L1),
+        ],
+        devices=[
+            SimDevice("dev_x", "X", SimDeviceType.STEP, Phase.L1,
+                      {"ct_x": 1.0}, 1000.0, "switch.x",
+                      metadata={"steps": [(0.0, 0.0), (300.0, 1000.0)]}),
+        ],
+    )
+    window_ms = 4000.0
+    cfg = SimulatorConfig(seed=7, minutes=8, interval=5, quality=QualityLevel.EXCELLENT,
+                          channel_intervals={"ct_x": 2.0},
+                          measurement_window_ms={"ct_x": window_ms})
+    recs = list(HS(cfg, topology=topo).records())
+    just_before = [r["measurements"]["ct_x"]["value_w"] for r in recs
+                   if 290 <= r["t_s"] < 300]
+    just_after = [r["measurements"]["ct_x"]["value_w"] for r in recs
+                  if 300 <= r["t_s"] < 310]
+    assert just_before and just_after
+    # The step is smeared: just after the transition the reported value is
+    # strictly between the before-level and the full 1000 W level.
+    early_after = just_after[0]
+    assert 0.0 < early_after < 1000.0, (just_before, just_after)
+
+
+def test_late_backfill_arrives_after_its_sample_time() -> None:
+    """A backfilled sample's receipt is later than its physical sample time."""
+    cfg = SimulatorConfig(seed=5, minutes=8, interval=10, quality=QualityLevel.EXCELLENT,
+                          late_backfill_s={"ct_main_l1": 25.0})
+    recs = HouseholdScenario(cfg).to_list()
+    late = [m for r in recs for m in r["measurements"].values()
+            if m["ct_id"] == "ct_main_l1"]
+    assert late
+    assert all(
+        datetime.fromisoformat(m["received_at"]) >
+        datetime.fromisoformat(m["state_timestamp"])
+        for m in late
+    )
+
+
+def test_reader_clock_skew_shifts_state_timestamp_only() -> None:
+    """Clock skew moves the reported state time, not the physical sample time."""
+    base_cfg = SimulatorConfig(seed=5, minutes=8, interval=10, quality=QualityLevel.EXCELLENT)
+    skew_cfg = SimulatorConfig(seed=5, minutes=8, interval=10, quality=QualityLevel.EXCELLENT,
+                               reader_clock_skew_s={"ct_main_l1": 30.0})
+    base = [m for r in HouseholdScenario(base_cfg).to_list() for m in r["measurements"].values()
+            if m["ct_id"] == "ct_main_l1"]
+    skewed = [m for r in HouseholdScenario(skew_cfg).to_list() for m in r["measurements"].values()
+              if m["ct_id"] == "ct_main_l1"]
+    assert len(base) == len(skewed) and base
+    # Same physical sample instants (and therefore the same values).
+    assert [m["value_w"] for m in base] == [m["value_w"] for m in skewed]
+    for b, s in zip(base, skewed, strict=True):
+        state_delta = (datetime.fromisoformat(s["state_timestamp"]) -
+                       datetime.fromisoformat(b["state_timestamp"])).total_seconds()
+        assert state_delta == 30.0
+        # The physical sample time is untouched by the skew.
+        assert b["sample_time_s"] == s["sample_time_s"]

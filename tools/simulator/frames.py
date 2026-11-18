@@ -62,6 +62,12 @@ TRUTH_KEYS: frozenset[str] = frozenset(
         "sim_type",
         "nominal_power_w",
         "seed_key",
+        # HB §17 reference-house truth keys.  Both are already caught by the
+        # ``true_`` prefix, but naming them explicitly documents the seam the
+        # hb17 fixture must respect (and keeps the detector honest if a prefix
+        # rule is ever relaxed).
+        "true_onset_at",
+        "true_circuit",
     }
 )
 
@@ -135,6 +141,9 @@ OBSERVABLE_MEASUREMENT_FIELDS: tuple[str, ...] = (
     "delivered",
     "samples_in_tick",
     "factor",
+    # WP-B8: push-on-change liveness and a declared per-reader averaging window.
+    "last_reported",
+    "measurement_window_ms",
 )
 
 #: Fields kept in the as-of-tick-end snapshot (no per-tick counters).
@@ -149,6 +158,8 @@ OBSERVABLE_LATEST_FIELDS: tuple[str, ...] = (
     "repeated",
     "age_s",
     "factor",
+    "last_reported",
+    "measurement_window_ms",
 )
 
 #: HA-state fields that are observation.  ``attributable`` is intentionally
@@ -162,6 +173,16 @@ OBSERVABLE_STATE_FIELDS: tuple[str, ...] = (
     "last_updated",
     "received_at",
     "device_id",
+    "context",
+)
+
+#: Top-level HB §17 stream keys.  They are already observation-shaped (the
+#: hb17 builder keeps truth under separate ``truth`` keys), so the stream views
+#: pass through verbatim; listing them makes the seam explicit.
+OBSERVABLE_HB17_FIELDS: tuple[str, ...] = (
+    "ha_messages",
+    "reader_samples",
+    "truth",
 )
 
 #: Scenario metadata that is safe to show an algorithm.
@@ -210,6 +231,16 @@ def observation_view(
     }
     if include_events:
         view["events"] = [dict(event) for event in record.get("events") or ()]
+    # HB §17 records use a different envelope (``ha_messages`` /
+    # ``reader_samples`` / ``truth``).  Pass the observation keys through
+    # verbatim and leave ``truth`` for the truth view.
+    if "ha_messages" in record or "reader_samples" in record:
+        for name in OBSERVABLE_HB17_FIELDS:
+            if name in record and name != "truth":
+                value = record[name]
+                view[name] = (
+                    [dict(item) for item in value] if isinstance(value, (list, tuple)) else dict(value)
+                )
     if include_scenario:
         view["scenario"] = _pick(
             record.get("scenario") or {}, OBSERVABLE_SCENARIO_FIELDS
@@ -242,6 +273,7 @@ def truth_stream(records: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
 
 
 __all__ = [
+    "OBSERVABLE_HB17_FIELDS",
     "OBSERVABLE_LATEST_FIELDS",
     "OBSERVABLE_MEASUREMENT_FIELDS",
     "OBSERVABLE_SCENARIO_FIELDS",
