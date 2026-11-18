@@ -449,10 +449,12 @@ def test_latest_schema_version_covers_every_migration() -> None:
     never added -- so every topology write failed on a healthy-looking install.
     A duplicate number fails here instead.
     """
+    from wattmosaic_engine.storage.migrations import RESERVED_VERSIONS
+
     versions = [m.version for m in MIGRATIONS]
     assert len(versions) == len(set(versions)), f"duplicate migration version: {versions}"
-    assert versions == list(range(1, len(versions) + 1))
-    assert len(versions) == LATEST_VERSION
+    # 12 is the reserved payload-encoding marker, never a migration schema.
+    assert versions == sorted(set(range(1, LATEST_VERSION + 1)) - set(RESERVED_VERSIONS))
     assert LATEST_VERSION >= 8  # the panel identity columns
 
 

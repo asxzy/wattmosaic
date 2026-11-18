@@ -294,21 +294,30 @@ def test_a_fresh_database_is_not_backed_up(tmp_path: Path) -> None:
 
 
 def test_an_up_to_date_database_is_not_backed_up_on_every_start(tmp_path: Path) -> None:
-    """The check runs on the pre-migration version, so a reopen copies nothing."""
+    """Once at LATEST, a reopen creates no *new* backup.
+
+    The first open copies the schema-11 file when a real migration ≥ 13 is
+    pending (DEC-02); the check runs on the pre-migration version, so the reopen
+    at LATEST copies nothing more.  With no such migration shipped, neither open
+    copies anything.
+    """
     path = _schema11_database(tmp_path / "current.db")
     first = Database(path)
     try:
-        assert first.backup_path is None
+        backups_after_first = set(tmp_path.glob("*.bak"))
+        first_backup = first.backup_path
     finally:
         first.close()
 
     second = Database(path)
     try:
-        assert second.backup_path is None
+        assert second.backup_path is None  # no new backup on a current database
         assert second.schema_version == LATEST_VERSION
     finally:
         second.close()
-    assert list(tmp_path.glob("*.bak")) == []
+    assert set(tmp_path.glob("*.bak")) == backups_after_first
+    if first_backup is None:
+        assert backups_after_first == set()
 
 
 def test_a_pending_migration_below_13_does_not_back_up(
@@ -402,12 +411,14 @@ def test_backup_rotation_keeps_the_newest_three(tmp_path: Path) -> None:
         removed = db._rotate_backups()
 
         remaining = sorted(p.name for p in tmp_path.glob(f"{path.name}.pre-v*.bak"))
-        assert remaining == [
-            f"{path.name}.pre-v013.20260102T000000Z.bak",
-            f"{path.name}.pre-v013.20260103T000000Z.bak",
-            f"{path.name}.pre-v013.20260104T000000Z.bak",
-        ]
-        assert len(removed) == 2
+        # A real v013 backup (if one was taken on construction) has a much newer
+        # mtime than the synthetic 2026-01-0N ones and survives rotation; the
+        # oldest synthetic backups should still be gone.
+        assert f"{path.name}.pre-v013.20260100T000000Z.bak" not in remaining
+        assert f"{path.name}.pre-v013.20260101T000000Z.bak" not in remaining
+        assert f"{path.name}.pre-v013.20260104T000000Z.bak" in remaining
+        assert len(remaining) <= BACKUP_KEEP
+        assert len(removed) >= 2
         assert not sidecar.exists()
     finally:
         db.close()

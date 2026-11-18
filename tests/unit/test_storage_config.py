@@ -334,7 +334,7 @@ def test_latest_schema_includes_the_audit_tables(tmp_path) -> None:
     """Migrations 9 and 10 are additive audit state; config is unaffected."""
     db = Database(tmp_path / "audit_schema.db")
     try:
-        assert LATEST_VERSION == 11
+        assert LATEST_VERSION >= 11
         assert db.schema_version == LATEST_VERSION
         tables = {
             row["name"]
@@ -774,7 +774,7 @@ def test_prior_schema_database_migrates_and_loads(tmp_path) -> None:
     db = Database(path)
     try:
         assert db.schema_version == LATEST_VERSION
-        assert LATEST_VERSION == 11
+        assert LATEST_VERSION >= 11
         # The legacy configuration payload reads through the new decode path.
         loaded = db.load_device_configurations().by_device()["kitchen_lights"]
         assert loaded.notes == ["audited 2026-11-01", "five-bulb fixture"]
@@ -789,12 +789,12 @@ def test_prior_schema_database_migrates_and_loads(tmp_path) -> None:
 
 
 def test_the_payload_encoding_is_not_a_migration() -> None:
-    """The encoding is a write-path marker, so ``LATEST_VERSION`` stays at 11.
+    """The encoding is a write-path marker, never a schema version.
 
     A migration that only bumped ``user_version`` would advance the version on a
-    database whose bytes never changed, making ``schema_version`` a lie.
+    database whose bytes never changed, making ``schema_version`` a lie.  Version
+    12 stays reserved even though canonical migrations (13+) now exist.
     """
     assert PAYLOAD_ENCODING_VERSION == 12
-    assert LATEST_VERSION == 11
-    assert PAYLOAD_ENCODING_VERSION == LATEST_VERSION + 1
+    assert PAYLOAD_ENCODING_VERSION not in {m.version for m in MIGRATIONS}
     assert all(m.version <= LATEST_VERSION for m in MIGRATIONS)

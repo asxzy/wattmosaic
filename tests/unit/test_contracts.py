@@ -386,9 +386,12 @@ def test_migrations_idempotent(tmp_path: Path) -> None:
 
 
 def test_migration_versions_are_sequential() -> None:
+    from wattmosaic_engine.storage.migrations import RESERVED_VERSIONS
+
     versions = [m.version for m in MIGRATIONS]
     assert versions == sorted(versions)
-    assert versions == list(range(1, len(versions) + 1))
+    # Version 12 is the payload-encoding marker, deliberately not a migration.
+    assert versions == sorted(set(range(1, LATEST_VERSION + 1)) - set(RESERVED_VERSIONS))
 
 
 def test_wal_enabled(tmp_path: Path) -> None:

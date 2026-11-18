@@ -213,9 +213,12 @@ class Database:
         pending = [m for m in pending_migrations(self._conn) if m.version >= BACKUP_FROM_VERSION]
         if not pending:
             return None
-        if not self.path.exists() or self.path.stat().st_size == 0:
-            # A fresh install: there is no data to lose, and an empty file is not
-            # a usable rollback target.
+        # A brand-new file has ``user_version == 0``: WAL PRAGMAs give it a 4 KiB
+        # header, so a size check alone mistakes it for an install with data and
+        # copies a useless backup (surfaced once a real migration ≥ 13 exists).
+        if not self.path.exists() or current_version(self._conn) == 0:
+            # A fresh install: there is no data to lose, and an uninitialised
+            # file is not a usable rollback target.
             return None
         target = max(m.version for m in pending)
         self.checkpoint()
