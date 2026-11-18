@@ -91,6 +91,12 @@ class Database:
         self._conn.row_factory = sqlite3.Row
         self._configure()
         self.schema_version = apply_migrations(self._conn)
+        # Latest-results cache (see ``latest_inference_results``).  ``None`` means
+        # "no valid cached snapshot"; the generation counter lets a reader that
+        # raced a write detect that its result is stale and avoid caching it.
+        self._latest_results_cache: list[dict[str, Any]] | None = None
+        self._cache_generation: int = -1  # never equal to a real generation
+        self._write_generation: int = 0
 
     def _configure(self) -> None:
         cur = self._conn.cursor()
@@ -242,6 +248,10 @@ class Database:
             self._conn.row_factory = sqlite3.Row
             self._configure()
             self.schema_version = apply_migrations(self._conn)
+            # A reset replaces the whole database under this object: a cache
+            # built from the old file would serve rows that no longer exist.
+            self._write_generation += 1
+            self._latest_results_cache = None
 
         return {
             "reset": True,
@@ -669,25 +679,57 @@ class Database:
             except Exception:
                 self._conn.execute("ROLLBACK")
                 raise
+            # Invalidate the latest-results cache only after a successful commit,
+            # so a rolled-back batch cannot stampede readers into a needless
+            # re-scan.  The generation counter also guards a reader that opened
+            # its snapshot before this write committed (see the method below).
+            self._write_generation += 1
+            self._latest_results_cache = None
         return len(payload)
 
     def latest_inference_results(self) -> list[dict[str, Any]]:
-        """The newest result per device.
+        """The newest result per device, cached across reads until the next write.
 
-        Reads on ``_reader()`` rather than the shared connection: this is a
-        covering-index scan of the whole table (~24 ms warm, ~590 ms cold on the
-        production 343k rows) and on the shared connection it holds
-        ``self._lock`` for its duration, so a concurrent ``ping()`` -- the
-        ``/health`` probe -- queues behind it.  That is the same defect the CT
-        sample scan had; WAL mode lets a second read-only connection run beside
-        the writer, which is what ``_reader`` opens.
+        The underlying query is a covering-index scan of the whole table (~24 ms
+        warm, ~590 ms cold at the production 343k rows).  The panel fires it from
+        both ``/snapshot`` and ``/devices`` in one poll, and the overview repeats
+        that every 8 s, so the same full scan ran several times per refresh.  A
+        covering index on ``(device_id, id)`` does **not** help: measured on a
+        120k-row synthetic table the plan still reported ``SCAN inference_results
+        USING COVERING INDEX`` and the read only improved 7.51 ms -> 6.62 ms.
+        The expensive part is touching every historical row at all, which an
+        index cannot avoid for ``MAX(id) GROUP BY device_id``.
+
+        Instead, cache the result for the lifetime of the data it describes.  The
+        cache is keyed to ``_write_generation``, bumped on every committed
+        ``inference_results`` insert under ``self._lock``.  A second connection is
+        opened via ``_reader()`` so the long scan never holds ``self._lock`` (a
+        concurrent ``ping()`` on ``/health`` must not queue behind it); because a
+        reader can capture its snapshot before a concurrent write commits, it
+        rechecks the generation after the query and caches only if it is still
+        current.  The next read after any write re-scans and refreshes the cache,
+        so no stale result survives a write.  ``prune`` and ``reset`` also bump
+        the generation so a deleted/reset database is never served old rows.
         """
+        with self._lock:
+            generation = self._write_generation
+            cached = self._latest_results_cache
+            if cached is not None and generation == self._cache_generation:
+                return cached
         with self._reader() as conn:
             rows = conn.execute(
                 """SELECT * FROM inference_results WHERE id IN
                 (SELECT MAX(id) FROM inference_results GROUP BY device_id) ORDER BY device_id"""
             ).fetchall()
-        return [dict(r) for r in rows]
+        result = [dict(r) for r in rows]
+        with self._lock:
+            # Only cache a snapshot that still reflects the committed data: if a
+            # write landed while we were scanning, leave the cache invalid so the
+            # next read re-scans instead of serving a stale map.
+            if self._write_generation == generation:
+                self._latest_results_cache = result
+                self._cache_generation = generation
+        return result
 
     def inference_history(self, device_id: str, since: datetime, limit: int = 5000) -> list[dict[str, Any]]:
         with self._lock:
@@ -1458,6 +1500,11 @@ class Database:
             except Exception:
                 self._conn.execute("ROLLBACK")
                 raise
+            # ``inference_results`` is a prunable raw table: deleting the oldest
+            # rows can drop a device's only row, so the cached latest map must be
+            # rebuilt on the next read.
+            self._write_generation += 1
+            self._latest_results_cache = None
         return removed
 
     def export_device_data(self, device_id: str) -> dict[str, Any]:
