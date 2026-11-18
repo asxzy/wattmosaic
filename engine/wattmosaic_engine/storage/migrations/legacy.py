@@ -1,50 +1,19 @@
-"""Versioned SQLite schema migrations.
+"""Migrations 1-11, moved verbatim from the single-module implementation.
 
-Each migration is a list of SQL statements applied in order.  ``schema_version``
-lives in ``PRAGMA user_version`` so a partially applied migration rolls back.
+These are released migrations and must never be edited; the package
+``wattmosaic_engine.storage.migrations`` imports this module and appends every
+``vNNN_*.py`` module discovered beside it (see ``__init__.discover_migrations``).
 
-Never edit an already-released migration; add a new one.
+``AUDIT_TABLES`` lives here because it is declared beside the DDL (migration 9)
+that creates those tables; ``Database.prune`` reads it from the package facade.
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Callable
-from dataclasses import dataclass
 
-
-@dataclass(frozen=True, slots=True)
-class Migration:
-    version: int
-    name: str
-    statements: tuple[str, ...] = ()
-    #: Optional step run after ``statements`` inside the same transaction.
-    #: Needed only where the SQL is not idempotent on its own -- SQLite has no
-    #: ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS``, and a migration must still
-    #: no-op on a database that already carries the column (a database created
-    #: by a build whose ``CREATE TABLE`` included it, or a migration that was
-    #: interrupted after the ``ALTER`` but before ``user_version`` advanced).
-    apply: Callable[[sqlite3.Connection], None] | None = None
-
-
-def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    """Column names of ``table``; empty when the table does not exist."""
-    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-
-
-def add_column_if_missing(
-    conn: sqlite3.Connection, table: str, column: str, declaration: str
-) -> None:
-    """``ALTER TABLE ... ADD COLUMN`` only when the column is absent.
-
-    ``ALTER TABLE ADD COLUMN`` in SQLite is metadata-only: it does not rewrite
-    the table, so this is cheap on a production database with ~12k rows in
-    ``reconciliation_results``.  Existing rows get NULL.
-    """
-    if column in table_columns(conn, table):
-        return
-    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+from . import Migration, add_column_if_missing
 
 
 def _add_residual_split_columns(conn: sqlite3.Connection) -> None:
@@ -788,39 +757,3 @@ MIGRATIONS: tuple[Migration, ...] = (
         apply=_retire_dedicated_rows,
     ),
 )
-
-#: Version that introduced the payload encoding (`REQ-STORAGE-008`).  Recorded
-#: beside :data:`MIGRATIONS` rather than as a thirteenth migration: the encoding
-#: is a **write-path** marker (``storage/payload.py`` prefixes a compressed
-#: value with ``Z1:``) and the decoder reads both forms, so there is no column
-#: to add and -- per §11.1, "a migration must not rewrite historical evidence" --
-#: no historical payload may be rewritten.  A migration that did nothing but
-#: bump ``user_version`` would advance the version on a database whose bytes
-#: never changed and make ``schema_version`` a lie about the data.
-PAYLOAD_ENCODING_VERSION = 12
-
-LATEST_VERSION = max(m.version for m in MIGRATIONS)
-
-
-def current_version(conn: sqlite3.Connection) -> int:
-    return int(conn.execute("PRAGMA user_version").fetchone()[0])
-
-
-def apply_migrations(conn: sqlite3.Connection) -> int:
-    """Apply pending migrations atomically.  Returns the resulting version."""
-    start = current_version(conn)
-    for migration in MIGRATIONS:
-        if migration.version <= start:
-            continue
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            for stmt in migration.statements:
-                conn.execute(stmt)
-            if migration.apply is not None:
-                migration.apply(conn)
-            conn.execute(f"PRAGMA user_version = {migration.version}")
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-    return current_version(conn)
