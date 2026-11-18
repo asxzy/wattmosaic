@@ -12,6 +12,12 @@ cannot produce a database still sitting at an old ``user_version``.  Each hop
 seeds a sentinel row in ``engine_state`` (present since schema v1) and verifies
 it survives; before/after table+column inventories verify no schema object is
 lost; a second ``apply_migrations`` verifies idempotence at the entry-point level.
+
+**Discovery, not a list.**  ``MIGRATIONS`` is the package facade: versions 1-11
+from ``migrations/legacy.py`` plus every ``vNNN_*.py`` module discovered beside
+it (X05).  Deriving the versions here means a Wave-2 migration is covered by this
+matrix the moment its module lands, with no edit to this file.  ``12`` is
+excluded because it is the payload-encoding marker, not a schema version.
 """
 
 from __future__ import annotations
@@ -23,6 +29,8 @@ import pytest
 from wattmosaic_engine.storage.migrations import (
     LATEST_VERSION,
     MIGRATIONS,
+    PAYLOAD_ENCODING_VERSION,
+    RESERVED_VERSIONS,
     apply_migrations,
     current_version,
 )
@@ -33,6 +41,11 @@ from wattmosaic_engine.storage.migrations import (
 PRIOR_VERSIONS: tuple[int, ...] = tuple(
     m.version for m in MIGRATIONS if m.version < LATEST_VERSION
 )
+
+#: Numbers that are intentionally not migrations.  ``12`` is the payload-encoding
+#: marker (``PAYLOAD_ENCODING_VERSION``); any future reserved number joins it
+#: here rather than making the "no gaps" assertion lie.
+RESERVED: frozenset[int] = frozenset({PAYLOAD_ENCODING_VERSION, *RESERVED_VERSIONS})
 
 SENTINEL_KEY = "migration_matrix_sentinel"
 SENTINEL_VALUE_TEMPLATE = "data-from-v{version}"
@@ -89,9 +102,20 @@ def _sentinel(conn: sqlite3.Connection) -> str:
 
 
 def test_matrix_covers_every_prior_version() -> None:
-    """Guard the matrix: no supported prior version is silently omitted."""
+    """Guard the matrix: no supported prior version is silently omitted.
+
+    Every number from 1 to ``LATEST_VERSION`` is either a released migration or a
+    deliberately reserved one (12 is the payload-encoding marker), so a released
+    module cannot be skipped by the matrix and a gap cannot hide behind it.
+    """
     assert PRIOR_VERSIONS
-    assert tuple(range(1, LATEST_VERSION)) == PRIOR_VERSIONS
+    versions = tuple(m.version for m in MIGRATIONS)
+    assert versions == tuple(sorted(versions))
+    # Every number up to the highest one in play is a migration or reserved.
+    highest = max(LATEST_VERSION, *RESERVED)
+    assert set(range(1, highest + 1)) == set(versions) | RESERVED
+    assert tuple(v for v in versions if v < LATEST_VERSION) == PRIOR_VERSIONS
+    assert LATEST_VERSION in versions
 
 
 @pytest.mark.parametrize("version", PRIOR_VERSIONS)

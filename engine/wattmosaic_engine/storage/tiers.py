@@ -7,7 +7,7 @@ tier, so retention, pruning and the storage-health surface read one answer
 rather than re-deriving it per call site.
 
 ``TIER_TABLES`` carries one entry per tier; :data:`TABLE_TIERS` is its
-tabulation.  Every table in the real schema (``storage/migrations.py``, whose
+tabulation.  Every table in the real schema (``storage/migrations/``, whose
 ``CREATE TABLE`` statements are the authority) appears exactly once.
 ``tests/unit/test_storage_config.py::test_every_table_is_classified`` asserts
 the two directions against a live database, so a new table cannot be added
@@ -28,6 +28,8 @@ Consumers.  ``GET /status`` reads :func:`table_tiers` for the tier vocabulary
 from __future__ import annotations
 
 from collections.abc import Iterator
+
+from .migrations import migration_tier_tables
 
 #: The tier vocabulary, in order.  Exactly these four names are valid
 #: (``09-api-and-data-contracts.md`` §7.8.1); no other value may be published.
@@ -56,6 +58,12 @@ TIERS: tuple[str, ...] = ("L1", "L2", "L3", "L4")
 #: * ``schema_metadata`` -- schema bookkeeping (already listed by the spec).
 #:
 #: The spec-listed ``evidence_records`` does not exist and is not created here.
+#:
+#: **Tables created by a later migration are not listed here.**  Each migration
+#: module declares them in its own ``TIERS`` dict, and
+#: :func:`merged_tier_tables` folds those in at import.  That is what lets a
+#: Wave-2 task classify its tables in the one file it owns, with no edit to this
+#: registry (the plan's per-file ownership rule).
 TIER_TABLES: dict[str, tuple[str, ...]] = {
     # §2.1 -- high-resolution raw measurements.  The spec names only
     # ``ct_samples``; ``device_state_samples`` and the four per-cycle telemetry
@@ -100,6 +108,45 @@ TIER_TABLES: dict[str, tuple[str, ...]] = {
         "learning_samples",
     ),
 }
+
+#: The registry, plus tables declared by discovered migration modules.
+#:
+#: A table classified twice -- here and by a migration, or by two migrations --
+#: is an import-time error, exactly like a duplicate inside :data:`TIER_TABLES`.
+#: The two stages are separate functions so the merge can be tested against a
+#: synthetic declaration without loading a real migration module.
+BASE_TIER_TABLES: dict[str, tuple[str, ...]] = TIER_TABLES
+
+
+def merge_tier_tables(
+    base: dict[str, tuple[str, ...]], declared: dict[str, str]
+) -> dict[str, tuple[str, ...]]:
+    """``base`` plus ``declared`` folded into their tiers, as a new mapping.
+
+    ``declared`` is ``{table: tier}`` -- what a migration module's ``TIERS`` is.
+    Raises :class:`ValueError` for an unknown tier or a table classified twice;
+    the caller (:func:`merged_tier_tables`) runs at import, so a mistake here
+    fails the process rather than producing a registry with a table in no tier.
+    """
+    merged: dict[str, list[str]] = {tier: list(tables) for tier, tables in base.items()}
+    already = {table for tables in merged.values() for table in tables}
+    for table in sorted(declared):
+        tier = declared[table]
+        if tier not in merged:
+            raise ValueError(f"migration module declares unknown tier {tier!r} for {table!r}")
+        if table in already:
+            raise ValueError(f"{table!r} is classified more than once")
+        merged[tier].append(table)
+        already.add(table)
+    return {tier: tuple(tables) for tier, tables in merged.items()}
+
+
+def merged_tier_tables() -> dict[str, tuple[str, ...]]:
+    """The published registry: :data:`BASE_TIER_TABLES` plus every migration's ``TIERS``."""
+    return merge_tier_tables(BASE_TIER_TABLES, migration_tier_tables())
+
+
+TIER_TABLES = merged_tier_tables()
 
 #: Same registry as ``{table: tier}``.  Built once at import; the mapping is
 #: flat so a lookup cannot disagree with the per-tier listing.
@@ -274,6 +321,7 @@ RAW_RETENTION_ENV = "WM_RETENTION_DAYS_RAW"
 
 __all__ = [
     "AGGREGATE_HORIZON",
+    "BASE_TIER_TABLES",
     "PRUNABLE_TABLES",
     "RAW_HORIZON",
     "RAW_RETENTION_ENV",
@@ -283,6 +331,8 @@ __all__ = [
     "TierError",
     "is_prunable",
     "iter_tier_tables",
+    "merge_tier_tables",
+    "merged_tier_tables",
     "partition_decision",
     "prunable_tables",
     "table_tiers",

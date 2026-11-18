@@ -33,6 +33,13 @@ stopped at ``user_version = 8``.
 (``version <= start``), so running the whole thing twice is a no-op no matter
 what the callback does -- it cannot detect a double-add bug.  Idempotency is
 tested by calling the version-11 ``apply=`` callback twice on one connection.
+
+**Where version 11 lives now**
+
+Migrations 1-11 were moved verbatim into
+``wattmosaic_engine.storage.migrations.legacy``; the package ``__init__``
+re-exports them as ``MIGRATIONS``.  This file only names the facade, so it does
+not care which module a version is defined in.
 """
 
 from __future__ import annotations
@@ -251,7 +258,7 @@ def test_the_fixture_really_is_a_pre_migration_database(schema8_db: Path) -> Non
     """Guard the fixture: if it were already at 11 the other tests would be vacuous."""
     rows = _rows(schema8_db)
     assert rows["version"] == PRE_MIGRATION_VERSION
-    assert LATEST_VERSION == PRE_MIGRATION_VERSION + 1
+    assert LATEST_VERSION >= PRE_MIGRATION_VERSION + 1
     assert rows["channels"]["tub_l1"]["ct_type"] == "dedicated_device"
 
 
@@ -260,7 +267,7 @@ def test_v11_demotes_dedicated_channels(schema8_db: Path) -> None:
     _rows_after.close()
 
     rows = _rows(schema8_db)
-    assert rows["version"] == 11
+    assert rows["version"] >= 11
     assert rows["channels"]["tub_l1"]["ct_type"] == "branch"
     assert rows["channels"]["tub_l2"]["ct_type"] == "branch"
     # Unrelated roles are untouched.
@@ -474,9 +481,18 @@ def test_migration_does_not_fake_a_topology_version(schema8_db: Path) -> None:
 
 
 def test_migrations_reach_nine_without_gaps() -> None:
+    """The released 1-11 sequence is contiguous; ``LATEST_VERSION`` is derived.
+
+    ``12`` is reserved for ``PAYLOAD_ENCODING_VERSION`` and is never a migration
+    (``storage/migrations/__init__.py``), so the assertion is about the released
+    range rather than "no number is skipped anywhere".  Once a later task adds
+    ``v013_*``, ``LATEST_VERSION`` moves and this test needs no edit.
+    """
     versions = [m.version for m in MIGRATIONS]
-    assert versions == list(range(1, len(versions) + 1))
-    assert LATEST_VERSION == 11
+    assert versions[:11] == list(range(1, 12))
+    assert len(set(versions)) == len(versions), "a migration number is declared twice"
+    assert LATEST_VERSION == max(versions) >= 11
+    assert 12 not in versions
     assert _v11().name == "retire_dedicated_device_role"
 
 
