@@ -1678,6 +1678,23 @@ class EngineCore:
         merged.update(self.latest_results)
         return merged
 
+    async def ha_device_registry(self) -> dict[str, Any]:
+        """HA device registry (cached), for the mapping matrix device axis.
+
+        Additive read hook: the facade's mapping projection uses this to surface
+        real HA appliances as device rows.  ``devices`` entries carry an ``id``
+        and a ``name_by_user``/``name``; no device is fabricated when HA has no
+        registry data.
+        """
+        try:
+            registries = await maybe_await(self.hasource.registries())
+        except Exception:  # noqa: BLE001 - registry is optional
+            return {"devices": []}
+        if not isinstance(registries, Mapping):
+            return {"devices": []}
+        devices = registries.get("devices", [])
+        return {"devices": [d for d in devices if isinstance(d, Mapping)]}
+
     def devices(self) -> list[dict[str, Any]]:
         topology = self._active_topology()
         devices = topology.devices if topology else []

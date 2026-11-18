@@ -110,6 +110,72 @@ def _relation_from_raw(raw: Any) -> TopologyRelation | None:
         return None
 
 
+async def _real_device_sources(
+    facade: EngineFacade, topology: Topology
+) -> list[list[dict[str, Any]]]:
+    """Collect real-device records for the matrix row axis, additively.
+
+    Two sources are available without fabricating anything:
+
+    * **HA registry devices** — the engine core may expose ``ha_device_registry``
+      returning ``{"devices": [...]}`` from the already-cached
+      ``HASource.registries()``.  Each entry's name is ``name_by_user`` or
+      ``name``.  A facade without this hook (stub/null/older backend) simply
+      contributes nothing here.
+    * **DeviceConfiguration-backed devices** — topology rows whose metadata
+      carries the configuration/materialisation markers written by
+      ``project_configuration``.  These are real appliances even without HA.
+
+    HA registry devices are included only when the registry data is actually
+    available; no rows are invented when it is not.
+    """
+    sources: list[list[dict[str, Any]]] = []
+
+    registry_reader = getattr(facade, "ha_device_registry", None)
+    if registry_reader is not None:
+        try:
+            payload = await maybe_await(registry_reader())
+            entries = (
+                payload.get("devices", [])
+                if isinstance(payload, Mapping)
+                else payload
+            )
+            devices: list[dict[str, Any]] = []
+            for entry in entries or []:
+                if not isinstance(entry, Mapping):
+                    continue
+                device_id = entry.get("id") or entry.get("device_id")
+                if not device_id:
+                    continue
+                devices.append(
+                    {
+                        "device_id": str(device_id),
+                        "name": entry.get("name_by_user") or entry.get("name"),
+                    }
+                )
+            if devices:
+                sources.append(devices)
+        except Exception:  # noqa: BLE001 - registry is optional; never fail the read
+            pass
+
+    config_markers = (
+        "device_config",
+        "materialised_from_config",
+        "monitoring_level",
+        "power_behavior",
+        "connectivity",
+    )
+    configured: list[dict[str, Any]] = []
+    for device in topology.devices:
+        metadata = device.metadata or {}
+        if any(key in metadata for key in config_markers):
+            configured.append({"device_id": device.device_id, "name": device.name})
+    if configured:
+        sources.append(configured)
+
+    return sources
+
+
 async def derive_mapping_matrix(facade: EngineFacade) -> dict[str, Any]:
     """Project the mapping matrix from a facade's *current* state.
 
@@ -173,12 +239,14 @@ async def derive_mapping_matrix(facade: EngineFacade) -> dict[str, Any]:
                 continue
 
     evidence = MappingEvidence(associations=tuple(associations))
+    device_sources = await _real_device_sources(facade, topology)
     matrix = build_mapping_matrix(
         topology,
         models=model_views,
         evidence=evidence,
         reader_configuration_version=f"topology-{topology.version}",
         topology_version=str(topology.version),
+        device_sources=device_sources,
     )
     return matrix.as_dict()
 

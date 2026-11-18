@@ -41,7 +41,9 @@ from typing import Any
 
 from wattmosaic_engine.contracts import (
     ConfidenceVector,
+    CTChannel,
     DeviceReaderMappingCell,
+    DeviceTopology,
     MappingCellStatus,
     MappingObservability,
     MeasurementBasis,
@@ -123,6 +125,10 @@ class MappingMatrix:
     coverage: MappingCoverage
     reader_configuration_version: str
     topology_version: str | None = None
+    #: Device-major axes (REQ: CTs are columns, real devices are rows).  Additive
+    #: and defaulted so existing callers/envelopes stay byte-compatible.
+    devices: tuple[str, ...] = ()
+    readers: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         """A stable, JSON-round-trippable view for byte-identical comparison."""
@@ -131,6 +137,8 @@ class MappingMatrix:
             "topology_version": self.topology_version,
             "cells": [cell.model_dump(mode="json") for cell in self.cells],
             "coverage": self.coverage.as_dict(),
+            "devices": list(self.devices),
+            "readers": list(self.readers),
         }
 
     def stable_json(self) -> str:
@@ -210,6 +218,93 @@ def _declared_pairs(topology: Topology) -> set[tuple[str, str]]:
         if owner is not None and owner in device_ids:
             pairs.add((owner, cid))
     return pairs
+
+
+def _is_ct_auto_circuit(device: DeviceTopology, channels: Mapping[str, CTChannel]) -> bool:
+    """True for a discovery-generated CT circuit, not a real appliance.
+
+    Passive discovery emits one ``DeviceTopology`` per measured CT conductor
+    (``dev_<ct_id>``) so the topology validates and the circuit is visible.  Such
+    a row describes a *conductor* that may feed zero or more appliances; it is
+    not an appliance itself.  CTs belong on the reader/column axis, so these
+    circuits must not surface as device rows.
+
+    The discriminator is structural and conservative: a device whose id is
+    ``dev_<ct_id>`` for an actual channel, or whose metadata carries a discovery
+    circuit marker, is a CT circuit.  A config/materialised-backed device (or an
+    explicitly named/declared device such as a user fixture) is a real device and
+    is kept even if it sits behind a CT whose id happens to share its slug.
+    """
+    metadata = device.metadata or {}
+    # A device a person configured/declared is real regardless of its id shape;
+    # never drop it just because a slug resembles a CT id.
+    config_markers = (
+        "device_config",
+        "materialised_from_config",
+        "monitoring_level",
+        "power_behavior",
+        "connectivity",
+    )
+    if any(key in metadata for key in config_markers):
+        return False
+    markers = ("shared_circuit", "ct_group", "pair_confidence")
+    if any(key in metadata for key in markers):
+        return True
+    device_id = device.device_id
+    if device_id.startswith("dev_"):
+        # Discovery names every auto-circuit exactly ``dev_<ct_id>``; that ct id
+        # is a real channel, while a real appliance's ``dev_`` slug is not.
+        return device_id[len("dev_") :] in channels
+    return False
+
+
+def _real_device_ids(
+    topology: Topology,
+    *,
+    device_sources: Sequence[Sequence[Any]] = (),
+) -> tuple[str, ...]:
+    """Real device ids for the device/row axis, in stable order.
+
+    Sources, in priority order:
+
+    * ``device_sources`` — optional, additive lists of device records supplied by
+      the caller (HA registry devices and/or DeviceConfiguration-backed devices).
+      Each record may be a mapping or an object exposing ``device_id`` and an
+      optional ``name``.  A HA registry id may be either ``device_id`` or ``id``.
+    * ``topology.devices`` — a DeviceTopology row that is not a discovery CT
+      auto-circuit (see :func:`_is_ct_auto_circuit`).  Config-backed devices and
+      auto-placed HA appliances live here.
+
+    CT circuit rows are never returned: CTs belong on the reader axis only.
+    """
+    channels = topology.channel_map()
+    real: set[str] = set()
+
+    for source in device_sources:
+        for entry in source:
+            if not isinstance(entry, Mapping) and not hasattr(entry, "device_id"):
+                continue
+            identifier = _field(entry, "device_id") or _field(entry, "id")
+            if identifier is None:
+                continue
+            text = str(identifier).strip()
+            if not text or text.startswith(_UNKNOWN_ID_PREFIX):
+                continue
+            real.add(text)
+
+    for device in topology.devices:
+        if _is_ct_auto_circuit(device, channels):
+            continue
+        if device.device_id.startswith(_UNKNOWN_ID_PREFIX):
+            continue
+        real.add(device.device_id)
+
+    return tuple(sorted(real))
+
+
+def _reader_ids(topology: Topology) -> tuple[str, ...]:
+    """The reader/column axis: every real CT channel in the topology."""
+    return tuple(sorted(topology.channel_map()))
 
 
 def _association_pairs(
@@ -497,6 +592,7 @@ def build_mapping_matrix(
     evidence: MappingEvidence | None = None,
     reader_configuration_version: str,
     topology_version: str | None = None,
+    device_sources: Sequence[Sequence[Any]] = (),
 ) -> MappingMatrix:
     """Derive the device/reader mapping matrix from topology, models, evidence.
 
@@ -506,19 +602,40 @@ def build_mapping_matrix(
     ``reader_configuration_version`` is an explicit input because every cell
     requires one and the projection must not invent it.  ``topology_version``
     is the opaque version id (when known) and is otherwise ``None``.
+
+    ``device_sources`` is optional and additive: a sequence of iterables of
+    real-device records (HA registry devices and/or DeviceConfiguration-backed
+    devices) used to build the device/row axis.  CT auto-circuits are excluded
+    from that axis regardless.  Existing callers that pass nothing keep the
+    cell envelope unchanged; the returned matrix additionally exposes the
+    ``devices`` and ``readers`` axes for device-major consumers.
     """
     models = models or {}
     evidence = evidence or MappingEvidence()
     graph = build_graph(topology)
 
-    known_devices = set(graph.device_ids)
+    channels = topology.channel_map()
+    # CT-derived auto-circuits (``dev_<ct_id>``) describe a measured conductor,
+    # not an appliance.  CTs belong on the reader axis, so exclude these rows
+    # from the device axis, the cells and the coverage alike.  Real devices
+    # (config-backed or HA appliances) stay.
+    ct_circuit_ids = {
+        device.device_id
+        for device in topology.devices
+        if _is_ct_auto_circuit(device, channels)
+    }
+    known_devices = set(graph.device_ids) - ct_circuit_ids
     known_readers = set(graph.channel_ids)
 
     topology_assocs = _association_pairs(topology.relations, known_devices, known_readers)
     evidence_assocs = _association_pairs(evidence.associations, known_devices, known_readers)
     assoc_by_pair = {**topology_assocs, **evidence_assocs}
 
-    declared = _declared_pairs(topology)
+    declared = {
+        (device_id, reader_id)
+        for device_id, reader_id in _declared_pairs(topology)
+        if device_id not in ct_circuit_ids
+    }
     all_pairs = declared | set(assoc_by_pair)
 
     device_readers: dict[str, set[str]] = {}
@@ -605,6 +722,8 @@ def build_mapping_matrix(
         coverage=coverage,
         reader_configuration_version=reader_configuration_version,
         topology_version=topology_version,
+        devices=_real_device_ids(topology, device_sources=device_sources),
+        readers=_reader_ids(topology),
     )
 
 

@@ -67,6 +67,10 @@ def test_mapping_route_returns_matrix_with_coverage_counts() -> None:
         assert "status" in cell
         assert "relation_type" in cell
 
+        # Device-major axes are additive and present without breaking the cell envelope.
+        assert body["devices"] == ["stub_device"]
+        assert body["readers"] == ["ct_l1"]
+
         coverage = body["coverage"]
         assert isinstance(coverage, dict)
         counts = coverage["counts"]
@@ -76,6 +80,33 @@ def test_mapping_route_returns_matrix_with_coverage_counts() -> None:
         assert counts["unknown_load_count"] == 0
 
     asyncio.run(_with_server(StubFacade(), fn))
+
+
+def test_mapping_route_surfaces_ha_registry_devices_as_rows() -> None:
+    """A facade exposing HA registry data gets real devices on the row axis."""
+
+    class RegistryFacade(StubFacade):
+        def ha_device_registry(self) -> dict[str, Any]:
+            return {
+                "devices": [
+                    {"id": "ha_kitchen", "name_by_user": "Kitchen light"},
+                    {"id": "ha_washer", "name": "Washer"},
+                    {"name": "no id"},  # skipped: no device id, so nothing fabricated
+                ]
+            }
+
+    async def fn(session: aiohttp.ClientSession, base: str) -> None:
+        async with session.get(f"{base}/mapping", headers=HEADERS) as resp:
+            assert resp.status == 200
+            body = await resp.json()
+        assert "ha_kitchen" in body["devices"]
+        assert "ha_washer" in body["devices"]
+        assert "stub_device" in body["devices"]
+        assert body["readers"] == ["ct_l1"]
+        # Cell envelope stays valid: existing stub cell is unchanged.
+        assert any(c["device_id"] == "stub_device" for c in body["cells"])
+
+    asyncio.run(_with_server(RegistryFacade(), fn))
 
 
 def test_mapping_route_empty_state_is_honest() -> None:

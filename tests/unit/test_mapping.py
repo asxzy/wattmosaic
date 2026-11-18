@@ -628,3 +628,101 @@ def test_reconciliation_does_not_promote_or_advance_a_version() -> None:
     assert result.matrix.topology_version == "tv-00000002"
     # No change-status/suspicion mutation occurs here: promotion is separate.
     assert "status" not in result.as_dict()
+
+
+# --------------------------------------------------------------------------- #
+# Device-major axes: CTs are readers, real devices are rows
+# --------------------------------------------------------------------------- #
+
+
+def _ct_auto_circuit(did: str, ct_id: str) -> DeviceTopology:
+    """A discovery-generated CT circuit: device id is ``dev_<ct_id>``."""
+    return DeviceTopology(
+        device_id=did,
+        name=ct_id,
+        branch_ct_ids=[ct_id],
+        topology_status=TopologyStatus.CANDIDATE,
+        metadata={"shared_circuit": True, "requires_confirmation": True},
+    )
+
+
+def test_ct_auto_circuits_are_not_device_rows_but_cts_are_readers() -> None:
+    topology = _topology(
+        [_channel("ct_kitchen"), _channel("ct_hall")],
+        [
+            _ct_auto_circuit("dev_ct_kitchen", "ct_kitchen"),
+            _ct_auto_circuit("dev_ct_hall", "ct_hall"),
+        ],
+    )
+    matrix = _project(topology)
+    # CT ids live on the reader/column axis only.
+    assert set(matrix.readers) == {"ct_kitchen", "ct_hall"}
+    # No CT-derived circuit surfaces as a device/row.
+    assert matrix.devices == ()
+    assert "dev_ct_kitchen" not in {c.device_id for c in matrix.cells}
+    assert "dev_ct_hall" not in {c.device_id for c in matrix.cells}
+    assert all(c.reader_id in matrix.readers for c in matrix.cells)
+
+
+def test_real_device_and_ct_circuit_coexist_with_clean_axes() -> None:
+    """A real HA/config-backed device stays a row; its CT stays a column."""
+    real = DeviceTopology(
+        device_id="dev_fridge",
+        name="Kitchen fridge",
+        branch_ct_ids=["ct_kitchen"],
+        metadata={"device_config": {"device_type": "appliance"}},
+    )
+    topology = _topology(
+        [_channel("ct_kitchen"), _channel("ct_hall")],
+        [real, _ct_auto_circuit("dev_ct_hall", "ct_hall")],
+    )
+    matrix = _project(topology)
+    assert matrix.devices == ("dev_fridge",)
+    assert set(matrix.readers) == {"ct_kitchen", "ct_hall"}
+    assert "dev_fridge" in {c.device_id for c in matrix.cells}
+    assert "dev_ct_hall" not in matrix.devices
+
+
+def test_device_sources_add_ha_and_config_devices_to_the_row_axis() -> None:
+    """HA registry and DeviceConfiguration sources feed the device axis."""
+    topology = _topology(
+        [_channel("ct_kitchen")],
+        [_ct_auto_circuit("dev_ct_kitchen", "ct_kitchen")],
+    )
+    matrix = build_mapping_matrix(
+        topology,
+        reader_configuration_version=Rcv,
+        device_sources=[
+            [
+                {"device_id": "ha_kitchen_light", "name": "Kitchen light"},
+                {"id": "ha_washer", "name_by_user": "Washer"},
+            ],
+            [{"device_id": "dev_fridge", "name": "Fridge"}],
+        ],
+    )
+    assert matrix.devices == ("dev_fridge", "ha_kitchen_light", "ha_washer")
+    assert matrix.readers == ("ct_kitchen",)
+    assert "dev_ct_kitchen" not in matrix.devices
+
+
+def test_axes_are_deterministic_and_sorted() -> None:
+    topology = _topology(
+        [_channel("ct_b"), _channel("ct_a")],
+        [
+            DeviceTopology(device_id="dev_z", branch_ct_ids=["ct_a"]),
+            DeviceTopology(device_id="dev_a", branch_ct_ids=["ct_b"]),
+        ],
+    )
+    matrix = _project(topology)
+    assert matrix.devices == tuple(sorted(matrix.devices))
+    assert matrix.readers == tuple(sorted(matrix.readers))
+    assert matrix.stable_json() == _project(topology).stable_json()
+
+
+def test_unknown_load_prefix_is_never_a_device_row() -> None:
+    topology = _topology(
+        [_channel("ct_x")],
+        [DeviceTopology(device_id="unknown-load::ct_x", branch_ct_ids=[])],
+    )
+    matrix = _project(topology)
+    assert "unknown-load::ct_x" not in matrix.devices
