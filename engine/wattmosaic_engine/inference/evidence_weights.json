@@ -1,0 +1,19 @@
+{
+  "version": "1.0.0",
+  "clip_min_nats": -10.0,
+  "clip_max_nats": 2.0,
+  "dependence_correction": {
+    "group": ["C", "D", "E"],
+    "factor": 0.5773502691896258
+  },
+  "weights": {
+    "A": 1.0,
+    "B": 1.0,
+    "C": 1.0,
+    "D": 1.0,
+    "E": 1.0,
+    "F": 1.0,
+    "G": 1.0,
+    "H": 1.0
+  }
+}
