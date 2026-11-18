@@ -12,11 +12,14 @@ name that the legacy surface already owns, the v3 name is suffixed with ``V3``:
   residual`` with a ``balance_error_w`` diagnostic).
 * ``DataQualityReport`` (legacy) -> re-used verbatim from the legacy module for
   the snapshot's ``system_quality`` field (it is not a new public name here).
-* ``PowerLevel`` (legacy) -> re-used from the legacy module for the estimate's
-  ``level`` field (not a new public name here).
-* ``EventGroupStatus`` (defined in ``interfaces.md`` §3, owned by K02) ->
-  :class:`EventGroupStatusV3` here, so K04 does not collide with K02's export or
-  duplicate that enum.  K02's ``measurement`` module owns the canonical copy.
+* ``PowerLevel`` (legacy) -> superseded by ``PowerLevelV3`` from K06's
+  ``power_models`` module for the estimate's ``level`` field; the legacy enum
+  does not distinguish OFF / STANDBY / IDLE (HB §11.5).  ``PowerLevelV3`` is
+  imported from :mod:`contracts.power_models`, not redefined here.
+* ``EventGroupStatus`` (§3, owned by K02) and ``ReaderMeasurement`` (K02) ->
+  imported from :mod:`contracts.measurement`; ``ReaderResidualPoint`` (K03) ->
+  imported from :mod:`contracts.topology`.  These canonical types are re-used
+  rather than duplicated or suffixed with ``V3`` here.
 
 The shared foundation types (``VersionTriple``, ``EvidenceRef``, ``Bounds``,
 ``EstimateStatus``, ``IdentifiabilityStatus``, ``InferenceMethod``,
@@ -46,13 +49,15 @@ from .foundation import (
     SnapshotId,
     VersionTriple,
 )
-from .legacy import DataQualityReport, Model, PowerLevel
+from .legacy import DataQualityReport, Model
+from .measurement import EventGroupStatus, ReaderMeasurement
+from .power_models import PowerLevelV3
+from .topology import ReaderResidualPoint
 
 __all__: list[str] = [
     # Enums
     "MatchState",
     "CandidateSource",
-    "EventGroupStatusV3",
     # Models
     "CandidateHypothesis",
     "DeviceEstimate",
@@ -95,22 +100,6 @@ class CandidateSource(str, Enum):
     DELAYED_RESPONSE = "delayed_response"
     DEVICE_GROUP = "device_group"
     UNKNOWN_SCOPE = "unknown_scope"
-
-
-class EventGroupStatusV3(str, Enum):
-    """Lifecycle of an event group (HB §12.3).
-
-    ``interfaces.md`` §3 calls this enum ``EventGroupStatus``; that name belongs
-    to K02's ``measurement`` module.  The suffix makes the two independent wave-1
-    owners collision-free; the values are identical to §3's six states.
-    """
-
-    DETECTED = "detected"
-    MATCHING = "matching"
-    PROVISIONAL = "provisional"
-    CONFIRMED = "confirmed"
-    REVISED = "revised"
-    UNRESOLVED = "unresolved"
 
 
 # --------------------------------------------------------------------------- #
@@ -158,7 +147,7 @@ class DeviceEstimate(Model):
     status: EstimateStatus
     identifiability: IdentifiabilityStatus
     group_id: str | None = None
-    level: PowerLevel | None = None
+    level: PowerLevelV3 | None = None
     method: InferenceMethod
     allocation_rule: str | None = None
     confidence: ConfidenceVectorV3
@@ -272,7 +261,7 @@ class JointInferenceResult(Model):
     result_id: str
     event_group_id: str | None = None
     event_group_revision: int | None = None
-    status: EventGroupStatusV3
+    status: EventGroupStatus
     device_estimates: list[DeviceEstimate]
     group_estimates: list[DeviceGroupEstimate]
     unknown_estimates: list[UnknownEstimate]
@@ -375,10 +364,10 @@ class InferenceSnapshot(Model):
     observed_at: datetime
     computed_at: datetime
     versions: VersionTriple
-    reader_measurements: list[Any]
+    reader_measurements: list[ReaderMeasurement]
     device_estimates: list[DeviceEstimate]
     group_estimates: list[DeviceGroupEstimate]
-    residual_estimates: list[Any]
+    residual_estimates: list[ReaderResidualPoint]
     reconciliation: ReconciliationV3
     system_quality: DataQualityReport
     stale_sources: list[str]
