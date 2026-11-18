@@ -43,9 +43,12 @@ except Exception:  # pragma: no cover - only if websockets is absent
 
 from ..contracts import (
     DeviceEvent,
+    HAEvent,
     Measurement,
     Polarity,
+    QualityFlag,
     QualityStatus,
+    ReaderMeasurement,
     utcnow,
 )
 from ..disaggregation.isolation import EVENT_KIND_HA, KIND_SOURCE_EVENT_TYPE
@@ -182,6 +185,8 @@ class WebSocketLike(Protocol):
 
 SampleHandler = Callable[[Measurement], Any]
 EventHandler = Callable[[DeviceEvent], Any]
+ReadingHandler = Callable[["ReaderMeasurement"], Any]
+HAEventHandler = Callable[["HAEvent"], Any]
 
 
 def compute_backoff(
@@ -356,6 +361,11 @@ class HASource:
         backoff_jitter: float = BACKOFF_JITTER,
         rng: random.Random | None = None,
         stop_timeout_s: float = 10.0,
+        revision_lookup: Any | None = None,
+        link_lookup: Any | None = None,
+        clock: Callable[[], datetime] | None = None,
+        reader_max_w: float | None = None,
+        candidate_ring: Any | None = None,
     ) -> None:
         if not token:
             raise ValueError("HASource requires a long-lived access token")
@@ -382,6 +392,27 @@ class HASource:
         self._rng = rng or random.Random()
         self._stop_timeout_s = stop_timeout_s
 
+        # P1 canonical-ingestion seam.  The revision/link lookups are supplied
+        # by the composition layer (S13 repositories or in-memory fakes in
+        # tests).  ``clock`` is injected so replay is deterministic; without it
+        # the source uses the contract clock, as before.
+        self._clock = clock or utcnow
+        self._revision_lookup = revision_lookup
+        self._link_lookup = link_lookup
+        # Bounded in-memory ring for events of unlinked entities (DEC-17).
+        # Supplied by the composition layer; nothing is persisted from it.
+        self.candidate_ring = candidate_ring
+        self._normalizer = None
+        if revision_lookup is not None:
+            # Local import breaks the ingestion → realtime → ingestion.normalize
+            # package cycle at import time; ingestion.normalize itself is leaf.
+            from ..realtime.normalize import ReadingNormalizer
+
+            normalizer_kwargs: dict[str, Any] = {}
+            if reader_max_w is not None:
+                normalizer_kwargs["reader_max_w"] = float(reader_max_w)
+            self._normalizer = ReadingNormalizer(revision_lookup, **normalizer_kwargs)
+
         self._state = ConnectionState.STOPPED
         self._ws: WebSocketLike | None = None
         self._task: asyncio.Task[None] | None = None
@@ -395,6 +426,8 @@ class HASource:
 
         self._on_sample: SampleHandler | None = None
         self._on_event: EventHandler | None = None
+        self._on_reading: ReadingHandler | None = None
+        self._on_ha_event: HAEventHandler | None = None
 
         self._last_event_at: datetime | None = None
         self._last_error: str | None = None
@@ -476,6 +509,8 @@ class HASource:
         self,
         on_sample: SampleHandler | None = None,
         on_event: EventHandler | None = None,
+        on_reading: ReadingHandler | None = None,
+        on_ha_event: HAEventHandler | None = None,
     ) -> None:
         """Start the background ingestion task.
 
@@ -488,6 +523,10 @@ class HASource:
             self._on_sample = on_sample
         if on_event is not None:
             self._on_event = on_event
+        if on_reading is not None:
+            self._on_reading = on_reading
+        if on_ha_event is not None:
+            self._on_ha_event = on_ha_event
         self._stopping = False
         self._state = ConnectionState.CONNECTING
         self._task = asyncio.create_task(self._run(), name="wattmosaic-ha-source")
@@ -1043,6 +1082,18 @@ class HASource:
         if not isinstance(attributes, dict):
             attributes = {}
 
+        # P1: capture the device-free HA event with top-level context.  The
+        # context object is dropped by the legacy path (ha_source.py:1042,1185
+        # in the pre-P1 tree); it lives at the top level of the HA state object,
+        # not in attributes.  Set ``linked`` from ha_entity_links at observed_at.
+        observed_at = (
+            parse_state_timestamp(new_state.get("last_updated"))
+            or parse_state_timestamp(new_state.get("last_changed"))
+            or parse_state_timestamp(fired_at)
+            or self._clock()
+        )
+        await self._emit_ha_event(entity_id, old_state, new_state, observed_at)
+
         raw_value = new_state.get("state")
         value_text = raw_value.strip().lower() if isinstance(raw_value, str) else ""
         if value_text in ("unavailable", "unknown", "none", ""):
@@ -1069,6 +1120,12 @@ class HASource:
             emitted = await self._emit_measurement(
                 entity_id, numeric, unit, attributes, new_state, fired_at, initial=initial
             )
+            # P1: also emit the canonical ReaderMeasurement (polarity + multiplier
+            # applied exactly once), in parallel with the legacy Measurement until
+            # P6 switches consumers.  Never deliver a quarantined value.
+            await self._emit_reading(
+                entity_id, raw_value, unit, new_state, fired_at, initial=initial
+            )
             if emitted and not self.emit_measurement_events:
                 return
 
@@ -1091,6 +1148,102 @@ class HASource:
                 or parse_state_timestamp(fired_at)
                 or utcnow(),
             )
+
+    async def _emit_reading(
+        self,
+        entity_id: str,
+        raw_value: Any,
+        unit: str | None,
+        new_state: dict[str, Any],
+        fired_at: Any,
+        *,
+        initial: bool,
+    ) -> ReaderMeasurement | None:
+        """Normalize one raw value into a canonical ReaderMeasurement (P1)."""
+        normalizer = self._normalizer
+        if normalizer is None:
+            return None
+        reader_id = _ct_id_for(entity_id)
+        observed_at = (
+            parse_state_timestamp(new_state.get("last_updated"))
+            or parse_state_timestamp(new_state.get("last_changed"))
+            or parse_state_timestamp(fired_at)
+            or self._clock()
+        )
+        received_at = self._clock()
+        flags: list[QualityFlag] = []
+        if initial:
+            # Reconnect `_prime` replays get PRIMED and are delivered as seeds.
+            flags.append(QualityFlag.PRIMED)
+
+        self._sequence += 1
+        result = normalizer.normalize(
+            reader_id,
+            raw_value=raw_value,
+            unit=unit,
+            observed_at=observed_at,
+            received_at=received_at,
+            sequence=self._sequence,
+            flags=flags,
+        )
+        # Quarantined values are counted by the normalizer and never delivered.
+        if result.deliverable:
+            self.stats["canonical_samples_emitted"] = (
+                self.stats.get("canonical_samples_emitted", 0) + 1
+            )
+            await self._call(self._on_reading, result.measurement, "reading")
+            return result.measurement
+        return None
+
+    def _is_linked(self, entity_id: str, at: datetime) -> bool:
+        """True when the entity has any HA entity link valid at ``at``."""
+        lookup = self._link_lookup
+        if lookup is None:
+            return False
+        return bool(lookup.links_for_entity(entity_id, at))
+
+    async def _emit_ha_event(
+        self,
+        entity_id: str,
+        old_state: dict[str, Any] | None,
+        new_state: dict[str, Any],
+        observed_at: datetime,
+    ) -> None:
+        """Build and deliver a device-free HAEvent with top-level context (P1)."""
+        context = new_state.get("context")
+        if not isinstance(context, dict):
+            context = {}
+        old_attributes = old_state.get("attributes") if isinstance(old_state, dict) else None
+        new_attributes = new_state.get("attributes") if isinstance(new_state, dict) else None
+        before = dict(old_attributes) if isinstance(old_attributes, dict) else {}
+        after = dict(new_attributes) if isinstance(new_attributes, dict) else {}
+        attributes_delta = {
+            key: value for key, value in after.items() if before.get(key) != value
+        }
+        event = HAEvent.make(
+            entity_id=entity_id,
+            observed_at=observed_at,
+            received_at=self._clock(),
+            from_state=(
+                str(old_state.get("state"))
+                if isinstance(old_state, dict) and old_state.get("state") is not None
+                else None
+            ),
+            to_state=(
+                str(new_state.get("state"))
+                if new_state.get("state") is not None
+                else None
+            ),
+            attributes_delta=attributes_delta,
+            context_id=context.get("id"),
+            context_parent_id=context.get("parent_id"),
+            context_user_id=context.get("user_id"),
+            linked=self._is_linked(entity_id, observed_at),
+        )
+        self.stats["ha_events_emitted"] = self.stats.get("ha_events_emitted", 0) + 1
+        if not event.linked and self.candidate_ring is not None:
+            self.candidate_ring.add(event, now=self._clock())
+        await self._call(self._on_ha_event, event, "ha_event")
 
     @staticmethod
     def _level_changed(
@@ -1133,7 +1286,7 @@ class HASource:
             or parse_state_timestamp(fired_at)
             or utcnow()
         )
-        received_at = utcnow()
+        received_at = self._clock()
         age = max(0.0, (received_at - state_ts).total_seconds())
         quality = QualityStatus.STALE if age > self.stale_after_s else QualityStatus.GOOD
 
