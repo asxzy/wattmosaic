@@ -1,0 +1,102 @@
+{
+  "$defs": {
+    "StepClass": {
+      "description": "Character of a detected reader change (P3).",
+      "enum": [
+        "sustained",
+        "transient",
+        "periodic",
+        "drift",
+        "data_gap"
+      ],
+      "title": "StepClass",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One detected reader change (P3), with a stable, identity-based id.",
+  "properties": {
+    "event_id": {
+      "title": "Event Id",
+      "type": "string"
+    },
+    "reader_id": {
+      "title": "Reader Id",
+      "type": "string"
+    },
+    "delta_w": {
+      "title": "Delta W",
+      "type": "number"
+    },
+    "sigma_w": {
+      "title": "Sigma W",
+      "type": "number"
+    },
+    "z_score": {
+      "title": "Z Score",
+      "type": "number"
+    },
+    "step_class": {
+      "$ref": "#/$defs/StepClass"
+    },
+    "onset_lo": {
+      "format": "date-time",
+      "title": "Onset Lo",
+      "type": "string"
+    },
+    "onset_hi": {
+      "format": "date-time",
+      "title": "Onset Hi",
+      "type": "string"
+    },
+    "pre_level_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Pre Level W"
+    },
+    "post_level_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Post Level W"
+    },
+    "quality_score": {
+      "title": "Quality Score",
+      "type": "number"
+    },
+    "detected_at": {
+      "format": "date-time",
+      "title": "Detected At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "event_id",
+    "reader_id",
+    "delta_w",
+    "sigma_w",
+    "z_score",
+    "step_class",
+    "onset_lo",
+    "onset_hi",
+    "quality_score",
+    "detected_at"
+  ],
+  "title": "MeasurementEvent",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/measurement_event.json",
+  "x-contract-version": "2.4.0"
+}

@@ -1,0 +1,80 @@
+{
+  "$defs": {
+    "EvidenceRef": {
+      "additionalProperties": false,
+      "description": "A typed, resolvable reference to a piece of evidence (D4's resolver).",
+      "properties": {
+        "kind": {
+          "enum": [
+            "sample",
+            "event_evidence",
+            "event_group",
+            "ha_event",
+            "edge",
+            "mapping_edge",
+            "model_version",
+            "configuration_event",
+            "observation"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "title": "EvidenceRef",
+      "type": "object"
+    },
+    "SubEventKind": {
+      "description": "What kind of atomic change a sub-event records.",
+      "enum": [
+        "ha_state",
+        "ha_attribute",
+        "reader_step",
+        "plug_step"
+      ],
+      "title": "SubEventKind",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "An atomic change within an event group, with its own timestamp.",
+  "properties": {
+    "sub_event_id": {
+      "title": "Sub Event Id",
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/$defs/SubEventKind"
+    },
+    "ref": {
+      "$ref": "#/$defs/EvidenceRef"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "title": "Observed At",
+      "type": "string"
+    },
+    "timestamp_uncertainty_s": {
+      "title": "Timestamp Uncertainty S",
+      "type": "number"
+    }
+  },
+  "required": [
+    "sub_event_id",
+    "kind",
+    "ref",
+    "observed_at",
+    "timestamp_uncertainty_s"
+  ],
+  "title": "SubEvent",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/sub_event.json",
+  "x-contract-version": "2.4.0"
+}

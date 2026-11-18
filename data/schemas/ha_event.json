@@ -1,0 +1,105 @@
+{
+  "additionalProperties": false,
+  "description": "A Home Assistant state change, with no device binding.\n\nBinding is a *matching output*, never an input: this record deliberately has\nno device/component field.  ``event_id`` is a content hash so the same\nchange ingested twice has the same id.",
+  "properties": {
+    "event_id": {
+      "title": "Event Id",
+      "type": "string"
+    },
+    "entity_id": {
+      "title": "Entity Id",
+      "type": "string"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "title": "Observed At",
+      "type": "string"
+    },
+    "received_at": {
+      "format": "date-time",
+      "title": "Received At",
+      "type": "string"
+    },
+    "from_state": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "From State"
+    },
+    "to_state": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "To State"
+    },
+    "attributes_delta": {
+      "additionalProperties": true,
+      "default": {},
+      "title": "Attributes Delta",
+      "type": "object"
+    },
+    "context_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Context Id"
+    },
+    "context_parent_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Context Parent Id"
+    },
+    "context_user_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Context User Id"
+    },
+    "linked": {
+      "title": "Linked",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "event_id",
+    "entity_id",
+    "observed_at",
+    "received_at",
+    "linked"
+  ],
+  "title": "HAEvent",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/ha_event.json",
+  "x-contract-version": "2.4.0"
+}
