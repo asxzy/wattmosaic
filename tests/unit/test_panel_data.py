@@ -145,6 +145,8 @@ SAMPLE_RESIDUALS = {
 }
 
 SAMPLE_MAPPING = {
+    "reader_configuration_version": "cfg-2026-11-17",
+    "topology_version": "v7",
     "cells": [
         {
             "device_id": "light.kitchen",
@@ -156,6 +158,22 @@ SAMPLE_MAPPING = {
             "max_contribution_w": 50.0,
             "relation_type": "one_to_one",
             "is_unknown_load": False,
+            # A ConfidenceVector: separate dimensions, never a blended score.
+            "confidence": {
+                "power": 0.91,
+                "ct_association": 0.95,
+                "topology": None,
+                "circuit_classification": None,
+                "residual": None,
+                "method": "blend_v1",
+            },
+            "evidence_count": 12,
+            "sources_used": [
+                {"source": "ct_measurement", "reason": "rows_in_fit:ct_kitchen"},
+                {"source": "topology", "reason": "graph_used_for_rows_and_identifiability"},
+            ],
+            "model_version": 3,
+            "topology_version": "v7",
         },
         {
             "device_id": "light.hall",
@@ -163,18 +181,37 @@ SAMPLE_MAPPING = {
             "status": "non_identifiable",
             "observability": "indirect",
             "estimated_contribution_w": None,
-            "min_contribution_w": 0.0,
+            "min_contribution_w": 10.0,
             "max_contribution_w": 90.0,
             "relation_type": "many_to_one",
             "is_unknown_load": False,
+            "confidence": {
+                "power": None,
+                "ct_association": 0.4,
+                "topology": None,
+                "circuit_classification": None,
+                "residual": None,
+                "method": "unavailable",
+            },
+            "evidence_count": 5,
+            "sources_used": [
+                {"source": "topology", "reason": "graph_used_for_rows_and_identifiability"},
+            ],
+            "model_version": None,
+            "topology_version": "v7",
         },
     ],
     "coverage": {
         "counts": {
             "cell_count": 2,
             "by_status": {"confirmed": 1, "non_identifiable": 1},
+            "by_cardinality": {"one_to_one": 1, "many_to_one": 1},
             "unknown_load_count": 0,
-        }
+        },
+        "unobserved_devices": [],
+        "unexplained_scopes": [],
+        "readers_without_attributable_device": [],
+        "non_summing_readers": [],
     },
 }
 
@@ -188,6 +225,15 @@ SAMPLE_DEVICES = [
             "max_w": 90.0,
             "group_members": ["light.hall", "light.entry"],
             "source": "inferred",
+            # The joint-inference ledger the engine attaches to every result.
+            "sources_used": [
+                {"source": "topology", "reason": "graph_used_for_rows_and_identifiability"},
+                {"source": "ct_measurement", "reason": "rows_in_fit:ct_kitchen"},
+            ],
+            "sources_unused": [
+                {"source": "learned_models", "reason": "no_model_for_device"},
+                {"source": "ha_attributes", "reason": "no_device_level_attributes"},
+            ],
         },
     },
     {
@@ -199,6 +245,14 @@ SAMPLE_DEVICES = [
             "max_w": 90.0,
             "group_members": ["light.hall", "light.entry"],
             "source": "inferred",
+            "sources_used": [
+                {"source": "topology", "reason": "graph_used_for_rows_and_identifiability"},
+                {"source": "ct_measurement", "reason": "rows_in_fit:ct_kitchen"},
+            ],
+            "sources_unused": [
+                {"source": "learned_models", "reason": "no_model_for_device"},
+                {"source": "ha_attributes", "reason": "no_device_level_attributes"},
+            ],
         },
     },
 ]
@@ -483,3 +537,127 @@ def test_panel_renders_event_evidence(rendered_uib: dict[str, str]) -> None:
     assert "Window" in text
     assert "contaminated_window" in text
     assert "light.entry, ct_shared" in text
+
+
+# ---------------------------------------------------------------------------
+# TASK-UI-MATRIX-DIAGNOSTIC: the dedicated matrix / internal-process view.
+#
+# The three new renderers (matrixCellsCard, matrixSourceLedgerCard,
+# matrixIdentifiabilityCard) live in the same harness slice as the UIa/UIb cards
+# -- all before ``systemCard`` -- so the same DOM shim and slice are reused.
+# They read only payloads the panel already fetches: /mapping for the cells and
+# /devices + /snapshot for the source ledger and identifiability ranges.  No new
+# API field is invented; a genuinely absent field reads "—".
+# ---------------------------------------------------------------------------
+
+# A snapshot result mirrors the device results for the ledger/range renderers.
+SAMPLE_SNAPSHOT = {
+    "timestamp": "2026-11-17T10:00:00+00:00",
+    "results": [
+        d["latest_result"] for d in SAMPLE_DEVICES if d.get("latest_result")
+    ],
+}
+
+
+def _render_matrix() -> dict[str, str]:
+    """Render the three matrix-view cards under node and return their text."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed; the panel does not need it at runtime")
+
+    script = APP_JS.read_text(encoding="utf-8")
+    start = script.index(_SLICE_START)
+    end = script.index(_SLICE_END, start)
+    block = script[start:end]
+
+    literals = "\n".join(
+        [
+            f"const SAMPLE_MAPPING = {json.dumps(SAMPLE_MAPPING)};",
+            f"const SAMPLE_DEVICES = {json.dumps(SAMPLE_DEVICES)};",
+            f"const SAMPLE_SNAPSHOT = {json.dumps(SAMPLE_SNAPSHOT)};",
+        ]
+    )
+    program = (
+        _DOM_SHIM
+        + "\n"
+        + block
+        + "\n"
+        + literals
+        + "\n"
+        + "console.log(JSON.stringify({\n"
+        + "  cells: matrixCellsCard(SAMPLE_MAPPING).textContent,\n"
+        + "  ledger: matrixSourceLedgerCard(SAMPLE_DEVICES, SAMPLE_SNAPSHOT, SAMPLE_MAPPING).textContent,\n"
+        + "  groups: matrixIdentifiabilityCard(SAMPLE_DEVICES, SAMPLE_SNAPSHOT).textContent,\n"
+        + "}));\n"
+    )
+    completed = subprocess.run(
+        [node, "-e", program],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(completed.stdout)
+
+
+@pytest.fixture(scope="module")
+def rendered_matrix() -> dict[str, str]:
+    return _render_matrix()
+
+
+def test_matrix_view_renders_cells(rendered_matrix: dict[str, str]) -> None:
+    """The matrix cell table shows every published field with its actual value."""
+    text = rendered_matrix["cells"]
+    assert "Mapping matrix" in text
+    # Identity, relation and status/observability come straight from the cell.
+    for value in (
+        "light.kitchen", "ct_kitchen", "light.hall", "ct_shared",
+        "Confirmed", "Non-identifiable", "Direct", "Indirect",
+        "One-to-one", "Many-to-one",
+        # Bounds and point estimate (non-identifiable cell's estimate is "—").
+        "45.0 W", "40.0 W", "50.0 W", "90.0 W",
+        # Real cell fields the rich view must expose.
+        "91%", "95%", "blend_v1", "12", "5",
+        "ct_measurement", "topology", "v3", "v7",
+        "cfg-2026-11-17", "Coverage", "Relation: One-to-one",
+    ):
+        assert value in text, f"missing matrix cell field value {value!r}"
+    # The non-identifiable cell has NO per-device watt under Estimate: its only
+    # number is the 10.0-90.0 range, so a bare "45.0 W" style estimate must belong
+    # to the confirmed cell.  The point estimate is blanked for that cell, and
+    # the engine's 0.0 placeholder must never surface as a fabricated watt.
+    assert "0.00 W" not in text  # no fabricated point watt for the shared cell
+
+
+def test_matrix_view_renders_source_ledger(rendered_matrix: dict[str, str]) -> None:
+    """Used vs unused sources appear with their published reasons."""
+    text = rendered_matrix["ledger"]
+    assert "source ledger" in text
+    assert "Used this cycle" in text
+    assert "Available but unused" in text
+    # Used source ids + their code-derived reasons, de-duplicated across devices.
+    for value in (
+        "CT measurement", "Topology", "rows_in_fit:ct_kitchen",
+        "graph_used_for_rows_and_identifiability",
+        # Unused sources carry a concrete reason each.
+        "Learned models", "no_model_for_device",
+        "HA attributes", "no_device_level_attributes",
+    ):
+        assert value in text, f"missing source ledger value {value!r}"
+    # Reasons are shown as published codes, never invented into prose.
+    assert "None recorded" not in text
+
+
+def test_matrix_view_identifiability_no_fabrication(rendered_matrix: dict[str, str]) -> None:
+    """A non-identifiable device shows its group range, never a per-device watt."""
+    text = rendered_matrix["groups"]
+    assert "identifiability" in text
+    assert "NON-IDENTIFIABLE" in text
+    # The honest group sum floor/cap and the members, from latest_result.
+    assert "30.0 W" in text and "90.0 W" in text
+    assert "Group total of:" in text
+    assert "light.hall" in text and "light.entry" in text
+    # Both devices share one member set, so one de-duplicated group range renders.
+    # The engine's 0.0 power_w placeholder must NEVER surface as a watt, and no
+    # per-device "Estimated power" figure may be presented for this group.
+    assert "0.00 W" not in text
+    assert "Estimated power" not in text

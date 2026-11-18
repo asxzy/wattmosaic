@@ -317,6 +317,15 @@
     isolated: 'Isolated',
     contaminated: 'Contaminated',
     insufficient_data: 'Insufficient data',
+    // Additive source-ledger vocabulary for the matrix diagnostic view.  The
+    // engine publishes these ids verbatim; these labels only make them readable
+    // and an unknown id still falls through ``titleCase``.  Reasons stay raw.
+    ha_state: 'HA state',
+    ha_attributes: 'HA attributes',
+    smart_plug_measurement: 'Smart plug measurement',
+    ct_measurement: 'CT measurement',
+    residual_events: 'Residual events',
+    learned_models: 'Learned models',
   };
   const label = (value) => STRINGS[value] || titleCase(value || 'unknown');
 
@@ -684,7 +693,7 @@
     const raw = (location.hash || '#/overview').replace(/^#\/?/, '');
     const [section, arg] = raw.split('/');
     if (section === 'device' && arg) return { view: 'device', deviceId: decodeURIComponent(arg) };
-    const known = ['overview', 'devices', 'topology', 'quality', 'diagnostics'];
+    const known = ['overview', 'devices', 'topology', 'quality', 'diagnostics', 'matrix'];
     if (known.includes(section)) return { view: section, deviceId: null };
     return { view: 'overview', deviceId: null };
   }
@@ -781,6 +790,9 @@
             break;
           case 'diagnostics':
             await renderDiagnostics(root, signal);
+            break;
+          case 'matrix':
+            await renderMatrix(root, signal);
             break;
           default:
             await renderOverview(root, signal);
@@ -1031,6 +1043,62 @@
       ],
       { foot: 'Residual = measured mains minus what the model could attribute.' }
     );
+  }
+
+  /* --- Matrix diagnostic view ------------------------------------------- *
+   * A purpose-built page that fetches /mapping plus the payloads the panel
+   * already reads on the overview (/devices, /snapshot, /status) and assembles
+   * the three audit cards above.  It introduces no new endpoint or API field:
+   * the source ledger and identifiability ranges come from the same latest
+   * results the Devices view uses.  A missing payload degrades to an honest
+   * empty section rather than an invented value.
+   * ---------------------------------------------------------------------- */
+
+  async function renderMatrix(root, signal) {
+    const [mapping, devices, snapshot, status] = await Promise.all([
+      get('/mapping', signal).catch(() => null),
+      get('/devices', signal).catch(() => []),
+      get('/snapshot', signal).catch(() => null),
+      get('/status', signal).catch(() => null),
+    ]);
+    if (signal.aborted) return;
+
+    root.append(
+      el('div', { class: 'page-head' }, [
+        el('div', {}, [
+          el('h1', {}, 'Matrix & internal process'),
+          el('p', { class: 'lede' },
+            'How the engine mapped readers to devices and decided what it could attribute — cell by cell, source by source.'),
+        ]),
+        el('div', { class: 'head-actions' }, [
+          el('button', { class: 'btn', type: 'button', onclick: () => render() }, 'Refresh'),
+        ]),
+      ])
+    );
+
+    const engineStatus = (status && status.inference) || {};
+    const topologyVersion =
+      (mapping && mapping.topology_version) ||
+      (status && status.topology_version) ||
+      '—';
+    root.append(el('div', { class: 'grid cols-3', style: 'margin-bottom:16px' }, [
+      statCard('Cells', mapping && mapping.coverage && mapping.coverage.counts
+        ? String(mapping.coverage.counts.cell_count) : '—', {
+        hint: 'Device/reader relations',
+      }),
+      statCard('Topology version', String(topologyVersion), {
+        hint: 'Matrix was computed against',
+      }),
+      statCard('Inference backend', engineStatus.backend
+        ? String(engineStatus.backend) : '—', {
+        hint: engineStatus.degraded ? 'Degraded' : 'Last inference engine',
+        tone: engineStatus.degraded ? 'warn' : null,
+      }),
+    ]));
+
+    root.append(matrixCellsCard(mapping));
+    root.append(matrixSourceLedgerCard(devices, snapshot, mapping));
+    root.append(matrixIdentifiabilityCard(devices, snapshot));
   }
 
   /* --- Derived backend data (completion sprint B4-UIa) ------------------- *
@@ -1459,6 +1527,242 @@
     );
     return card('Event evidence', rows, {
       foot: 'Engine event-log entries and isolation verdicts, newest first. A verdict names the window examined, competing devices and the reason code.',
+    });
+  }
+
+  /* --- Matrix diagnostic view (TASK-UI-MATRIX-DIAGNOSTIC) ----------------- *
+   * A read-only view that explains HOW a result was produced.  It reads only
+   * payloads the panel already fetches: /mapping for the cell matrix,
+   * /devices and /snapshot for the source ledger and identifiability ranges, and
+   * /status for version context.  Nothing is invented: an absent field reads
+   * "—", and a NON_IDENTIFIABLE device shows a group range, never a per-device
+   * watt.  These renderers are pure so the DOM harness can execute them.
+   * ---------------------------------------------------------------------- */
+
+  // A ConfidenceVector has no blended score by design (it even refuses
+  // __float__).  Show only the dimensions the engine actually assessed, each as
+  // its own labelled percentage, plus the derivation method — never collapse
+  // them into one invented number.
+  function matrixConfidence(confidence) {
+    if (!confidence || typeof confidence !== 'object') return '—';
+    const dims = [
+      ['power', 'Power'],
+      ['ct_association', 'CT assoc.'],
+      ['topology', 'Topology'],
+      ['circuit_classification', 'Circuit'],
+      ['residual', 'Residual'],
+    ].filter(([key]) => confidence[key] !== null && confidence[key] !== undefined);
+    if (!dims.length) return confidence.method ? String(confidence.method) : '—';
+    return el('span', { class: 'matrix-confidence' }, [
+      ...dims.map(([key, name]) =>
+        el('span', { class: 'chip' }, `${name} ${percent(confidence[key], 0)}`)),
+      confidence.method ? el('span', { class: 'stat-hint' }, String(confidence.method)) : null,
+    ]);
+  }
+
+  // A ledger entry is {source, reason}, both published verbatim by the engine.
+  // Reasons are code strings (e.g. "rows_in_fit:ct_kitchen"); show them as text,
+  // never title-cased into a sentence the engine did not say.
+  function matrixLedgerList(entries, tone) {
+    const list = Array.isArray(entries) ? entries : [];
+    if (!list.length) {
+      return el('p', { class: 'stat-hint' }, 'None recorded for this cycle.');
+    }
+    return el('div', { class: 'matrix-ledger' },
+      list.map((entry) => el('div', { class: 'matrix-ledger-row' }, [
+        badge(label(String((entry && entry.source) || 'unknown')), tone),
+        el('span', { class: 'matrix-ledger-reason' },
+          String((entry && entry.reason) || '—')),
+      ]))
+    );
+  }
+
+  // GET /api/v1/mapping -> {cells:[...], coverage:{counts, ...}, ...}.  Richer
+  // than the overview's compact card: it exposes every field the cell publishes
+  // so a person can audit the mapping cell by cell.  A non-identifiable cell has
+  // bounds but no point estimate, rendered "—" and never a fabricated watt.
+  function matrixCellsCard(mapping) {
+    const data = mapping || {};
+    const cells = Array.isArray(data.cells) ? data.cells : [];
+    const rows = cells.map((cell) => {
+      const c = cell || {};
+      const status = String(c.status || 'unknown');
+      const nonIdentifiable = status.toLowerCase() === 'non_identifiable';
+      const estimate = c.estimated_contribution_w;
+      const contribution = nonIdentifiable || estimate === null || estimate === undefined
+        ? '—'
+        : watts(estimate);
+      const low = c.min_contribution_w;
+      const high = c.max_contribution_w;
+      const bounds = (low === null || low === undefined) && (high === null || high === undefined)
+        ? '—'
+        : `${watts(low)} – ${watts(high)}`;
+      const sources = (Array.isArray(c.sources_used) ? c.sources_used : [])
+        .map((s) => String((s && s.source) || 'unknown'));
+      return el('tr', {}, [
+        el('td', {}, String(c.device_id || '—')),
+        el('td', {}, String(c.reader_id || '—')),
+        el('td', {}, statusBadge(status)),
+        el('td', {}, label(c.observability || 'unknown')),
+        el('td', {}, c.relation_type ? label(c.relation_type) : '—'),
+        el('td', { class: 'num' }, contribution),
+        el('td', { class: 'num' }, bounds),
+        el('td', {}, matrixConfidence(c.confidence)),
+        el('td', { class: 'num' },
+          c.evidence_count === undefined || c.evidence_count === null
+            ? '—' : String(c.evidence_count)),
+        el('td', {}, sources.length ? sources.join(', ') : '—'),
+        el('td', {}, c.model_version === undefined || c.model_version === null
+          ? '—' : `v${c.model_version}`),
+        el('td', {}, c.topology_version ? String(c.topology_version) : '—'),
+        el('td', {}, c.is_unknown_load ? badge('unknown load', 'warn') : '—'),
+      ]);
+    });
+
+    const coverage = (data.coverage && data.coverage.counts) || {};
+    const byStatus = coverage.by_status || {};
+    const byCardinality = coverage.by_cardinality || {};
+    const summaryRows = [
+      ['Reader config version', String(data.reader_configuration_version || '—')],
+      ['Matrix topology version', String(data.topology_version || '—')],
+      ['Cells', String(coverage.cell_count === undefined ? cells.length : coverage.cell_count)],
+      ['Unknown loads', String(coverage.unknown_load_count === undefined ? 0 : coverage.unknown_load_count)],
+      ...Object.keys(byStatus).sort().map((key) => [`Status: ${label(key)}`, String(byStatus[key])]),
+      ...Object.keys(byCardinality).sort().map((key) => [`Relation: ${label(key)}`, String(byCardinality[key])]),
+    ];
+
+    const body = rows.length
+      ? el('div', {}, [
+          el('div', { class: 'table-wrap' }, [
+            el('table', { class: 'data matrix-cells' }, [
+              el('thead', {}, el('tr', {}, [
+                el('th', {}, 'Device'),
+                el('th', {}, 'Reader'),
+                el('th', {}, 'Status'),
+                el('th', {}, 'Observability'),
+                el('th', {}, 'Relation'),
+                el('th', { class: 'num' }, 'Estimate'),
+                el('th', { class: 'num' }, 'Bounds'),
+                el('th', {}, 'Confidence'),
+                el('th', { class: 'num' }, 'Evidence'),
+                el('th', {}, 'Sources used'),
+                el('th', {}, 'Model'),
+                el('th', {}, 'Topology'),
+                el('th', {}, 'Marker'),
+              ])),
+              el('tbody', {}, rows),
+            ]),
+          ]),
+          el('div', { class: 'mapping-coverage', style: 'margin-top:14px' }, [
+            el('div', { class: 'stat-label' }, 'Coverage'),
+            kv(summaryRows),
+          ]),
+        ])
+      : emptyState(
+          'No mapping cells',
+          'The engine has not derived a device/reader mapping matrix yet.'
+        );
+    return card('Mapping matrix — cell detail', [body], {
+      foot: 'Each row is one device↔reader relation as published by the engine. A non-identifiable cell carries a range, not an invented per-device watt; confidence dimensions stay separate, never blended.',
+    });
+  }
+
+  // The joint-inference source ledger: used vs available-but-unused, each with
+  // the engine's concrete reason.  The engine attaches sources_used/sources_unused
+  // to every inference result for the cycle; /mapping cells also carry their own
+  // sources_used.  De-duplicate by source|reason so one shared reason is not
+  // printed once per device.  There is no per-cell sources_unused in any payload,
+  // so unused sources come from results only — an honest empty line when absent.
+  function matrixSourceLedgerCard(devices, snapshot, mapping) {
+    const used = new Map();
+    const unused = new Map();
+    const add = (target, entry) => {
+      if (!entry || typeof entry !== 'object') return;
+      const source = String(entry.source || 'unknown');
+      const reason = String(entry.reason || '—');
+      target.set(`${source}|${reason}`, { source, reason });
+    };
+    const readResult = (result) => {
+      if (!result) return;
+      (Array.isArray(result.sources_used) ? result.sources_used : []).forEach((e) => add(used, e));
+      (Array.isArray(result.sources_unused) ? result.sources_unused : []).forEach((e) => add(unused, e));
+    };
+    (Array.isArray(devices) ? devices : []).forEach((d) => readResult(d && d.latest_result));
+    const snapResults = (snapshot && snapshot.results) || [];
+    (Array.isArray(snapResults) ? snapResults : []).forEach(readResult);
+    // Per-cell sources_used are always present on /mapping when the backend
+    // publishes a matrix, so the "used" side still has real data without results.
+    ((mapping && mapping.cells) || []).forEach((cell) => {
+      (Array.isArray(cell && cell.sources_used) ? cell.sources_used : []).forEach((e) => add(used, e));
+    });
+
+    const sorted = (m) => [...m.values()].sort((a, b) =>
+      a.source.localeCompare(b.source) || a.reason.localeCompare(b.reason));
+    const hasAny = used.size > 0 || unused.size > 0;
+    const body = hasAny
+      ? el('div', {}, [
+          el('div', { class: 'stat-label' }, 'Used this cycle'),
+          matrixLedgerList(sorted(used), 'ok'),
+          el('div', { class: 'stat-label', style: 'margin-top:14px' },
+            'Available but unused (with reason)'),
+          matrixLedgerList(sorted(unused), 'warn'),
+        ])
+      : emptyState(
+          'No source ledger published',
+          'The engine names the sources it consumed after the first inference cycle. No source list has been published yet.'
+        );
+    return card('Internal process — source ledger', [body], {
+      foot: 'Every source and reason here is published by the engine, never inferred by the panel. A source the engine did not consume is marked unused with its own reason.',
+    });
+  }
+
+  // The identifiability/group-range outcome.  A device with min_w/max_w or
+  // group_members is observable only as a GROUP SUM: show that range and label
+  // it NON_IDENTIFIABLE.  The engine writes power_w: 0.0 as a placeholder for
+  // such devices; that is NOT a measurement, so it is never rendered as a watt.
+  // Group rows are de-duplicated by the sorted member set: one group = one range.
+  function matrixIdentifiabilityCard(devices, snapshot) {
+    const byGroup = new Map();
+    const add = (result, fallbackId) => {
+      if (!result) return;
+      const hasBounds =
+        (result.min_w !== null && result.min_w !== undefined) ||
+        (result.max_w !== null && result.max_w !== undefined);
+      const members = Array.isArray(result.group_members) ? result.group_members : [];
+      if (!hasBounds && !members.length) return;
+      const id = String((result.device_id || fallbackId || 'device'));
+      const key = members.length ? members.slice().sort().join('|') : `id:${id}`;
+      if (byGroup.has(key)) return;
+      byGroup.set(key, { id, result, members });
+    };
+    (Array.isArray(devices) ? devices : []).forEach((d) =>
+      add(d && d.latest_result, d && d.device_id));
+    const snapResults = (snapshot && snapshot.results) || [];
+    (Array.isArray(snapResults) ? snapResults : []).forEach((r) => add(r, r && r.device_id));
+
+    if (!byGroup.size) {
+      return card('Internal process — identifiability', [
+        emptyState(
+          'No group ranges',
+          'The engine has not published an identifiability group range. A device with its own measurement needs no range.'
+        ),
+      ], {
+        foot: 'A group range exists only where the reader sees a combined load it cannot split into per-device watts.',
+      });
+    }
+
+    const rows = [...byGroup.values()].map(({ id, result, members }) => {
+      const range = `${watts(result.min_w)} – ${watts(result.max_w)}`;
+      const shown = members.length ? members.join(', ') : id;
+      return el('div', { class: 'group-range-row', dataset: { status: 'non_identifiable' } }, [
+        el('span', { class: 'group-range-name' }, id),
+        el('span', { class: 'chip chip-non-identifiable' }, 'NON-IDENTIFIABLE'),
+        el('span', { class: 'group-range-value' }, range),
+        el('span', { class: 'group-range-members' }, `Group total of: ${shown}`),
+      ]);
+    });
+    return card('Internal process — identifiability', rows, {
+      foot: 'NON_IDENTIFIABLE: the reader observes only the group SUM. The range is that sum’s honest floor and cap — the engine does not fabricate a per-device split, so the 0 W placeholder is never shown as a measurement.',
     });
   }
 
@@ -4371,7 +4675,21 @@
    * Wiring
    * ---------------------------------------------------------------------- */
 
+  // The static shell's <nav> is not part of this task's scope, so the Matrix
+  // entry is added here at boot.  It reuses the same [data-nav] contract the
+  // router already understands, so active-state handling needs no change.  If
+  // the shell later gains the link itself, this is a no-op.
+  function addMatrixNav() {
+    const nav = document.querySelector('nav.nav');
+    if (!nav || nav.querySelector('[data-nav="matrix"]')) return;
+    const link = el('a', { href: '#/matrix', 'data-nav': 'matrix' }, 'Matrix');
+    const diagnostics = nav.querySelector('[data-nav="diagnostics"]');
+    if (diagnostics) diagnostics.insertAdjacentElement('afterend', link);
+    else nav.append(link);
+  }
+
   function wire() {
+    addMatrixNav();
     window.addEventListener('hashchange', () => {
       applyRoute();
       if (state.view === 'overview') startPolling();
