@@ -1,0 +1,63 @@
+{
+  "additionalProperties": false,
+  "description": "Independent event-association counts (HB \u00a710.3: 100 samples \u2260 100 events).",
+  "properties": {
+    "matched_event_count": {
+      "default": 0,
+      "title": "Matched Event Count",
+      "type": "integer"
+    },
+    "confirmed_match_count": {
+      "default": 0,
+      "title": "Confirmed Match Count",
+      "type": "integer"
+    },
+    "provisional_match_count": {
+      "default": 0,
+      "title": "Provisional Match Count",
+      "type": "integer"
+    },
+    "avg_response_delay_ms": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Avg Response Delay Ms"
+    },
+    "response_signature": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Response Signature"
+    },
+    "last_matched_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Last Matched At"
+    }
+  },
+  "title": "CellEvents",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/cell_events.json",
+  "x-contract-version": "2.4.0"
+}

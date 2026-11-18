@@ -1,0 +1,93 @@
+{
+  "additionalProperties": false,
+  "description": "Reader (column) drill-down: scope, relations and totals.",
+  "properties": {
+    "reader_id": {
+      "title": "Reader Id",
+      "type": "string"
+    },
+    "scope": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Scope"
+    },
+    "topology_relations": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Topology Relations",
+      "type": "array"
+    },
+    "measured_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Measured W"
+    },
+    "known_contrib_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Known Contrib W"
+    },
+    "known_contributions": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Known Contributions",
+      "type": "array"
+    },
+    "residual_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Residual W"
+    },
+    "unknown_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Unknown W"
+    }
+  },
+  "required": [
+    "reader_id"
+  ],
+  "title": "ReaderDetail",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/reader_detail.json",
+  "x-contract-version": "2.4.0"
+}

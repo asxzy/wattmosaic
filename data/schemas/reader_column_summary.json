@@ -1,0 +1,58 @@
+{
+  "additionalProperties": false,
+  "description": "Per-reader totals; never summed across readers (design \u00a78).",
+  "properties": {
+    "measured_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Measured W"
+    },
+    "known_contrib_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Known Contrib W"
+    },
+    "residual_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Residual W"
+    },
+    "unknown_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Unknown W"
+    }
+  },
+  "title": "ReaderColumnSummary",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/reader_column_summary.json",
+  "x-contract-version": "2.4.0"
+}

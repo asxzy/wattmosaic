@@ -1,0 +1,81 @@
+{
+  "$defs": {
+    "EvidenceRef": {
+      "additionalProperties": false,
+      "description": "A typed, resolvable reference to a piece of evidence (D4's resolver).",
+      "properties": {
+        "kind": {
+          "enum": [
+            "sample",
+            "event_evidence",
+            "event_group",
+            "ha_event",
+            "edge",
+            "mapping_edge",
+            "model_version",
+            "configuration_event",
+            "observation"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "title": "EvidenceRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Typed, resolvable provenance for a cell (HB \u00a79.6 / \u00a718).",
+  "properties": {
+    "sources_used": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Sources Used",
+      "type": "array"
+    },
+    "evidence_refs": {
+      "items": {
+        "$ref": "#/$defs/EvidenceRef"
+      },
+      "title": "Evidence Refs",
+      "type": "array"
+    },
+    "topology_version_id": {
+      "title": "Topology Version Id",
+      "type": "string"
+    },
+    "model_version_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model Version Id"
+    },
+    "mapping_version_id": {
+      "title": "Mapping Version Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "topology_version_id",
+    "mapping_version_id"
+  ],
+  "title": "CellProvenance",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/cell_provenance.json",
+  "x-contract-version": "2.4.0"
+}

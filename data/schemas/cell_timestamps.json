@@ -1,0 +1,43 @@
+{
+  "additionalProperties": false,
+  "description": "The observation/validation/refresh times of a cell.",
+  "properties": {
+    "first_observed_at": {
+      "format": "date-time",
+      "title": "First Observed At",
+      "type": "string"
+    },
+    "last_observed_at": {
+      "format": "date-time",
+      "title": "Last Observed At",
+      "type": "string"
+    },
+    "last_validated_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Last Validated At"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "first_observed_at",
+    "last_observed_at",
+    "updated_at"
+  ],
+  "title": "CellTimestamps",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/cell_timestamps.json",
+  "x-contract-version": "2.4.0"
+}
