@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 from wattmosaic_engine import contracts
-from wattmosaic_engine.contracts import legacy, matrix
+from wattmosaic_engine.contracts import legacy, matrix, topology
 from wattmosaic_engine.contracts.matrix import (
     CellDetail,
     CellEvents,
@@ -48,7 +48,7 @@ NO_ESTIMATE_LEVELS = {"unknown", "not_observable"}
 def _mapping(**overrides: Any) -> CellMapping:
     data: dict[str, Any] = {
         "observability": "direct",
-        "relation_type": "DIRECT_ENDPOINT",
+        "relation_type": "direct_endpoint",
         "mapping_status": "confirmed",
         "mapping_confidence": 0.9,
         "valid_from": "2026-01-01T00:00:00Z",
@@ -235,6 +235,48 @@ def test_every_exported_model_is_in_all_and_schema_exports() -> None:
 def test_matrix_names_reachable_from_facade() -> None:
     assert contracts.MappingCell is MappingCell
     assert contracts.MatrixPayload is MatrixPayload
+
+
+# --------------------------------------------------------------------------- #
+# Shared vocabulary with K03's topology contracts.
+# --------------------------------------------------------------------------- #
+
+
+def test_cell_mapping_observability_is_topology_observability() -> None:
+    """CellMapping.observability must reuse K03's enum object (identity, not a copy)."""
+    assert CellMapping.model_fields["observability"].annotation is topology.Observability
+
+
+def test_observability_values_match_topology() -> None:
+    """The matrix module's observability levels must be K03's exact string values."""
+    assert {level.value for level in topology.Observability} == {
+        "direct",
+        "expected",
+        "inferred",
+        "partial",
+        "unknown",
+        "not_observable",
+        "conflicted",
+    }
+    expected_no_estimate = {
+        topology.Observability.UNKNOWN.value,
+        topology.Observability.NOT_OBSERVABLE.value,
+    }
+    assert expected_no_estimate == set(NO_ESTIMATE_LEVELS)
+
+
+def test_relation_type_accepts_lowercase_topology_values_and_direct_endpoint() -> None:
+    """relation_type accepts RelationType values plus the lowercase direct_endpoint literal."""
+    for value in [r.value for r in topology.RelationType] + ["direct_endpoint"]:
+        cell = _mapping(relation_type=value)
+        assert cell.relation_type == value
+    assert _mapping(relation_type=None).relation_type is None
+
+
+def test_observability_v3_is_not_exported() -> None:
+    """The duplicated ObservabilityV3 vocabulary has been removed."""
+    assert "ObservabilityV3" not in matrix.__all__
+    assert not hasattr(matrix, "ObservabilityV3")
 
 
 # --------------------------------------------------------------------------- #
