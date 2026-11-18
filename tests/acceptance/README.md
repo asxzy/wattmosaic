@@ -37,7 +37,7 @@ directory), so collection always succeeds and the test xfails strictly.
 | `test_at04_unknown_without_ha.py` | Unknown devices detected without HA | T6 | open |
 | `test_at05_response_delays_matched.py` | Matching handles different response delays | I2 | open |
 | `test_at06_joint_inference.py` | Multiple simultaneous devices jointly inferred | I3 | open |
-| `test_at07_group_not_fabricated.py` | Non-identifiable → group, no fabricated values | I4 | open |
+| `test_at07_group_not_fabricated.py` | Non-identifiable → group, no fabricated values | I4 | closed |
 | `test_at08_plug_anchor.py` | Smart-plug measurements are stronger anchors | I3 | open |
 | `test_at09_covariance_nested.py` | Covariance accounted for across nested readers | I3 | open |
 | `test_at10_unknown_alternatives.py` | Unknown-load alternatives remain during matching | I1 | open |

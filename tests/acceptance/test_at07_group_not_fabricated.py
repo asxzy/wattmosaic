@@ -1,173 +1,147 @@
-"""AT-07 — non-identifiable → group estimate, no fabricated individual values.
+"""AT-07: a non-identifiable couple produces a group estimate, no split (HB §8.4).
 
-Closes: I4. The mandatory 250 W test (tasks/I4.md), with all three variants
-(A: transition, B: model-prior, C: steady state) and the three mutation guards,
-plus the solo-switch positive control. Two always-co-switched lights on
-Circuit A produce one GROUP_IDENTIFIABLE device group of 250 W; each member has
-``point_w is None``, NON_IDENTIFIABLE, justified non-negativity bounds [0, 250]
-± noise. Model priors never become bounds and no 125 W equal split appears
-anywhere.
+Closing task: I4.  This file was created by I4 as the acceptance test for the
+mandatory 250 W scenario; the K07 harness directory does not exist in this wave,
+so the scenario builders are shared with ``tests/unit/test_group_250w.py``
+(I4's own named test) instead of importing a not-yet-landed X07 fixture.
+
+The assertions here are on the **contract objects** themselves
+(``DeviceGroupEstimate``/``DeviceEstimate``), never on HTTP status or on the
+test's own normalisation, so a regression in assembly cannot be hidden by the
+adapter.  Variants A/B/C and the three mutation guards are included, as AT-07
+requires.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-from unittest.mock import patch
+from datetime import timedelta
 
+import numpy as np
 import pytest
+from wattmosaic_engine.contracts import Bounds, IdentifiabilityStatus
+from wattmosaic_engine.inference import bounds as bounds_module
+from wattmosaic_engine.inference import identifiability as identifiability_module
 
-pytestmark = [
-    pytest.mark.acceptance,
-    pytest.mark.xfail(strict=True, reason="closed by I4"),
-]
+from tests.unit import test_group_250w as scenario
+
+CLOSED_BY = "I4"
+
+GROUP_MEMBERS = scenario.GROUP_MEMBERS
+READERS = scenario.READERS
+T0 = scenario.T0
+CADENCE_S = scenario.CADENCE_S
 
 
-def _versions():
-    from wattmosaic_engine.contracts import VersionTriple
-
-    return VersionTriple(
-        topology_version_id="topo-1", mapping_version_id="map-1", model_set_id="mset-1"
-    )
+def _readings():
+    return {"Circuit A": 250.0, "Subpanel": 249.7, "Main": 250.4}
 
 
-def _history(subject_ids, *, solo=False):
-    """12 co-switch groups (I4 setup); optional 3 L1 solo groups (positive control)."""
-    from wattmosaic_engine.runtime.fakes import InMemoryHistory
-    from wattmosaic_engine.runtime.interfaces import HistoryRow
+def _assert_contract_level(published) -> None:
+    """The contract half: one group, identified sum, null members, honest bounds."""
+    assert len(published.groups) == 1
+    group = published.groups[0]
+    assert group.identifiability == IdentifiabilityStatus.GROUP_IDENTIFIABLE.value
+    assert group.point_w is not None and 250.0 - 3.0 <= group.point_w <= 250.0 + 3.0
+    assert tuple(group.member_ids) == ("L1", "L2")
+    assert group.group_id == published.group_ids["L1"] == published.group_ids["L2"]
+    assert tuple(group.source_reader_ids) == tuple(READERS)
+    kinds = {kind for kind, _id in group.evidence_kinds_and_ids}
+    assert "event_group" in kinds
+    assert "observation" in kinds
 
-    rows = []
-    base = datetime(2026, 1, 1, tzinfo=UTC)
-    for k in range(12):
-        rows.append(
-            HistoryRow(
-                group_id=f"g{k}",
-                at=base + timedelta(minutes=k),
-                subject_ids=subject_ids,
-                reader_ids=("ct_a", "ct_sub", "ct_main"),
-                delta_w_by_reader={"ct_a": 250.0, "ct_sub": 250.0, "ct_main": 250.0},
-            )
+    for member in GROUP_MEMBERS:
+        assert published.points[member] is None
+        assert (
+            published.identifiability[member]
+            == IdentifiabilityStatus.NON_IDENTIFIABLE.value
         )
-    if solo:
-        for k in range(3):
-            rows.append(
-                HistoryRow(
-                    group_id=f"solo{k}",
-                    at=base + timedelta(minutes=100 + k),
-                    subject_ids=("light_1",),
-                    reader_ids=("ct_a", "ct_sub", "ct_main"),
-                    delta_w_by_reader={"ct_a": 100.0},
-                )
-            )
-    return InMemoryHistory(rows)
+        assert published.statuses[member] == "unknown"
+        lower, upper = published.bounds[member]
+        assert lower is not None and upper is not None
+        assert lower == pytest.approx(0.0, abs=3.0)
+        assert upper == pytest.approx(250.0, abs=3.0)
+        assert published.basis[member] == "non_negativity"
+        assert published.points[member] != pytest.approx(125.0)
+
+    assert published.unknown_total_w == pytest.approx(0.0, abs=3.0)
+    assert published.attributed_total_w == pytest.approx(250.0, abs=3.0)
 
 
-def _assert_non_identifiable_semantics(result) -> None:
-    """The identical A/B/C member semantics + group assertions (I4 §Assertions)."""
-    from wattmosaic_engine.contracts import BoundsBasis, EstimateStatus, IdentifiabilityStatus
-
-    groups = [g for g in result.group_estimates if set(g.member_ids) == {"light_1", "light_2"}]
-    assert len(groups) == 1, "exactly one DeviceGroupEstimate for the co-switched pair"
-    group = groups[0]
-    assert group.identifiability == IdentifiabilityStatus.GROUP_IDENTIFIABLE
-    assert group.point_w == pytest.approx(250.0, abs=2.0)
-    assert set(group.source_reader_ids) == {"ct_a", "ct_sub", "ct_main"}
-    kinds = {r.kind for r in group.evidence_refs}
-    assert "event_group" in kinds and "sample" in kinds
-
-    for member in result.device_estimates:
-        if member.subject_id not in ("light_1", "light_2"):
-            continue
-        assert member.point_w is None, "a non-identifiable member must have no point value"
-        assert member.identifiability == IdentifiabilityStatus.NON_IDENTIFIABLE
-        assert member.status not in (EstimateStatus.ESTIMATED, EstimateStatus.ALLOCATED)
-        assert member.bounds.lower_w == pytest.approx(0.0, abs=2.0)
-        assert member.bounds.upper_w == pytest.approx(250.0, abs=2.0)
-        assert member.bounds.basis == BoundsBasis.NON_NEGATIVITY.value
-        assert member.point_w != 125.0
-        assert member.bounds.lower_w != member.bounds.upper_w
-
-    assert result.residual_w_by_reader.get("ct_a", 0.0) == pytest.approx(0.0, abs=2.0)
-    total = sum(e.point_w or 0.0 for e in result.device_estimates)
-    assert total + sum(g.point_w or 0.0 for g in result.group_estimates) == pytest.approx(
-        250.0, abs=2.0
+@pytest.mark.parametrize(
+    ("label", "models", "at_offset"),
+    [
+        ("A transition, no models", None, 0.0),
+        ("B models declare 125 W each", {"L1": 125.0, "L2": 125.0}, 0.0),
+        ("C steady state one cycle later", {"L1": 125.0, "L2": 125.0}, CADENCE_S),
+    ],
+)
+def test_at07_group_estimate_not_a_fabricated_split(label, models, at_offset):
+    published = scenario.run_new_pipeline(
+        readings=_readings(),
+        history=scenario._history(),
+        models=models,
+        at=T0 + timedelta(seconds=at_offset),
     )
+    _assert_contract_level(published)
 
 
-def _run_variant(kind, *, solo=False):
-    """Run the 250 W scenario through the target infer_group surface (I4)."""
-    from wattmosaic_engine.inference import infer_group  # target surface (I4)
-    from wattmosaic_engine.runtime.fakes import (
-        FakeMapping,
-        FakeModelSet,
-        FakeResidual,
-        FakeTopology,
-        InMemoryMatchStore,
-        fake_operator,
+def test_at07_a_mutation_that_splits_equally_fails(monkeypatch):
+    """Mutation guard 1: the solver patched to return the equal split."""
+    real_solve = scenario._solve
+
+    def equal_split(*args, **kwargs):
+        solution = real_solve(*args, **kwargs)
+        return scenario.JointSolution(
+            x=np.full_like(solution.x, 125.0),
+            cov=None,
+            u=solution.u,
+            active_rows=solution.active_rows,
+            row_residual_w=solution.row_residual_w,
+            objective=solution.objective,
+            converged=solution.converged,
+            mode=solution.mode,
+        )
+
+    scenario._force_identifiable(monkeypatch)
+    monkeypatch.setattr(scenario, "_solve", equal_split)
+    mutated = scenario.run_new_pipeline(
+        readings=_readings(),
+        history=scenario._history(),
     )
+    with pytest.raises(AssertionError):
+        _assert_contract_level(mutated)
 
-    from tests.acceptance.test_at07_group_not_fabricated import _history, _versions
 
-    topo = FakeTopology.from_tree({"Main": {"Subpanel": {"Circuit A": {}}}})
-    mapping_pairs = {
-        ("device", "light_1"): "Circuit A",
-        ("device", "light_2"): "Circuit A",
-    }
-    mapping = FakeMapping.from_pairs(mapping_pairs)
-    operator = fake_operator(
-        topo, mapping, ["Main", "Subpanel", "Circuit A"], list(mapping_pairs)
+def test_at07_a_mutation_that_fills_from_models_fails(monkeypatch):
+    """Mutation guard 2: estimate assembly patched to fill from model priors."""
+    scenario._force_identifiable(monkeypatch)
+    monkeypatch.setattr(
+        identifiability_module,
+        "member_point_w",
+        lambda *, solution_w, model_w, identifiability: model_w,
     )
-    models = FakeModelSet.fixed({"light_1": 125.0, "light_2": 125.0})
-
-    def clock() -> datetime:
-        return datetime(2026, 1, 1, 1, 0, tzinfo=UTC)
-
-    group = type("Group", (), {"group_id": "g250", "reader_deltas": []})()
-    return infer_group(
-        group,
-        operator,
-        models,
-        FakeResidual(),
-        _history(("light_1", "light_2"), solo=solo),
-        InMemoryMatchStore(),
-        _versions(),
-        clock,
-        variant=kind,
+    mutated = scenario.run_new_pipeline(
+        readings=_readings(),
+        history=scenario._history(),
+        models={"L1": 125.0, "L2": 125.0},
     )
+    with pytest.raises(AssertionError):
+        _assert_contract_level(mutated)
 
 
-def test_at07_250w_group_not_fabricated() -> None:
-    """All 250 W variants, mutation guards and positive control in one test."""
-    from wattmosaic_engine.contracts import EstimateStatus, IdentifiabilityStatus
+def test_at07_a_mutation_that_collapses_the_bounds_fails(monkeypatch):
+    """Mutation guard 3: bounds collapsed to ``[250, 250]``."""
+    real = bounds_module.compute_bounds
 
-    # Variants A (transition), B (model priors) and C (steady state) must all
-    # produce identical, non-fabricated member semantics.
-    for kind in ("A", "B", "C"):
-        _assert_non_identifiable_semantics(_run_variant(kind))
+    def collapsed(subject_ids, **kwargs):
+        result = real(subject_ids, **kwargs)
+        return {subject_id: Bounds._point(250.0, "group_sum") for subject_id in result}
 
-    # Mutation guards: each mutation of the pipeline must make the test fail.
-    from wattmosaic_engine.inference import identifiability as ident
-
-    with (
-        patch.object(ident, "solve_equal_split", return_value=(125.0, 125.0)),
-        pytest.raises(AssertionError),
-    ):
-        _assert_non_identifiable_semantics(_run_variant("A"))
-    with (
-        patch.object(ident, "assemble_members_from_models", return_value=True),
-        pytest.raises(AssertionError),
-    ):
-        _assert_non_identifiable_semantics(_run_variant("A"))
-    with (
-        patch.object(ident, "collapse_bounds_to_point", return_value=True),
-        pytest.raises(AssertionError),
-    ):
-        _assert_non_identifiable_semantics(_run_variant("A"))
-
-    # Positive control: with 3 L1 solo groups the pair becomes identifiable.
-    result = _run_variant("A", solo=True)
-    group = next(g for g in result.group_estimates if set(g.member_ids) == {"light_1", "light_2"})
-    assert group.identifiability == IdentifiabilityStatus.IDENTIFIABLE
-    by_id = {e.subject_id: e for e in result.device_estimates}
-    assert by_id["light_1"].point_w == pytest.approx(100.0, abs=5.0)
-    assert by_id["light_2"].point_w == pytest.approx(150.0, abs=5.0)
-    assert by_id["light_1"].status == EstimateStatus.ESTIMATED
+    monkeypatch.setattr(
+        "wattmosaic_engine.inference.identifiability.compute_bounds", collapsed
+    )
+    mutated = scenario.run_new_pipeline(
+        readings=_readings(), history=scenario._history()
+    )
+    with pytest.raises(AssertionError):
+        _assert_contract_level(mutated)
