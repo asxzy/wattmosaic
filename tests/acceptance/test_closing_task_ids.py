@@ -1,10 +1,14 @@
-"""Meta-test: acceptance markers name real closing tasks (K07).
+"""Meta-test: every AT file is open xfail-strict OR closed by a real task (K07/K07b).
 
-Guards the xfail-strict contract itself:
-* every ``test_atNN_*.py`` file's ``xfail(strict=True, reason="closed by <TASK>")``
-  reason names an existing task id from ``implementation-plan.md`` §3;
-* the 20 required files all exist and each names exactly one closing task;
-* the ids agree with the per-file map in ``tests/acceptance/README.md``.
+Guards the acceptance contract itself:
+
+* each ``test_atNN_*.py`` file is EITHER **open** — exactly one strict xfail
+  marker ``reason="closed by <TASK>"`` — OR **closed** — zero xfail markers and
+  a module-level constant ``CLOSED_BY = "<TASK>"``;
+* in both cases the task id must exist in ``implementation-plan.md`` §3;
+* there are exactly 20 files, one per AT number (AT-01 … AT-20);
+* each file's task id and open/closed state agree with the per-file map in
+  ``tests/acceptance/README.md``.
 """
 
 from __future__ import annotations
@@ -16,28 +20,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PLAN = REPO_ROOT / "docs/specs/realtime-topology-disaggregation/implementation-plan.md"
 README = Path(__file__).resolve().parent / "README.md"
 
-_FILE_TASK = {
-    "test_at01_nested_no_double_count.py": "M1",
-    "test_at02_parent_residual_not_containment.py": "T5",
-    "test_at03_nonzero_standby_modeled.py": "L2",
-    "test_at04_unknown_without_ha.py": "T6",
-    "test_at05_response_delays_matched.py": "I2",
-    "test_at06_joint_inference.py": "I3",
-    "test_at07_group_not_fabricated.py": "I4",
-    "test_at08_plug_anchor.py": "I3",
-    "test_at09_covariance_nested.py": "I3",
-    "test_at10_unknown_alternatives.py": "I1",
-    "test_at11_cells_track_evidence.py": "M2",
-    "test_at12_columns_multi_level.py": "U1",
-    "test_at13_no_duplicate_secondary_columns.py": "M1",
-    "test_at14_physical_load_counted_once.py": "I5",
-    "test_at15_plug_relocation.py": "T7",
-    "test_at16_reader_reconciliation.py": "T7",
-    "test_at17_missing_not_zero.py": "D3",
-    "test_at18_late_event_revision.py": "I6",
-    "test_at19_replay_newer_model.py": "L7",
-    "test_at20_ui_explains_estimates.py": "U2",
-}
+_XFAIL = re.compile(r'xfail\(strict=True, reason="closed by ([A-Z][0-9]+)"\)')
+_CLOSED_BY = re.compile(r'^CLOSED_BY = "([A-Z][0-9]+)"', re.M)
 
 
 def _plan_task_ids() -> set[str]:
@@ -46,28 +30,69 @@ def _plan_task_ids() -> set[str]:
     return set(re.findall(r"^\| ([A-Z][0-9]+) \|", section, re.M))
 
 
-def test_all_twenty_acceptance_files_exist() -> None:
+def _at_files() -> dict[str, Path]:
+    """Return ``{filename: path}`` for every ``test_atNN_*.py`` module."""
     here = Path(__file__).resolve().parent
-    actual = {p.name for p in here.glob("test_at*.py")}
-    assert actual == set(_FILE_TASK), (
-        f"missing={set(_FILE_TASK) - actual} unexpected={actual - set(_FILE_TASK)}"
+    return {p.name: p for p in here.glob("test_at*.py")}
+
+
+def _file_state(source: str) -> tuple[str, str]:
+    """Return ``(state, task_id)`` for an acceptance module's source.
+
+    ``state`` is ``"closed"`` (zero xfail markers + one ``CLOSED_BY``) or
+    ``"open"`` (one strict xfail marker + zero ``CLOSED_BY``). Anything else —
+    both forms at once, neither, or duplicates — is a contract violation.
+    """
+    xfails = _XFAIL.findall(source)
+    closed_by = _CLOSED_BY.findall(source)
+    if len(xfails) == 1 and not closed_by:
+        return "open", xfails[0]
+    if not xfails and len(closed_by) == 1:
+        return "closed", closed_by[0]
+    raise AssertionError(
+        "expected exactly one strict xfail OR one CLOSED_BY, "
+        f"got xfail={xfails} CLOSED_BY={closed_by}"
     )
 
 
-def test_reason_names_an_existing_task_id() -> None:
+def _readme_map() -> dict[str, tuple[str, str]]:
+    """Parse README's file table into ``{filename: (task, state)}``."""
+    result: dict[str, tuple[str, str]] = {}
+    for line in README.read_text(encoding="utf-8").splitlines():
+        if not line.lstrip().startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 4 or not cells[0].startswith("`test_at"):
+            continue
+        name = cells[0].strip("`")
+        task = cells[2]
+        state = "closed" if "closed" in cells[3].lower() else "open"
+        result[name] = (task, state)
+    return result
+
+
+def test_all_twenty_acceptance_files_exist() -> None:
+    files = _at_files()
+    assert len(files) == 20, f"expected exactly 20 AT files, got {len(files)}: {sorted(files)}"
+    numbers = sorted(int(re.search(r"test_at(\d+)_", name).group(1)) for name in files)
+    assert numbers == list(range(1, 21)), f"AT numbers must be 1..20, got {numbers}"
+
+
+def test_open_or_closed_marker_names_an_existing_task_id() -> None:
     task_ids = _plan_task_ids()
-    here = Path(__file__).resolve().parent
-    for name, expected in _FILE_TASK.items():
-        source = (here / name).read_text(encoding="utf-8")
-        matches = re.findall(r'xfail\(strict=True, reason="closed by ([A-Z][0-9]+)"\)', source)
-        assert len(matches) == 1, f"{name}: expected exactly one strict xfail reason"
-        assert matches[0] == expected, f"{name}: reason {matches[0]} != expected {expected}"
-        assert matches[0] in task_ids, f"{name}: reason {matches[0]} is not a task id in §3"
+    readme = _readme_map()
+    for name, path in _at_files().items():
+        state, task = _file_state(path.read_text(encoding="utf-8"))
+        assert task in task_ids, f"{name}: task {task} is not a task id in §3"
+        assert name in readme, f"README does not list {name}"
+        expected_task, expected_state = readme[name]
+        assert task == expected_task, f"{name}: task {task} != README task {expected_task}"
+        assert state == expected_state, f"{name}: state {state} != README state {expected_state}"
 
 
 def test_readme_lists_every_file_and_task() -> None:
     text = README.read_text(encoding="utf-8")
-    for name in _FILE_TASK:
+    for name in _at_files():
         assert name in text, f"README does not list {name}"
-    for task in set(_FILE_TASK.values()):
+    for task, _state in _readme_map().values():
         assert re.search(rf"\b{re.escape(task)}\b", text), f"README does not list task {task}"
