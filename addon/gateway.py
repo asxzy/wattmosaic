@@ -37,6 +37,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -187,11 +188,11 @@ log = logging.getLogger("wattmosaic.gateway")
 #: cached separately from the response, and a single 300-line blob is impossible
 #: to test or lint.  These files are served by :func:`static` below.
 UI_INDEX = UI_DIR / "index.html"
-UI_ASSETS = {
-    "ui/app.css": UI_DIR / "app.css",
-    "ui/app.js": UI_DIR / "app.js",
-    "ui/mark.svg": UI_DIR / "mark.svg",
-}
+#: The panel is shipped as flat native ES modules.  Rather than an allowlist of
+#: individual file names (which every new module would have to extend), any
+#: single flat segment with a safe name and a served extension is permitted;
+#: the realpath containment check in :func:`static` keeps it inside ``UI_DIR``.
+UI_ASSET_NAME = re.compile(r"^[a-z0-9-]+\.(js|css|svg)$")
 #: (content type, charset).  aiohttp appends the charset itself, so it must not
 #: be baked into ``content_type``.
 ASSET_TYPES = {
@@ -442,17 +443,23 @@ async def index(request: web.Request) -> web.Response:
 async def static(request: web.Request) -> web.Response:
     """Serve one immutable panel asset.
 
-    Only the fixed allowlist in :data:`UI_ASSETS` is reachable, so a crafted
-    path cannot walk outside the UI directory.  Assets are also gated on the
-    ingress peer: an unauthenticated caller on a published host port must not
-    be able to enumerate or fetch them.
+    Only a single flat path segment with a safe name and a shipped extension is
+    accepted (``^[a-z0-9-]+\\.(js|css|svg)$``), and the resolved real path must
+    stay inside :data:`UI_DIR`.  A crafted name therefore cannot walk out of
+    the UI directory nor reach a nested file.  Assets are gated on the ingress
+    peer: an unauthenticated caller on a published host port must not be able
+    to enumerate or fetch them.
     """
     if not _peer_trusted(request):
         return _json(401, "unauthorized", "the panel is only served through Home Assistant ingress")
 
     name = request.match_info["asset"]
-    path = UI_ASSETS.get(f"ui/{name}")
-    if path is None:
+    if not UI_ASSET_NAME.fullmatch(name):
+        return _json(404, "not_found", "unknown asset")
+    path = (UI_DIR / name).resolve()
+    # Containment: a symlink inside UI_DIR must not escape it either.
+    ui_root = UI_DIR.resolve()
+    if path.parent != ui_root or not path.is_file():
         return _json(404, "not_found", "unknown asset")
     try:
         payload = path.read_bytes()

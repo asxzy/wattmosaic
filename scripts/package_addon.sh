@@ -112,7 +112,7 @@ chmod 0755 "${STAGE}/run.sh" "${STAGE}/discovery.py"
 # Sanity checks: the build context must be self-sufficient.
 required=(config.yaml Dockerfile run.sh gateway.py healthcheck.py discovery.py
           constraints.txt icon.png logo.png pyproject.toml README.md
-          ui/index.html ui/app.css ui/app.js ui/mark.svg
+          ui/index.html ui/app.css ui/matrix.css ui/main.js ui/core.js ui/mark.svg
           engine/wattmosaic_engine/main.py)
 missing=0
 for f in "${required[@]}"; do

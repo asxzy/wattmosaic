@@ -84,7 +84,9 @@ required_files=(
   addon/discovery.py
   addon/ui/index.html
   addon/ui/app.css
-  addon/ui/app.js
+  addon/ui/matrix.css
+  addon/ui/main.js
+  addon/ui/core.js
   addon/ui/mark.svg
   addon/constraints.txt
   addon/icon.png
@@ -468,13 +470,18 @@ fi
 # has no node, so this is a skip there; a developer machine catches a typo
 # before it is ever served to a browser.
 if command -v node >/dev/null 2>&1; then
-  if OUT="$(node --check addon/ui/app.js 2>&1)"; then
-    pass "node --check addon/ui/app.js"
-  else
-    fail "node --check addon/ui/app.js" "${OUT}"
-  fi
+  JS_FAIL=0
+  for module in addon/ui/*.js; do
+    if OUT="$(node --input-type=module --check < "${module}" 2>&1)"; then
+      pass "node --check ${module}"
+    else
+      fail "node --check ${module}" "${OUT}"
+      JS_FAIL=1
+    fi
+  done
+  [[ "${JS_FAIL}" -eq 0 ]] || true
 else
-  skip "node --check addon/ui/app.js (node not installed)"
+  skip "node --check addon/ui/*.js (node not installed)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -786,7 +793,7 @@ if OUT="$(bash scripts/package_addon.sh --out "${STAGE_PARENT}" 2>&1)"; then
   pass "package_addon.sh stages a self-contained app"
   STAGE="${STAGE_PARENT}/wattmosaic_engine"
   for f in config.yaml Dockerfile run.sh gateway.py healthcheck.py constraints.txt \
-           pyproject.toml README.md ui/index.html ui/app.css ui/app.js ui/mark.svg \
+           pyproject.toml README.md ui/index.html ui/app.css ui/matrix.css ui/main.js ui/core.js ui/mark.svg \
            engine/wattmosaic_engine/main.py; do
     if [[ -e "${STAGE}/${f}" ]]; then pass "staged ${f}"; else fail "staged ${f}"; fi
   done
