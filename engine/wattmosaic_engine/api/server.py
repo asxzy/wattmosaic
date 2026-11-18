@@ -33,6 +33,8 @@ import json
 import logging
 import math
 import time
+import uuid
+from collections import OrderedDict
 from datetime import date, datetime
 from enum import Enum
 from typing import Any, Literal
@@ -40,7 +42,7 @@ from typing import Any, Literal
 from aiohttp import web
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from ..contracts import CONTRACT_VERSION, ErrorResponse, ServiceCommand, Topology
+from ..contracts import CONTRACT_VERSION, ErrorResponse, ServiceCommand, ServiceResult, Topology
 from .facade import (
     ENGINE_VERSION,
     EngineFacade,
@@ -92,6 +94,173 @@ DEFAULT_ROUTE_TIMEOUTS: dict[str, float] = {
     DISCOVERY_PLACEMENTS_PATH: DISCOVERY_REQUEST_TIMEOUT_S,
 }
 
+#: How many *finished* discovery jobs are kept for status polling.  Running jobs
+#: are always tracked; this only bounds the history of completed/failed ones so a
+#: busy install cannot grow the dict without limit.  Oldest entries are evicted
+#: first (``OrderedDict`` insertion order).
+DISCOVERY_JOB_HISTORY_LIMIT = 32
+
+
+class DiscoveryJobManager:
+    """Runs placement discovery as a bounded background job.
+
+    Placement discovery reads the whole recorder window and fits it; on a real
+    install that is minutes of work.  Holding an HTTP request open that long
+    starves ``/healthz`` and surfaces as a gateway 504.  This manager owns the
+    work instead: :meth:`start` creates a task and returns a handle immediately,
+    and :meth:`status` reports progress and the final result/error.
+
+    Ownership rules, chosen deliberately:
+
+    * **One at a time, idempotent.**  A second ``start`` while a job is running
+      returns the *existing* handle rather than a fresh task or a 409.  Discovery
+      is used as an initialization event; concurrent whole-house analyses would
+      only race each other for the same recorder and CPU.
+    * **CPU stays off the loop.**  The task awaits the facade's ``discover_placements``
+      coroutine, whose CPU-bound half already runs in ``asyncio.to_thread``
+      (``main.EngineCore.discover_placements``).  This manager never calls a
+      blocking method directly on the loop.
+    * **Bounded history.**  At most ``DISCOVERY_JOB_HISTORY_LIMIT`` finished
+      jobs are retained; a caller that polls late gets a ``not_found`` rather
+      than an ever-growing store.
+    * **Clean lifecycle.**  :meth:`stop` cancels the running task and awaits it,
+      so shutdown leaves no dangling task.  It is called from ``APIServer.stop``.
+
+    Task ownership is the HTTP server's because that is where the loop and the
+    request handlers live; the engine core remains the pure facade that does the
+    analysis.  Both the direct route and ``POST /commands`` use this one manager,
+    so there is a single concurrency bound across the two entry points.
+    """
+
+    def __init__(self, facade: Any, *, history_limit: int = DISCOVERY_JOB_HISTORY_LIMIT) -> None:
+        self._facade = facade
+        self._history_limit = max(1, int(history_limit))
+        # OrderedDict gives deterministic "oldest first" eviction; values are the
+        # mutable job records written by the background task and read by handlers.
+        self._jobs: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._task: asyncio.Task[None] | None = None
+        self._current_id: str | None = None
+
+    @staticmethod
+    def handle(job_id: str, status: str) -> dict[str, Any]:
+        """The immediate job handle returned by a start request."""
+        return {"job_id": job_id, "status": status}
+
+    def _public(self, job_id: str, job: dict[str, Any]) -> dict[str, Any]:
+        """Build the status response from a job's private record."""
+        status = str(job["status"])
+        result: dict[str, Any] = {
+            "job_id": job_id,
+            "status": status,
+        }
+        if status in ("complete", "failed"):
+            # A terminal job always carries exactly one of ``result``/``error``.
+            if "error" in job:
+                result["error"] = job["error"]
+            else:
+                result["result"] = job.get("result")
+        return result
+
+    def _current(self) -> dict[str, Any] | None:
+        """The single in-flight job record, if one is still running or pending."""
+        if self._current_id is None:
+            return None
+        job = self._jobs.get(self._current_id)
+        if job is None or job["status"] not in ("pending", "running"):
+            return None
+        return job
+
+    async def start(
+        self,
+        *,
+        lookback_hours: float,
+        apply: bool | None,
+        include_groups: bool,
+        max_candidates: int,
+    ) -> dict[str, Any]:
+        """Start discovery in the background and return a handle immediately.
+
+        Idempotent: when a job is already active its existing handle is returned
+        without scheduling more work.  The returned dict is a job handle, *not*
+        the discovery result; callers poll :meth:`status` for that.
+        """
+        existing = self._current()
+        if existing is not None and self._current_id is not None:
+            return self.handle(self._current_id, str(existing["status"]))
+
+        job_id = uuid.uuid4().hex
+        record: dict[str, Any] = {
+            "status": "pending",
+            "request": {
+                "lookback_hours": lookback_hours,
+                "apply": apply,
+                "include_groups": include_groups,
+                "max_candidates": max_candidates,
+            },
+        }
+        self._jobs[job_id] = record
+        self._current_id = job_id
+        self._task = asyncio.create_task(
+            self._run(job_id, record), name=f"wm-discovery-{job_id[:8]}"
+        )
+        return self.handle(job_id, "running")
+
+    async def _run(self, job_id: str, record: dict[str, Any]) -> None:
+        """Execute the discovery coroutine and store its result or error."""
+        record["status"] = "running"
+        try:
+            method = getattr(self._facade, "discover_placements", None)
+            if method is None:
+                raise FacadeUnavailable("placement discovery is not supported by this backend")
+            result = await maybe_await(method(**record["request"]))
+        except asyncio.CancelledError:
+            # Shutdown: clear the active slot but keep the (partial) record so a
+            # poller sees a definite terminal state instead of "running" forever.
+            record["status"] = "failed"
+            record["error"] = "discovery cancelled during shutdown"
+            if self._current_id == job_id:
+                self._current_id = None
+            raise
+        except Exception as exc:  # noqa: BLE001 - a failed job must not crash the server
+            record["status"] = "failed"
+            record["error"] = str(exc) or type(exc).__name__
+        else:
+            record["status"] = "complete"
+            record["result"] = result
+        finally:
+            if self._current_id == job_id:
+                self._current_id = None
+            self._evict()
+
+    def _evict(self) -> None:
+        """Keep the finished-job history bounded, never evict a running job."""
+        finished = [key for key, value in self._jobs.items() if value["status"] != "running"]
+        over = len(finished) - self._history_limit
+        if over <= 0:
+            # A negative slice index (``finished[:-n]``) would evict the front
+            # while we are still *under* the cap; only trim when above it.
+            return
+        for key in finished[:over]:
+            self._jobs.pop(key, None)
+
+    def status(self, job_id: str) -> dict[str, Any] | None:
+        """Return the public job record, or ``None`` when the id is unknown."""
+        job = self._jobs.get(job_id)
+        if job is None:
+            return None
+        return self._public(job_id, job)
+
+    async def stop(self) -> None:
+        """Cancel the in-flight job (if any) and await it.  Idempotent."""
+        task, self._task = self._task, None
+        if task is None:
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+        self._current_id = None
+
+
 # Typed application keys (avoids aiohttp NotAppKeyWarning).
 FACADE_KEY: web.AppKey[Any] = web.AppKey("wm_facade", Any)
 CONFIG_KEY: web.AppKey[dict[str, Any]] = web.AppKey("wm_config", dict)
@@ -103,6 +272,15 @@ TIMEOUTS_KEY: web.AppKey[dict[str, float]] = web.AppKey("wm_route_timeouts", dic
 BODY_KEY: web.RequestKey[bytes] = web.RequestKey("wm_raw_body", bytes)
 SEMAPHORE_KEY: web.AppKey[asyncio.Semaphore] = web.AppKey("wm_semaphore", asyncio.Semaphore)
 STARTED_AT_KEY: web.AppKey[float] = web.AppKey("wm_started_at", float)
+DISCOVERY_JOBS_KEY: web.AppKey[DiscoveryJobManager] = web.AppKey(
+    "wm_discovery_jobs", DiscoveryJobManager
+)
+
+
+def _discovery_jobs(request: web.Request) -> DiscoveryJobManager:
+    """The process-wide discovery job manager attached to the app."""
+    return request.app[DISCOVERY_JOBS_KEY]
+
 
 #: The literal the caller must send to authorise a destructive DB reset.
 RESET_CONFIRM_TOKEN = "RESET"
@@ -232,6 +410,12 @@ class APIServer:
         if runner is not None:
             with contextlib.suppress(Exception):
                 await runner.cleanup()
+        # Cancel/await any in-flight discovery job so shutdown leaves no dangling
+        # asyncio task (follows the engine's own task-supervision stop pattern).
+        try:
+            await self.app[DISCOVERY_JOBS_KEY].stop()
+        except Exception:  # noqa: BLE001 - shutdown must always complete
+            log.exception("error stopping discovery jobs")
 
     async def __aenter__(self) -> APIServer:
         await self.start()
@@ -529,18 +713,19 @@ async def topology_tree(request: web.Request) -> web.Response:
 
 
 async def discover_placements(request: web.Request) -> web.Response:
-    """Learn placements from recorded history; writes only when explicitly asked.
+    """Start learning placements from history as a background job (HTTP 202).
 
     Every field is optional, so an empty body is a valid "show me what you would
     place" request.  Validation here is transport-level only: the bounds match
     ``topology_nesting``'s ``hours`` because both name a lookback over stored
     history, and a non-finite or non-positive value cannot describe a window.
 
-    The planning step reads the recorder and the configuration store, so it runs
-    in a worker thread for the same reason ``topology_tree`` does -- it must not
-    stall ``/health`` or ingestion.  The frozen idiom (``to_thread`` +
-    ``maybe_await``) is required because a facade may be ``async`` and calling it
-    in a thread returns a coroutine that still needs awaiting.
+    The response is a job handle (``{job_id, status}``), returned immediately.
+    The real work -- the recorder read and the CPU-bound analysis (which stays in
+    ``asyncio.to_thread`` inside the facade) -- runs in a background task owned
+    by :class:`DiscoveryJobManager`.  Poll ``GET /discover/placements/{job_id}``
+    for the status and the final result.  One job runs at a time; a second start
+    while one is active returns the existing handle (idempotent).
     """
     body: Any = {}
     if request.can_read_body:
@@ -567,21 +752,32 @@ async def discover_placements(request: web.Request) -> web.Response:
     if max_candidates_raw < 1:
         raise InvalidRequest("max_candidates must be at least 1")
 
-    facade = _facade(request)
-    method = getattr(facade, "discover_placements", None)
-    if method is None:
-        raise FacadeUnavailable("placement discovery is not supported by this backend")
-    return _ok(
-        await maybe_await(
-            await asyncio.to_thread(
-                method,
-                lookback_hours=lookback_hours,
-                apply=apply_raw,
-                include_groups=include_groups,
-                max_candidates=max_candidates_raw,
-            )
-        )
+    # Start the whole-house analysis as a bounded background job and return its
+    # handle immediately.  The previous synchronous version held this request
+    # open for minutes, starving /healthz and surfacing as a gateway 504; the
+    # analysis itself (including its to_thread CPU half) is unchanged -- it just
+    # now runs behind a job handle that the caller polls.
+    handle = await _discovery_jobs(request).start(
+        lookback_hours=lookback_hours,
+        apply=apply_raw,
+        include_groups=include_groups,
+        max_candidates=max_candidates_raw,
     )
+    return _ok(handle, status=202)
+
+
+async def discovery_job_status(request: web.Request) -> web.Response:
+    """Return the state (and, when done, the result/error) of a discovery job.
+
+    ``running`` answers with ``{job_id, status}``; ``complete`` adds ``result``
+    carrying the same payload the synchronous route used to return; ``failed``
+    adds ``error`` with the failure detail.  An unknown/evicted id is a 404.
+    """
+    job_id = request.match_info["job_id"]
+    job = _discovery_jobs(request).status(job_id)
+    if job is None:
+        raise NotFound(f"discovery job {job_id!r} not found")
+    return _ok(job)
 
 
 def _mapping_coverage_counts(matrix: dict[str, Any]) -> dict[str, Any]:
@@ -737,6 +933,46 @@ async def models(request: web.Request) -> web.Response:
 
 async def commands(request: web.Request) -> web.Response:
     payload = _validate(ServiceCommand, await _read_json(request))
+    if payload.command in SLOW_COMMANDS:
+        # The HA integration's ``discover_placements`` service reaches discovery
+        # through POST /commands.  Since discovery is now asynchronous, return a
+        # job handle here too instead of blocking for the whole analysis.  The
+        # handle lives in ``ServiceResult.data`` so the response keeps the
+        # command envelope; poll ``GET /discover/placements/{job_id}`` for the
+        # result.  This is a deliberate compatibility change: callers that used
+        # to receive the full result inline must now poll, but the result shape
+        # at the status endpoint is byte-for-byte the old synchronous payload.
+        params = payload.parameters
+        lookback_raw = params.get("lookback_hours", 24.0)
+        if isinstance(lookback_raw, bool) or not isinstance(lookback_raw, (int, float)):
+            raise InvalidRequest("lookback_hours must be a number")
+        lookback_hours = float(lookback_raw)
+        if not math.isfinite(lookback_hours) or lookback_hours <= 0 or lookback_hours > 2160:
+            raise InvalidRequest("lookback_hours must be greater than 0 and at most 2160")
+        include_groups = params.get("include_groups", True)
+        if not isinstance(include_groups, bool):
+            raise InvalidRequest("include_groups must be a boolean")
+        max_candidates = params.get("max_candidates", 200)
+        if isinstance(max_candidates, bool) or not isinstance(max_candidates, int):
+            raise InvalidRequest("max_candidates must be an integer")
+        if max_candidates < 1:
+            raise InvalidRequest("max_candidates must be at least 1")
+        apply_raw = params.get("apply")
+        if apply_raw is not None and not isinstance(apply_raw, bool):
+            raise InvalidRequest("apply must be a boolean")
+        handle = await _discovery_jobs(request).start(
+            lookback_hours=lookback_hours,
+            apply=apply_raw,
+            include_groups=include_groups,
+            max_candidates=max_candidates,
+        )
+        result = ServiceResult(
+            ok=True,
+            command=payload.command,
+            detail="discovery started; poll GET /discover/placements/{job_id}",
+            data=handle,
+        )
+        return _ok(result)
     result = await maybe_await(_facade(request).command(payload))
     return _ok(result)
 
@@ -843,6 +1079,7 @@ def create_app(
     """
     app = web.Application(middlewares=[_bounded, _contract_and_auth])
     app[FACADE_KEY] = facade or NullFacade()
+    app[DISCOVERY_JOBS_KEY] = DiscoveryJobManager(app[FACADE_KEY])
     app[CONFIG_KEY] = {
         "api_token": api_token or "",
         "request_timeout_s": float(request_timeout_s),
@@ -878,6 +1115,7 @@ def create_app(
     router.add_post(f"{base}/commands", commands)
     router.add_post(f"{base}{RESET_DB_ROUTE}", reset_database)
     router.add_post(f"{base}/discover/placements", discover_placements)
+    router.add_get(f"{base}/discover/placements/{{job_id}}", discovery_job_status)
     router.add_get(f"{base}/export/{{device_id}}", export)
     router.add_get(f"{base}/metrics", metrics)
     return app
@@ -897,8 +1135,11 @@ __all__ = [
     "DEFAULT_MAX_CONCURRENCY",
     "DEFAULT_REQUEST_TIMEOUT_S",
     "DEFAULT_ROUTE_TIMEOUTS",
+    "DISCOVERY_JOB_HISTORY_LIMIT",
+    "DISCOVERY_JOBS_KEY",
     "DISCOVERY_PLACEMENTS_PATH",
     "DISCOVERY_REQUEST_TIMEOUT_S",
+    "DiscoveryJobManager",
     "RESET_CONFIRM_TOKEN",
     "RESET_DB_PATH",
     "ResetDatabaseRequest",

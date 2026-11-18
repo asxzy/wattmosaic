@@ -981,18 +981,34 @@ async def _with_server(facade: Any, fn: Any) -> Any:
         await server.stop()
 
 
+async def _start_and_wait(session: aiohttp.ClientSession, base: str, payload: dict[str, Any]) -> Any:
+    """POST a discovery request, then poll its job to completion."""
+    async with session.post(f"{base}/discover/placements", json=payload) as response:
+        assert response.status == 202, await response.text()
+        handle = await response.json()
+        assert handle["status"] == "running"
+        job_id = handle["job_id"]
+    for _ in range(100):
+        async with session.get(f"{base}/discover/placements/{job_id}") as response:
+            assert response.status == 200, await response.text()
+            body = await response.json()
+        if body["status"] in ("complete", "failed"):
+            return body
+        await asyncio.sleep(0.01)
+    raise AssertionError("discovery job did not finish")
+
+
 def test_route_is_registered_and_returns_the_shaped_answer() -> None:
     facade = _StubPlacementFacade()
 
     async def run(session: aiohttp.ClientSession, base: str) -> Any:
-        async with session.post(f"{base}/discover/placements", json={}) as response:
-            assert response.status == 200, await response.text()
-            return await response.json()
+        return await _start_and_wait(session, base, {})
 
     body = asyncio.run(_with_server(facade, run))
 
-    assert body["ok"] is True
-    assert body["groups"] == []
+    assert body["status"] == "complete"
+    assert body["result"]["ok"] is True
+    assert body["result"]["groups"] == []
     assert facade.calls == [
         {
             "lookback_hours": 24.0,
@@ -1020,17 +1036,16 @@ def test_route_forwards_valid_overrides() -> None:
     facade = _StubPlacementFacade()
 
     async def run(session: aiohttp.ClientSession, base: str) -> Any:
-        async with session.post(
-            f"{base}/discover/placements",
-            json={
+        return await _start_and_wait(
+            session,
+            base,
+            {
                 "lookback_hours": 6,
                 "apply": True,
                 "include_groups": False,
                 "max_candidates": 50,
             },
-        ) as response:
-            assert response.status == 200, await response.text()
-            return await response.json()
+        )
 
     asyncio.run(_with_server(facade, run))
 

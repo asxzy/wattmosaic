@@ -959,20 +959,15 @@ def test_default_route_still_times_out_and_maps_to_504() -> None:
     assert run(_with_server(SlowStatus(), fn, request_timeout_s=0.05))
 
 
-def test_discovery_route_uses_its_own_larger_budget() -> None:
-    """A slow discovery survives the default cap but is still bounded by its own.
+def test_discovery_route_starts_a_job_and_returns_immediately() -> None:
+    """POST /discover/placements returns a handle without waiting for the work.
 
-    Same scaled-down pair as the test above: the injected default is 0.05 s and
-    the discovery override is 0.6 s, while the handler sleeps 0.3 s.  Under the
-    old code (one unconditional budget) this request would die at 0.05 s; it now
-    completes because the middleware consults the route table by exact path.
-
-    This is a real proof rather than a tautology: it exercises the middleware
-    end to end over a real socket, and the production magnitudes are pinned
-    separately by
-    ``test_discovery_budget_exceeds_history_budget_for_every_allowed_lookback``.
-    The scaled pair preserves the ordering that matters (handler sleep <
-    discovery budget, handler sleep > default) without sleeping for minutes.
+    The handler used to run the whole analysis inline; with a 0.3 s sleep and a
+    0.05 s default budget it could only survive by borrowing the 6600 s route
+    override.  Discovery is now asynchronous: the POST answers 202 with a job
+    handle in milliseconds (well under even the 0.05 s default), and the slow
+    work proceeds in a background task.  Polling the status endpoint yields the
+    original synchronous result shape once the job completes.
     """
 
     class SlowDiscovery(StubFacade):
@@ -984,9 +979,24 @@ def test_discovery_route_uses_its_own_larger_budget() -> None:
         async with session.post(
             f"{base}/discover/placements", json={"lookback_hours": 168}, headers=HEADERS
         ) as resp:
-            assert resp.status == 200, await resp.text()
-            body = await resp.json()
-            assert body["ok"] is True
+            assert resp.status == 202, await resp.text()
+            handle = await resp.json()
+            assert handle["status"] == "running"
+            job_id = handle["job_id"]
+        # The status route answers immediately at every stage; its budget is the
+        # default and it never awaits the analysis.  Poll until the task finishes.
+        for _ in range(100):
+            async with session.get(
+                f"{base}/discover/placements/{job_id}", headers=HEADERS
+            ) as resp:
+                assert resp.status == 200, await resp.text()
+                body = await resp.json()
+            if body["status"] == "complete":
+                break
+            await asyncio.sleep(0.02)
+        assert body["status"] == "complete"
+        assert body["job_id"] == job_id
+        assert body["result"]["ok"] is True
         return True
 
     assert run(
