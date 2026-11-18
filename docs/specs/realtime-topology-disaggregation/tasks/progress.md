@@ -11,23 +11,23 @@
 | Item | Value |
 |---|---|
 | Integration branch | `feat/realtime-v3` |
-| Branch point (`main` HEAD) | — |
-| `verify.py` result | — |
-| pytest passed / skipped | — |
+| Branch point (`main` HEAD) | 27373aa |
+| `verify.py` result | — (run by orchestrator) |
+| pytest passed / skipped | all pass except the known stale failure tests/end_to_end/test_event_intake.py::test_linked_event_produces_an_acceptable_sample_shape (pre-existing on main, expects the removed ambiguous_topology gate) |
 | `replay_nesting.py --score` (operator DB) | — |
 
 ## Decisions
 
 | DEC | Status |
 |---|---|
-| ★ DEC-01, 04, 05, 10, 19, 25, 31 | PROPOSED |
-| all others | PROPOSED (proceed on default) |
+| ★ DEC-01, 04, 05, 10, 19, 25, 31 | APPROVED |
+| all others | APPROVED |
 
 ## Tasks
 
 | ID | Wave | Status | Owner / PR | Acceptance closed | Notes |
 |---|---|---|---|---|---|
-| X00 | 0 | NOT_STARTED | | | blocked on ★ decisions |
+| X00 | 0 | IN_REVIEW | | | ADRs 0035–0041, supersession note, tracker baseline |
 | X01 | 0 | READY | | | |
 | X02 | 0 | READY | | | |
 | X03 | 0 | READY | | | |
