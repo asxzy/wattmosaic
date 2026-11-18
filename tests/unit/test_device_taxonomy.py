@@ -823,6 +823,80 @@ def test_load_shape_class_is_published() -> None:
     assert result.model_dump(mode="json")["load_shape"] == "always_on"
 
 
+def test_load_shape_repr_does_not_drop_the_inference_batch() -> None:
+    """A stored LoadShape repr must coerce, not raise and drop the whole batch.
+
+    ``DeviceConfiguration`` uses ``use_enum_values=True`` but Pydantic does not
+    validate field defaults, so a projection that omits ``load_shape`` leaves the
+    default as a ``LoadShape`` member.  ``str(member)`` is the repr
+    ``LoadShape.UNKNOWN``, which ``LoadShape(...)`` rejected in production.
+    """
+    topology = Topology(
+        channels=[
+            CTChannel(ct_id="main_l1", entity_id="sensor.main", ct_type=CTType.MAIN, phase=Phase.L1),
+        ],
+        devices=[
+            # An older projection with no load_shape key: the neutral default.
+            DeviceTopology(
+                device_id="no_shape",
+                metadata={"device_config": {"device_id": "no_shape"}},
+            ),
+            # A plain value string: must resolve to the declared member.
+            DeviceTopology(
+                device_id="value_shape",
+                metadata={"device_config": {"device_id": "value_shape", "load_shape": "always_on"}},
+            ),
+            # A stored repr string: must resolve to the declared member, not UNKNOWN.
+            DeviceTopology(
+                device_id="repr_shape",
+                metadata={
+                    "device_config": {"device_id": "repr_shape", "load_shape": "LoadShape.ALWAYS_ON"}
+                },
+            ),
+        ],
+    )
+    configs = effective_configs(topology)
+    assert set(configs) == {"no_shape", "value_shape", "repr_shape"}
+    assert configs["no_shape"].load_shape == LoadShape.UNKNOWN
+    assert configs["value_shape"].load_shape == LoadShape.ALWAYS_ON
+    assert configs["repr_shape"].load_shape == LoadShape.ALWAYS_ON
+
+
+def test_coerce_load_shape_accepts_member_value_and_repr() -> None:
+    """The coercion helper handles all three forms, case-insensitively."""
+    from wattmosaic_engine.disaggregation.configuration import _coerce_load_shape
+
+    assert _coerce_load_shape(LoadShape.UNKNOWN) is LoadShape.UNKNOWN
+    assert _coerce_load_shape(LoadShape.ALWAYS_ON) is LoadShape.ALWAYS_ON
+    assert _coerce_load_shape("unknown") is LoadShape.UNKNOWN
+    assert _coerce_load_shape("always_on") is LoadShape.ALWAYS_ON
+    assert _coerce_load_shape("LoadShape.UNKNOWN") is LoadShape.UNKNOWN
+    assert _coerce_load_shape("LoadShape.ALWAYS_ON") is LoadShape.ALWAYS_ON
+    assert _coerce_load_shape("  loadshape.always_on  ") is LoadShape.ALWAYS_ON
+
+
+def test_other_taxonomy_reprs_coerce_without_falling_back() -> None:
+    """The monitoring/behavior/connectivity repr forms resolve, not fall back."""
+    from wattmosaic_engine.disaggregation.configuration import (
+        BEHAVIOR_KEY,
+        CONNECTIVITY_KEY,
+        MONITORING_KEY,
+    )
+
+    dev = DeviceTopology(
+        device_id="d",
+        metadata={
+            MONITORING_KEY: str(MonitoringLevel.SHARED),
+            BEHAVIOR_KEY: str(PowerBehavior.VARIABLE),
+            CONNECTIVITY_KEY: str(HaConnectivity.CONNECTED),
+        },
+    )
+    cfg = effective_config("d", device=dev)
+    assert cfg.monitoring == MonitoringLevel.SHARED
+    assert cfg.behavior == PowerBehavior.VARIABLE
+    assert cfg.connectivity == HaConnectivity.CONNECTED
+
+
 def test_load_shape_is_never_derived_from_a_device_name() -> None:
     """A suggestive name alone never sets the load-shape axis."""
     # A device called "always_on..." with no declaration must stay UNKNOWN.

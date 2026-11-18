@@ -58,7 +58,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from enum import Enum
+from typing import Any, TypeVar
 
 from wattmosaic_engine.contracts import (
     CTType,
@@ -352,6 +353,31 @@ def _split_entities(
     return deduped_kept, deduped_mode, reclassified
 
 
+_E = TypeVar("_E", bound=Enum)
+
+
+def _coerce_enum(value: Any, enum_cls: type[_E]) -> _E:
+    """Resolve an enum member, a plain value string, or a ``ClassName.MEMBER`` repr.
+
+    ``str(EnumMember)`` for a ``(str, Enum)`` returns the *repr* ``ClassName.MEMBER``,
+    not the value.  Passing that to ``EnumClass(...)`` raises.  Accept the member
+    directly, a plain value (case-insensitive, whitespace-stripped), or the repr
+    form (parse the part after the final dot); raise only for genuinely invalid
+    input so a real typo is not silently accepted.
+    """
+    if isinstance(value, enum_cls):
+        return value
+    text = str(value).strip()
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    return enum_cls(text.lower())
+
+
+def _coerce_load_shape(value: Any) -> LoadShape:
+    """Coerce any LoadShape representation (member, value string or repr) safely."""
+    return _coerce_enum(value, LoadShape)
+
+
 def effective_config(
     device_id: str,
     *,
@@ -376,30 +402,40 @@ def effective_config(
     config = None
     if isinstance(raw_config, Mapping):
         try:
-            config = DeviceConfiguration.model_validate({"device_id": device_id, **raw_config})
+            # Older/stored projections may carry a ``ClassName.MEMBER`` repr for
+            # load_shape; Pydantic would reject it and null the whole config.
+            # Normalise it to the plain value first so the declaration survives.
+            projection: dict[str, Any] = {"device_id": device_id, **raw_config}
+            shape = projection.get("load_shape")
+            if isinstance(shape, str) and "." in shape:
+                projection["load_shape"] = _coerce_load_shape(shape).value
+            config = DeviceConfiguration.model_validate(projection)
         except Exception:  # noqa: BLE001 - a bad projection must not break inference
             config = None
 
     declared = MonitoringLevel.UNKNOWN
     try:
-        declared = MonitoringLevel(str(metadata.get(MONITORING_KEY, "unknown")))
+        declared = _coerce_enum(metadata.get(MONITORING_KEY, "unknown"), MonitoringLevel)
     except ValueError:
         declared = MonitoringLevel.UNKNOWN
     monitoring = derive_monitoring(device, graph, topology=topology, declared=declared)
 
     behavior = PowerBehavior.UNKNOWN
     try:
-        behavior = PowerBehavior(str(metadata.get(BEHAVIOR_KEY, "unknown")))
+        behavior = _coerce_enum(metadata.get(BEHAVIOR_KEY, "unknown"), PowerBehavior)
     except ValueError:
         behavior = PowerBehavior.UNKNOWN
     # The load shape is a declaration; an unparseable value is UNKNOWN, never a
     # guess and never a derivation from the device's name or type.
     load_shape = LoadShape.UNKNOWN
     if config is not None:
-        load_shape = LoadShape(str(config.load_shape))
+        try:
+            load_shape = _coerce_load_shape(config.load_shape)
+        except ValueError:
+            load_shape = LoadShape.UNKNOWN
     connectivity = HaConnectivity.UNKNOWN
     try:
-        connectivity = HaConnectivity(str(metadata.get(CONNECTIVITY_KEY, "unknown")))
+        connectivity = _coerce_enum(metadata.get(CONNECTIVITY_KEY, "unknown"), HaConnectivity)
     except ValueError:
         connectivity = HaConnectivity.UNKNOWN
 
