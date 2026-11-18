@@ -1,0 +1,96 @@
+{
+  "$defs": {
+    "KernelPhase": {
+      "additionalProperties": false,
+      "description": "One phase of a response kernel (delay / amplitude / duration).",
+      "properties": {
+        "phase": {
+          "enum": [
+            "startup",
+            "active",
+            "steady",
+            "shutdown",
+            "standby"
+          ],
+          "title": "Phase",
+          "type": "string"
+        },
+        "delay_s": {
+          "$ref": "#/$defs/LevelStat"
+        },
+        "amplitude_w": {
+          "$ref": "#/$defs/LevelStat"
+        },
+        "duration_s": {
+          "$ref": "#/$defs/LevelStat"
+        }
+      },
+      "required": [
+        "phase"
+      ],
+      "title": "KernelPhase",
+      "type": "object"
+    },
+    "LevelStat": {
+      "additionalProperties": false,
+      "description": "A robust statistic of a level: nullable median/MAD plus a sample count.",
+      "properties": {
+        "median_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Median W"
+        },
+        "mad_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mad W"
+        },
+        "n": {
+          "default": 0,
+          "title": "N",
+          "type": "integer"
+        }
+      },
+      "title": "LevelStat",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Transient response kernel, keyed by transition type.",
+  "properties": {
+    "kind": {
+      "const": "response_kernel",
+      "default": "response_kernel",
+      "title": "Kind",
+      "type": "string"
+    },
+    "by_transition": {
+      "additionalProperties": {
+        "items": {
+          "$ref": "#/$defs/KernelPhase"
+        },
+        "type": "array"
+      },
+      "title": "By Transition",
+      "type": "object"
+    }
+  },
+  "title": "ResponseKernelSpec",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/response_kernel_spec.json",
+  "x-contract-version": "2.4.0"
+}

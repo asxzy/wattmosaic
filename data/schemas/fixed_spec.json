@@ -1,0 +1,85 @@
+{
+  "$defs": {
+    "LevelStat": {
+      "additionalProperties": false,
+      "description": "A robust statistic of a level: nullable median/MAD plus a sample count.",
+      "properties": {
+        "median_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Median W"
+        },
+        "mad_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mad W"
+        },
+        "n": {
+          "default": 0,
+          "title": "N",
+          "type": "integer"
+        }
+      },
+      "title": "LevelStat",
+      "type": "object"
+    },
+    "PowerLevelV3": {
+      "description": "Operating level of a published value (HB \u00a711.5).\n\nUnlike the legacy ``PowerLevel``, ``OFF`` and ``STANDBY`` are distinct\nmembers: OFF is a transition endpoint, not a claim of 0 W (HB \u00a711.5,\nrule 6).  ``UNKNOWN`` is the neutral default.",
+      "enum": [
+        "off",
+        "standby",
+        "idle",
+        "active",
+        "transient",
+        "unknown"
+      ],
+      "title": "PowerLevelV3",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Fixed-power model: per-level stats plus named transition deltas.",
+  "properties": {
+    "kind": {
+      "const": "fixed",
+      "default": "fixed",
+      "title": "Kind",
+      "type": "string"
+    },
+    "levels": {
+      "additionalProperties": {
+        "$ref": "#/$defs/LevelStat"
+      },
+      "propertyNames": {
+        "$ref": "#/$defs/PowerLevelV3"
+      },
+      "title": "Levels",
+      "type": "object"
+    },
+    "transition_delta": {
+      "additionalProperties": {
+        "$ref": "#/$defs/LevelStat"
+      },
+      "title": "Transition Delta",
+      "type": "object"
+    }
+  },
+  "title": "FixedSpec",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/fixed_spec.json",
+  "x-contract-version": "2.4.0"
+}

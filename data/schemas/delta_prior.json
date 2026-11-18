@@ -1,0 +1,37 @@
+{
+  "additionalProperties": false,
+  "description": "A signed, uncertain delta-power prior handed to inference (interfaces \u00a75).",
+  "properties": {
+    "mean_w": {
+      "title": "Mean W",
+      "type": "number"
+    },
+    "sigma_w": {
+      "title": "Sigma W",
+      "type": "number"
+    },
+    "sign": {
+      "enum": [
+        "pos",
+        "neg",
+        "any"
+      ],
+      "title": "Sign",
+      "type": "string"
+    },
+    "model_version_id": {
+      "title": "Model Version Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "mean_w",
+    "sigma_w",
+    "sign",
+    "model_version_id"
+  ],
+  "title": "DeltaPrior",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/delta_prior.json",
+  "x-contract-version": "2.4.0"
+}

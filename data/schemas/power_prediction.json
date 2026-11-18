@@ -1,0 +1,80 @@
+{
+  "$defs": {
+    "PowerLevelV3": {
+      "description": "Operating level of a published value (HB \u00a711.5).\n\nUnlike the legacy ``PowerLevel``, ``OFF`` and ``STANDBY`` are distinct\nmembers: OFF is a transition endpoint, not a claim of 0 W (HB \u00a711.5,\nrule 6).  ``UNKNOWN`` is the neutral default.",
+      "enum": [
+        "off",
+        "standby",
+        "idle",
+        "active",
+        "transient",
+        "unknown"
+      ],
+      "title": "PowerLevelV3",
+      "type": "string"
+    },
+    "PredictionStatus": {
+      "description": "Whether a :class:`PowerPrediction` carries a usable value.",
+      "enum": [
+        "KNOWN",
+        "UNKNOWN"
+      ],
+      "title": "PredictionStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "A per-level prediction that can honestly say \"unknown\" (never 0 W).",
+  "properties": {
+    "level": {
+      "$ref": "#/$defs/PowerLevelV3"
+    },
+    "mean_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Mean W"
+    },
+    "sigma_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Sigma W"
+    },
+    "status": {
+      "$ref": "#/$defs/PredictionStatus"
+    },
+    "model_version_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model Version Id"
+    }
+  },
+  "required": [
+    "level",
+    "status"
+  ],
+  "title": "PowerPrediction",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/power_prediction.json",
+  "x-contract-version": "2.4.0"
+}

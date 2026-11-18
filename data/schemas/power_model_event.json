@@ -1,0 +1,42 @@
+{
+  "additionalProperties": false,
+  "description": "A status transition in a version's append-only lifecycle log.",
+  "properties": {
+    "version_id": {
+      "title": "Version Id",
+      "type": "string"
+    },
+    "event": {
+      "enum": [
+        "candidate",
+        "activated",
+        "superseded",
+        "rejected",
+        "rolled_back",
+        "frozen",
+        "unfrozen"
+      ],
+      "title": "Event",
+      "type": "string"
+    },
+    "reason": {
+      "title": "Reason",
+      "type": "string"
+    },
+    "at": {
+      "format": "date-time",
+      "title": "At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "version_id",
+    "event",
+    "reason",
+    "at"
+  ],
+  "title": "PowerModelEvent",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/power_model_event.json",
+  "x-contract-version": "2.4.0"
+}

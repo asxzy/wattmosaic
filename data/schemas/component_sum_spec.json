@@ -1,0 +1,23 @@
+{
+  "additionalProperties": false,
+  "description": "A device model that is the sum of its component models.",
+  "properties": {
+    "kind": {
+      "const": "component_sum",
+      "default": "component_sum",
+      "title": "Kind",
+      "type": "string"
+    },
+    "component_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Component Ids",
+      "type": "array"
+    }
+  },
+  "title": "ComponentSumSpec",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/component_sum_spec.json",
+  "x-contract-version": "2.4.0"
+}
