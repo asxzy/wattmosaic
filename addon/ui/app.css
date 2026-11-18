@@ -912,8 +912,12 @@ pre.code {
   .grid.cols-5 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   /* Between the phone breakpoint and a full desktop header the nav, brand and
      connection chip compete for width; trim the brand subtitle and the nav
-     padding so all five sections stay visible without horizontal scrolling. */
+     padding. With six sections (Matrix included) the trimmed links still do
+     not fit ~761-860px, so wrap the nav instead of scrolling it sideways:
+     a horizontally scrolling nav hides the last tab (Matrix) with no visible
+     affordance, making its click land on the element behind it. */
   .brand-sub { display: none; }
+  .nav { flex-wrap: wrap; overflow-x: visible; row-gap: 2px; }
   .nav a { padding: 8px 9px; font-size: 13.5px; }
   .topbar-inner { gap: 12px; }
 }
