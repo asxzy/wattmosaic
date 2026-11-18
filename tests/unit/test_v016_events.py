@@ -26,7 +26,6 @@ from wattmosaic_engine.contracts import (
     EventEvidence,
     EventGroup,
     EventGroupStatus,
-    EventGroupStatusV3,
     EventInferenceRecord,
     EvidenceRef,
     JointInferenceResult,
@@ -369,7 +368,7 @@ def _result() -> JointInferenceResult:
     return JointInferenceResult(
         event_group_id="grp-1",
         event_group_revision=1,
-        status=EventGroupStatusV3.CONFIRMED,
+        status=EventGroupStatus.CONFIRMED,
         device_estimates=[],
         group_estimates=[],
         unknown_estimates=[],

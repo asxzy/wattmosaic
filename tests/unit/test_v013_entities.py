@@ -495,7 +495,7 @@ def test_backup_file_exists(schema11_db: Path) -> None:
     try:
         assert db.backup_path is not None
         assert db.backup_path.exists()
-        assert db.backup_path.name.startswith(f"{schema11_db.name}.pre-v013.")
+        assert db.backup_path.name.startswith(f"{schema11_db.name}.pre-v")  # names the highest pending migration
         backup = sqlite3.connect(db.backup_path)
         try:
             assert int(backup.execute("PRAGMA user_version").fetchone()[0]) == PRE_MIGRATION_VERSION
