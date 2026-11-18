@@ -55,6 +55,17 @@ SOLVER_TOL = 1e-10
 #: but naming it makes the bound part of our contract instead of scipy's.
 SOLVER_MAX_ITER = 1000
 
+#: Huber tuning constant (design §7): residual z-scores beyond this are
+#: down-weighted linearly instead of quadratically, so one bad reader cannot
+#: drag a whole event group's solve towards it.
+HUBER_DELTA = 1.345
+
+#: IRLS budget and convergence tolerance (design §7: "At most 20 iterations,
+#: tolerance 1e-6").  A solve that exhausts this is reported as *not
+#: converged*; it is never silently published as a result.
+IRLS_MAX_ITER = 20
+IRLS_TOL = 1e-6
+
 
 @dataclass(slots=True)
 class Identifiability:
@@ -573,6 +584,237 @@ def solve_constrained_nnls(
         dropped_rows=dropped_rows,
         merged_rows=merged_rows,
     )
+
+
+@dataclass(slots=True)
+class RobustSolveResult:
+    """The outcome of :func:`solve_robust_constrained`.
+
+    ``converged`` is ``False`` when the IRLS loop exhausted its budget or when
+    the inner bounded solve did not prove optimality.  Callers must surface that
+    flag; a non-converged point is not a measurement of any device.
+    """
+
+    result: SolveResult
+    #: Huber weights applied to each row on the final iteration.
+    robust_weights: np.ndarray
+    iterations: int
+    converged: bool
+    objective: float
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def x(self) -> np.ndarray:
+        return self.result.x
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            **self.result.as_dict(),
+            "iterations": self.iterations,
+            "robust_converged": self.converged,
+            "objective": self.objective,
+        }
+
+
+def huber_weights(z: np.ndarray, delta: float = HUBER_DELTA) -> np.ndarray:
+    """IRLS weights for the Huber loss ``ρ(z)`` (pure, deterministic).
+
+    ``ρ(z) = z²/2`` for ``|z| <= δ`` and ``δ(|z| - δ/2)`` beyond it, so the
+    effective weight is ``1`` inside the band and ``δ/|z|`` outside.
+    """
+    z = np.asarray(z, dtype=float)
+    magnitude = np.abs(z)
+    out = np.ones_like(magnitude)
+    outside = magnitude > delta
+    if np.any(outside):
+        out[outside] = delta / magnitude[outside]
+    return out
+
+
+def huber_loss(z: np.ndarray, delta: float = HUBER_DELTA) -> float:
+    """The Huber loss value of standardised residuals ``z``."""
+    z = np.asarray(z, dtype=float)
+    magnitude = np.abs(z)
+    inside = magnitude <= delta
+    total = np.where(inside, 0.5 * z**2, delta * (magnitude - 0.5 * delta))
+    return float(np.sum(total))
+
+
+def solve_robust_constrained(
+    A: np.ndarray,
+    y: np.ndarray,
+    *,
+    device_ids: Sequence[str] | None = None,
+    sigma: np.ndarray | Sequence[float] | None = None,
+    weights: np.ndarray | Sequence[float] | None = None,
+    lower: float | Sequence[float] = 0.0,
+    upper: float | Sequence[float] | None = None,
+    prior: Sequence[float] | None = None,
+    ridge: float = 0.0,
+    huber_delta: float = HUBER_DELTA,
+    max_iter: int = IRLS_MAX_ITER,
+    tol: float = IRLS_TOL,
+    analyse: bool = True,
+    robust_mask: np.ndarray | Sequence[bool] | None = None,
+) -> RobustSolveResult:
+    """Huber-IRLS around :func:`solve_constrained_nnls` (HB §8.2, design §7).
+
+    The measurement loss is ``Σ_r w_r · Huber_δ(r_r / σ_r)``; each IRLS step
+    reweights the rows by ``min(1, δ/|z|)`` and hands the resulting *weighted*
+    least-squares problem (with signed ``lower``/``upper`` per variable and an
+    optional ridge towards ``prior``) to the bounded solver.
+
+    Signed bounds are supported because ``lower``/``upper`` may be arrays: an
+    ON transition of a consumer uses ``lower = 0``, an OFF transition uses
+    ``upper = 0``, and producer/bidirectional devices and unknown-load columns
+    are unrestricted.  Values are never clamped to zero here — a battery
+    discharge keeps its negative ΔP.
+
+    ``sigma`` is the per-row noise (W).  Rows with a missing (``None``/``nan``)
+    or non-positive sigma are excluded from the robust fit, because weighting
+    them as if they were certain is exactly the failure mode this wrapper
+    exists to avoid.  ``weights`` is an optional extra row multiplier.
+
+    ``robust_mask`` selects the rows the robust loss is applied to.  Rows
+    outside the mask keep their quadratic penalty (used for near-hard anchor
+    constraints such as a single-subject plug reading, whose "outlier" can only
+    be a real disagreement to be surfaced, not down-weighted away).
+
+    Returns a :class:`RobustSolveResult`; it is deterministic for identical
+    inputs (no random initialisation, no wall clock).
+    """
+    design = np.asarray(A, dtype=float)
+    measured = np.asarray(y, dtype=float)
+    if design.ndim != 2:
+        raise ValueError("A must be 2-D")
+    m, n = design.shape
+    if measured.shape[0] != m:
+        raise ValueError(f"y has {measured.shape[0]} rows but A has {m}")
+
+    sigma_arr = np.full(m, np.nan, dtype=float) if sigma is None else np.asarray(sigma, dtype=float).reshape(-1)
+    if sigma_arr.size != m:
+        raise ValueError("sigma must have one value per row")
+    base = np.ones(m, dtype=float) if weights is None else np.asarray(weights, dtype=float).reshape(-1)
+    if base.size != m:
+        raise ValueError("weights must have one value per row")
+    base = np.where(np.isfinite(base) & (base > 0), base, 0.0)
+
+    usable = np.isfinite(sigma_arr) & (sigma_arr > 0) & (base > 0)
+    # A row with no sigma cannot be weighted honestly; give it a huge sigma so
+    # it contributes nothing, and record it.
+    effective = np.where(usable, sigma_arr, np.inf)
+    initial_w = np.where(usable, base / np.where(usable, effective, 1.0), 0.0)
+    if robust_mask is None:
+        robust_rows = usable
+    else:
+        mask = np.asarray(robust_mask, dtype=bool).reshape(-1)
+        if mask.size != m:
+            raise ValueError("robust_mask must have one value per row")
+        robust_rows = mask & usable
+
+    warnings: list[str] = []
+    if not np.all(usable):
+        warnings.append("rows_without_sigma_excluded")
+
+    robust = np.ones(m, dtype=float)
+    total_obj = float("inf")
+    converged = True
+    iterations = 0
+    inner: SolveResult | None = None
+    for iteration in range(1, max(int(max_iter), 1) + 1):
+        iterations = iteration
+        row_weights = initial_w * np.sqrt(robust)
+        inner = solve_constrained_nnls(
+            design,
+            measured,
+            device_ids=device_ids,
+            weights=row_weights,
+            lower=lower,
+            upper=upper,
+            prior=prior,
+            ridge=ridge,
+            analyse=analyse,
+        )
+        residual = measured - design @ inner.x
+        z = np.zeros(m, dtype=float)
+        nonzero = usable & (effective > 0) & np.isfinite(effective)
+        z[nonzero] = residual[nonzero] / effective[nonzero]
+        new_robust = np.ones(m, dtype=float)
+        if np.any(robust_rows):
+            new_robust[robust_rows] = huber_weights(z[robust_rows], huber_delta)
+        objective = huber_loss(z[robust_rows], huber_delta) if np.any(robust_rows) else 0.0
+        if prior is not None and ridge > 0.0:
+            delta_x = inner.x - np.asarray(prior, dtype=float)
+            objective += 0.5 * float(ridge) * float(np.sum(delta_x**2))
+        delta_w = 0.0
+        if np.any(robust_rows):
+            delta_w = float(np.max(np.abs(new_robust[robust_rows] - robust[robust_rows])))
+        robust = new_robust
+        if not inner.converged:
+            converged = False
+            warnings.extend(w for w in inner.warnings if w not in warnings)
+            break
+        total_obj = objective
+        if delta_w <= tol:
+            break
+    else:
+        converged = False
+        warnings.append("irls_iteration_limit")
+
+    if inner is None:  # pragma: no cover - max_iter >= 1 guarantees a solve
+        raise RuntimeError("IRLS loop produced no solve")
+
+    residual = measured - design @ inner.x
+    # The reported objective is the loss the caller asked for: Huber on the
+    # robust rows, plain quadratic on the near-hard ones (anchors, penalties).
+    total_obj = 0.0
+    if np.any(robust_rows):
+        total_obj += huber_loss(
+            (residual[robust_rows] / effective[robust_rows]),
+            huber_delta,
+        )
+    quadratic = usable & ~robust_rows
+    if np.any(quadratic):
+        z = residual[quadratic] / effective[quadratic]
+        total_obj += 0.5 * float(np.sum(z**2))
+    if prior is not None and ridge > 0.0:
+        delta_x = inner.x - np.asarray(prior, dtype=float)
+        total_obj += 0.5 * float(ridge) * float(np.sum(delta_x**2))
+    if not converged and "solve_not_converged" not in warnings:
+        warnings.append("solve_not_converged")
+    return RobustSolveResult(
+        result=inner,
+        robust_weights=robust,
+        iterations=iterations,
+        converged=converged,
+        objective=float(total_obj) if np.isfinite(total_obj) else float(inner.cost),
+        warnings=warnings,
+    )
+
+
+def transition_bounds(
+    sign: str | None,
+    *,
+    magnitude: float | None = None,
+) -> tuple[float, float | None]:
+    """Signed per-variable bounds from a transition sign class (design §7).
+
+    ``"pos"`` (ON for a consumer, charging) => ``[0, +∞)``.
+    ``"neg"`` (OFF, discharge) => ``(-∞, 0]`` — deliberately *not* clipped.
+    ``"any"``/``None`` (PV, battery, bidirectional, unknown columns) =>
+    ``(-∞, +∞)``; such a variable stays free to take either sign.
+
+    ``magnitude`` adds an optional physical ceiling (a declared or learned
+    maximum), applied on the side the sign allows.  It is never used as a
+    *floor*: model priors are not bounds (DEC-19).
+    """
+    kind = (sign or "any").lower()
+    bound = abs(float(magnitude)) if magnitude is not None else float(np.inf)
+    if kind in {"pos", "positive", "on", "up"}:
+        return 0.0, bound
+    if kind in {"neg", "negative", "off", "down"}:
+        return -bound, 0.0
+    return -np.inf, np.inf
 
 
 def residual_summary(
