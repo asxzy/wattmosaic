@@ -20,9 +20,22 @@ if str(ENGINE_ROOT) not in sys.path:
     sys.path.insert(0, str(ENGINE_ROOT))
 
 from wattmosaic_engine import contracts  # noqa: E402
+from wattmosaic_engine.contracts import (  # noqa: E402
+    entities,
+    foundation,
+    inference,
+    matrix,
+    measurement,
+    power_models,
+    topology,
+)
 
 OUT = ROOT / "data" / "schemas"
 
+# The original single-file module's export set.  Kept verbatim so the generated
+# schemas are byte-identical to those from before the contracts.py -> contracts/
+# split (X01).  New contracts are exported through each submodule's
+# ``SCHEMA_EXPORTS`` list instead of being added here.
 MODELS = {
     "measurement": contracts.Measurement,
     "ct_channel": contracts.CTChannel,
@@ -55,18 +68,41 @@ MODELS = {
     "service_result": contracts.ServiceResult,
 }
 
+# Submodules that may contribute new schemas.  Each declares ``SCHEMA_EXPORTS``
+# as a list of ``(name, model)`` pairs; tasks own their submodule's list, so no
+# task needs to edit this exporter.
+SCHEMA_MODULES = (
+    foundation,
+    entities,
+    measurement,
+    topology,
+    inference,
+    matrix,
+    power_models,
+)
+
+
+def collect_models() -> dict[str, type]:
+    """Return the legacy export set plus every submodule's ``SCHEMA_EXPORTS``."""
+    collected = dict(MODELS)
+    for module in SCHEMA_MODULES:
+        for name, model in getattr(module, "SCHEMA_EXPORTS", ()):
+            collected[name] = model
+    return collected
+
 
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
+    models = collect_models()
     index = {"contract_version": contracts.CONTRACT_VERSION, "schemas": {}}
-    for name, model in MODELS.items():
+    for name, model in models.items():
         schema = model.model_json_schema(mode="serialization")
         schema["$id"] = f"https://wattmosaic.local/schemas/{name}.json"
         schema["x-contract-version"] = contracts.CONTRACT_VERSION
         (OUT / f"{name}.json").write_text(json.dumps(schema, indent=2) + "\n")
         index["schemas"][name] = f"{name}.json"
     (OUT / "index.json").write_text(json.dumps(index, indent=2) + "\n")
-    print(json.dumps({"contract_version": contracts.CONTRACT_VERSION, "schemas": len(MODELS)}, indent=2))
+    print(json.dumps({"contract_version": contracts.CONTRACT_VERSION, "schemas": len(models)}, indent=2))
 
 
 if __name__ == "__main__":
