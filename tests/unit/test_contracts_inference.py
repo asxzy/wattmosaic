@@ -26,7 +26,6 @@ from wattmosaic_engine.contracts.inference import (
     CandidateSource,
     DeviceEstimate,
     DeviceGroupEstimate,
-    EventGroupStatusV3,
     EventInferenceRecord,
     InferenceSnapshot,
     JointInferenceResult,
@@ -34,6 +33,9 @@ from wattmosaic_engine.contracts.inference import (
     ReconciliationV3,
     UnknownEstimate,
 )
+from wattmosaic_engine.contracts.measurement import EventGroupStatus, ReaderMeasurement
+from wattmosaic_engine.contracts.power_models import PowerLevelV3
+from wattmosaic_engine.contracts.topology import ReaderResidualPoint
 
 SCHEMA_MODELS = [model for _stem, model in inference.SCHEMA_EXPORTS]
 
@@ -120,7 +122,7 @@ def _result(**overrides: object) -> JointInferenceResult:
     data: dict[str, object] = {
         "event_group_id": "eg-1",
         "event_group_revision": 1,
-        "status": EventGroupStatusV3.CONFIRMED,
+        "status": EventGroupStatus.CONFIRMED,
         "device_estimates": [_estimate()],
         "group_estimates": [_group()],
         "unknown_estimates": [
@@ -177,6 +179,19 @@ def test_names_reachable_from_facade() -> None:
     assert contracts.DeviceEstimate is DeviceEstimate
     assert contracts.InferenceSnapshot is InferenceSnapshot
     assert contracts.ReconciliationV3 is ReconciliationV3
+
+
+def test_event_group_status_v3_is_gone() -> None:
+    assert "EventGroupStatusV3" not in inference.__all__
+    assert not hasattr(inference, "EventGroupStatusV3")
+
+
+def test_field_annotations_reference_the_canonical_classes() -> None:
+    """Fields must use the real K02/K03/K06 types, not placeholders or duplicates."""
+    assert DeviceEstimate.model_fields["level"].annotation == PowerLevelV3 | None
+    assert JointInferenceResult.model_fields["status"].annotation is EventGroupStatus
+    assert InferenceSnapshot.model_fields["reader_measurements"].annotation == list[ReaderMeasurement]
+    assert InferenceSnapshot.model_fields["residual_estimates"].annotation == list[ReaderResidualPoint]
 
 
 @pytest.mark.parametrize("model", SCHEMA_MODELS, ids=lambda m: m.__name__)
@@ -251,8 +266,8 @@ def test_candidate_sources_cover_all_ten() -> None:
     }
 
 
-def test_event_group_status_v3_covers_six_states() -> None:
-    assert [member.value for member in EventGroupStatusV3] == [
+def test_event_group_status_covers_six_states() -> None:
+    assert [member.value for member in EventGroupStatus] == [
         "detected",
         "matching",
         "provisional",

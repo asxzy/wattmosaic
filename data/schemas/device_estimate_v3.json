@@ -224,16 +224,17 @@
       "title": "InferenceMethod",
       "type": "string"
     },
-    "PowerLevel": {
-      "description": "Which of a device's four power levels a published value belongs to.\n\n``06-device-and-load-model-spec.md`` \u00a75.1 names four levels -- standby,\nidle, active, transient -- and ``ExpectedPower`` carries the envelope\n(``standby_w``, ``idle_w``, ``on_w``, ``startup_w`` / ``shutdown_w``).\nThis enum is the label a *published* value carries.\n\nIt is a **different axis** from ``PowerState`` and must never be conflated\nwith it.  ``PowerState`` is a *provenance* label (``measured`` /\n``estimated`` / ``allocated`` / ``unknown``) derived by ``power_state_for``\nfrom ``Source`` and ``MeasurementBasis``; ``PowerLevel`` is the *operating\nlevel* the number sits at.  A value can be both ``measured`` and\n``standby``: the two fields answer different questions and coexist on\n``InferenceResult``.\n\n``UNKNOWN`` is the neutral default, so a payload that does not name a level\nreads as \"not stated\" rather than as a claim.",
+    "PowerLevelV3": {
+      "description": "Operating level of a published value (HB \u00a711.5).\n\nUnlike the legacy ``PowerLevel``, ``OFF`` and ``STANDBY`` are distinct\nmembers: OFF is a transition endpoint, not a claim of 0 W (HB \u00a711.5,\nrule 6).  ``UNKNOWN`` is the neutral default.",
       "enum": [
+        "off",
         "standby",
         "idle",
         "active",
         "transient",
         "unknown"
       ],
-      "title": "PowerLevel",
+      "title": "PowerLevelV3",
       "type": "string"
     },
     "VersionTriple": {
@@ -313,7 +314,7 @@
     "level": {
       "anyOf": [
         {
-          "$ref": "#/$defs/PowerLevel"
+          "$ref": "#/$defs/PowerLevelV3"
         },
         {
           "type": "null"

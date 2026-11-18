@@ -241,7 +241,7 @@
         "level": {
           "anyOf": [
             {
-              "$ref": "#/$defs/PowerLevel"
+              "$ref": "#/$defs/PowerLevelV3"
             },
             {
               "type": "null"
@@ -459,17 +459,311 @@
       "title": "InferenceMethod",
       "type": "string"
     },
-    "PowerLevel": {
-      "description": "Which of a device's four power levels a published value belongs to.\n\n``06-device-and-load-model-spec.md`` \u00a75.1 names four levels -- standby,\nidle, active, transient -- and ``ExpectedPower`` carries the envelope\n(``standby_w``, ``idle_w``, ``on_w``, ``startup_w`` / ``shutdown_w``).\nThis enum is the label a *published* value carries.\n\nIt is a **different axis** from ``PowerState`` and must never be conflated\nwith it.  ``PowerState`` is a *provenance* label (``measured`` /\n``estimated`` / ``allocated`` / ``unknown``) derived by ``power_state_for``\nfrom ``Source`` and ``MeasurementBasis``; ``PowerLevel`` is the *operating\nlevel* the number sits at.  A value can be both ``measured`` and\n``standby``: the two fields answer different questions and coexist on\n``InferenceResult``.\n\n``UNKNOWN`` is the neutral default, so a payload that does not name a level\nreads as \"not stated\" rather than as a claim.",
+    "MeasurementBasis": {
+      "description": "What produced the watt value, independent of how much we trust it.\n\n``Source`` answers *\"how was the value obtained\"*; this answers *\"what kind\nof instrument produced the watts\"*.  A ``DIRECT_MEASURED`` result can be\n``FACTOR_ADJUSTED``, and a ``MODEL_ESTIMATED`` result can never be\n``CT_MEASURED``.",
       "enum": [
+        "ct_measured",
+        "monitor_reported",
+        "factor_adjusted",
+        "estimated_appliance_total",
+        "unknown"
+      ],
+      "title": "MeasurementBasis",
+      "type": "string"
+    },
+    "MeasurementType": {
+      "description": "What kind of value a reader measurement represents (HB \u00a72.1).",
+      "enum": [
+        "instantaneous",
+        "window_average",
+        "device_reported",
+        "calculated",
+        "accumulated_energy"
+      ],
+      "title": "MeasurementType",
+      "type": "string"
+    },
+    "PowerLevelV3": {
+      "description": "Operating level of a published value (HB \u00a711.5).\n\nUnlike the legacy ``PowerLevel``, ``OFF`` and ``STANDBY`` are distinct\nmembers: OFF is a transition endpoint, not a claim of 0 W (HB \u00a711.5,\nrule 6).  ``UNKNOWN`` is the neutral default.",
+      "enum": [
+        "off",
         "standby",
         "idle",
         "active",
         "transient",
         "unknown"
       ],
-      "title": "PowerLevel",
+      "title": "PowerLevelV3",
       "type": "string"
+    },
+    "QualityFlag": {
+      "description": "Why a measurement may be unfit for inference (HB \u00a76.1, \u00a718).",
+      "enum": [
+        "unit_invalid",
+        "implausible_range",
+        "repeated",
+        "stale_on_arrival",
+        "clock_skew_future",
+        "primed",
+        "out_of_order"
+      ],
+      "title": "QualityFlag",
+      "type": "string"
+    },
+    "ReaderMeasurement": {
+      "additionalProperties": false,
+      "description": "HB \u00a72.1 normalized reading, produced only by P1 (polarity applied once).\n\nUnsupported measurements stay ``None`` -- the contract never fabricates a\nfield (HB \u00a72.1) and never uses ``0`` to mean \"unknown\" (HB \u00a718).",
+      "properties": {
+        "reader_id": {
+          "title": "Reader Id",
+          "type": "string"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "title": "Observed At",
+          "type": "string"
+        },
+        "received_at": {
+          "format": "date-time",
+          "title": "Received At",
+          "type": "string"
+        },
+        "active_power_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Active Power W"
+        },
+        "current_rms_a": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Current Rms A"
+        },
+        "voltage_rms_v": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Voltage Rms V"
+        },
+        "reactive_power_var": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reactive Power Var"
+        },
+        "power_factor": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Power Factor"
+        },
+        "energy_wh": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Energy Wh"
+        },
+        "phase": {
+          "enum": [
+            "l1",
+            "l2",
+            "both",
+            "unknown"
+          ],
+          "title": "Phase",
+          "type": "string"
+        },
+        "leg": {
+          "anyOf": [
+            {
+              "enum": [
+                "l1",
+                "l2"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Leg"
+        },
+        "voltage_reference_v": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Voltage Reference V"
+        },
+        "measurement_type": {
+          "$ref": "#/$defs/MeasurementType"
+        },
+        "measurement_window_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Measurement Window Ms"
+        },
+        "calibration_version": {
+          "title": "Calibration Version",
+          "type": "string"
+        },
+        "measurement_basis": {
+          "title": "Measurement Basis",
+          "type": "string"
+        },
+        "quality_flags": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/QualityFlag"
+          },
+          "title": "Quality Flags",
+          "type": "array"
+        },
+        "sequence": {
+          "title": "Sequence",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "reader_id",
+        "observed_at",
+        "received_at",
+        "phase",
+        "measurement_type",
+        "calibration_version",
+        "measurement_basis",
+        "sequence"
+      ],
+      "title": "ReaderMeasurement",
+      "type": "object"
+    },
+    "ReaderResidualPoint": {
+      "additionalProperties": false,
+      "description": "One signed residual sample for one reader (HB \u00a79.4 E, DEF-05).\n\nThe point is keyed by reader and carries the topology version it was\ncomputed under, so per-reader baselines no longer share a single\ninstall-wide window.  ``residual_w`` is signed and never clamped; ``None``\nmeans unknown (HB \u00a718), never 0 W.",
+      "properties": {
+        "reader_id": {
+          "title": "Reader Id",
+          "type": "string"
+        },
+        "at": {
+          "format": "date-time",
+          "title": "At",
+          "type": "string"
+        },
+        "residual_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Residual W"
+        },
+        "baseline_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Baseline W"
+        },
+        "dynamic_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dynamic W"
+        },
+        "noise_sigma_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Noise Sigma W"
+        },
+        "topology_version_id": {
+          "title": "Topology Version Id",
+          "type": "string"
+        },
+        "basis": {
+          "$ref": "#/$defs/MeasurementBasis"
+        }
+      },
+      "required": [
+        "reader_id",
+        "at",
+        "topology_version_id",
+        "basis"
+      ],
+      "title": "ReaderResidualPoint",
+      "type": "object"
     },
     "ReconciliationV3": {
       "additionalProperties": false,
@@ -610,7 +904,9 @@
       "$ref": "#/$defs/VersionTriple"
     },
     "reader_measurements": {
-      "items": {},
+      "items": {
+        "$ref": "#/$defs/ReaderMeasurement"
+      },
       "title": "Reader Measurements",
       "type": "array"
     },
@@ -629,7 +925,9 @@
       "type": "array"
     },
     "residual_estimates": {
-      "items": {},
+      "items": {
+        "$ref": "#/$defs/ReaderResidualPoint"
+      },
       "title": "Residual Estimates",
       "type": "array"
     },
