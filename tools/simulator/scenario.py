@@ -90,6 +90,30 @@ class SimulatorConfig:
     #: an explicit factor history.  Absent by default on purpose — a bare float
     #: default would make "no metadata" indistinguishable from a deliberate ×1.
     factor_channels: dict[str, RefossFactorChannel] = field(default_factory=dict)
+    #: WP-B8: declared averaging window per reader, in milliseconds.  A sample
+    #: taken at time t is the *mean* channel truth over [t-window, t], so a step
+    #: is smeared across one window.  Absent readers have no declared window.
+    measurement_window_ms: dict[str, float] = field(default_factory=dict)
+    #: WP-B8: extra delivery latency for a late backfill per channel, in
+    #: simulated seconds.  A sample whose ``received_at`` exceeds its physical
+    #: sample time by more than the group's post-window is a late backfill.
+    late_backfill_s: dict[str, float] = field(default_factory=dict)
+    #: WP-B8: per-reader clock skew in seconds.  ``state_timestamp`` is reported
+    #: as ``sample_time + skew`` while the engine's ``received_at`` is untouched;
+    #: the physical sample time is held in ``sample_time_s`` for the oracle.
+    reader_clock_skew_s: dict[str, float] = field(default_factory=dict)
+    #: WP-B8: push-on-change silence.  When true, a reader emits *no* sample
+    #: while its reported value is unchanged (HA fires no ``state_changed`` for
+    #: an unchanged value).  The last reported value and its timestamp are kept
+    #: as ``last_reported`` on the samples that do arrive.  Opt-in: the legacy
+    #: simulator emits repeated samples by default.
+    push_on_change: bool = False
+    #: WP-B8: HA context attached to every state change of a device.  The value
+    #: is ``{"id": ..., "parent_id": ..., "user_id": ...}`` as HA puts it at the
+    #: top level of a ``state_changed`` payload.  Devices in one automation
+    #: burst share a ``parent_id``; a decoy group shares a parent id while its
+    #: physical changes are deliberately non-simultaneous.
+    ha_contexts: dict[str, dict[str, str]] = field(default_factory=dict)
 
     @property
     def horizon_s(self) -> float:
@@ -116,6 +140,11 @@ class SimulatorConfig:
             "factor_channels": {
                 k: v.as_metadata() for k, v in self.factor_channels.items()
             },
+            "measurement_window_ms": dict(self.measurement_window_ms),
+            "late_backfill_s": dict(self.late_backfill_s),
+            "reader_clock_skew_s": dict(self.reader_clock_skew_s),
+            "push_on_change": bool(self.push_on_change),
+            "ha_contexts": {k: dict(v) for k, v in self.ha_contexts.items()},
             "simulator_version": "1.1.0",
             "topology_notes": [],
         }
@@ -177,6 +206,10 @@ class HouseholdScenario:
         self._ct_energy_kwh = {c.ct_id: 0.0 for c in self.topology.channels}
         self._prev_tick: float | None = None
         self._previous_reported: dict[str, float] = {}
+        # WP-B8: the value a push-on-change reader last *published*, judged on
+        # the pre-noise (windowed) truth.  A steady load has a constant truth,
+        # so the reader stays silent even though instantaneous noise differs.
+        self._previous_published_truth: dict[str, float] = {}
         self._last_obs: dict[str, Observation] = {}
         self._last_device_state: dict[str, str] = {}
         self._last_changed: dict[str, float] = {}
@@ -293,6 +326,35 @@ class HouseholdScenario:
         channel = self.config.factor_channels.get(ct_id)
         return 1.0 if channel is None else channel.reported_multiplier_at(t)
 
+    def _averaged_truth(self, ct_id: str, t: float) -> float:
+        """Mean channel truth over the declared measurement window ending at t.
+
+        Averaging is done over *physical truth*, before any impairment.  With no
+        declared window this is just the instantaneous truth.  A step therefore
+        appears smeared across exactly one window on a windowed reader, which is
+        what a real CT that publishes a rolling average reports.
+        """
+        window_s = float(self.config.measurement_window_ms.get(ct_id, 0.0)) / 1000.0
+        if window_s <= 0.0:
+            truth_devices = {
+                dev.device_id: self.profiles[dev.device_id].effective_power(t)
+                for dev in self.devices
+            }
+            return self.topology.true_ct_powers(truth_devices).get(ct_id, 0.0)
+        # A handful of sub-samples is enough: truth here is piecewise-smooth
+        # (steps, ramps, duty cycles) and determinism matters more than
+        # quadrature precision.
+        acc = 0.0
+        count = 8
+        for i in range(1, count + 1):
+            tt = t - window_s + (window_s * i) / count
+            truth_devices = {
+                dev.device_id: self.profiles[dev.device_id].effective_power(tt)
+                for dev in self.devices
+            }
+            acc += self.topology.true_ct_powers(truth_devices).get(ct_id, 0.0)
+        return acc / count
+
     def factor_frame(self, ct_id: str, t: float) -> dict[str, Any] | None:
         """Observable factor metadata for a factor channel at ``t``.
 
@@ -343,6 +405,11 @@ class HouseholdScenario:
                 ct_truth = self.topology.true_ct_powers(truth_devices)
                 outage = self._in_outage(ch.ct_id, sample_t)
                 conductor = ct_truth.get(ch.ct_id, 0.0)
+                # WP-B8: a windowed reader reports the mean truth over one
+                # declared measurement window, so a step is smeared.  For an
+                # un-windowed reader this is the instantaneous conductor truth.
+                if self.config.measurement_window_ms.get(ch.ct_id):
+                    conductor = self._averaged_truth(ch.ct_id, sample_t)
                 # A Refoss factor channel publishes ``conductor * factor``.  The
                 # conductor reading is ground truth and is never derived from
                 # the factor; only the published value is scaled.
@@ -366,6 +433,31 @@ class HouseholdScenario:
                 spike = self._spike_at(ch.ct_id, sample_t)
                 if spike and not obs.dropped_by_outage:
                     obs.reported_w = obs.reported_w + spike
+                # WP-B8: reader clock skew shifts the *reported* state timestamp
+                # only; the physical sample time and engine receipt are kept.
+                skew = float(self.config.reader_clock_skew_s.get(ch.ct_id, 0.0))
+                if skew:
+                    obs.state_timestamp = obs.state_timestamp + skew
+                # WP-B8: late backfill shifts *receipt* only.  The value still
+                # describes the instant in ``state_timestamp``; it simply
+                # arrives after the group's post-window has closed.
+                backfill = float(self.config.late_backfill_s.get(ch.ct_id, 0.0))
+                if backfill:
+                    obs.received_at = obs.received_at + backfill
+                # WP-B8: push-on-change silence.  With the windowed value, a
+                # flat reader has an identical reported value sample after
+                # sample; HA would publish no state change for those.  Suppress
+                # them, keeping only the last reported value/timestamp as
+                # liveness on the samples that do arrive.
+                published_truth = truth
+                if (
+                    self.config.push_on_change
+                    and ch.ct_id in self._previous_published_truth
+                    and abs(published_truth - self._previous_published_truth[ch.ct_id]) < 1e-9
+                    and not obs.dropped_by_outage
+                ):
+                    continue
+                self._previous_published_truth[ch.ct_id] = published_truth
                 self._previous_reported[ch.ct_id] = obs.reported_w
                 self._pending[ch.ct_id].append(obs)
 
@@ -401,6 +493,15 @@ class HouseholdScenario:
                     "injected_noise_w": round(obs.noise_w, 4),
                     "delivered": not obs.dropped_by_outage,
                     "samples_in_tick": count,
+                    # WP-B8: push-on-change liveness + declared averaging window.
+                    # ``last_reported`` is the HA state timestamp of this
+                    # reading: the instant the reader last reported a value.  A
+                    # steady load is silent, so this timestamp ages while the
+                    # value is held — exactly the ADR-0015 liveness signal.
+                    "last_reported": _iso(self.config.start_time, obs.state_timestamp),
+                    "measurement_window_ms": (
+                        self.config.measurement_window_ms.get(ch.ct_id)
+                    ),
                 }
                 factor = self.factor_frame(ch.ct_id, obs.sample_time)
                 if factor is not None:
@@ -431,6 +532,20 @@ class HouseholdScenario:
             if state != self._last_device_state.get(dev.device_id):
                 self._last_device_state[dev.device_id] = state
                 self._last_changed[dev.device_id] = observed_at
+            explicit = self.config.ha_contexts.get(dev.device_id)
+            if explicit is not None:
+                context = dict(explicit)
+            else:
+                # A deterministic fallback context keyed to device + change
+                # time.  HA always sets a context on every state change; a
+                # default context that changes with each transition keeps the
+                # simulator faithful without inventing a shared cause.
+                changed = self._last_changed.get(dev.device_id, 0.0)
+                context = {
+                    "id": f"ctx_{hash_stable(dev.device_id):08x}_{int(changed * 1000)}",
+                    "parent_id": None,
+                    "user_id": None,
+                }
             states[dev.ha_entity_id] = {
                 "entity_id": dev.ha_entity_id,
                 "state": state,
@@ -445,6 +560,9 @@ class HouseholdScenario:
                 "received_at": _iso(self.config.start_time, t + 0.05),
                 "device_id": dev.device_id,
                 "attributable": dev.metadata.get("attributable", True),
+                # WP-B8: HA puts ``context`` at the top level of a state_changed
+                # payload (not inside attributes), so that is where it goes.
+                "context": context,
             }
         return states
 
@@ -495,6 +613,10 @@ class HouseholdScenario:
                     "quality": obs.quality.value,
                     "repeated": obs.repeated,
                     "age_s": round(max(0.0, t_next - obs.received_at), 3),
+                    "last_reported": _iso(self.config.start_time, obs.state_timestamp),
+                    "measurement_window_ms": (
+                        self.config.measurement_window_ms.get(ct_id)
+                    ),
                 }
                 for ct_id, obs in sorted(latest_obs.items())
             }
@@ -527,6 +649,15 @@ class HouseholdScenario:
             prof = self.profiles[dev.device_id]
             for ev in prof.events:
                 if t0 <= ev.t < t1:
+                    explicit = self.config.ha_contexts.get(ev.device_id)
+                    if explicit is not None:
+                        context = dict(explicit)
+                    else:
+                        context = {
+                            "id": f"ctx_{hash_stable(ev.device_id):08x}_{int(ev.t * 1000)}",
+                            "parent_id": None,
+                            "user_id": None,
+                        }
                     out.append({
                         "device_id": ev.device_id,
                         "entity_id": dev.ha_entity_id,
@@ -534,6 +665,7 @@ class HouseholdScenario:
                         "power_w": round(ev.power_w, 4),
                         "note": ev.note,
                         "occurred_at": _iso(self.config.start_time, ev.t),
+                        "context": context,
                     })
         out.sort(key=lambda e: e["occurred_at"])
         return out

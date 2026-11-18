@@ -40,6 +40,8 @@ from .frames import (
     truth_stream,
     truth_view,
 )
+from .hb17 import HB17House, HB17Step
+from .hb17 import build as build_hb17
 from .hot_tub import HOT_TUB_BUILDERS, HOT_TUB_VARIANTS, HotTubFixture, hot_tub, hot_tub_list
 from .labhouse import (
     STRATA,
@@ -48,6 +50,15 @@ from .labhouse import (
     available_strata,
     build_scenario,
     validate_strata,
+)
+from .replay import (
+    Clock,
+    MutableClock,
+    RecordingConsumer,
+    ReplayResult,
+    StateChangeConsumer,
+    drive_house,
+    replay,
 )
 from .scenario import HouseholdScenario, SimulatorConfig
 from .topology import (
@@ -63,6 +74,17 @@ __all__ = [
     # scenario
     "HouseholdScenario",
     "SimulatorConfig",
+    # HB §17 reference house + replay driver
+    "HB17House",
+    "HB17Step",
+    "build_hb17",
+    "Clock",
+    "MutableClock",
+    "ReplayResult",
+    "RecordingConsumer",
+    "StateChangeConsumer",
+    "drive_house",
+    "replay",
     # topology
     "REAL_HOME_TOPOLOGY",
     "HouseholdTopology",
