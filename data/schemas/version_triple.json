@@ -1,0 +1,27 @@
+{
+  "additionalProperties": false,
+  "description": "The independent topology/mapping/model version triple (rule 20).",
+  "properties": {
+    "topology_version_id": {
+      "title": "Topology Version Id",
+      "type": "string"
+    },
+    "mapping_version_id": {
+      "title": "Mapping Version Id",
+      "type": "string"
+    },
+    "model_set_id": {
+      "title": "Model Set Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "topology_version_id",
+    "mapping_version_id",
+    "model_set_id"
+  ],
+  "title": "VersionTriple",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/version_triple.json",
+  "x-contract-version": "2.4.0"
+}

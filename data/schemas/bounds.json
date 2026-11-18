@@ -1,0 +1,53 @@
+{
+  "additionalProperties": false,
+  "description": "A justified interval for an estimate.\n\n``lower_w`` and ``upper_w`` are nullable (HB \u00a718).  When both are present\nthe validator requires ``lower_w <= upper_w``.  A zero-width interval\n(a point) is only possible through the private :meth:`_point` constructor,\nwhich represents an IDENTIFIABLE or MEASURED result; the ``allow_point``\nflag is *not* a field and never appears in the model or its JSON schema.",
+  "properties": {
+    "lower_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Lower W"
+    },
+    "upper_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Upper W"
+    },
+    "basis": {
+      "anyOf": [
+        {
+          "enum": [
+            "non_negativity",
+            "group_sum",
+            "reader_ceiling",
+            "posterior",
+            "declared_ceiling"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Basis"
+    }
+  },
+  "title": "Bounds",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/bounds.json",
+  "x-contract-version": "2.4.0"
+}

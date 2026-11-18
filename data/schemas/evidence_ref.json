@@ -1,0 +1,33 @@
+{
+  "additionalProperties": false,
+  "description": "A typed, resolvable reference to a piece of evidence (D4's resolver).",
+  "properties": {
+    "kind": {
+      "enum": [
+        "sample",
+        "event_evidence",
+        "event_group",
+        "ha_event",
+        "edge",
+        "mapping_edge",
+        "model_version",
+        "configuration_event",
+        "observation"
+      ],
+      "title": "Kind",
+      "type": "string"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "kind",
+    "id"
+  ],
+  "title": "EvidenceRef",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/evidence_ref.json",
+  "x-contract-version": "2.4.0"
+}
