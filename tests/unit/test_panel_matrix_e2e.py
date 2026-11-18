@@ -1,5 +1,9 @@
 """Real-browser regression test for the Matrix tab click (matrix-tab-e2e).
 
+The panel is served as flat native ES modules.  This test serves the real
+modules under a fake HA-ingress path prefix and intercepts the engine API, so
+a relative ``import './core.js'`` must resolve through the prefix.
+
 The Matrix tab is the last link in the top navigation. Between roughly 761px
 and 860px of viewport width the nav used to scroll horizontally; with six
 sections the last link was clipped with no visible affordance, so a user click
@@ -86,23 +90,30 @@ def test_matrix_tab_click_renders_view() -> None:
     node, playwright_dir, exe = _PW
 
     index_html = (UI_DIR / "index.html").read_text(encoding="utf-8")
-    # Inline the real CSS/JS so the page needs no static-file server. The app
-    # fetches only same-origin /api/v1/* paths, which Playwright intercepts.
     css = (UI_DIR / "app.css").read_text(encoding="utf-8")
-    app_js = (UI_DIR / "app.js").read_text(encoding="utf-8")
+    matrix_css = (UI_DIR / "matrix.css").read_text(encoding="utf-8")
+    # Inline the CSS (CSP style-src allows inline styles) but load the real ES
+    # modules over HTTP under a fake ingress prefix so relative imports must
+    # resolve through the prefix — exactly the production scenario.
+    ingress = "/api/hassio_ingress/fake-token/"
     html = (
         index_html.replace('<link rel="stylesheet" href="ui/app.css">', f"<style>{css}</style>")
-        .replace('<script src="ui/app.js" defer></script>', f"<script>{app_js}</script>")
+        .replace('<link rel="stylesheet" href="ui/matrix.css">', f"<style>{matrix_css}</style>")
+        .replace('<script type="module" src="ui/main.js"></script>',
+                 f'<script type="module" src="{ingress}ui/main.js"></script>')
     )
+
+    # Serve each shipped module from the fake ingress prefix.
+    modules = {p.name: p.read_text(encoding="utf-8") for p in UI_DIR.glob("*.js")}
 
     script = r"""
 const { chromium } = require('playwright');
-const [exe, htmlB64, apiB64] = process.argv.slice(1);
+const [exe, htmlB64, apiB64, modulesB64, ingress] = process.argv.slice(1);
 const html = Buffer.from(htmlB64, 'base64').toString('utf8');
 const api = JSON.parse(Buffer.from(apiB64, 'base64').toString('utf8'));
+const modules = JSON.parse(Buffer.from(modulesB64, 'base64').toString('utf8'));
 (async () => {
   const browser = await chromium.launch({ executablePath: exe, headless: true, args: ['--no-sandbox'] });
-  // The width that used to clip the last nav link.
   const page = await browser.newPage({ viewport: { width: 780, height: 800 } });
   const pageErrors = [];
   page.on('pageerror', e => pageErrors.push(e.message));
@@ -111,22 +122,25 @@ const api = JSON.parse(Buffer.from(apiB64, 'base64').toString('utf8'));
     route.fulfill({ status: 200, contentType: 'application/json',
                     body: JSON.stringify(api[key] || {}) });
   });
-  // Fulfill the shell from a stable http origin so API fetches stay same-origin.
-  await page.route('http://panel.test/', route =>
+  // Serve the real ES modules through the ingress prefix with a JS MIME type.
+  for (const [name, source] of Object.entries(modules)) {
+    await page.route('http://panel.test' + ingress + 'ui/' + name, route =>
+      route.fulfill({ status: 200, contentType: 'text/javascript', body: source }));
+  }
+  await page.route('http://panel.test' + ingress, route =>
     route.fulfill({ status: 200, contentType: 'text/html', body: html }));
-  await page.goto('http://panel.test/', { waitUntil: 'domcontentloaded' });
-  await page.waitForTimeout(300);
+  await page.goto('http://panel.test' + ingress, { waitUntil: 'domcontentloaded' });
+  // ES modules need a microtask to fetch and evaluate; give them a moment.
+  await page.waitForTimeout(400);
 
   const link = page.locator('nav.nav [data-nav="matrix"]');
   const box = await link.boundingBox();
-  // Click at the link's own coordinates WITHOUT auto-scroll; this is what a
-  // user does. If the link is clipped behind another element, the hash stays put.
   const hit = await page.evaluate(({x, y}) => {
     const e = document.elementFromPoint(x, y);
     return e ? (e.getAttribute('data-nav') || e.tagName) : null;
   }, { x: box.x + box.width / 2, y: box.y + box.height / 2 });
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(500);
 
   const result = {
     hash: await page.evaluate(() => location.hash),
@@ -152,6 +166,8 @@ const api = JSON.parse(Buffer.from(apiB64, 'base64').toString('utf8'));
             exe,
             base64.b64encode(html.encode()).decode(),
             base64.b64encode(json.dumps(_API).encode()).decode(),
+            base64.b64encode(json.dumps(modules).encode()).decode(),
+            ingress,
         ],
         capture_output=True,
         text=True,
@@ -165,7 +181,7 @@ const api = JSON.parse(Buffer.from(apiB64, 'base64').toString('utf8'));
 
     assert result["hit"] == "matrix", f"click landed on {result['hit']!r}, not the Matrix link"
     assert result["hash"] == "#/matrix", f"hash after click was {result['hash']!r}"
-    assert result["viewHead"] == "Matrix & internal process", result["viewHead"]
+    assert result["viewHead"] == "Matrix & internal process", (result, result["pageErrors"])
     assert result["hasCells"] and result["hasLedger"] and result["hasIdent"], result
     assert result["ariaCurrent"] == "page", result["ariaCurrent"]
     assert not result["pageErrors"], result["pageErrors"]

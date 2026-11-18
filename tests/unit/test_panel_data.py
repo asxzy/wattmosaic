@@ -1,122 +1,20 @@
 """Data-rendering tests for the panel's derived backend-data cards (B4-UIa).
 
-``addon/ui/app.js`` is a plain browser script with no module seam, so — exactly
-as ``test_panel.py`` does for the window helpers — these tests *execute* a slice
-of the real shipped script under node rather than pattern-matching it.  A tiny
-DOM shim implements the handful of primitives the render helpers use
-(``document.createElement``, ``Node``, ``textContent``, ``append``), so the
-assertions are on the text the browser would actually put on screen when the
-engine publishes residual decomposition, the mapping matrix and identifiability
-group ranges.
-
-This is deliberately different from the shell/asset guards in ``test_panel.py``:
-those pin that files are *served*; these assert that given a sample API payload,
-the rendered DOM contains the expected fields and values.
+The panel is shipped as flat native ES modules under ``addon/ui``.  These tests
+import the real modules under node with a DOM shim on ``globalThis`` (see
+``panel_harness.py``) and assert on the text the browser would render for sample
+API payloads.  No source slicing or module-name markers: that was the old
+single-IIFE harness, removed by the ES-module port.
 """
 
 from __future__ import annotations
 
 import json
-import shutil
-import subprocess
-from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-APP_JS = REPO_ROOT / "addon" / "ui" / "app.js"
+from tests.unit.panel_harness import DOM_SHIM, EVENT_DOM_SHIM, lit, node_path, run_esm
 
-# The slice of the IIFE that holds the DOM helpers, formatters, STRINGS table and
-# the three derived-data renderers (up to the first unrelated card).  It contains
-# only declarations, so evaluating it under node executes no boot/fetch/DOM work.
-_SLICE_START = "const el = (tag, props = {}, children = []) => {"
-_SLICE_END = "function systemCard(health, status) {"
-
-# Minimal DOM stand-in.  ``el`` uses ``child instanceof Node`` and appends text
-# nodes; ``textContent`` concatenates the tree the way a browser would, which is
-# what the assertions below read.
-_DOM_SHIM = r"""
-class Node {
-  constructor() {
-    this.children = [];
-    this._text = '';
-    this.dataset = {};
-    this.attrs = {};
-    this.className = '';
-  }
-  set textContent(v) { this._text = String(v); this.children = []; }
-  get textContent() {
-    return this._text + this.children.map(
-      (c) => (c instanceof Node ? c.textContent : String(c))
-    ).join('');
-  }
-  setAttribute(k, v) { this.attrs[k] = String(v); }
-  append(...cs) { for (const c of cs) this.children.push(c); }
-  get firstChild() { return this.children[0] || null; }
-  removeChild(c) { const i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); }
-}
-global.Node = Node;
-global.document = {
-  createElement: (tag) => { const n = new Node(); n.tagName = tag; return n; },
-  createTextNode: (t) => { const n = new Node(); n._text = String(t); return n; },
-  // ``frag`` (used by ``kv``, which the mapping card renders) builds a fragment
-  // and appends children to it; a Node has both ``append`` and textContent.
-  createDocumentFragment: () => new Node(),
-  getElementById: () => null,
-  querySelectorAll: () => [],
-};
-"""
-
-
-def _render(payloads: dict) -> dict[str, str]:
-    """Render the three data cards under node and return their text content.
-
-    Returns ``None``-carrying callers as empty text where a card legitimately
-    renders nothing (no group ranges).  Skips when node is not installed: the
-    panel itself needs no node at runtime.
-    """
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("node is not installed; the panel does not need it at runtime")
-
-    script = APP_JS.read_text(encoding="utf-8")
-    start = script.index(_SLICE_START)
-    end = script.index(_SLICE_END, start)
-    block = script[start:end]
-
-    literals = (
-        f"const SAMPLE_RESIDUALS = {json.dumps(payloads['residuals'])};\n"
-        f"const SAMPLE_MAPPING = {json.dumps(payloads['mapping'])};\n"
-        f"const SAMPLE_DEVICES = {json.dumps(payloads['devices'])};\n"
-    )
-    program = (
-        _DOM_SHIM
-        + "\n"
-        + block
-        + "\n"
-        + literals
-        + "\n"
-        + "const groups = groupRangesCard(SAMPLE_DEVICES);\n"
-        + "console.log(JSON.stringify({\n"
-        + "  residual: residualDecompositionCard(SAMPLE_RESIDUALS).textContent,\n"
-        + "  mapping: mappingMatrixCard(SAMPLE_MAPPING).textContent,\n"
-        + "  groups: groups ? groups.textContent : '',\n"
-        + "}));\n"
-    )
-    completed = subprocess.run(
-        [node, "-e", program],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return json.loads(completed.stdout)
-
-
-# Sample API payloads — shapes taken from the actual engine wire forms:
-#   GET /api/v1/residuals -> {window_hours, count, components:[...]}
-#   GET /api/v1/mapping   -> {cells:[...], coverage:{counts:{...}}}
-#   GET /api/v1/devices   -> [{device_id, name, latest_result:{min_w,max_w,
-#                              group_members,power_w}, ...}]
 SAMPLE_RESIDUALS = {
     "window_hours": 24.0,
     "count": 2,
@@ -261,6 +159,174 @@ SAMPLE_DEVICES = [
     },
 ]
 
+SAMPLE_TOPOLOGY = {
+    "version": 7,
+    "status": "active",
+    "created_at": "2026-11-16T10:00:00+00:00",
+    "edge_count": 12,
+    "created_by": "op",
+    "summary": "rebalanced",
+}
+
+SAMPLE_MODEL = {
+    "device_id": "light.kitchen",
+    "active": {"version": 3},
+    "versions": [
+        {
+            "model_type": "linear",
+            "version": 3,
+            "status": "confirmed",
+            "confidence": 0.91,
+            "created_at": "2026-11-15T10:00:00+00:00",
+        },
+    ],
+}
+
+SAMPLE_VERSION = {
+    "versions": [
+        {
+            "version_id": "v6",
+            "version_number": 6,
+            "status": "frozen",
+            "edge_count": 11,
+            "created_at": "2026-11-14T10:00:00+00:00",
+            "created_by": "sys",
+            "summary": "initial",
+        },
+    ],
+}
+
+SAMPLE_STATUS = {
+    "audit": {
+        "last_pass": {
+            "configuration_changes": [
+                {
+                    "kind": "reader_reassign",
+                    "status": "suspected",
+                    "confidence": 0.62,
+                    "evidence_event_ids": ["e1", "e2"],
+                    "occurred_at": "2026-11-17T08:00:00+00:00",
+                    "device_id": "light.hall",
+                    "reader_id": "ct_shared",
+                },
+            ],
+        },
+    },
+}
+
+SAMPLE_DIAGNOSTICS = {
+    "errors": {
+        "recent_system_events": [
+            {
+                "category": "configuration_change",
+                "timestamp": "2026-11-17T08:00:00+00:00",
+                "details": {
+                    "event": {
+                        "kind": "threshold_tune",
+                        "status": "suspected",
+                        "confidence": 0.44,
+                        "evidence_event_ids": ["e3"],
+                    },
+                },
+            },
+            {
+                "category": "quality",
+                "timestamp": "2026-11-17T07:30:00+00:00",
+                "level": "degraded",
+                "message": "signal dropped below threshold",
+            },
+        ],
+        "recent_quality_events": [
+            {
+                "timestamp": "2026-11-17T07:00:00+00:00",
+                "code": "noise_spike",
+                "severity": "warn",
+                "detail": "noise floor rose",
+            },
+        ],
+    },
+}
+
+SAMPLE_ISOLATION = {
+    "verdicts": [
+        {
+            "device_id": "light.hall",
+            "status": "isolated",
+            "occurred_at": "2026-11-17T06:00:00+00:00",
+            "reason": "contaminated_window",
+            "competing_device_ids": ["light.entry", "ct_shared"],
+            "power_window_contaminated": True,
+            "window_start": "2026-11-17T05:00:00+00:00",
+            "window_end": "2026-11-17T06:00:00+00:00",
+        },
+    ],
+}
+
+SAMPLE_SNAPSHOT = {
+    "timestamp": "2026-11-17T10:00:00+00:00",
+    "results": [
+        d["latest_result"] for d in SAMPLE_DEVICES if d.get("latest_result")
+    ],
+}
+
+SAMPLE_RESET = {
+    "reset": True,
+    "backup_path": "/data/wattmosaic.reset-backup.2026-11-17T10-00-00.db",
+    "schema_version": 7,
+    "latest_schema_version": 7,
+}
+
+_STALE_GATING_STRINGS = (
+    "Learning is paused",
+    "confirm the topology to start",
+    "being rejected as ambiguous",
+    "until the topology is confirmed",
+    "penalty until",
+)
+
+_DYNAMIC_TOPOLOGY_NOTE = (
+    "Topology is dynamic (candidate); it is authoritative for inference and "
+    "learning and carries a reduced confidence (candidate 0.6 vs confirmed "
+    "1.0). No confirmation is required."
+)
+
+SAMPLE_DYNAMIC_STATUS = {
+    "learning": {
+        "active": True,
+        "effective_state": "learning",
+        "topology_note": _DYNAMIC_TOPOLOGY_NOTE,
+        "remedy": None,
+    },
+}
+
+SAMPLE_CANDIDATE_TOPOLOGY = {
+    "version": 7,
+    "status": "candidate",
+    "channels": [
+        {"ct_type": "main", "parent_ct_id": None},
+        {"ct_type": "branch", "parent_ct_id": "ct_main"},
+    ],
+    "devices": [{"device_id": "light.kitchen"}, {"device_id": "light.hall"}],
+    "created_at": "2026-11-16T10:00:00+00:00",
+}
+
+def _render(payloads: dict) -> dict[str, str]:
+    """Render the three data cards from the real modules under node."""
+    if not node_path():
+        pytest.skip("node is not installed; the panel does not need it at runtime")
+    program = (
+        "import { residualDecompositionCard, mappingMatrixCard, groupRangesCard } from './view-devices.js';\n"
+        f"const SAMPLE_RESIDUALS = {lit(payloads['residuals'])};\n"
+        f"const SAMPLE_MAPPING = {lit(payloads['mapping'])};\n"
+        f"const SAMPLE_DEVICES = {lit(payloads['devices'])};\n"
+        "const groups = groupRangesCard(SAMPLE_DEVICES);\n"
+        "console.log(JSON.stringify({\n"
+        "  residual: residualDecompositionCard(SAMPLE_RESIDUALS).textContent,\n"
+        "  mapping: mappingMatrixCard(SAMPLE_MAPPING).textContent,\n"
+        "  groups: groups ? groups.textContent : '',\n"
+        "}));\n"
+    )
+    return run_esm(program, shim=DOM_SHIM)
 
 @pytest.fixture(scope="module")
 def rendered() -> dict[str, str]:
@@ -451,47 +517,24 @@ SAMPLE_ISOLATION = {
 
 
 def _render_uib() -> dict[str, str]:
-    """Render the three B4-UIb cards under node and return their text content."""
-    node = shutil.which("node")
-    if not node:
+    """Render the three B4-UIb cards from the real modules under node."""
+    if not node_path():
         pytest.skip("node is not installed; the panel does not need it at runtime")
-
-    script = APP_JS.read_text(encoding="utf-8")
-    start = script.index(_SLICE_START)
-    end = script.index(_SLICE_END, start)
-    block = script[start:end]
-
-    literals = "\n".join(
-        [
-            f"const SAMPLE_TOPOLOGY = {json.dumps(SAMPLE_TOPOLOGY)};",
-            f"const SAMPLE_MODEL = {json.dumps(SAMPLE_MODEL)};",
-            f"const SAMPLE_VERSION = {json.dumps(SAMPLE_VERSION)};",
-            f"const SAMPLE_STATUS = {json.dumps(SAMPLE_STATUS)};",
-            f"const SAMPLE_DIAGNOSTICS = {json.dumps(SAMPLE_DIAGNOSTICS)};",
-            f"const SAMPLE_ISOLATION = {json.dumps(SAMPLE_ISOLATION)};",
-        ]
-    )
     program = (
-        _DOM_SHIM
-        + "\n"
-        + block
-        + "\n"
-        + literals
-        + "\n"
-        + "console.log(JSON.stringify({\n"
-        + "  version: versionHistoryCard(SAMPLE_TOPOLOGY, SAMPLE_MODEL, SAMPLE_VERSION).textContent,\n"
-        + "  suspected: suspectedChangesCard(SAMPLE_STATUS, SAMPLE_DIAGNOSTICS).textContent,\n"
-        + "  evidence: eventEvidenceCard(SAMPLE_DIAGNOSTICS, SAMPLE_ISOLATION).textContent,\n"
-        + "}));\n"
+        "import { versionHistoryCard, suspectedChangesCard, eventEvidenceCard } from './view-devices.js';\n"
+        f"const SAMPLE_TOPOLOGY = {lit(SAMPLE_TOPOLOGY)};\n"
+        f"const SAMPLE_MODEL = {lit(SAMPLE_MODEL)};\n"
+        f"const SAMPLE_VERSION = {lit(SAMPLE_VERSION)};\n"
+        f"const SAMPLE_STATUS = {lit(SAMPLE_STATUS)};\n"
+        f"const SAMPLE_DIAGNOSTICS = {lit(SAMPLE_DIAGNOSTICS)};\n"
+        f"const SAMPLE_ISOLATION = {lit(SAMPLE_ISOLATION)};\n"
+        "console.log(JSON.stringify({\n"
+        "  version: versionHistoryCard(SAMPLE_TOPOLOGY, SAMPLE_MODEL, SAMPLE_VERSION).textContent,\n"
+        "  suspected: suspectedChangesCard(SAMPLE_STATUS, SAMPLE_DIAGNOSTICS).textContent,\n"
+        "  evidence: eventEvidenceCard(SAMPLE_DIAGNOSTICS, SAMPLE_ISOLATION).textContent,\n"
+        "}));\n"
     )
-    completed = subprocess.run(
-        [node, "-e", program],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return json.loads(completed.stdout)
-
+    return run_esm(program, shim=DOM_SHIM)
 
 @pytest.fixture(scope="module")
 def rendered_uib() -> dict[str, str]:
@@ -564,59 +607,37 @@ SAMPLE_SNAPSHOT = {
 
 
 def _render_matrix() -> dict[str, str]:
-    """Render the matrix-view cards under node and return text + pivot structure."""
-    node = shutil.which("node")
-    if not node:
+    """Render the matrix-view cards from the real modules under node."""
+    if not node_path():
         pytest.skip("node is not installed; the panel does not need it at runtime")
-
-    script = APP_JS.read_text(encoding="utf-8")
-    start = script.index(_SLICE_START)
-    end = script.index(_SLICE_END, start)
-    block = script[start:end]
-
-    literals = "\n".join(
-        [
-            f"const SAMPLE_MAPPING = {json.dumps(SAMPLE_MAPPING)};",
-            f"const SAMPLE_DEVICES = {json.dumps(SAMPLE_DEVICES)};",
-            f"const SAMPLE_SNAPSHOT = {json.dumps(SAMPLE_SNAPSHOT)};",
-        ]
-    )
     program = (
-        _DOM_SHIM
-        + "\n"
-        + block
-        + "\n"
-        + literals
-        + "\n"
-        + "const pivot = matrixPivotCard(SAMPLE_MAPPING);\n"
-        + "const all = [];\n"
-        + "const walk = (n) => { if (!(n instanceof Node)) return; all.push(n);"
-        + " (n.children || []).forEach(walk); };\n"
-        + "walk(pivot);\n"
-        + "const rows = all.filter((n) => n.tagName === 'th' && n.dataset && n.dataset.device)"
-        + ".map((n) => n.textContent);\n"
-        + "const cols = all.filter((n) => n.tagName === 'th' && n.dataset && n.dataset.reader)"
-        + ".map((n) => n.textContent);\n"
-        + "const details = all.filter((n) => n.className &&"
-        + " n.className.indexOf('matrix-pivot-detail') >= 0).map((n) => n.textContent);\n"
-        + "const empties = all.filter((n) => n.className &&"
-        + " n.className.indexOf('matrix-pivot-empty') >= 0).map((n) => n.textContent);\n"
-        + "console.log(JSON.stringify({\n"
-        + "  pivot: pivot.textContent,\n"
-        + "  rows: rows, cols: cols, details: details, empties: empties,\n"
-        + "  cells: matrixCellsCard(SAMPLE_MAPPING).textContent,\n"
-        + "  ledger: matrixSourceLedgerCard(SAMPLE_DEVICES, SAMPLE_SNAPSHOT, SAMPLE_MAPPING).textContent,\n"
-        + "  groups: matrixIdentifiabilityCard(SAMPLE_DEVICES, SAMPLE_SNAPSHOT).textContent,\n"
-        + "}));\n"
+        "import { matrixPivotCard, matrixCellsCard } from './matrix-cell.js';\n"
+        "import { matrixSourceLedgerCard as ledger, matrixIdentifiabilityCard } from './matrix-drill.js';\n"
+        f"const SAMPLE_MAPPING = {lit(SAMPLE_MAPPING)};\n"
+        f"const SAMPLE_DEVICES = {lit(SAMPLE_DEVICES)};\n"
+        f"const SAMPLE_SNAPSHOT = {lit(SAMPLE_SNAPSHOT)};\n"
+        "const pivot = matrixPivotCard(SAMPLE_MAPPING);\n"
+        "const all = [];\n"
+        "const walk = (n) => { if (!(n instanceof Node)) return; all.push(n);"
+        " (n.children || []).forEach(walk); };\n"
+        "walk(pivot);\n"
+        "const rows = all.filter((n) => n.tagName === 'th' && n.dataset && n.dataset.device)"
+        ".map((n) => n.textContent);\n"
+        "const cols = all.filter((n) => n.tagName === 'th' && n.dataset && n.dataset.reader)"
+        ".map((n) => n.textContent);\n"
+        "const details = all.filter((n) => n.className &&"
+        " n.className.indexOf('matrix-pivot-detail') >= 0).map((n) => n.textContent);\n"
+        "const empties = all.filter((n) => n.className &&"
+        " n.className.indexOf('matrix-pivot-empty') >= 0).map((n) => n.textContent);\n"
+        "console.log(JSON.stringify({\n"
+        "  pivot: pivot.textContent,\n"
+        "  rows: rows, cols: cols, details: details, empties: empties,\n"
+        "  cells: matrixCellsCard(SAMPLE_MAPPING).textContent,\n"
+        "  ledger: ledger(SAMPLE_DEVICES, SAMPLE_SNAPSHOT, SAMPLE_MAPPING).textContent,\n"
+        "  groups: matrixIdentifiabilityCard(SAMPLE_DEVICES, SAMPLE_SNAPSHOT).textContent,\n"
+        "}));\n"
     )
-    completed = subprocess.run(
-        [node, "-e", program],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return json.loads(completed.stdout)
-
+    return run_esm(program, shim=DOM_SHIM)
 
 @pytest.fixture(scope="module")
 def rendered_matrix() -> dict:
@@ -728,12 +749,6 @@ def test_matrix_view_identifiability_no_fabrication(rendered_matrix: dict[str, s
 # rather than pattern-matching source.  The shim lives here in the test file only.
 # ---------------------------------------------------------------------------
 
-_RESET_BLOCK_START = "/* RESET_UI_BLOCK_START */"
-_RESET_BLOCK_END = "/* RESET_UI_BLOCK_END */"
-# The real api/get/post helpers and ApiError live before the el slice; include
-# them so the driver exercises the shipped request path, not a reimplementation.
-_API_SLICE_START = "  const BASE = (() => {"
-
 SAMPLE_RESET = {
     "reset": True,
     "backup_path": "/data/wattmosaic.reset-backup.2026-11-17T10-00-00.db",
@@ -745,112 +760,23 @@ SAMPLE_RESET = {
 # need with: id lookup, ``value``/``disabled`` properties, event listeners plus
 # a ``fire`` helper, and body/URL/storage globals so the real ``api`` helper can
 # run.  ``fetch`` is stubbed by each driver to capture the outgoing request.
-_RESET_DOM_SHIM = r"""
-class Node {
-  constructor() {
-    this.children = [];
-    this._text = '';
-    this.dataset = {};
-    this.attrs = {};
-    this.className = '';
-    this._listeners = {};
-    this._parent = null;
-    this.value = '';
-    this.disabled = false;
-    this.id = '';
-    this.tagName = '';
-  }
-  set textContent(v) { this._text = String(v); this.children = []; }
-  get textContent() {
-    return this._text + this.children.map(
-      (c) => (c instanceof Node ? c.textContent : String(c))
-    ).join('');
-  }
-  setAttribute(k, v) { this.attrs[k] = String(v); if (k === 'id') this.id = String(v); }
-  getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
-  addEventListener(type, fn) { (this._listeners[type] ||= []).push(fn); }
-  fire(type, ev) {
-    for (const fn of (this._listeners[type] || [])) fn.call(this, ev || { target: this });
-  }
-  append(...cs) {
-    for (const c of cs) {
-      if (c instanceof Node) c._parent = this;
-      this.children.push(c);
-    }
-  }
-  remove() {
-    if (this._parent) {
-      const i = this._parent.children.indexOf(this);
-      if (i >= 0) this._parent.children.splice(i, 1);
-      this._parent = null;
-    }
-  }
-  get firstChild() { return this.children[0] || null; }
-  removeChild(c) { const i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); }
-}
-global.Node = Node;
-function _walk(node, out) {
-  for (const c of node.children) {
-    if (c instanceof Node) { if (c.id) out.push(c); _walk(c, out); }
-  }
-  return out;
-}
-const _body = new Node(); _body.tagName = 'body';
-global.document = {
-  baseURI: 'http://localhost/',
-  body: _body,
-  createElement: (tag) => { const n = new Node(); n.tagName = tag; return n; },
-  createTextNode: (t) => { const n = new Node(); n._text = String(t); return n; },
-  createDocumentFragment: () => new Node(),
-  getElementById: (id) => _walk(_body, []).find((n) => n.id === id) || null,
-  querySelectorAll: () => [],
-};
-global.location = { href: 'http://localhost/', hash: '', replace() {} };
-global.sessionStorage = { getItem: () => null, setItem() {}, removeItem() {} };
-"""
-
-
 def _run_reset_driver(driver_js: str, *, reset_payload: dict | None = None) -> dict:
-    """Evaluate the real api/post helpers + reset block, then a node driver.
-
-    ``driver_js`` may use ``global.__calls`` (captured fetch calls), ``byId`` and
-    the ``SAMPLE_RESET`` payload.  It must finish with a ``console.log(JSON...)``.
-    """
-    node = shutil.which("node")
-    if not node:
+    """Run the reset-card test against the real modules under node."""
+    if not node_path():
         pytest.skip("node is not installed; the panel does not need it at runtime")
-
-    script = APP_JS.read_text(encoding="utf-8")
-    api_start = script.index(_API_SLICE_START)
-    core_start = script.index(_SLICE_START)
-    core_end = script.index(_SLICE_END, core_start)
-    api = script[api_start:core_start]
-    core = script[core_start:core_end]
-    reset_start = script.index(_RESET_BLOCK_START)
-    reset_end = script.index(_RESET_BLOCK_END, reset_start)
-    reset_block = script[reset_start:reset_end]
-
-    payload = json.dumps(reset_payload if reset_payload is not None else SAMPLE_RESET)
+    payload = lit(reset_payload if reset_payload is not None else SAMPLE_RESET)
     preamble = (
         "global.__calls = [];\n"
-        + "global.fetch = async (url, init) => {\n"
-        + "  global.__calls.push({ url, init });\n"
-        + "  return { ok: true, status: 200, text: async () => JSON.stringify(" + payload + ") };\n"
-        + "};\n"
-        + "const byId = (id) => document.getElementById(id);\n"
+        "global.fetch = async (url, init) => {\n"
+        "  global.__calls.push({ url, init });\n"
+        "  return { ok: true, status: 200, text: async () => JSON.stringify(" + payload + ") };\n"
+        "};\n"
+        "const byId = (id) => document.getElementById(id);\n"
     )
-    program = (
-        _RESET_DOM_SHIM + "\n" + preamble + "\n"
-        + api + "\n" + core + "\n" + reset_block + "\n" + driver_js + "\n"
+    imports = (
+        "import { resetDatabaseCard } from './view-diagnostics.js';\n"
     )
-    completed = subprocess.run(
-        [node, "-e", program],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return json.loads(completed.stdout)
-
+    return run_esm(imports + preamble + driver_js, shim=EVENT_DOM_SHIM)
 
 _RESET_DRIVER_GUARD = r"""
 (async () => {
@@ -892,7 +818,6 @@ _RESET_DRIVER_GUARD = r"""
   }));
 })();
 """
-
 
 def test_reset_button_requires_typed_confirmation() -> None:
     """The button opens a dialog whose confirm stays inert until RESET is typed."""
@@ -1017,71 +942,26 @@ SAMPLE_CANDIDATE_TOPOLOGY = {
 
 
 def _render_topology_messaging() -> dict[str, str | bool]:
-    """Render the two dynamic-topology surfaces under node.
-
-    Extracts the real ``topologySummary`` and ``topologyLearningBanner``
-    functions plus the helpers they close over (``el``/``frag``/``notice``,
-    ``STRINGS``, ``statCard``, ``label``, ``toneFor``, ``ago``, ``titleCase``)
-    and a stub ``confirmTopology`` so no network/DOM boot code runs.  Returns
-    each surface's on-screen text plus whether a banner was produced.
-    """
-    node = shutil.which("node")
-    if not node:
+    """Render the two dynamic-topology surfaces from the real modules."""
+    if not node_path():
         pytest.skip("node is not installed; the panel does not need it at runtime")
-
-    script = APP_JS.read_text(encoding="utf-8")
-    # Everything from `el` up to systemCard contains the shared DOM/formatting
-    # helpers and the two functions' dependencies (STRINGS, statCard, notice...).
-    helpers_start = script.index(_SLICE_START)
-    helpers_end = script.index(_SLICE_END, helpers_start)
-    helpers = script[helpers_start:helpers_end]
-
-    def _fn(name: str, next_marker: str) -> str:
-        start = script.index(f"function {name}(")
-        end = script.index(next_marker, start)
-        return script[start:end]
-
-    summary_fn = _fn("topologySummary", "/* --- The hierarchy")
-    banner_fn = _fn("topologyLearningBanner", "/* --- Quality")
-
-    literals = "\n".join(
-        [
-            f"const STATUS = {json.dumps(SAMPLE_DYNAMIC_STATUS)};",
-            f"const TOPOLOGY = {json.dumps(SAMPLE_CANDIDATE_TOPOLOGY)};",
-        ]
-    )
-    # The banner wires an ``onclick`` handler, so the base shim needs a minimal
-    # ``addEventListener`` (the read-only-card shim above deliberately omits it).
-    shim = _DOM_SHIM + "\nNode.prototype.addEventListener = function () {};\n"
+    # The base shim needs addEventListener because the banner wires onclick.
+    shim = DOM_SHIM + "\nNode.prototype.addEventListener = function () {};\n"
     program = (
-        shim
-        + "\n"
-        + helpers
-        + "\n"
-        + "const confirmTopology = () => {};\n"
-        + summary_fn
-        + "\n"
-        + banner_fn
-        + "\n"
-        + literals
-        + "\n"
-        + "const summary = topologySummary(TOPOLOGY, null);\n"
-        + "const banner = topologyLearningBanner(STATUS, TOPOLOGY);\n"
-        + "console.log(JSON.stringify({\n"
-        + "  summary: summary.textContent,\n"
-        + "  hasBanner: banner !== null,\n"
-        + "  banner: banner ? banner.textContent : '',\n"
-        + "  bannerTone: banner ? banner.dataset.tone : null,\n"
-        + "}));\n"
+        "import { topologySummary } from './view-topology.js';\n"
+        "import { topologyLearningBanner } from './view-discover.js';\n"
+        f"const STATUS = {lit(SAMPLE_DYNAMIC_STATUS)};\n"
+        f"const TOPOLOGY = {lit(SAMPLE_CANDIDATE_TOPOLOGY)};\n"
+        "const summary = topologySummary(TOPOLOGY, null);\n"
+        "const banner = topologyLearningBanner(STATUS, TOPOLOGY);\n"
+        "console.log(JSON.stringify({\n"
+        "  summary: summary.textContent,\n"
+        "  hasBanner: banner !== null,\n"
+        "  banner: banner ? banner.textContent : '',\n"
+        "  bannerTone: banner ? banner.dataset.tone : null,\n"
+        "}));\n"
     )
-    completed = subprocess.run(
-        [node, "-e", program],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return json.loads(completed.stdout)
-
+    return run_esm(program, shim=shim)
 
 @pytest.fixture(scope="module")
 def topology_messaging() -> dict[str, str | bool]:
@@ -1128,53 +1008,27 @@ def test_learning_banner_with_topology_note_is_informational(
         )
 
 
-# The pure discovery-job outcome mapper, delimited by markers in app.js.  Loading
+# The pure discovery-job outcome mapper.  Importing it directly
 # only this slice under node exercises the shipped mapping with no DOM, no fetch
 # and no timer harness -- it is a pure function.
-_DISCOVERY_OUTCOME_START = "/* DISCOVERY_STATUS_OUTCOME_START */"
-_DISCOVERY_OUTCOME_END = "/* DISCOVERY_STATUS_OUTCOME_END */"
-
-
 def test_discovery_status_outcome_maps_states() -> None:
-    """The pure helper maps running/complete/failed, surfacing the real error text.
-
-    A failed job's ``error`` is a string in the status payload (the engine writes
-    ``str(exc)``); the mapper must return it verbatim so the UI can show it rather
-    than a generic "Discovery failed".
-    """
-    node = shutil.which("node")
-    if not node:
+    """The pure helper maps running/complete/failed, surfacing the real error text."""
+    if not node_path():
         pytest.skip("node is not installed; the panel does not need it at runtime")
-
-    script = APP_JS.read_text(encoding="utf-8")
-    start = script.index(_DISCOVERY_OUTCOME_START)
-    end = script.index(_DISCOVERY_OUTCOME_END, start)
-    block = script[start:end]
-
     program = (
-        block
-        + "\n"
-        + "const out = {\n"
-        + "  running: discoveryStatusOutcome({ job_id: 'j', status: 'running' }),\n"
-        + "  complete: discoveryStatusOutcome({ job_id: 'j', status: 'complete', result: { accepted: [1] } }),\n"
-        + "  failed: discoveryStatusOutcome({ job_id: 'j', status: 'failed', error: 'CT row measures the whole installation' }),\n"
-        + "  failedObject: discoveryStatusOutcome({ job_id: 'j', status: 'failed', error: { message: 'engine exploded' } }),\n"
-        + "};\n"
-        + "console.log(JSON.stringify(out));\n"
+        "import { discoveryStatusOutcome } from './view-discover.js';\n"
+        "console.log(JSON.stringify({\n"
+        "  running: discoveryStatusOutcome({ job_id: 'j', status: 'running' }),\n"
+        "  complete: discoveryStatusOutcome({ job_id: 'j', status: 'complete', result: { accepted: [1] } }),\n"
+        "  failed: discoveryStatusOutcome({ job_id: 'j', status: 'failed', error: 'CT row measures the whole installation' }),\n"
+        "  failedObject: discoveryStatusOutcome({ job_id: 'j', status: 'failed', error: { message: 'engine exploded' } }),\n"
+        "}));\n"
     )
-    completed = subprocess.run(
-        [node, "-e", program],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    out = json.loads(completed.stdout)
+    out = run_esm(program, shim=DOM_SHIM)
 
     assert out["running"] == {"done": False}
     assert out["complete"]["done"] is True
     assert out["complete"]["result"] == {"accepted": [1]}
     assert out["failed"]["done"] is True
-    assert out["failed"]["error"] == "CT row measures the whole installation", (
-        "a failed job must surface the actual error text from the status payload"
-    )
+    assert out["failed"]["error"] == "CT row measures the whole installation"
     assert out["failedObject"]["error"] == "engine exploded"

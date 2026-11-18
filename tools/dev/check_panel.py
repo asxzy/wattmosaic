@@ -35,14 +35,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 UI = ROOT / "addon" / "ui"
-REQUIRED = ("index.html", "app.css", "app.js", "mark.svg")
+REQUIRED = ("index.html", "app.css", "matrix.css", "main.js", "mark.svg")
 
 #: The SVG namespace is a name, not a request.  Everything else that looks like
 #: an absolute URL is an external reference the runtime cannot satisfy.
 ALLOWED_URLS = ("http://www.w3.org/2000/svg",)
 
 #: Elements whose open/close counts must balance in the static shell.  The
-#: dynamic views are built by ``app.js`` and are not parsed here.
+#: dynamic views are built by the ES modules and are not parsed here.
 BALANCED_TAGS = ("html", "head", "body", "header", "nav", "main", "footer")
 
 #: ADR-0029 retired the "dedicated CT" role, its monitoring level and its
@@ -75,13 +75,13 @@ def retired_vocabulary_errors(name: str, text: str) -> list[str]:
 # AC-7: the badge text on a legacy payload
 # --------------------------------------------------------------------------- #
 
-#: ``app.js`` is a browser script with no module seam and the repo has no JS
-#: runner, so AC-7 ("the panel renders no dedicated text even on legacy data")
+#: The panel is shipped as ES modules; the repo has no JS
+#: runner in the static-check path, so AC-7 ("the panel renders no dedicated text even on legacy data")
 #: is checked by *replaying* the panel's own label lookup rather than by a DOM
 #: render.  The table is parsed out of the shipped file, so this cannot pass
 #: against a copy of the strings that has drifted from what the browser loads.
-STRINGS_BLOCK = re.compile(r"const STRINGS = \{(.*?)\n  \};", re.DOTALL)
-STRINGS_ENTRY = re.compile(r"^ {4}([a-z0-9_]+):\s*'([^']*)',?$", re.MULTILINE)
+STRINGS_BLOCK = re.compile(r"const STRINGS = \{(.*?)\n\};", re.DOTALL)
+STRINGS_ENTRY = re.compile(r"^\s*([a-z0-9_]+):\s*'([^']*)',?$", re.MULTILINE)
 
 #: The payload shapes an older engine can still send.  ``dedicated_device`` is
 #: the retired CT role; it is the shape that used to print "Dedicated Device"
@@ -90,7 +90,7 @@ LEGACY_BADGE_PAYLOADS = ("dedicated_device",)
 
 
 def panel_strings(script: str) -> dict[str, str]:
-    """The panel's ``STRINGS`` table, parsed from the shipped ``app.js``."""
+    """The panel's ``STRINGS`` table, parsed from the shipped ``core.js``."""
     block = STRINGS_BLOCK.search(script)
     if block is None:
         return {}
@@ -98,7 +98,7 @@ def panel_strings(script: str) -> dict[str, str]:
 
 
 def _title_case(text: str) -> str:
-    """A Python port of ``app.js``'s ``titleCase`` (the fallback ``label`` uses)."""
+    """A Python port of the panel's ``titleCase`` (the fallback ``label`` uses)."""
     spaced = re.sub(r"[_-]+", " ", str(text))
     return re.sub(r"\b\w", lambda match: match.group(0).upper(), spaced)
 
@@ -118,24 +118,24 @@ def render_smoke_errors(script: str) -> list[str]:
     """
     strings = panel_strings(script)
     if not strings:
-        return ["app.js: the STRINGS table could not be parsed for the AC-7 check"]
+        return ["core.js: the STRINGS table could not be parsed for the AC-7 check"]
 
     errors: list[str] = []
     for ct_type in LEGACY_BADGE_PAYLOADS:
         rendered = render_label(ct_type, strings)
         if "dedicat" in rendered.lower():
             errors.append(
-                f"app.js renders a legacy {ct_type!r} channel as {rendered!r}; "
+                f"panel renders a legacy {ct_type!r} channel as {rendered!r}; "
                 "the badge must read 'Branch CT'"
             )
         elif rendered != "Branch CT":
             errors.append(
-                f"app.js renders a legacy {ct_type!r} channel as {rendered!r}, "
+                f"panel renders a legacy {ct_type!r} channel as {rendered!r}, "
                 "not 'Branch CT'"
             )
     if render_label("new_role", strings) != "New Role":
         errors.append(
-            "app.js: the titleCase replay is broken, so the AC-7 check proves nothing"
+            "panel: the titleCase replay is broken, so the AC-7 check proves nothing"
         )
     return errors
 
@@ -151,16 +151,18 @@ def check(root: Path) -> list[str]:
 
     html = (root / "index.html").read_text(encoding="utf-8")
     css = (root / "app.css").read_text(encoding="utf-8")
-    js = (root / "app.js").read_text(encoding="utf-8")
     svg = (root / "mark.svg").read_text(encoding="utf-8")
+    # Every shipped ES module is scanned; the STRINGS table (checked below) is
+    # parsed from core.js, where the shared vocabulary now lives.
+    modules = sorted(p for p in root.glob("*.js") if p.is_file())
+    js = "\n".join(p.read_text(encoding="utf-8") for p in modules)
+    core_js = (root / "core.js").read_text(encoding="utf-8")
 
     # 1. No external origins anywhere.
-    for name, text in (
-        ("index.html", html),
-        ("app.css", css),
-        ("app.js", js),
-        ("mark.svg", svg),
-    ):
+    texts = [("index.html", html), ("app.css", css),
+             ("matrix.css", (root / "matrix.css").read_text(encoding="utf-8")),
+             ("mark.svg", svg)] + [(p.name, p.read_text(encoding="utf-8")) for p in modules]
+    for name, text in texts:
         stripped = text
         for allowed in ALLOWED_URLS:
             stripped = stripped.replace(allowed, "")
@@ -199,30 +201,33 @@ def check(root: Path) -> list[str]:
     # 6. The script must not build code at runtime.  Inline handlers are
     #    already gone, but eval/new Function would reintroduce the same hole.
     if re.search(r"\beval\s*\(", js):
-        errors.append("app.js uses eval()")
+        errors.append("panel uses eval()")
     if re.search(r"\bnew\s+Function\s*\(", js):
-        errors.append("app.js uses new Function()")
+        errors.append("panel uses new Function()")
     if re.search(r"""fetch\(\s*[`'"]https?://""", js):
-        errors.append("app.js fetches an absolute URL")
+        errors.append("panel fetches an absolute URL")
     if re.search(r"\bdocument\.write\s*\(", js):
-        errors.append("app.js uses document.write()")
+        errors.append("panel uses document.write()")
 
     # 7. No retired "dedicated CT" vocabulary.  AC-1 is about what the panel
     #    shows, and the word can only reach it from a shipped asset, so every
     #    file is scanned; the ``STRINGS.dedicated_device`` alias is the one
     #    allowlisted line and it renders "Branch CT".
-    for name, text in (
-        ("index.html", html),
-        ("app.css", css),
-        ("app.js", js),
-        ("mark.svg", svg),
-    ):
+    for name, text in texts:
         errors.extend(retired_vocabulary_errors(name, text))
 
-    # 8. AC-7: a legacy payload must still render the branch label.  This is a
-    #    replay of the panel's own label lookup, not a DOM render — there is no
-    #    JS runner in this repo, which is why the gate is static.
-    errors.extend(render_smoke_errors(js))
+    # 8. AC-7: a legacy payload must still render the branch label.
+    errors.extend(render_smoke_errors(core_js))
+
+    # 9. Every relative ES-module import must name a shipped file.  A dangling
+    #    import would make the panel half-load under ingress with a console error.
+    for p in modules:
+        text = p.read_text(encoding="utf-8")
+        for spec in re.findall(r"(?:import|export)[^;'\n]*?from\s*['\"]([^'\"]+)['\"]", text):
+            if spec.startswith("."):
+                target = (p.parent / spec).resolve()
+                if not target.is_file():
+                    errors.append(f"{p.name} imports missing module {spec}")
 
     return errors
 
@@ -234,7 +239,7 @@ def main() -> int:
         for error in errors:
             print("  " + error, file=sys.stderr)
         return 1
-    print(f"panel check: {len(REQUIRED)} assets, self-contained and CSP-safe")
+    print(f"panel check: {len(REQUIRED)} required assets, {len(list(UI.glob('*.js')))} modules, self-contained and CSP-safe")
     return 0
 
 

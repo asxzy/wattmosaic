@@ -123,5 +123,5 @@ def test_the_panel_is_a_runtime_input_of_the_image() -> None:
 def test_the_panel_assets_exist_where_the_image_stages_them() -> None:
     """Every file the gateway serves must be staged into the image."""
     ui = ROOT / "addon" / "ui"
-    for name in ("index.html", "app.css", "app.js", "mark.svg"):
+    for name in ("index.html", "app.css", "matrix.css", "main.js", "core.js", "mark.svg"):
         assert (ui / name).is_file(), name

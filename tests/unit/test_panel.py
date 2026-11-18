@@ -14,10 +14,10 @@ the interesting behaviours are:
 that only the ingress proxy adds, so the tests rewrite ``TRUSTED_IPS`` to
 ``127.0.0.1`` (the test client's peer address) rather than spoofing an IP.
 
-The Discover-card copy has no JS test harness: ``addon/ui/app.js`` is a browser
-script with no module seam, so those tests read the shipped source and pin its
-shape (the same static approach ``tools/dev/check_panel.py`` uses).  They are
-drift guards for user-visible wording, not rendering tests.
+The Discover-card copy is checked as source shape across the shipped ES
+modules (``_shipped_js()`` concatenates them); behaviour tests import the real
+modules under node via ``panel_harness``.  These source-shape guards pin
+user-visible wording, the same approach ``tools/dev/check_panel.py`` uses.
 """
 
 from __future__ import annotations
@@ -98,8 +98,9 @@ async def test_panel_shell_is_served_to_ingress_peer(trusted: TestClient) -> Non
     assert 'id="view"' in body
     # Every asset it names is same-origin and relative, so the same shell works
     # under /api/hassio_ingress/<token>/.
-    assert 'src="ui/app.js"' in body
+    assert 'src="ui/main.js"' in body
     assert 'href="ui/app.css"' in body
+    assert 'href="ui/matrix.css"' in body
 
 
 async def test_panel_nav_includes_matrix_link(trusted: TestClient) -> None:
@@ -166,7 +167,8 @@ async def test_panel_shell_requires_the_ingress_identity_header(trusted: TestCli
     ("path", "content_type", "needle"),
     [
         ("/ui/app.css", "text/css", "--accent:"),
-        ("/ui/app.js", "text/javascript", "function render()"),
+        ("/ui/main.js", "text/javascript", "import {"),
+        ("/ui/core.js", "text/javascript", "function render()"),
         ("/ui/mark.svg", "image/svg+xml", "<svg"),
     ],
 )
@@ -182,7 +184,7 @@ async def test_panel_assets_are_served_with_type(
 
 
 async def test_panel_asset_is_denied_to_a_direct_peer(untrusted: TestClient) -> None:
-    response = await untrusted.get("/ui/app.js", headers=INGRESS_USER)
+    response = await untrusted.get("/ui/main.js", headers=INGRESS_USER)
     assert response.status == 401
     payload = await response.json()
     assert payload["error"] == "unauthorized"
@@ -193,6 +195,19 @@ async def test_unknown_panel_asset_is_a_structured_404(trusted: TestClient) -> N
     assert response.status == 404
     payload = await response.json()
     assert payload["error"] == "not_found"
+
+
+async def test_asset_pattern_rejects_subdirectories_and_unknown_extensions(trusted: TestClient) -> None:
+    """Only one flat segment with a shipped extension is served.
+
+    The ES-module switch replaced the fixed allowlist with a vetted name
+    pattern.  It must not open up nested paths (``ui/sub/x.js``) or arbitrary
+    extensions (``ui/secrets.txt`` / ``ui/notes.md``).
+    """
+    for path in ("/ui/sub/x.js", "/ui/notes.md", "/ui/main.js.map", "/ui/.env"):
+        response = await trusted.get(path, headers=INGRESS_USER)
+        assert response.status == 404, path
+        assert (await response.json())["error"] == "not_found"
 
 
 async def test_asset_allowlist_cannot_walk_out_of_the_ui_directory(trusted: TestClient) -> None:
@@ -309,15 +324,32 @@ def test_checker_rejects_an_inline_event_handler(tmp_path: Path) -> None:
 def test_checker_rejects_a_missing_asset(tmp_path: Path) -> None:
     checker = _panel_checker()
     root = _panel_fixture(tmp_path)
-    (root / "app.js").unlink()
+    (root / "main.js").unlink()
     errors = checker.check(root)
-    assert any("missing addon/ui/app.js" in error for error in errors)
+    assert any("missing addon/ui/main.js" in error or "references missing asset ui/main.js" in error for error in errors)
+
+
+def test_checker_rejects_a_dangling_module_import(tmp_path: Path) -> None:
+    """An import naming a module that was never shipped must fail the gate.
+
+    The ES-module panel resolves imports relative to the module URL.  A typo or
+    a deleted module would otherwise half-load the panel under ingress with only
+    a console error to show for it.
+    """
+    checker = _panel_checker()
+    root = _panel_fixture(tmp_path)
+    script = root / "view-matrix.js"
+    script.write_text(
+        "import { thing } from './does-not-exist.js';\n" + script.read_text()
+    )
+    errors = checker.check(root)
+    assert any("imports missing module" in error for error in errors), errors
 
 
 def test_checker_rejects_eval_and_document_write(tmp_path: Path) -> None:
     checker = _panel_checker()
     root = _panel_fixture(tmp_path)
-    script = root / "app.js"
+    script = root / "core.js"
     script.write_text(script.read_text() + "\neval('1'); document.write('x');\n")
     errors = checker.check(root)
     assert any("eval()" in error for error in errors)
@@ -329,24 +361,26 @@ def test_checker_rejects_eval_and_document_write(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _app_js() -> str:
-    return (REPO_ROOT / "addon" / "ui" / "app.js").read_text(encoding="utf-8")
+def _shipped_js() -> str:
+    """All shipped ES modules concatenated, for source-shape guards."""
+    ui = REPO_ROOT / "addon" / "ui"
+    return "\n".join(p.read_text(encoding="utf-8") for p in sorted(ui.glob("*.js")))
 
 
 def _withheld_reason_keys() -> set[str]:
     """The keys of the panel's ``WITHHELD_REASONS`` table, parsed statically.
 
-    ``app.js`` is a browser script with no module seam, so this is the same
+    the panel is shipped as ES modules, so this is the same
     static-parsing approach ``tools/dev/check_panel.py`` already uses for the
     panel.  It is a drift guard, not a rendering test: it fails when the engine
     grows a refusal the panel would show as title-cased enum text.
     """
-    script = _app_js()
+    script = _shipped_js()
     block = re.search(
-        r"const WITHHELD_REASONS = \{(.*?)\n  \};", script, re.DOTALL
+        r"const WITHHELD_REASONS = \{(.*?)\n\};", script, re.DOTALL
     )
-    assert block is not None, "WITHHELD_REASONS table not found in app.js"
-    return set(re.findall(r"^\s{4}([a-z0-9_]+):", block.group(1), re.MULTILINE))
+    assert block is not None, "WITHHELD_REASONS table not found in the shipped modules"
+    return set(re.findall(r"^\s{2}([a-z0-9_]+):", block.group(1), re.MULTILINE))
 
 
 def test_every_named_candidate_refusal_has_a_human_phrasing() -> None:
@@ -373,7 +407,7 @@ def test_every_named_candidate_refusal_has_a_human_phrasing() -> None:
 
 def test_unknown_reason_codes_still_fall_back_to_title_case() -> None:
     """A newer engine's code must stay legible rather than render blank."""
-    script = _app_js()
+    script = _shipped_js()
     assert "return titleCase(text);" in script
     assert "WITHHELD_REASONS[text] || titleCase(text)" not in script, (
         "the lookup must fall through to titleCase only for unknown codes, "
@@ -391,13 +425,13 @@ def test_prefixed_withheld_reasons_are_handled() -> None:
     engine = (REPO_ROOT / "engine" / "wattmosaic_engine" / "main.py").read_text(
         encoding="utf-8"
     )
-    script = _app_js()
+    script = _shipped_js()
     for prefix in (
         "identified_by_aggregate_fit_on_",
         "co_toggles_with_another_fixture_on_",
     ):
         assert prefix in engine, f"{prefix} is no longer emitted by the engine"
-        assert prefix in script, f"app.js does not phrase {prefix}"
+        assert prefix in script, f"the panel does not phrase {prefix}"
 
 
 def test_placed_empty_state_does_not_blame_the_evidence_bar_unconditionally() -> None:
@@ -408,7 +442,7 @@ def test_placed_empty_state_does_not_blame_the_evidence_bar_unconditionally() ->
     fixture met the evidence bar.  The fix keys the message on that reason; this
     pins the branch so the false claim cannot come back silently.
     """
-    script = _app_js()
+    script = _shipped_js()
     assert "isAlreadyWritten(reason)" in script, "empty state no longer reads the reason"
     assert "'already_declared_state_entity'" in script
     assert "already configured" in script
@@ -444,7 +478,7 @@ def test_already_written_empty_states_do_not_claim_a_measurement() -> None:
     fact (a duplicate refusal) is what the copy may state.  This is a
     source-shape guard, not a rendering test.
     """
-    script = _app_js()
+    script = _shipped_js()
     assert "this window proved" not in script, (
         "the empty state claims the window re-proved rows that were refused "
         "before measurement"
@@ -473,9 +507,9 @@ def test_apply_toast_is_branched_on_the_applied_flag() -> None:
     "Placements applied" therefore claimed a write that never happened.
     Source-shape guard only: it does not execute the button.
     """
-    script = _app_js()
+    script = _shipped_js()
     handler = re.search(
-        r"const result = outcome\.result;(?P<body>.*?)\n        \} catch",
+        r"const result = outcome\.result;(?P<body>.*?)\n      \} catch",
         script,
         re.DOTALL,
     )
@@ -509,7 +543,7 @@ def test_detail_notice_is_gated_on_a_hard_precondition() -> None:
     place the user can learn which switch to turn on.
     Source-shape guard only: there is no JS test harness for this panel.
     """
-    script = _app_js()
+    script = _shipped_js()
     assert "if (data.ok === false && data.detail)" in script, (
         "the card notice must fire only for a hard precondition"
     )
@@ -530,9 +564,9 @@ def test_refusal_detail_reaches_the_user_through_the_apply_toast() -> None:
     emits that sentence when a write was attempted.  The toast must relay
     ``detail`` and must not claim anything was written.
     """
-    script = _app_js()
+    script = _shipped_js()
     handler = re.search(
-        r"const result = outcome\.result;(?P<body>.*?)\n        \} catch",
+        r"const result = outcome\.result;(?P<body>.*?)\n      \} catch",
         script,
         re.DOTALL,
     )
@@ -558,7 +592,7 @@ def test_hard_precondition_sentence_is_not_repeated_in_the_footer() -> None:
     dedupe the card shows "no topology to place devices on" twice, once as an
     error and once as an engine note.
     """
-    script = _app_js()
+    script = _shipped_js()
     footer = script[script.index("function discoveryFoot(") : script.index("function discoverPlacedRow(")]
     assert "String(note) === String(data.detail)" in footer, (
         "the footer does not drop a note that repeats the detail notice"
@@ -580,12 +614,12 @@ def test_all_empty_discovery_does_not_claim_a_measurement_when_it_could_not_run(
     Source-shape guard only: this panel has no JS test harness, so the branch is
     pinned statically, like the other guards in this module.
     """
-    script = _app_js()
+    script = _shipped_js()
     start = script.index("if (nothing) {")
     end = script.index("return card('Discover devices', body, {", start)
     block = script[start:end]
     arms = re.search(
-        r"if \(data\.ok === false\) \{(?P<hard>.*?)\n      \} else \{(?P<ran>.*?)\n      \}",
+        r"if \(data\.ok === false\) \{(?P<hard>.*?)\n    \} else \{(?P<ran>.*?)\n    \}",
         block,
         re.DOTALL,
     )
@@ -625,7 +659,7 @@ def test_engine_notes_are_phrased_not_joined_raw() -> None:
     them, so the note formatter must route through it and must not simply
     ``notes.join(' ')``.  Source-shape guard.
     """
-    script = _app_js()
+    script = _shipped_js()
     assert "`Engine notes: ${notes.join(' ')}`" not in script, (
         "the footer still joins raw reason codes"
     )
@@ -649,7 +683,7 @@ def test_engine_notes_are_phrased_not_joined_raw() -> None:
 # --------------------------------------------------------------------------- #
 # Discover-card window selector
 #
-# ``addon/ui/app.js`` is a browser script with no module seam, so there is no JS
+# The panel is shipped as ES modules, so there is a node module harness
 # unit harness to call ``discoverWindow()`` (the same reason every guard in this
 # module reads the source).  These are static drift guards: they pin that the
 # request body carries a *selected* window, that a long option exists, and that
@@ -665,13 +699,13 @@ def _discover_window_options() -> list[tuple[int, str]]:
     fails loudly if the table is reshaped, because the guards below lean on the
     options actually shipped rather than a restated copy.
     """
-    script = _app_js()
+    script = _shipped_js()
     block = re.search(
         r"const DISCOVER_WINDOWS = Object\.freeze\(\[(.*?)\n  \]\);",
         script,
         re.DOTALL,
     )
-    assert block is not None, "DISCOVER_WINDOWS table not found in app.js"
+    assert block is not None, "DISCOVER_WINDOWS table not found in the shipped modules"
     return [
         (int(hours), label)
         for hours, label in re.findall(
@@ -696,7 +730,7 @@ def test_discover_window_options_cover_the_useful_windows() -> None:
     assert "7 days" in week and "168" in week
     # The default is an explicit constant, not a bare literal at the call site,
     # and it is the fast first run.
-    script = _app_js()
+    script = _shipped_js()
     assert "const DISCOVER_DEFAULT_HOURS = 24;" in script
 
 
@@ -705,7 +739,7 @@ def test_discover_window_options_cover_the_useful_windows() -> None:
 #: *executed* under node rather than pattern-matched -- this is the one
 #: behaviour test in this section, the rest are source-shape guards.
 _WINDOW_HELPER_START = "const DISCOVER_WINDOWS"
-_WINDOW_HELPER_END = "/* ---------------------------------------------------------------------- *\n   * Application state"
+_WINDOW_HELPER_END = "/* ---------------------------------------------------------------------- *\n * Application state"
 
 
 def _node_window_helpers():
@@ -722,7 +756,7 @@ def _node_window_helpers():
     node = shutil.which("node")
     if not node:
         return None
-    script = _app_js()
+    script = _shipped_js()
     start = script.index(_WINDOW_HELPER_START)
     end = script.index(_WINDOW_HELPER_END, start)
     block = script[start:end]
@@ -788,9 +822,9 @@ def test_discover_request_posts_the_selected_window() -> None:
     selection instead of a hardcoded value.  It must still be read-only:
     ``apply: false`` stays in the same body.
     """
-    script = _app_js()
+    script = _shipped_js()
     call = re.search(
-        r"const outcome = await startDiscoveryJob\(\{(?P<body>.*?)\n      \}, \(payload\)",
+        r"const outcome = await startDiscoveryJob\(\{(?P<body>.*?)\n    \}, \(payload\)",
         script,
         re.DOTALL,
     )
@@ -817,9 +851,9 @@ def test_apply_request_reuses_the_reviewed_window() -> None:
     it, so a later selector change cannot move the write off the reviewed
     window.
     """
-    script = _app_js()
+    script = _shipped_js()
     call = re.search(
-        r"const outcome = await startDiscoveryJob\(\{(?=\s*apply: true)(?P<body>.*?)\n          \}\);",
+        r"const outcome = await startDiscoveryJob\(\{(?=\s*apply: true)(?P<body>.*?)\n        \}\);",
         script,
         re.DOTALL,
     )
@@ -847,7 +881,7 @@ def test_discovery_polls_status_and_shows_error() -> None:
     ``error`` text on a failed job (not a generic "Discovery failed").  These are
     source-shape guards: removing the poll or the error rendering breaks them.
     """
-    script = _app_js()
+    script = _shipped_js()
 
     # The poll helper GETs the status route with the returned job id and maps
     # every answer through the pure outcome helper.
@@ -870,10 +904,10 @@ def test_discovery_polls_status_and_shows_error() -> None:
         "a failed outcome is not distinguished from a completed one"
     )
     # The cancel guard: navigation bumps the token and no GET follows a cancel.
-    assert "token !== discoveryGeneration" in helper, (
+    assert "token !== slots.discoveryGeneration" in helper, (
         "the poll has no navigation cancel guard"
     )
-    assert "discoveryGeneration += 1" in script[script.index("function applyRoute()") :], (
+    assert "slots.discoveryGeneration += 1" in script[script.index("function applyRoute()") :], (
         "navigation does not signal the discovery poll to cancel"
     )
 
@@ -905,7 +939,7 @@ def test_long_window_loading_state_says_the_wait_is_long() -> None:
     without inventing a progress percentage.  The elapsed clock reports real
     time only.
     """
-    script = _app_js()
+    script = _shipped_js()
     loading = script[
         script.index("function discoverLoadingCard()") : script.index(
             "function discoverErrorCard("
@@ -936,7 +970,7 @@ def test_long_window_loading_state_says_the_wait_is_long() -> None:
 # The Supervisor holds the ingress session for 15 minutes and renews it on every
 # request it proxies.  A tab left hidden or open past that window makes no
 # requests, so the session lapses and the next call answers 401 -- which the
-# panel used to render as a bare error with no way forward.  ``app.js`` has no
+# panel used to render as a bare error with no way forward.  the panel has no
 # module seam, so these are static guards on the recovery path, the same
 # approach as the Discover-card guards above.
 # --------------------------------------------------------------------------- #
@@ -949,9 +983,9 @@ def test_the_panel_reloads_the_document_when_the_ingress_session_expires() -> No
     top-level document is loaded.  The panel therefore has to reload rather than
     retry: the same request keeps failing until the document is fetched again.
     """
-    script = _app_js()
-    assert "INGRESS" in script, "app.js does not detect the ingress prefix"
-    assert "reloadForSession" in script, "app.js has no session-recovery path"
+    script = _shipped_js()
+    assert "INGRESS" in script, "the panel does not detect the ingress prefix"
+    assert "reloadForSession" in script, "the panel has no session-recovery path"
     assert "location.replace(location.href)" in script, (
         "recovery must reload the current document so the Supervisor issues a "
         "fresh ingress session"
@@ -975,7 +1009,7 @@ def test_a_resumed_tab_probes_the_session_even_off_the_overview() -> None:
     after a long hide would otherwise discover the expired session on the next
     interaction.  The resume path touches ``/health`` regardless of view.
     """
-    script = _app_js()
+    script = _shipped_js()
     match = re.search(
         r"document\.addEventListener\('visibilitychange'.*?\n    \}\);",
         script,
@@ -993,7 +1027,7 @@ def test_a_resumed_tab_probes_the_session_even_off_the_overview() -> None:
 def _js_function_body(script: str, signature: str) -> str:
     """Return the brace-matched body of ``signature`` (up to its closing brace).
 
-    ``app.js`` is a browser script with no module seam, so this is the same
+    the panel is shipped as ES modules, so this is the same
     static source parsing the neighbouring tests use.  Brace matching keeps the
     assertion scoped to one function rather than the whole file — a bare
     ``"fetchOverview" in script`` check would pass even if ``pollTick`` reverted,
@@ -1026,7 +1060,7 @@ def test_poll_tick_uses_the_lightweight_overview_fetcher() -> None:
     poll discarded.  This guard reads only ``pollTick``'s body, so reverting the
     call — or reintroducing an expensive endpoint in the tick — fails here.
     """
-    body = _strip_js_comments(_js_function_body(_app_js(), "async function pollTick()"))
+    body = _strip_js_comments(_js_function_body(_shipped_js(), "async function pollTick()"))
 
     assert "fetchOverviewLive()" in body, (
         "pollTick no longer uses the lightweight fetchOverviewLive()"
@@ -1053,7 +1087,7 @@ def test_checker_rejects_stray_retired_vocabulary(tmp_path: Path) -> None:
     """
     checker = _panel_checker()
     root = _panel_fixture(tmp_path)
-    script = root / "app.js"
+    script = root / "view-devices.js"
     script.write_text(script.read_text().replace("['Branch CTs'", "['Dedicated CTs'"))
     errors = checker.check(root)
     assert any("retired dedicated CT concept" in error for error in errors), errors
@@ -1069,9 +1103,9 @@ def test_checker_rejects_a_deleted_legacy_alias(tmp_path: Path) -> None:
     """
     checker = _panel_checker()
     root = _panel_fixture(tmp_path)
-    script = root / "app.js"
+    script = root / "core.js"
     script.write_text(
-        script.read_text().replace("    dedicated_device: 'Branch CT',\n", "")
+        script.read_text().replace("  dedicated_device: 'Branch CT',\n", "")
     )
     errors = checker.check(root)
     assert any("must read 'Branch CT'" in error for error in errors), errors
@@ -1084,7 +1118,7 @@ def test_checker_rejects_an_alias_that_renders_the_retired_word(tmp_path: Path) 
     """The allowlist is conditional on the alias *rendering* ``Branch CT``."""
     checker = _panel_checker()
     root = _panel_fixture(tmp_path)
-    script = root / "app.js"
+    script = root / "core.js"
     script.write_text(
         script.read_text().replace(
             "dedicated_device: 'Branch CT'", "dedicated_device: 'Dedicated Device'"
@@ -1102,7 +1136,7 @@ def test_the_render_replay_is_not_vacuous() -> None:
     unknown value must come out title-cased rather than passed through.
     """
     checker = _panel_checker()
-    strings = checker.panel_strings(_app_js())
+    strings = checker.panel_strings(_shipped_js())
     assert strings, "the STRINGS table could not be parsed"
     assert checker.render_label("dedicated_device", strings) == "Branch CT"
     assert checker.render_label("not_a_real_role", strings) == "Not A Real Role"
@@ -1110,7 +1144,7 @@ def test_the_render_replay_is_not_vacuous() -> None:
 
 def test_the_panel_prints_no_retired_ct_wording() -> None:
     """The rendered surfaces task-12 touched, pinned by their new wording."""
-    script = _app_js()
+    script = _shipped_js()
     assert "['Monitored by', (topology.branch_ct_ids || []).join(', ')" in script, (
         "the placement card no longer feeds Monitored by from branch_ct_ids"
     )
