@@ -2070,3 +2070,130 @@ Investigation confirmed what that costs:
 ### Verification
 
 Covered by `docs/specs/retire-dedicated-ct-concept/design.md` AC-1 … AC-11, principally: a pre-change database opens and migrates (AC-2), every device keeps an attribution row (AC-3), a legacy HA entry replays without a 400 (AC-5), no write can reintroduce the role (AC-6), and `tools/dev/verify.py` is green end to end (AC-8).
+---
+
+## ADR-0035 — One canonical domain model and a single 3.0 cutover
+
+**Status:** Accepted · 2026-11-18
+
+**Context.** The current engine welds device identity to the measuring CT: discovery mints `dev_<ct>` devices, topology and mapping share one version, and an unexplained reading becomes a fake device. Contract 2.x cannot express Physical Devices, Load Components and Measurement Endpoints as separate entities, so a staged dual-shape API would keep the flawed identity model alive on the live path. Every push to `main` publishes a release, so half-migrated states there would reach dev-channel users; `api_client._check_contract` already refuses a major mismatch.
+
+**Decision.** (DEC-01, 02, 04, 07, 08, 09, 26, 30)
+
+1. **One breaking cutover to contract `3.0.0`.** Engine, HA integration and panel ship in the same release, with no dual-read period. All intermediate work lands on `feat/realtime-v3`, never on `main`.
+2. **Rollback is backup-and-restore, not down-migration.** Before any migration of version 13 or higher the DB file is backed up beside itself; rollback means reinstalling the previous add-on version and restoring that backup. There are no down-migrations; legacy tables stay read-only for one release.
+3. **Device identity survives verbatim.** Every existing `device_id` (`dev_<ct>`, `dev_auto_*`, user ids) becomes the Physical Device id; new devices use `pd_<ulid>`. Discovery stops minting one device per CT — a CT is a Measurement Endpoint, and what it sees without an explained device is a Reader Residual row, never a fake device. Devices come from HA devices that own load-evidence entities, user declaration, or a promoted Unknown Load Profile.
+4. **Load Components are first-class in the contract, storage, matrix rows and models**, and are user-declared only; learning may suggest but never creates one.
+5. **One many-to-many `ha_entity_links` table** links an HA entity to a subject with `target_kind ∈ {device, component}`; one entity may link to several subjects. Disambiguation is a joint-inference question, not an ingestion refusal.
+6. **Version ids are human-readable and monotonic** — `topo-<n>`, `map-<n>`, `mdl-<subject_id>-<n>`, `snap-<ulid>` — each with an integer `*_number` companion.
+7. **Legacy inference history is re-labelled, not silently read as current.** Rows with `provenance.power_w_is_placeholder=true` migrate to `power_w = NULL` and carry `legacy_semantics=placeholder_zero`; old `source=direct_measured` rows are shown as `legacy`, not `MEASURED`.
+8. **Retention is tiered and configurable.** Small version tables (mapping cells, topology, mapping, models) are kept forever; `event_evidence` for 400 days; raw high-resolution samples in evidence windows for 30 days.
+
+**Consequences.** The cutover is large but atomic: clients reading 2.x shapes must migrate at the same release, and an operator can only roll back by restoring a DB backup. Preserving device ids keeps HA entities and long-term statistics intact, while the endpoint/device/component split makes plug relocation and shared readers representable. The null migration means historical zero placeholders become gaps rather than false zeros.
+
+---
+
+## ADR-0036 — Single-subject endpoints and MEASURED, amending ADR-0034
+
+**Status:** Accepted · 2026-11-18 · Amends ADR-0034 decision 2; decisions 1, 3 and 4 stand
+
+**Context.** ADR-0034 removed the CT-role concept and the direct-measurement path it gated, on the grounds that a declaration about a *circuit* is not evidence about a device. That reasoning does not apply to a smart plug or appliance energy monitor, which physically measures one load. Distinguishing a property of an *endpoint* from a claim about a circuit lets MEASURED survive without reinstating the retired role. The vocabulary test (`tests/unit/test_docs_vocabulary.py`) forbids reusing the retired names.
+
+**Decision.** (DEC-05, 06)
+
+1. **A Measurement Endpoint whose declared scope is exactly one Physical Device or Load Component produces `MEASURED`** and acts as an anchor in joint inference. The scope is `EndpointScope.SINGLE_SUBJECT`; it starts as a **candidate** and is effective only after the user confirms it. A circuit CT never gets that scope automatically.
+2. **The retired CT-role vocabulary stays retired.** The new concept is an endpoint scope and must not reuse the removed role, monitoring level or field names. ADR-0034's decisions 1 (no replacement flag — a single-device channel stays a structural one-device branch row), 3 (the monitoring level is removed) and 4 (the old dedicated-CT-id field is removed) are unchanged; only decision 2 is amended, so a confirmed single-subject endpoint is a legitimate direct-reading path.
+3. **Discovery lists every non-CT-monitor HA power entity as a candidate endpoint** with no ingestion. The engine ingests its samples only after the user accepts it in HA setup or the panel.
+
+**Consequences.** Plugs and appliance monitors become first-class measurement sources without claiming anything about circuit CTs. The storage-protection case that motivated candidate-only ingestion is preserved: undeclared power entities are not ingested by default, so they cannot flood ADR storage. Evidence-tier grading for other devices is unaffected.
+
+---
+
+## ADR-0037 — Typed topology edges, edge authority and the minimal-HA fold-in
+
+**Status:** Accepted · 2026-11-18
+
+**Context.** Topology is currently expressed as pointer fields on channels and consumed unconditionally as hard structure. A single event can promote a relationship to fact, a parent-only change is treated as evidence against containment, and an untracked `minimal-ha-setup` draft would write inferred parents as user declarations and silently confirm them. The handbook requires edges to be typed, versioned and promoted only by sustained independent evidence.
+
+**Decision.** (DEC-10, 11, 12, 13)
+
+1. **Edges are the authority.** A user-declared parent creates `CONTAINS` with `declared_by=user, lifecycle=CONFIRMED`; on ≥ N contradicting independent events it moves to `CONFLICTED`, never silently deleted. Inferred edges go `CANDIDATE → PROVISIONAL` (engine) `→ CONFIRMED` after ≥ 8 independent sign-consistent events from ≥ 2 distinct causes. **One event never moves an edge past CANDIDATE.** The user can pin or reject any edge.
+2. **The pointer fields are removed from the 3.0 contract** and replaced with typed edges `CONTAINS`, `PAIRED_LEG` and `SAME_CONDUCTOR`. A read-only derived "primary tree" view serves the UI and HA. Only CONFIRMED edges are structural; PROVISIONAL edges are soft alternatives and CANDIDATE/CORRELATED edges are never structural.
+3. **A missing child under a nested parent does not drop the parent row.** The child's contribution is an unknown column with the child's last-known level as a soft prior and inflated variance; it is never set to zero.
+4. **The `minimal-ha-setup` draft is folded into H2 and rebased onto 3.0.** HA writes only what the user picks — endpoints, optional user-declared parents and plug scope. It never writes an engine-inferred parent as a declaration and performs no silent topology confirmation; engine proposals remain engine-owned PROVISIONAL edges.
+
+**Consequences.** Wrong structure cannot silently become fact, and a single noisy transition cannot confirm an edge. Coverage figures move because parent rows with missing children are now kept and counted. The HA setup flow becomes the single place users declare topology, eliminating two competing write paths.
+
+---
+
+## ADR-0038 — Event-driven three-loop runtime, superseding the 5 s full recompute
+
+**Status:** Accepted · 2026-11-18 · Supersedes the 5 s full recompute
+
+**Context.** The engine currently recomputes an absolute solution every 5 s on the asyncio loop, using a four-buffer, four-clock pipeline and treating an `ON` entity state as load evidence. ADR-0033 showed that long analyses block health probes; the handbook forbids a periodic full solve entirely. Real CT cadence is ~15.7 s, so event windows must be derived from observed cadence rather than a hardcoded 2 s.
+
+**Decision.** (DEC-03, 14, 15, 17, 18, 37)
+
+1. **No periodic full solve.** Inference runs per closed or revised Event Group in the event loop. A steady-state absolute pass runs per reader when its level changes beyond its noise band, plus a 60 s staleness heartbeat that publishes only `stale_sources` and aging.
+2. **PROVISIONAL is published at the first post-event sample of the earliest reader** (~0–16 s at the measured cadence). An HA state change with no reader sample yet stays `DETECTED` with no watt value.
+3. **Events from unlinked entities are kept in a bounded in-memory ring** for grouping and candidate generation, and persisted only if they join an Event Group that becomes evidence.
+4. **Event windows default to 30 s pre and 120 s post**, configured per load class. Pre-window noise comes from long-run per-reader statistics, never from the few samples inside a 30 s pre-window.
+5. **The legacy `WM_INFERENCE_INTERVAL_S` option is accepted, ignored with a startup warning for one release, then deleted**, so add-on config validation does not fail on a user-visible option.
+6. **One background worker thread runs chunked jobs capped at 2 s of CPU.** `/healthz` p99 < 100 ms under load is a gate; long inference runs off the event loop on an immutable input bundle.
+
+**Consequences.** Idle periods cost no full solve, and a plug transition can publish a provisional value before a steady sample arrives. Nobody may infer from an aborted or stale sample: staleness is published rather than zero-filled. The compatibility warning gives operators one release to remove the obsolete config option.
+
+---
+
+## ADR-0039 — Group estimates, null semantics and estimate status
+
+**Status:** Accepted · 2026-11-18 · Supersedes ADR-0026's greedy measured-step credit and ADR-0030's proportional sharing; the "accounted ≤ measured" invariant of ADR-0030 is kept
+
+**Context.** The current solver publishes 0 W where a value is unknown, then splits a group equally (250 W / 250 W on a 500 W row) using a model as a bound. ADR-0026 credited the measured step greedily to the one changing device, and ADR-0030 shared over-declared priors proportionally; both fabricate a per-device number where the evidence does not separate the loads. The handbook requires an honest null, justified bounds and a group functional estimate.
+
+**Decision.** (DEC-19, 20, 21, 22, 23, 24, 25)
+
+1. **A non-identifiable member gets `point_w = null`, mathematically justified bounds and `NON_IDENTIFIABLE`.** A model learned from isolated events counts as identifiability evidence through the history-stacked experiment matrix; if history separates the devices they are `IDENTIFIABLE` and get values. **Model priors are never bounds and never floors.**
+2. **Declared wattage priors sharing a row are not allocated proportionally.** Proportional clipping is removed; declarations are model priors (λ_m), and an explicit user allocation (a later feature) is published as `ALLOCATED` with an `allocation_rule`. The invariant that accounted power never exceeds what the row measured is kept.
+3. **The greedy measured-step credit is superseded.** The measured step becomes one hypothesis scored against the unknown-load alternative inside the joint solve, rather than an automatic credit to a single device.
+4. **The published snapshot comes from the steady-state absolute solve, constrained by the identities and groups established by event-delta inference.** A disagreement beyond 3σ marks the device `CONFLICTED` in mapping status and surfaces it in `unresolved_events`.
+5. **The unknown-load penalty λ_u is learned per reader scope** from the residual engine and starts low so unknown is cheap; it is exposed as `WM_UNKNOWN_PENALTY_SCALE` and monitored by the share of |ΔY| explained by ΔU per reader per day.
+6. **Confidence stays an uncalibrated engineering score, labelled "not a probability"**, with inputs scoped to the handbook's seven components. Evidence tiers are retired in favour of `EstimateStatus × IdentifiabilityStatus`.
+7. **HA presents a device power state of `unknown` (None)** unless the status is `MEASURED`, or `ESTIMATED` with `IDENTIFIABLE`. Bounds, status, identifiability, group id and versions become attributes; new group power sensors live on a synthetic group device per stable `group_id`. Existing unique ids are unchanged, past 0 W history becomes gaps going forward and is not rewritten, and energy integration never integrates a null.
+
+**Consequences.** Two lights on one row now yield a group estimate and two honest nulls instead of a fabricated 250/250 split; a fixed load can no longer be promoted by a step it did not cause. Attributed percentages will fall where groups were falsely resolved, which V1 re-baselines deliberately. HA shows gaps where 0 W used to be asserted, which is safe for recorder statistics.
+
+---
+
+## ADR-0040 — Matrix rows, endpoints and retention of matrix history
+
+**Status:** Accepted · 2026-11-18
+
+**Context.** The current matrix makes every HA registry device a row, so one appliance can appear twice, and `/mapping` recomputes the whole matrix under the writer lock with no persistence. The handbook wants a stable row set, a real matrix API and a diagnostic-free default view that still keeps history for replay.
+
+**Decision.** (DEC-27, 28, 29)
+
+1. **Rows are drawn from the canonical registry:** Physical Devices and Load Components, plus Device Group, Unknown Load Profile, Reader Residual and derived Summary rows. An HA registry device is **not** a row unless linked to a Physical Device; HA `area_id` is read for display grouping only.
+2. **`/mapping` is deleted** and replaced by `/api/v1/matrix` plus drill-down routes. No known external consumer relies on the old endpoint.
+3. **A compact cell shows the status glyph and text, the value or interval, and a confidence glyph**; everything else lives in the drill-down. The current debug cards move behind a "Diagnostic" toggle on the matrix page.
+4. **Matrix history is retained with the other version tables:** `mapping_cell_versions`, topology, mapping and model versions are kept forever; the evidence behind them follows the 400-day / 30-day retention of ADR-0035.
+
+**Consequences.** The same appliance can no longer appear as two rows, and a per-result cell update replaces the full recompute. Operators lose the always-on debug cards but keep them one toggle away, and replay still has the cell history it needs.
+
+---
+
+## ADR-0041 — Delta-basis models, legacy models and promotion
+
+**Status:** Accepted · 2026-11-18
+
+**Context.** Every current power model is fitted on whole-circuit power and graded with a whole-number R² gate, so a clean fixed load (MAE 0.3 W) can never pass R² ≥ 0.70 and composite/dimmable models reload broken. A 3.0 system must learn from device-attributed deltas, keep legacy models readable without trusting them, and promote on frozen evidence so a single event cannot change an active version.
+
+**Decision.** (DEC-31, 32, 33, 34, 35)
+
+1. **Legacy absolute-basis models are kept read-only, flagged `legacy_absolute`.** They are not served as validated power and are not used as priors, except on a confirmed single-subject endpoint. New models are retrained from delta evidence.
+2. **Auto-promotion is allowed.** It uses per-class criteria on a frozen evidence-id set and requires ≥ 5 independent confirmed events. A subject's first version and any class change are flagged "review suggested" but are not blocked.
+3. **A user declaration wins for priors.** Learned evidence never overwrites a declared prior; a discrepancy beyond 3σ is surfaced as a mapping-status / diagnostic item rather than silently applied.
+4. **Model class is the declared `LoadShape`.** If undeclared, learning starts with `Fixed` and may *propose* a class change shown in the panel; it never applies one silently.
+5. **Reconciliation and replay write only into the engine's versioned derived namespace.** HA long-term statistics are not rewritten.
+
+**Consequences.** Fixed loads become promotable under per-class criteria, and a legacy model can no longer masquerade as a validated estimate after reload. Versioned replay is reproducible without touching HA's append-only statistics. Rollback reactivates only the last version whose event log records activation, so a rejected candidate cannot come back.

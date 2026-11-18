@@ -4,6 +4,8 @@
 review gate. Every requirement in this folder is an implementation commitment
 from this commit onward.
 
+**Superseded where it conflicts by `docs/specs/realtime-topology-disaggregation/` (contract 3.0). Its additive-only rule no longer applies.**
+
 This folder specifies the next generation of WattMosaic's load disaggregation:
 a system that understands a home's **circuits**, not just its meters, and that
 treats uncertainty, partial observability and configuration change as
