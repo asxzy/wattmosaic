@@ -21,7 +21,12 @@ table.data.matrix-pivot th.matrix-hdr-group::before {
   content: '▸ '; color: var(--text-mute); font-weight: 400;
 }
 table.data.matrix-pivot th.matrix-pivot-reader { top: 30px; z-index: 3; font-size: 12px; }
-table.data.matrix-pivot th.matrix-pivot-device { left: 0; top: 30px; z-index: 4; font-weight: 600; }
+/* DEF-08: body-row identity headers stick horizontally (left: 0) only.
+   Giving them a `top` pinned every row header to the same vertical offset when
+   the grid scrolled, stacking them on top of one another.  Only the header
+   *cells* in thead carry a `top`; body-row `th` must not (the frozen column
+   keeps its horizontal stickiness without a vertical one). */
+table.data.matrix-pivot th.matrix-pivot-device { left: 0; z-index: 4; font-weight: 600; }
 .matrix-pivot-cell { position: relative; white-space: nowrap; }
 .matrix-filter-count { color: var(--text-mute); font-size: 12px; min-height: 16px; }
 .matrix-filter { min-width: 240px; }
@@ -75,4 +80,78 @@ table.data.matrix-pivot th.matrix-pivot-device { left: 0; top: 30px; z-index: 4;
   border-color: color-mix(in srgb, var(--warn) 32%, transparent);
   color: var(--warn); background: var(--warn-soft);
 }
+
+/* --- U1 user-facing v3 matrix ------------------------------------------ *
+ * The v3 grid reuses the frozen-column pattern above.  Every level of the
+ * L0–L4 thead is sticky; the identity column is frozen horizontally.  The
+ * eight categories pair a text label + glyph with their colour so status is
+ * never communicated by colour alone (HB §19.3).
+ * ---------------------------------------------------------------------- */
+.matrix-grid-wrap { max-height: 70vh; overflow: auto; }
+table.data.matrix-grid { min-width: 720px; border-collapse: separate; border-spacing: 0; }
+table.data.matrix-grid thead th {
+  position: sticky; top: 0; z-index: 3;
+  background: var(--bg-elev);
+}
+/* Stack the five header levels: each lower level sits below the previous. */
+table.data.matrix-grid thead tr:nth-child(1) th { top: 0; }
+table.data.matrix-grid thead tr:nth-child(2) th { top: 30px; }
+table.data.matrix-grid thead tr:nth-child(3) th { top: 60px; }
+table.data.matrix-grid thead tr:nth-child(4) th { top: 90px; }
+table.data.matrix-grid thead tr:nth-child(5) th { top: 120px; }
+table.data.matrix-grid th.matrix-grid-identity {
+  position: sticky; left: 0; z-index: 4;
+  background: var(--bg-elev); text-align: left; white-space: nowrap;
+  /* DEF-08: no `top` on body-row headers — only thead cells stick vertically. */
+}
+.matrix-hdr-text { display: inline; }
+.matrix-anno {
+  display: inline-block; margin-left: 4px; padding: 0 4px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  font-size: 10px; color: var(--text-mute);
+}
+.matrix-hdr-span { font-size: 10px; color: var(--text-mute); }
+.matrix-row-group { font-weight: 700; }
+.matrix-row-unknown_profile { font-style: italic; }
+.matrix-row-reader_residual { color: var(--warn); }
+.matrix-row-summary { font-weight: 700; border-top: 2px solid var(--line); }
+.matrix-row-derived::after { content: ' (derived)'; color: var(--text-mute); font-weight: 400; }
+.matrix-row-member { opacity: 0.85; }
+.matrix-group-toggle { margin-left: 8px; font-size: 11px; }
+.matrix-grid-cell { padding: 0; }
+.matrix-cell-btn {
+  display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
+  width: 100%; padding: 5px 7px; border: 0; background: transparent;
+  color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.matrix-cell-btn:hover, .matrix-cell-btn:focus { background: var(--bg-elev-2); outline: 1px solid var(--line); }
+.matrix-cell-glyph { font-size: 13px; font-weight: 700; }
+.matrix-cell-text { font-size: 11px; color: var(--text-dim); }
+.matrix-cell-value { font-variant-numeric: tabular-nums; font-weight: 600; }
+.matrix-cell-interval { color: var(--text-mute); font-size: 11px; }
+.matrix-cell-confidence { color: var(--text-mute); font-size: 12px; }
+.matrix-cell-age { color: var(--text-mute); font-size: 10px; margin-left: auto; }
+.matrix-grid-empty { color: var(--text-mute); text-align: center; }
+.matrix-legend {
+  display: flex; flex-wrap: wrap; gap: 6px 14px;
+  padding: 8px 0; font-size: 11.5px;
+}
+.matrix-legend-item { display: inline-flex; align-items: center; gap: 5px; }
+.matrix-legend-glyph { font-weight: 700; }
+.matrix-cat-directly_measured .matrix-cell-glyph,
+.matrix-cat-directly_measured .matrix-legend-glyph { color: var(--ok); }
+.matrix-cat-confirmed_inferred .matrix-cell-glyph,
+.matrix-cat-confirmed_inferred .matrix-legend-glyph { color: var(--ok); }
+.matrix-cat-provisional .matrix-cell-glyph,
+.matrix-cat-provisional .matrix-legend-glyph { color: var(--warn); }
+.matrix-cat-group_only .matrix-cell-glyph,
+.matrix-cat-group_only .matrix-legend-glyph { color: var(--warn); }
+.matrix-cat-conflicted .matrix-cell-glyph,
+.matrix-cat-conflicted .matrix-legend-glyph { color: var(--bad); }
+.matrix-drill-actions { display: flex; gap: 8px; margin-top: 12px; }
+.matrix-drill-summary { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.matrix-evidence-refs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+.matrix-reasons { margin: 6px 0 0; padding-left: 20px; }
+.matrix-row-drill-item { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.matrix-totals { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 14px; }
 

@@ -5,8 +5,8 @@
    under /api/hassio_ingress/<token>/.  No build step, no network beyond origin.
    ========================================================================== */
 
-import { card, el, emptyState, label, watts } from './core.js';
-import { matrixLedgerList } from './matrix-model.js';
+import { card, el, emptyState, kv, label, percent, watts } from './core.js';
+import { cellView, matrixLedgerList } from './matrix-model.js';
 
 // The joint-inference source ledger: used vs available-but-unused, each with
 // the engine's concrete reason.  The engine attaches sources_used/sources_unused
@@ -107,7 +107,181 @@ function matrixIdentifiabilityCard(devices, snapshot) {
   });
 }
 
+/* --- U1 — cell / reader / row drill-downs (HB §19.4) ------------------- *
+ * A drawer surfaces the evidence behind a selection: mapping history, event
+ * groups, evidence refs, confidence components, reasons for uncertainty and
+ * contradictions.  The v3 payload already carries these on each cell, so the
+ * drawer is pure over the published data and needs no new endpoint.  M3's
+ * cell/reader/row routes can enrich it later; until then the same fields are
+ * read from the matrix payload.
+ * ---------------------------------------------------------------------- */
+
+function _confidenceComponents(confidence) {
+  const c = confidence || {};
+  const rows = Object.keys(c)
+    .filter((k) => typeof c[k] === 'number')
+    .sort()
+    .map((k) => [label(k), percent(c[k], 0)]);
+  return rows.length
+    ? kv(rows)
+    : el('p', { class: 'stat-hint' }, 'No confidence components published.');
+}
+
+function _evidenceRefs(refs) {
+  const list = Array.isArray(refs) ? refs : [];
+  if (!list.length) return el('p', { class: 'stat-hint' }, 'No evidence references published.');
+  return el('div', { class: 'matrix-evidence-refs' }, list.map((r) => el('span', {
+    class: 'chip', title: String((r && r.kind) || 'evidence'),
+  }, `${String((r && r.kind) || 'evidence')}: ${String((r && r.id) || '—')}`)));
+}
+
+function _drillShell(title, body) {
+  return card(title, body, {
+    actions: [el('button', {
+      class: 'btn btn-ghost btn-sm', type: 'button',
+      onclick: (e) => { const p = e.target.closest ? e.target.closest('.card') : null; if (p) p.hidden = true; },
+    }, 'Close')],
+    foot: 'Every value here is published by the engine. Nothing is inferred by the panel.',
+  });
+}
+
+// Cell drill: power, mapping, identifiability, event groups, evidence refs,
+// confidence components and uncertainty/contradiction reasons.
+function matrixCellDrill(cell, payload) {
+  const c = cell || {};
+  const view = cellView(c);
+  const power = c.power || {};
+  const mapping = c.mapping || {};
+  const events = c.event_association || {};
+  const prov = c.provenance || {};
+  const bounds = power.bounds || {};
+  const low = bounds.lower_w !== undefined ? bounds.lower_w : bounds.low;
+  const high = bounds.upper_w !== undefined ? bounds.upper_w : bounds.high;
+  const interval = (low === undefined || low === null) && (high === undefined || high === null)
+    ? '—' : `${watts(low)} – ${watts(high)}`;
+  const reasons = [];
+  if (view.category === 'group_only' || String(c.identifiability).toLowerCase() === 'non_identifiable') {
+    reasons.push('The reader observes only the group sum; no per-device split is identifiable.');
+  }
+  if (String(mapping.observability || '').toLowerCase() === 'not_observable') {
+    reasons.push('No measurement or mapping edge observes this load at this reader.');
+  }
+  if (String(mapping.mapping_status || '').toLowerCase() === 'conflicted') {
+    reasons.push('Competing mapping evidence conflicts; the estimate is withheld.');
+  }
+  if (String(mapping.mapping_status || '').toLowerCase() === 'suspected_change') {
+    reasons.push('A recent configuration change makes this mapping suspect.');
+  }
+  return _drillShell(`Cell · ${c.row_id || '—'} × ${c.reader_id || '—'}`, [
+    el('div', { class: 'matrix-drill-summary matrix-cat-' + view.category }, [
+      el('span', { class: 'matrix-cell-glyph' }, view.glyph),
+      el('span', {}, view.text),
+      el('strong', {}, view.value),
+      el('span', { class: 'stat-hint' }, interval),
+    ]),
+    el('div', { class: 'stat-label' }, 'Mapping & power'),
+    kv([
+      ['Mapping status', label(mapping.mapping_status || 'unknown')],
+      ['Observability', label(mapping.observability || 'unknown')],
+      ['Relation', mapping.relation_type ? label(mapping.relation_type) : '—'],
+      ['Measurement status', label(power.measurement_status || 'unknown')],
+      ['Estimate', view.value],
+      ['Bounds', interval],
+      ['Identifiability', label(c.identifiability || 'unknown')],
+      ['Group', c.group_id ? String(c.group_id) : '—'],
+    ]),
+    el('div', { class: 'stat-label', style: 'margin-top:10px' }, 'Event groups'),
+    kv([
+      ['Matched events', events.matched_event_count === undefined ? '—' : String(events.matched_event_count)],
+      ['Confirmed matches', events.confirmed_match_count === undefined ? '—' : String(events.confirmed_match_count)],
+      ['Provisional matches', events.provisional_match_count === undefined ? '—' : String(events.provisional_match_count)],
+      ['Avg response delay', events.avg_response_delay_ms === undefined || events.avg_response_delay_ms === null
+        ? '—' : `${events.avg_response_delay_ms} ms`],
+      ['Last matched', events.last_matched_at ? String(events.last_matched_at) : '—'],
+    ]),
+    el('div', { class: 'stat-label', style: 'margin-top:10px' }, 'Provenance & evidence'),
+    kv([
+      ['Sources used', (Array.isArray(prov.sources_used) ? prov.sources_used : []).map(label).join(', ') || '—'],
+      ['Topology version', prov.topology_version_id ? String(prov.topology_version_id) : '—'],
+      ['Model version', prov.model_version_id ? String(prov.model_version_id) : '—'],
+      ['Mapping version', prov.mapping_version_id ? String(prov.mapping_version_id) : '—'],
+    ]),
+    _evidenceRefs(prov.evidence_refs),
+    el('div', { class: 'stat-label', style: 'margin-top:10px' }, 'Confidence components'),
+    _confidenceComponents(c.confidence),
+    el('div', { class: 'stat-label', style: 'margin-top:10px' }, 'Reasons for uncertainty / contradictions'),
+    reasons.length
+      ? el('ul', { class: 'matrix-reasons' }, reasons.map((r) => el('li', {}, r)))
+      : el('p', { class: 'stat-hint' }, 'No uncertainty or contradiction reason published.'),
+  ]);
+}
+
+function matrixReaderDrill(payload) {
+  const data = payload || {};
+  const totals = data.reader_totals || {};
+  const body = el('div', {}, [
+    el('p', { class: 'stat-hint' },
+      'A reader column shows its own measured total, known contributions and unexplained residual. Columns are never summed.'),
+    el('div', { class: 'table-wrap' }, [
+      el('table', { class: 'data' }, [
+        el('thead', {}, el('tr', {}, [
+          el('th', {}, 'Reader'), el('th', { class: 'num' }, 'Measured'),
+          el('th', { class: 'num' }, 'Known'), el('th', { class: 'num' }, 'Residual'),
+          el('th', { class: 'num' }, 'Unknown'),
+        ])),
+        el('tbody', {}, Object.keys(totals).sort().map((reader) => {
+          const t = totals[reader] || {};
+          return el('tr', {}, [
+            el('th', {}, reader),
+            el('td', { class: 'num' }, watts(t.measured_w)),
+            el('td', { class: 'num' }, watts(t.known_contrib_w)),
+            el('td', { class: 'num' }, watts(t.residual_w)),
+            el('td', { class: 'num' }, watts(t.unknown_w)),
+          ]);
+        })),
+      ]),
+    ]),
+  ]);
+  return _drillShell('Reader drill-down', body);
+}
+
+function matrixRowDrill(payload) {
+  const data = payload || {};
+  const cells = Array.isArray(data.cells) ? data.cells : [];
+  const byRow = new Map();
+  cells.forEach((c) => {
+    if (!c || !c.row_id) return;
+    if (!byRow.has(c.row_id)) byRow.set(c.row_id, []);
+    byRow.get(c.row_id).push(c);
+  });
+  const body = el('div', {}, [
+    el('p', { class: 'stat-hint' },
+      'A row shows its observed readers and mapping history. A group row represents its members; it does not identify them individually.'),
+    ...[...byRow.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([rowId, rcells]) => {
+      const readers = rcells.map((c) => `${c.reader_id}: ${cellView(c).text}`).join(', ');
+      return el('div', { class: 'matrix-row-drill-item' }, [
+        el('div', { class: 'stat-label' }, rowId),
+        el('div', { class: 'stat-hint' }, readers),
+      ]);
+    }),
+  ]);
+  return _drillShell('Row drill-down', body);
+}
+
+// Append a cell drill drawer to the DOM root.  Kept as a function (not a card
+// in the grid) so clicking a cell opens it on demand without a full re-render.
+function matrixDrillDrawer(kind, context) {
+  if (kind === 'cell') return matrixCellDrill(context.cell, context.payload);
+  if (kind === 'reader') return matrixReaderDrill(context.payload);
+  if (kind === 'row') return matrixRowDrill(context.payload);
+  return _drillShell('Detail', el('p', { class: 'stat-hint' }, 'No detail available.'));
+}
+
 export {
   matrixSourceLedgerCard,
-  matrixIdentifiabilityCard
+  matrixIdentifiabilityCard,
+  matrixCellDrill,
+  matrixReaderDrill,
+  matrixRowDrill,
+  matrixDrillDrawer,
 };
