@@ -930,6 +930,55 @@ def test_a_resumed_tab_probes_the_session_even_off_the_overview() -> None:
     )
 
 
+def _js_function_body(script: str, signature: str) -> str:
+    """Return the brace-matched body of ``signature`` (up to its closing brace).
+
+    ``app.js`` is a browser script with no module seam, so this is the same
+    static source parsing the neighbouring tests use.  Brace matching keeps the
+    assertion scoped to one function rather than the whole file — a bare
+    ``"fetchOverview" in script`` check would pass even if ``pollTick`` reverted,
+    because the helper itself and an explanatory comment still mention it.
+    """
+    match = re.search(re.escape(signature) + r"\s*\{", script)
+    assert match is not None, f"{signature} not found"
+    depth = 1
+    index = match.end()
+    while index < len(script) and depth:
+        char = script[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        index += 1
+    return script[match.end() : index - 1]
+
+
+def _strip_js_comments(body: str) -> str:
+    """Drop ``//`` line comments so they cannot satisfy a call assertion."""
+    return "\n".join(line.split("//", 1)[0] for line in body.splitlines())
+
+
+def test_poll_tick_uses_the_lightweight_overview_fetcher() -> None:
+    """The 8s poll must call ``fetchOverviewLive()``, never ``fetchOverview()``.
+
+    The two differ in cost: ``fetchOverview`` also fetches ``/residuals`` and
+    ``/mapping`` (an N+1 model read before commit b959997), whose results the
+    poll discarded.  This guard reads only ``pollTick``'s body, so reverting the
+    call — or reintroducing an expensive endpoint in the tick — fails here.
+    """
+    body = _strip_js_comments(_js_function_body(_app_js(), "async function pollTick()"))
+
+    assert "fetchOverviewLive()" in body, (
+        "pollTick no longer uses the lightweight fetchOverviewLive()"
+    )
+    assert "fetchOverview(" not in body, (
+        "pollTick reverted to the expensive fetchOverview()"
+    )
+    assert "'/residuals'" not in body and "'/mapping'" not in body, (
+        "pollTick must not fetch the expensive residuals/mapping endpoints"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # AC-1 / AC-7: the retired dedicated-CT vocabulary (task-12)
 # --------------------------------------------------------------------------- #
