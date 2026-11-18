@@ -1,5 +1,16 @@
 # Release Notes
 
+## v0.2.1-dev.41 — 2026-11-18 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- feat(ui): add typed-confirmation reset database button
+- feat(storage): add a guarded full database reset with safety backup
+- fix(disaggregation): coerce LoadShape repr strings without failing the batch
+- fix(ui): keep Matrix tab clickable by wrapping nav at mid widths
+
 ## v0.2.1-dev.40 — 2026-11-18 (development channel)
 
 Automatic development build.
