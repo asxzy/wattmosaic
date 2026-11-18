@@ -28,6 +28,14 @@ from ..contracts import (
     TopologyRelation,
 )
 from ..electrical.models import resolve_model
+from .protocols import (
+    DiagnosticsProvider,
+    DiscoveryProvider,
+    MappingProvider,
+    ModelsProvider,
+    SnapshotProvider,
+    TopologyProvider,
+)
 
 
 class FacadeUnavailable(RuntimeError):
@@ -252,61 +260,22 @@ async def derive_mapping_matrix(facade: EngineFacade) -> dict[str, Any]:
 
 
 @runtime_checkable
-class EngineFacade(Protocol):
-    """Everything the HTTP layer needs from the engine."""
+class EngineFacade(
+    SnapshotProvider,
+    TopologyProvider,
+    MappingProvider,
+    ModelsProvider,
+    DiscoveryProvider,
+    DiagnosticsProvider,
+    Protocol,
+):
+    """Everything the HTTP layer needs from the engine.
 
-    def health(self) -> Any: ...
-
-    def status(self) -> Any: ...
-
-    def snapshot(self) -> Any: ...
-
-    def devices(self) -> Any: ...
-
-    def device(self, device_id: str) -> Any: ...
-
-    def confidence_tiers(self) -> Any: ...
-
-    def topology(self) -> Any: ...
-
-    def set_topology(self, topology: Any) -> Any: ...
-
-    def confirm_topology(self) -> Any: ...
-
-    def panel_tree(self, *, include_nesting: bool = False) -> Any: ...
-
-    def nesting_candidates(self, *, hours: float = 12.0) -> Any: ...
-
-    def quality(self) -> Any: ...
-
-    def diagnostics(self) -> Any: ...
-
-    def circuits(self) -> Any: ...
-
-    def relations(self, kind: str | None = None) -> Any: ...
-
-    def inference_records(self, device_id: str, *, limit: int = 200) -> Any: ...
-
-    def residual_components(self, *, hours: float = 24.0, limit: int = 500) -> Any: ...
-
-    def isolation_status(self) -> Any: ...
-
-    def models(self, device_id: str) -> Any: ...
-
-    def command(self, command: ServiceCommand) -> Any: ...
-
-    def discover_placements(
-        self,
-        *,
-        lookback_hours: float = 24.0,
-        apply: bool | None = None,
-        include_groups: bool = True,
-        max_candidates: int = 200,
-    ) -> Any: ...
-
-    def export(self, device_id: str) -> Any: ...
-
-    def metrics(self) -> Any: ...
+    This is the composition of the six per-area protocols in
+    :mod:`api.protocols`.  It declares no methods of its own, so existing
+    facades and test doubles that satisfy the old monolithic protocol keep
+    working unchanged.
+    """
 
 
 class NullFacade:
