@@ -1,0 +1,165 @@
+{
+  "$defs": {
+    "EvidenceRef": {
+      "additionalProperties": false,
+      "description": "A typed, resolvable reference to a piece of evidence (D4's resolver).",
+      "properties": {
+        "kind": {
+          "enum": [
+            "sample",
+            "event_evidence",
+            "event_group",
+            "ha_event",
+            "edge",
+            "mapping_edge",
+            "model_version",
+            "configuration_event",
+            "observation"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "title": "EvidenceRef",
+      "type": "object"
+    },
+    "IdentifiabilityStatus": {
+      "description": "Identifiability of an estimate (HB \u00a78.4).",
+      "enum": [
+        "identifiable",
+        "partially_identifiable",
+        "group_identifiable",
+        "non_identifiable",
+        "insufficient_evidence"
+      ],
+      "title": "IdentifiabilityStatus",
+      "type": "string"
+    },
+    "ModelBasis": {
+      "description": "What a model is fitted on, and how its numbers must be interpreted.",
+      "enum": [
+        "DELTA",
+        "ABSOLUTE_ANCHOR",
+        "LEGACY_ABSOLUTE"
+      ],
+      "title": "ModelBasis",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One device-attributed learning observation derived from immutable evidence.",
+  "properties": {
+    "observation_id": {
+      "title": "Observation Id",
+      "type": "string"
+    },
+    "subject_kind": {
+      "enum": [
+        "device",
+        "component"
+      ],
+      "title": "Subject Kind",
+      "type": "string"
+    },
+    "subject_id": {
+      "title": "Subject Id",
+      "type": "string"
+    },
+    "endpoint_id": {
+      "title": "Endpoint Id",
+      "type": "string"
+    },
+    "event_group_ref": {
+      "$ref": "#/$defs/EvidenceRef"
+    },
+    "transition": {
+      "title": "Transition",
+      "type": "string"
+    },
+    "attributes": {
+      "additionalProperties": true,
+      "title": "Attributes",
+      "type": "object"
+    },
+    "delta_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Delta W"
+    },
+    "level_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Level W"
+    },
+    "status": {
+      "enum": [
+        "provisional",
+        "confirmed",
+        "rejected"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "rejection_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Rejection Reason"
+    },
+    "identifiability": {
+      "$ref": "#/$defs/IdentifiabilityStatus"
+    },
+    "basis": {
+      "$ref": "#/$defs/ModelBasis",
+      "default": "DELTA"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "observation_id",
+    "subject_kind",
+    "subject_id",
+    "endpoint_id",
+    "event_group_ref",
+    "transition",
+    "status",
+    "identifiability",
+    "created_at"
+  ],
+  "title": "LearningObservation",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/learning_observation.json",
+  "x-contract-version": "2.4.0"
+}

@@ -1,0 +1,89 @@
+{
+  "$defs": {
+    "LevelStat": {
+      "additionalProperties": false,
+      "description": "A robust statistic of a level: nullable median/MAD plus a sample count.",
+      "properties": {
+        "median_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Median W"
+        },
+        "mad_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mad W"
+        },
+        "n": {
+          "default": 0,
+          "title": "N",
+          "type": "integer"
+        }
+      },
+      "title": "LevelStat",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Hidden-state model: state distributions, HA mapping, transitions, durations.",
+  "properties": {
+    "kind": {
+      "const": "dynamic",
+      "default": "dynamic",
+      "title": "Kind",
+      "type": "string"
+    },
+    "states": {
+      "additionalProperties": {
+        "$ref": "#/$defs/LevelStat"
+      },
+      "title": "States",
+      "type": "object"
+    },
+    "ha_state_to_states": {
+      "additionalProperties": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "title": "Ha State To States",
+      "type": "object"
+    },
+    "transition_counts": {
+      "additionalProperties": {
+        "additionalProperties": {
+          "type": "integer"
+        },
+        "type": "object"
+      },
+      "title": "Transition Counts",
+      "type": "object"
+    },
+    "duration_s": {
+      "additionalProperties": {
+        "$ref": "#/$defs/LevelStat"
+      },
+      "title": "Duration S",
+      "type": "object"
+    }
+  },
+  "title": "DynamicSpec",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/dynamic_spec.json",
+  "x-contract-version": "2.4.0"
+}

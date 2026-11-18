@@ -1,0 +1,447 @@
+{
+  "$defs": {
+    "AdjustableSpec": {
+      "additionalProperties": false,
+      "description": "Adjustable P=f(x) model on a declared control variable.",
+      "properties": {
+        "kind": {
+          "const": "adjustable",
+          "default": "adjustable",
+          "title": "Kind",
+          "type": "string"
+        },
+        "control_variable": {
+          "title": "Control Variable",
+          "type": "string"
+        },
+        "knots_x": {
+          "items": {
+            "type": "number"
+          },
+          "title": "Knots X",
+          "type": "array"
+        },
+        "knots_w": {
+          "items": {
+            "type": "number"
+          },
+          "title": "Knots W",
+          "type": "array"
+        },
+        "monotone": {
+          "default": false,
+          "title": "Monotone",
+          "type": "boolean"
+        },
+        "x_coverage": {
+          "anyOf": [
+            {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "X Coverage"
+        },
+        "standby": {
+          "$ref": "#/$defs/LevelStat"
+        }
+      },
+      "required": [
+        "control_variable"
+      ],
+      "title": "AdjustableSpec",
+      "type": "object"
+    },
+    "ComponentSumSpec": {
+      "additionalProperties": false,
+      "description": "A device model that is the sum of its component models.",
+      "properties": {
+        "kind": {
+          "const": "component_sum",
+          "default": "component_sum",
+          "title": "Kind",
+          "type": "string"
+        },
+        "component_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Component Ids",
+          "type": "array"
+        }
+      },
+      "title": "ComponentSumSpec",
+      "type": "object"
+    },
+    "DynamicSpec": {
+      "additionalProperties": false,
+      "description": "Hidden-state model: state distributions, HA mapping, transitions, durations.",
+      "properties": {
+        "kind": {
+          "const": "dynamic",
+          "default": "dynamic",
+          "title": "Kind",
+          "type": "string"
+        },
+        "states": {
+          "additionalProperties": {
+            "$ref": "#/$defs/LevelStat"
+          },
+          "title": "States",
+          "type": "object"
+        },
+        "ha_state_to_states": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": "Ha State To States",
+          "type": "object"
+        },
+        "transition_counts": {
+          "additionalProperties": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object"
+          },
+          "title": "Transition Counts",
+          "type": "object"
+        },
+        "duration_s": {
+          "additionalProperties": {
+            "$ref": "#/$defs/LevelStat"
+          },
+          "title": "Duration S",
+          "type": "object"
+        }
+      },
+      "title": "DynamicSpec",
+      "type": "object"
+    },
+    "EvidenceRef": {
+      "additionalProperties": false,
+      "description": "A typed, resolvable reference to a piece of evidence (D4's resolver).",
+      "properties": {
+        "kind": {
+          "enum": [
+            "sample",
+            "event_evidence",
+            "event_group",
+            "ha_event",
+            "edge",
+            "mapping_edge",
+            "model_version",
+            "configuration_event",
+            "observation"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "title": "EvidenceRef",
+      "type": "object"
+    },
+    "FixedSpec": {
+      "additionalProperties": false,
+      "description": "Fixed-power model: per-level stats plus named transition deltas.",
+      "properties": {
+        "kind": {
+          "const": "fixed",
+          "default": "fixed",
+          "title": "Kind",
+          "type": "string"
+        },
+        "levels": {
+          "additionalProperties": {
+            "$ref": "#/$defs/LevelStat"
+          },
+          "propertyNames": {
+            "$ref": "#/$defs/PowerLevelV3"
+          },
+          "title": "Levels",
+          "type": "object"
+        },
+        "transition_delta": {
+          "additionalProperties": {
+            "$ref": "#/$defs/LevelStat"
+          },
+          "title": "Transition Delta",
+          "type": "object"
+        }
+      },
+      "title": "FixedSpec",
+      "type": "object"
+    },
+    "KernelPhase": {
+      "additionalProperties": false,
+      "description": "One phase of a response kernel (delay / amplitude / duration).",
+      "properties": {
+        "phase": {
+          "enum": [
+            "startup",
+            "active",
+            "steady",
+            "shutdown",
+            "standby"
+          ],
+          "title": "Phase",
+          "type": "string"
+        },
+        "delay_s": {
+          "$ref": "#/$defs/LevelStat"
+        },
+        "amplitude_w": {
+          "$ref": "#/$defs/LevelStat"
+        },
+        "duration_s": {
+          "$ref": "#/$defs/LevelStat"
+        }
+      },
+      "required": [
+        "phase"
+      ],
+      "title": "KernelPhase",
+      "type": "object"
+    },
+    "LevelStat": {
+      "additionalProperties": false,
+      "description": "A robust statistic of a level: nullable median/MAD plus a sample count.",
+      "properties": {
+        "median_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Median W"
+        },
+        "mad_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mad W"
+        },
+        "n": {
+          "default": 0,
+          "title": "N",
+          "type": "integer"
+        }
+      },
+      "title": "LevelStat",
+      "type": "object"
+    },
+    "ModelBasis": {
+      "description": "What a model is fitted on, and how its numbers must be interpreted.",
+      "enum": [
+        "DELTA",
+        "ABSOLUTE_ANCHOR",
+        "LEGACY_ABSOLUTE"
+      ],
+      "title": "ModelBasis",
+      "type": "string"
+    },
+    "ModelClass": {
+      "description": "The discriminated model class (DEC-34: the declared ``LoadShape``).",
+      "enum": [
+        "FIXED",
+        "ADJUSTABLE",
+        "DYNAMIC",
+        "RESPONSE_KERNEL",
+        "COMPONENT_SUM"
+      ],
+      "title": "ModelClass",
+      "type": "string"
+    },
+    "PowerLevelV3": {
+      "description": "Operating level of a published value (HB \u00a711.5).\n\nUnlike the legacy ``PowerLevel``, ``OFF`` and ``STANDBY`` are distinct\nmembers: OFF is a transition endpoint, not a claim of 0 W (HB \u00a711.5,\nrule 6).  ``UNKNOWN`` is the neutral default.",
+      "enum": [
+        "off",
+        "standby",
+        "idle",
+        "active",
+        "transient",
+        "unknown"
+      ],
+      "title": "PowerLevelV3",
+      "type": "string"
+    },
+    "ResponseKernelSpec": {
+      "additionalProperties": false,
+      "description": "Transient response kernel, keyed by transition type.",
+      "properties": {
+        "kind": {
+          "const": "response_kernel",
+          "default": "response_kernel",
+          "title": "Kind",
+          "type": "string"
+        },
+        "by_transition": {
+          "additionalProperties": {
+            "items": {
+              "$ref": "#/$defs/KernelPhase"
+            },
+            "type": "array"
+          },
+          "title": "By Transition",
+          "type": "object"
+        }
+      },
+      "title": "ResponseKernelSpec",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One append-only version of a subject's power model.",
+  "properties": {
+    "version_id": {
+      "title": "Version Id",
+      "type": "string"
+    },
+    "subject_kind": {
+      "enum": [
+        "device",
+        "component"
+      ],
+      "title": "Subject Kind",
+      "type": "string"
+    },
+    "subject_id": {
+      "title": "Subject Id",
+      "type": "string"
+    },
+    "number": {
+      "title": "Number",
+      "type": "integer"
+    },
+    "model_class": {
+      "$ref": "#/$defs/ModelClass"
+    },
+    "basis": {
+      "$ref": "#/$defs/ModelBasis"
+    },
+    "spec": {
+      "discriminator": {
+        "mapping": {
+          "adjustable": "#/$defs/AdjustableSpec",
+          "component_sum": "#/$defs/ComponentSumSpec",
+          "dynamic": "#/$defs/DynamicSpec",
+          "fixed": "#/$defs/FixedSpec",
+          "response_kernel": "#/$defs/ResponseKernelSpec"
+        },
+        "propertyName": "kind"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/FixedSpec"
+        },
+        {
+          "$ref": "#/$defs/AdjustableSpec"
+        },
+        {
+          "$ref": "#/$defs/DynamicSpec"
+        },
+        {
+          "$ref": "#/$defs/ResponseKernelSpec"
+        },
+        {
+          "$ref": "#/$defs/ComponentSumSpec"
+        }
+      ],
+      "title": "Spec"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "evidence_refs": {
+      "items": {
+        "$ref": "#/$defs/EvidenceRef"
+      },
+      "title": "Evidence Refs",
+      "type": "array"
+    },
+    "topology_version_at_training": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Topology Version At Training"
+    },
+    "trainer_version": {
+      "title": "Trainer Version",
+      "type": "string"
+    },
+    "parent_version_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Version Id"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "version_id",
+    "subject_kind",
+    "subject_id",
+    "number",
+    "model_class",
+    "basis",
+    "spec",
+    "trainer_version",
+    "created_at"
+  ],
+  "title": "PowerModelVersion",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/power_model_version.json",
+  "x-contract-version": "2.4.0"
+}

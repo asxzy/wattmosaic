@@ -1,0 +1,106 @@
+{
+  "$defs": {
+    "LevelStat": {
+      "additionalProperties": false,
+      "description": "A robust statistic of a level: nullable median/MAD plus a sample count.",
+      "properties": {
+        "median_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Median W"
+        },
+        "mad_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mad W"
+        },
+        "n": {
+          "default": 0,
+          "title": "N",
+          "type": "integer"
+        }
+      },
+      "title": "LevelStat",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Adjustable P=f(x) model on a declared control variable.",
+  "properties": {
+    "kind": {
+      "const": "adjustable",
+      "default": "adjustable",
+      "title": "Kind",
+      "type": "string"
+    },
+    "control_variable": {
+      "title": "Control Variable",
+      "type": "string"
+    },
+    "knots_x": {
+      "items": {
+        "type": "number"
+      },
+      "title": "Knots X",
+      "type": "array"
+    },
+    "knots_w": {
+      "items": {
+        "type": "number"
+      },
+      "title": "Knots W",
+      "type": "array"
+    },
+    "monotone": {
+      "default": false,
+      "title": "Monotone",
+      "type": "boolean"
+    },
+    "x_coverage": {
+      "anyOf": [
+        {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "X Coverage"
+    },
+    "standby": {
+      "$ref": "#/$defs/LevelStat"
+    }
+  },
+  "required": [
+    "control_variable"
+  ],
+  "title": "AdjustableSpec",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/adjustable_spec.json",
+  "x-contract-version": "2.4.0"
+}

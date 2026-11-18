@@ -33,6 +33,18 @@
     "version_triple": "version_triple.json",
     "evidence_ref": "evidence_ref.json",
     "bounds": "bounds.json",
-    "confidence_vector_v3": "confidence_vector_v3.json"
+    "confidence_vector_v3": "confidence_vector_v3.json",
+    "level_stat": "level_stat.json",
+    "fixed_spec": "fixed_spec.json",
+    "adjustable_spec": "adjustable_spec.json",
+    "dynamic_spec": "dynamic_spec.json",
+    "kernel_phase": "kernel_phase.json",
+    "response_kernel_spec": "response_kernel_spec.json",
+    "component_sum_spec": "component_sum_spec.json",
+    "power_model_version": "power_model_version.json",
+    "power_model_event": "power_model_event.json",
+    "power_prediction": "power_prediction.json",
+    "delta_prior": "delta_prior.json",
+    "learning_observation": "learning_observation.json"
   }
 }

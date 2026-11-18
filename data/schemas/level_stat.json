@@ -1,0 +1,39 @@
+{
+  "additionalProperties": false,
+  "description": "A robust statistic of a level: nullable median/MAD plus a sample count.",
+  "properties": {
+    "median_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Median W"
+    },
+    "mad_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Mad W"
+    },
+    "n": {
+      "default": 0,
+      "title": "N",
+      "type": "integer"
+    }
+  },
+  "title": "LevelStat",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/level_stat.json",
+  "x-contract-version": "2.4.0"
+}
