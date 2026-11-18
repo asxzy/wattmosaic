@@ -1,0 +1,250 @@
+{
+  "$defs": {
+    "EventGroupStatus": {
+      "description": "The six HB \u00a712.3 states, in order.",
+      "enum": [
+        "detected",
+        "matching",
+        "provisional",
+        "confirmed",
+        "revised",
+        "unresolved"
+      ],
+      "title": "EventGroupStatus",
+      "type": "string"
+    },
+    "EvidenceRef": {
+      "additionalProperties": false,
+      "description": "A typed, resolvable reference to a piece of evidence (D4's resolver).",
+      "properties": {
+        "kind": {
+          "enum": [
+            "sample",
+            "event_evidence",
+            "event_group",
+            "ha_event",
+            "edge",
+            "mapping_edge",
+            "model_version",
+            "configuration_event",
+            "observation"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "title": "EvidenceRef",
+      "type": "object"
+    },
+    "ReaderDelta": {
+      "additionalProperties": false,
+      "description": "A reader's signed contribution to an event group.\n\n``delta_w is None`` iff ``completeness == \"missing\"``: a reader with no\nusable data keeps ``None`` and is never reported as ``0`` (HB \u00a718).",
+      "properties": {
+        "reader_id": {
+          "title": "Reader Id",
+          "type": "string"
+        },
+        "delta_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Delta W"
+        },
+        "sigma_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sigma W"
+        },
+        "completeness": {
+          "enum": [
+            "complete",
+            "pre_missing",
+            "post_pending",
+            "missing"
+          ],
+          "title": "Completeness",
+          "type": "string"
+        },
+        "evidence_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "reader_id",
+        "completeness"
+      ],
+      "title": "ReaderDelta",
+      "type": "object"
+    },
+    "SubEvent": {
+      "additionalProperties": false,
+      "description": "An atomic change within an event group, with its own timestamp.",
+      "properties": {
+        "sub_event_id": {
+          "title": "Sub Event Id",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/SubEventKind"
+        },
+        "ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "title": "Observed At",
+          "type": "string"
+        },
+        "timestamp_uncertainty_s": {
+          "title": "Timestamp Uncertainty S",
+          "type": "number"
+        }
+      },
+      "required": [
+        "sub_event_id",
+        "kind",
+        "ref",
+        "observed_at",
+        "timestamp_uncertainty_s"
+      ],
+      "title": "SubEvent",
+      "type": "object"
+    },
+    "SubEventKind": {
+      "description": "What kind of atomic change a sub-event records.",
+      "enum": [
+        "ha_state",
+        "ha_attribute",
+        "reader_step",
+        "plug_step"
+      ],
+      "title": "SubEventKind",
+      "type": "string"
+    },
+    "VersionTriple": {
+      "additionalProperties": false,
+      "description": "The independent topology/mapping/model version triple (rule 20).",
+      "properties": {
+        "topology_version_id": {
+          "title": "Topology Version Id",
+          "type": "string"
+        },
+        "mapping_version_id": {
+          "title": "Mapping Version Id",
+          "type": "string"
+        },
+        "model_set_id": {
+          "title": "Model Set Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "topology_version_id",
+        "mapping_version_id",
+        "model_set_id"
+      ],
+      "title": "VersionTriple",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "A cross-reader event group (P5); prior revisions are immutable.",
+  "properties": {
+    "group_id": {
+      "title": "Group Id",
+      "type": "string"
+    },
+    "revision": {
+      "title": "Revision",
+      "type": "integer"
+    },
+    "status": {
+      "$ref": "#/$defs/EventGroupStatus"
+    },
+    "opened_at": {
+      "format": "date-time",
+      "title": "Opened At",
+      "type": "string"
+    },
+    "closed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Closed At"
+    },
+    "sub_events": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SubEvent"
+      },
+      "title": "Sub Events",
+      "type": "array"
+    },
+    "reader_deltas": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ReaderDelta"
+      },
+      "title": "Reader Deltas",
+      "type": "array"
+    },
+    "grouping_reasons": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Grouping Reasons",
+      "type": "array"
+    },
+    "versions": {
+      "$ref": "#/$defs/VersionTriple"
+    }
+  },
+  "required": [
+    "group_id",
+    "revision",
+    "status",
+    "opened_at",
+    "versions"
+  ],
+  "title": "EventGroup",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/event_group.json",
+  "x-contract-version": "2.4.0"
+}

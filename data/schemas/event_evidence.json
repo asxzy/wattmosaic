@@ -1,0 +1,128 @@
+{
+  "$defs": {
+    "QualityFlag": {
+      "description": "Why a measurement may be unfit for inference (HB \u00a76.1, \u00a718).",
+      "enum": [
+        "unit_invalid",
+        "implausible_range",
+        "repeated",
+        "stale_on_arrival",
+        "clock_skew_future",
+        "primed",
+        "out_of_order"
+      ],
+      "title": "QualityFlag",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Immutable event window (P4), HB \u00a76.5.\n\n``finalized=True`` does not freeze the object at the Pydantic level, but\n:meth:`with_sample` always returns a *new* record with a new id: evidence is\nimmutable by construction, and a revision never mutates its predecessor.",
+  "properties": {
+    "evidence_id": {
+      "title": "Evidence Id",
+      "type": "string"
+    },
+    "reader_id": {
+      "title": "Reader Id",
+      "type": "string"
+    },
+    "measurement_event_id": {
+      "title": "Measurement Event Id",
+      "type": "string"
+    },
+    "window_start": {
+      "format": "date-time",
+      "title": "Window Start",
+      "type": "string"
+    },
+    "window_end": {
+      "format": "date-time",
+      "title": "Window End",
+      "type": "string"
+    },
+    "samples": {
+      "items": {
+        "maxItems": 2,
+        "minItems": 2,
+        "prefixItems": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        ],
+        "type": "array"
+      },
+      "title": "Samples",
+      "type": "array"
+    },
+    "baseline_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Baseline W"
+    },
+    "sigma_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Sigma W"
+    },
+    "delta_w": {
+      "title": "Delta W",
+      "type": "number"
+    },
+    "quality_flags": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/QualityFlag"
+      },
+      "title": "Quality Flags",
+      "type": "array"
+    },
+    "topology_version_id": {
+      "title": "Topology Version Id",
+      "type": "string"
+    },
+    "finalized": {
+      "title": "Finalized",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "evidence_id",
+    "reader_id",
+    "measurement_event_id",
+    "window_start",
+    "window_end",
+    "samples",
+    "delta_w",
+    "topology_version_id",
+    "finalized"
+  ],
+  "title": "EventEvidence",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/event_evidence.json",
+  "x-contract-version": "2.4.0"
+}

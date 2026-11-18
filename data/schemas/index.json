@@ -33,6 +33,13 @@
     "version_triple": "version_triple.json",
     "evidence_ref": "evidence_ref.json",
     "bounds": "bounds.json",
-    "confidence_vector_v3": "confidence_vector_v3.json"
+    "confidence_vector_v3": "confidence_vector_v3.json",
+    "reader_measurement": "reader_measurement.json",
+    "ha_event": "ha_event.json",
+    "measurement_event": "measurement_event.json",
+    "event_evidence": "event_evidence.json",
+    "sub_event": "sub_event.json",
+    "reader_delta": "reader_delta.json",
+    "event_group": "event_group.json"
   }
 }

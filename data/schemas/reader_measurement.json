@@ -1,0 +1,207 @@
+{
+  "$defs": {
+    "MeasurementType": {
+      "description": "What kind of value a reader measurement represents (HB \u00a72.1).",
+      "enum": [
+        "instantaneous",
+        "window_average",
+        "device_reported",
+        "calculated",
+        "accumulated_energy"
+      ],
+      "title": "MeasurementType",
+      "type": "string"
+    },
+    "QualityFlag": {
+      "description": "Why a measurement may be unfit for inference (HB \u00a76.1, \u00a718).",
+      "enum": [
+        "unit_invalid",
+        "implausible_range",
+        "repeated",
+        "stale_on_arrival",
+        "clock_skew_future",
+        "primed",
+        "out_of_order"
+      ],
+      "title": "QualityFlag",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "HB \u00a72.1 normalized reading, produced only by P1 (polarity applied once).\n\nUnsupported measurements stay ``None`` -- the contract never fabricates a\nfield (HB \u00a72.1) and never uses ``0`` to mean \"unknown\" (HB \u00a718).",
+  "properties": {
+    "reader_id": {
+      "title": "Reader Id",
+      "type": "string"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "title": "Observed At",
+      "type": "string"
+    },
+    "received_at": {
+      "format": "date-time",
+      "title": "Received At",
+      "type": "string"
+    },
+    "active_power_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Active Power W"
+    },
+    "current_rms_a": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Current Rms A"
+    },
+    "voltage_rms_v": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Voltage Rms V"
+    },
+    "reactive_power_var": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reactive Power Var"
+    },
+    "power_factor": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Power Factor"
+    },
+    "energy_wh": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Energy Wh"
+    },
+    "phase": {
+      "enum": [
+        "l1",
+        "l2",
+        "both",
+        "unknown"
+      ],
+      "title": "Phase",
+      "type": "string"
+    },
+    "leg": {
+      "anyOf": [
+        {
+          "enum": [
+            "l1",
+            "l2"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Leg"
+    },
+    "voltage_reference_v": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Voltage Reference V"
+    },
+    "measurement_type": {
+      "$ref": "#/$defs/MeasurementType"
+    },
+    "measurement_window_ms": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Measurement Window Ms"
+    },
+    "calibration_version": {
+      "title": "Calibration Version",
+      "type": "string"
+    },
+    "measurement_basis": {
+      "title": "Measurement Basis",
+      "type": "string"
+    },
+    "quality_flags": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/QualityFlag"
+      },
+      "title": "Quality Flags",
+      "type": "array"
+    },
+    "sequence": {
+      "title": "Sequence",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "reader_id",
+    "observed_at",
+    "received_at",
+    "phase",
+    "measurement_type",
+    "calibration_version",
+    "measurement_basis",
+    "sequence"
+  ],
+  "title": "ReaderMeasurement",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/reader_measurement.json",
+  "x-contract-version": "2.4.0"
+}

@@ -1,0 +1,96 @@
+{
+  "$defs": {
+    "EvidenceRef": {
+      "additionalProperties": false,
+      "description": "A typed, resolvable reference to a piece of evidence (D4's resolver).",
+      "properties": {
+        "kind": {
+          "enum": [
+            "sample",
+            "event_evidence",
+            "event_group",
+            "ha_event",
+            "edge",
+            "mapping_edge",
+            "model_version",
+            "configuration_event",
+            "observation"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "title": "EvidenceRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "A reader's signed contribution to an event group.\n\n``delta_w is None`` iff ``completeness == \"missing\"``: a reader with no\nusable data keeps ``None`` and is never reported as ``0`` (HB \u00a718).",
+  "properties": {
+    "reader_id": {
+      "title": "Reader Id",
+      "type": "string"
+    },
+    "delta_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Delta W"
+    },
+    "sigma_w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Sigma W"
+    },
+    "completeness": {
+      "enum": [
+        "complete",
+        "pre_missing",
+        "post_pending",
+        "missing"
+      ],
+      "title": "Completeness",
+      "type": "string"
+    },
+    "evidence_ref": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "reader_id",
+    "completeness"
+  ],
+  "title": "ReaderDelta",
+  "type": "object",
+  "$id": "https://wattmosaic.local/schemas/reader_delta.json",
+  "x-contract-version": "2.4.0"
+}
