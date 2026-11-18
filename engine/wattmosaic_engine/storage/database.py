@@ -86,6 +86,12 @@ class Database:
         self.path = Path(path)
         self._lock = threading.RLock()
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Record whether there was a real database to preserve *before* opening
+        # the connection (which creates an empty file).  The backup decision must
+        # not confuse "sqlite just made this file" with "the operator has data".
+        # A zero-byte or brand-new file, or a file whose ``user_version`` is 0,
+        # has nothing worth rolling back to.
+        self._preexisting_file = self.path.exists() and self.path.stat().st_size > 0
         # ``check_same_thread=False`` lets a reader thread use this connection.
         # That is safe *only* because every accessor below executes inside
         # ``self._lock``: SQLite serialises a single connection internally,
@@ -198,9 +204,9 @@ class Database:
     def _backup_before_migration(self) -> Path | None:
         """Copy the file aside when a migration numbered 13+ is pending.
 
-        Returns the backup path, or ``None`` when nothing was copied (no file
-        yet, an in-memory database, or no pending migration at or above
-        :data:`BACKUP_FROM_VERSION`).
+        Returns the backup path, or ``None`` when nothing was copied (a fresh,
+        empty or unversioned database, an in-memory database, or no pending
+        migration at or above :data:`BACKUP_FROM_VERSION`).
 
         The steps mirror :meth:`reset` steps 1-2, for the same reason: a WAL-mode
         file is only self-contained after a checkpoint, and the copy has to exist
@@ -210,12 +216,16 @@ class Database:
         """
         if self._is_memory():
             return None
+        # A backup is only a rollback point for data that already existed.  A
+        # fresh install (no file before this constructor), a zero-byte file, or
+        # a database still at ``user_version`` 0 has nothing to roll back to.
+        # Skip in all three cases instead of copying an empty/unversioned file.
+        if not self._preexisting_file:
+            return None
+        if current_version(self._conn) < 1:
+            return None
         pending = [m for m in pending_migrations(self._conn) if m.version >= BACKUP_FROM_VERSION]
         if not pending:
-            return None
-        if not self.path.exists() or self.path.stat().st_size == 0:
-            # A fresh install: there is no data to lose, and an empty file is not
-            # a usable rollback target.
             return None
         target = max(m.version for m in pending)
         self.checkpoint()

@@ -51,7 +51,12 @@ from wattmosaic_engine.contracts import (
     TopologyStatus,
 )
 from wattmosaic_engine.storage import LATEST_VERSION, Database
-from wattmosaic_engine.storage.migrations import MIGRATIONS, apply_migrations, current_version
+from wattmosaic_engine.storage import migrations as migrations_module
+from wattmosaic_engine.storage.migrations import (
+    MIGRATIONS,
+    apply_migrations,
+    current_version,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -386,9 +391,27 @@ def test_migrations_idempotent(tmp_path: Path) -> None:
 
 
 def test_migration_versions_are_sequential() -> None:
+    """Released versions are contiguous; later ones may have gaps.
+
+    Wave-2 migrations land in parallel and out of order, and 21-24 are spare, so
+    the old ``list(range(1, N + 1))`` rule breaks as soon as any one of them is
+    added.  The real invariant is: 1-11 exist and are contiguous, 12 is never a
+    migration (it is the payload-encoding marker), and every later version is
+    unique and at most 25.
+    """
     versions = [m.version for m in MIGRATIONS]
     assert versions == sorted(versions)
-    assert versions == list(range(1, len(versions) + 1))
+    assert versions[:11] == list(range(1, 12))
+    assert len(versions) == len(set(versions)), f"duplicate version: {versions}"
+    assert max(versions) == migrations_module.LATEST_VERSION
+    reserved = set(migrations_module.RESERVED_VERSIONS)
+    spare = set(migrations_module.SPARE_VERSIONS)
+    assert reserved == {12}
+    assert spare == set(range(21, 25))
+    assert 12 not in versions
+    assert all(13 <= version <= 25 for version in versions if version > 11)
+    assert not reserved & set(versions)
+    assert not spare & set(versions)
 
 
 def test_wal_enabled(tmp_path: Path) -> None:

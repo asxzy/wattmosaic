@@ -91,8 +91,23 @@ def add_column_if_missing(
 #: ``vNNN_<slug>``: three digits, underscore, a lower-case slug.
 _MODULE_PATTERN = re.compile(r"^v(\d{3})_([a-z0-9_]+)$")
 
-#: Version 12 is the payload-encoding marker, never a migration.
-RESERVED_VERSIONS: dict[int, str] = {
+#: Numbers that are deliberately *not* schema versions produced by a migration.
+#:
+#: ``12`` is the payload-encoding marker (``PAYLOAD_ENCODING_VERSION``): a
+#: write-path flag with no DDL behind it.  Because the released migrations stop
+#: at 11, a module numbered 12 would make "schema 12" mean two different things.
+#: Discovery still refuses a module with a reserved number (below).
+RESERVED_VERSIONS: frozenset[int] = frozenset({12})
+
+#: Numbers set aside for future W3/W4 tasks that need a new table.  Unlike
+#: :data:`RESERVED_VERSIONS`, these may legitimately become migrations later; a
+#: gap in this range must therefore not be read as "a migration is missing".
+SPARE_VERSIONS: frozenset[int] = frozenset(range(21, 25))
+
+#: Human-readable reasons, keyed by reserved number, used only by discovery's
+#: refusal message.  Kept private so the public ``RESERVED_VERSIONS`` stays a
+#: simple set of numbers for schema-version tests.
+_RESERVED_REASONS: dict[int, str] = {
     12: "PAYLOAD_ENCODING_VERSION is a write-path marker, not a migration",
 }
 
@@ -146,7 +161,9 @@ def discover_modules(directory: str | Path | None = None) -> tuple[MigrationModu
             )
         number = int(match.group(1))
         if number in RESERVED_VERSIONS:
-            raise ValueError(f"{path.name}: version {number} is reserved -- {RESERVED_VERSIONS[number]}")
+            raise ValueError(
+                f"{path.name}: version {number} is reserved -- {_RESERVED_REASONS[number]}"
+            )
         if number in found:
             raise ValueError(
                 f"duplicate migration version {number}: {found[number].path.name} and {path.name}"
@@ -283,6 +300,7 @@ __all__ = [
     "MigrationModule",
     "PAYLOAD_ENCODING_VERSION",
     "RESERVED_VERSIONS",
+    "SPARE_VERSIONS",
     "TIER_NAMES",
     "Tier",
     "add_column_if_missing",
