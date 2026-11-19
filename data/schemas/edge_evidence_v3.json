@@ -52,5 +52,5 @@
   "title": "EdgeEvidence",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/edge_evidence_v3.json",
-  "x-contract-version": "2.4.0"
+  "x-contract-version": "3.0.0"
 }

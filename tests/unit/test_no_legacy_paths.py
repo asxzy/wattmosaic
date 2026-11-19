@@ -28,7 +28,11 @@ legacy contract facade (``contracts/legacy.py``) or a frozen storage migration
 The allowlist is explicit below so a new importer cannot quietly keep a module
 alive.
 
-The gate is extended by Z1 with the remaining contract symbols.
+Z1 extends the gate with contract-3.0.0 symbols that are genuinely gone from
+the production tree (``PowerState`` and its ``power_state_for`` derivation) and
+pins the cut-over version across engine and integration.  The remaining legacy
+contract *models* stay reachable through the facade until the unowned tests that
+import them are ported by their owners; see the task's open issues.
 """
 
 from __future__ import annotations
@@ -56,6 +60,11 @@ FORBIDDEN = frozenset(
         "_power_for_params",
         "_infer_model_type",
         "parent_endpoint_id",
+        # Z1: contract 3.0.0 removes the legacy provenance/power-state axis
+        # entirely (architecture.md §5).  The v3 surface uses EstimateStatus,
+        # IdentifiabilityStatus and PowerLevelV3 instead.
+        "PowerState",
+        "power_state_for",
     }
 )
 
@@ -189,3 +198,29 @@ def test_removed_legacy_modules_are_deleted() -> None:
                 f"(allowed only by: {', '.join(sorted(allowed))})"
             )
     assert not offenders, "legacy helper modules are still alive:\n" + "\n".join(offenders)
+
+
+def test_contract_version_is_cut_over_to_3_0_0() -> None:
+    """Z1: contract 3.0.0 is the single version across engine and integration.
+
+    The legacy contract module no longer pins 2.4.0; the authoritative constant
+    lives in ``contracts/foundation.py`` and is mirrored by the HA integration.
+    """
+    from wattmosaic_engine import contracts
+    from wattmosaic_engine.contracts import foundation, legacy
+
+    assert contracts.CONTRACT_VERSION == "3.0.0"
+    assert foundation.CONTRACT_VERSION == "3.0.0"
+    assert legacy.CONTRACT_VERSION == "3.0.0"
+
+    # The integration mirror is loaded from source (HA is not installed here).
+    import importlib.util
+    import sys
+
+    const_path = ROOT / "custom_components" / "wattmosaic" / "const.py"
+    spec = importlib.util.spec_from_file_location("wm_z1_const", const_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    assert module.CONTRACT_VERSION == contracts.CONTRACT_VERSION

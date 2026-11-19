@@ -14,9 +14,11 @@ Security
 Contract
 --------
 Every response is validated against the authoritative contract in
-``engine/wattmosaic_engine/contracts.py`` (version ``1.0.0``).  A missing
-``X-WattMosaic-Contract-Version`` header is tolerated (older engine), a
-different *major* version raises :class:`EngineContractMismatch`.
+``engine/wattmosaic_engine/contracts/foundation.py`` (version ``3.0.0``).  The
+integration and the engine ship together (DEC-01): a different *major* version
+raises :class:`EngineContractMismatch`.  There is no v2 shape fallback -- the
+engine serves only the v3 `InferenceSnapshot` on ``GET /snapshot``.  The
+``X-WattMosaic-Contract-Version`` response header is the wire check.
 """
 
 from __future__ import annotations

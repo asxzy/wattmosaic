@@ -742,5 +742,5 @@
   "title": "RowDetail",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/row_detail.json",
-  "x-contract-version": "2.4.0"
+  "x-contract-version": "3.0.0"
 }

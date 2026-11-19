@@ -61,5 +61,5 @@
   "title": "UnknownEstimate",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/unknown_estimate.json",
-  "x-contract-version": "2.4.0"
+  "x-contract-version": "3.0.0"
 }

@@ -76,5 +76,5 @@
   "title": "PowerPrediction",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/power_prediction.json",
-  "x-contract-version": "2.4.0"
+  "x-contract-version": "3.0.0"
 }

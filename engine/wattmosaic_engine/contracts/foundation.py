@@ -32,6 +32,14 @@ from pydantic import Field, model_validator
 
 from .legacy import Model
 
+#: Contract version.  Canonical source for the 3.0.0 cutover (DEC-01).  The
+#: integration mirrors this value in ``custom_components/wattmosaic/const.py``;
+#: a major mismatch is refused by the integration's ``_check_contract``.
+CONTRACT_VERSION = "3.0.0"
+
+# NOTE: ``CONTRACT_VERSION`` is deliberately *not* in ``__all__``: the facade
+# re-exports it from the legacy surface (the canonical literal lives here and is
+# mirrored there), and a v3 star-export may not shadow a legacy public name.
 __all__: list[str] = [
     # Version-id types and helpers
     "TopologyVersionId",
