@@ -863,34 +863,24 @@ class ChangeDetector:
         return max(measured, self.config.sigma_min_w) if measured is not None else None
 
     def _resolution(self, reader: str) -> float | None:
-        state = self.store.reader_state(reader)
-        return None if state is None else state.resolution_w
+        return self.store.resolution(reader)
 
     def _cadence_s(self, reader: str) -> float:
         cadence = self.store.cadence(reader)
         return max(1.0, cadence.seconds) if cadence is not None else 15.7
 
     def _flags_at(self, reader: str, at: datetime) -> set[QualityFlag]:
-        state = self.store.reader_state(reader)
-        if state is None:
-            return set()
-        for sample in reversed(state.samples):
-            if sample.observed_at == at:
-                return set(sample.quality_flags)
-        return set()
+        sample = self.store.sample_at(reader, at)
+        return set() if sample is None else set(sample.quality_flags)
 
     def _is_primed(self, reader: str, at: datetime) -> bool:
         return QualityFlag.PRIMED in self._flags_at(reader, at)
 
     def _sample_at(self, reader: str, at: datetime) -> WindowSample:
-        state = self.store.reader_state(reader)
-        if state is not None:
-            for sample in reversed(state.samples):
-                if sample.observed_at == at:
-                    return sample
+        sample = self.store.sample_at(reader, at)
         # A held value always corresponds to a retained sample; keep a valid
         # (absent-value) fallback rather than fabricating a measurement.
-        return WindowSample(at, at, None, (), -1)
+        return sample if sample is not None else WindowSample(at, at, None, (), -1)
 
     def _pre_post_samples(
         self, reader: str, sm: _ReaderSM, sample_at: datetime
