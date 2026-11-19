@@ -103,3 +103,4 @@
 | V1c | ? | VERIFIED | | | MEASURED only from declared single-subject endpoint; gate green |
 | Z3a | ? | VERIFIED | | | live-path name heuristics removed (A1-A5); gate green at c1c3736 |
 | Z4 | ? | VERIFIED | | | live residual_w via T3; model-set id advances on activation; gate green at a4e2434 |
+| V2b | ? | IN_REVIEW | | | merged; healthz p99 43.75ms PASS; fast path p99 0.583ms FAIL; event-loop p50 ~17s at 30ev/s -> Z5 |
