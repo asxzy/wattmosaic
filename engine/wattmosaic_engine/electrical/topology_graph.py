@@ -33,7 +33,61 @@ from wattmosaic_engine.contracts import (
 )
 from wattmosaic_engine.runtime.interfaces import CONFIRMED
 
-__all__: list[str] = ["TopologyGraph", "DisplayNode"]
+__all__: list[str] = ["TopologyGraph", "DisplayNode", "topology_root_readers"]
+
+
+def _enum_text(value: object) -> str:
+    return str(getattr(value, "value", value))
+
+
+def topology_root_readers(topology: object) -> tuple[str, ...]:
+    """The main reader(s) of a topology: the roots of its CONFIRMED hierarchy.
+
+    A root is a reader that is the source of a CONFIRMED ``CONTAINS`` edge and
+    the target of none.  Several roots (parallel mains) are all returned; so is
+    the verified partner of a root's complete ``PAIRED_LEG`` pair (the legs of
+    a multi-leg main observe the household together and are summed).  A
+    ``SAME_CONDUCTOR`` alias of a returned reader is dropped, so no conductor
+    is counted twice.
+
+    Only the topology decides -- never a reader's name.  A topology with no
+    CONFIRMED ``CONTAINS`` edge has no root and returns ``()``; callers then
+    publish ``main_w`` / ``residual_w`` as ``None`` (HB §18) rather than pick
+    an arbitrary reader.  Works on any :class:`TopologyView` duck type.
+    """
+    try:
+        edges = tuple(topology.edges())  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - no usable view: no roots
+        return ()
+    confirmed = _enum_text(EdgeLifecycleV3.CONFIRMED)
+    active = [e for e in edges if _enum_text(e.lifecycle) == confirmed]
+
+    def of(relation: RelationType) -> list[TopologyEdgeV3]:
+        return [e for e in active if _enum_text(e.relation) == relation.value]
+
+    contains = of(RelationType.CONTAINS)
+    children = {e.target_endpoint_id for e in contains}
+    roots = sorted({e.source_endpoint_id for e in contains} - children)
+    partners = {e.source_endpoint_id: e.target_endpoint_id for e in of(RelationType.PAIRED_LEG)}
+
+    out: list[str] = []
+    for root in roots:
+        leg = partners.get(root)
+        # A verified pair declares both directions (see ``paired_leg``).
+        verified = leg if leg is not None and partners.get(leg) == root else None
+        for reader in (root, verified):
+            if reader is not None and reader not in out and reader not in children:
+                out.append(reader)
+
+    aliases: dict[str, set[str]] = {}
+    for e in of(RelationType.SAME_CONDUCTOR):
+        aliases.setdefault(e.source_endpoint_id, set()).add(e.target_endpoint_id)
+        aliases.setdefault(e.target_endpoint_id, set()).add(e.source_endpoint_id)
+    kept: list[str] = []
+    for reader in out:
+        if not aliases.get(reader, set()) & set(kept):
+            kept.append(reader)
+    return tuple(kept)
 
 
 @dataclass(frozen=True, slots=True)

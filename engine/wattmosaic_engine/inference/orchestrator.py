@@ -36,6 +36,7 @@ from wattmosaic_engine.contracts import (
     InferenceMethod,
     JointInferenceResult,
     MatchState,
+    PowerLevelV3,
     UnknownEstimate,
     VersionTriple,
 )
@@ -227,6 +228,40 @@ def _model_priors_delta(
         if prior is not None:
             priors[candidate.subject_id] = prior
     return priors
+
+
+#: Steady operating levels a published value can be classified at (HB §11.5);
+#: TRANSIENT is a transition shape and UNKNOWN is not a level.
+_CLASSIFIABLE_LEVELS = (
+    PowerLevelV3.OFF,
+    PowerLevelV3.STANDBY,
+    PowerLevelV3.IDLE,
+    PowerLevelV3.ACTIVE,
+)
+
+
+def _model_levels(
+    models: ModelSetView, subject_ids: Sequence[str], at: Any
+) -> dict[str, dict[PowerLevelV3, tuple[float, float | None]]]:
+    """``{subject: {level: (mean_w, sigma_w)}}`` from each subject's active model.
+
+    Only KNOWN level predictions are kept; a subject without a model (or whose
+    model knows no steady level) is absent, so its published level is None.
+    """
+    out: dict[str, dict[PowerLevelV3, tuple[float, float | None]]] = {}
+    for subject_id in subject_ids:
+        levels: dict[PowerLevelV3, tuple[float, float | None]] = {}
+        for level in _CLASSIFIABLE_LEVELS:
+            try:
+                prediction = models.predict(subject_id, PredictionContext(at=at, level=level))
+            except Exception:  # noqa: BLE001 - a broken model gives no level
+                continue
+            mean = _finite(getattr(prediction, "mean_w", None))
+            if mean is not None:
+                levels[level] = (mean, _finite(getattr(prediction, "sigma_w", None)))
+        if levels:
+            out[subject_id] = levels
+    return out
 
 
 def _model_priors_level(models: ModelSetView, operator: ObservationOperator, at: Any) -> dict[str, DeltaPrior]:
@@ -452,6 +487,7 @@ def infer_group(
             models=model_points,
             method=InferenceMethod.JOINT_DELTA,
             direct=direct,
+            model_levels=_model_levels(models, report.subject_ids, at),
             reader_quality={
                 meta.reader_id: ({} if meta.sigma_w is None else {"quality": 1.0})
                 for meta in operator.rows
@@ -706,6 +742,7 @@ def infer_steady(
             models={},
             method=InferenceMethod.JOINT_ABSOLUTE,
             direct=direct,
+            model_levels=_model_levels(models, report.subject_ids, at),
             reader_quality={
                 meta.reader_id: ({} if meta.sigma_w is None else {"quality": 1.0})
                 for meta in operator.rows

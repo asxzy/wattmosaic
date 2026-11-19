@@ -254,6 +254,7 @@ def test_reconciliation_identity_counts_each_subject_once() -> None:
         unknowns=[],
         residual_by_reader={"Main": 1500.0},
         main_w=1620.0,
+        root_reader_ids=("Main",),
     )
     assert recon.identified_w == pytest.approx(120.0)
     assert recon.residual_w == pytest.approx(1500.0)
@@ -266,6 +267,7 @@ def test_reconciliation_identity_counts_each_subject_once() -> None:
         unknowns=[],
         residual_by_reader={"Main": 1500.0},
         main_w=1620.0,
+        root_reader_ids=("Main",),
     )
     complete.group_w = 0.0
     complete.unknown_w = 0.0

@@ -47,7 +47,15 @@ from typing import Any
 
 import pytest
 from wattmosaic_engine.api.facade import NotFound
-from wattmosaic_engine.contracts import EventGroupStatus
+from wattmosaic_engine.contracts import (
+    EventGroupStatus,
+    FixedSpec,
+    LevelStat,
+    ModelBasis,
+    ModelClass,
+    PowerLevelV3,
+    PowerModelVersion,
+)
 from wattmosaic_engine.contracts.entities import PhysicalDevice
 from wattmosaic_engine.core.runtime import EvidenceHistory
 from wattmosaic_engine.realtime import EngineHarness
@@ -123,8 +131,36 @@ def _configure(start):
                     "declared_by": "user",
                 }
             )
+        _declare_tv_model(core, at)
 
     return configure
+
+
+def _declare_tv_model(core: Any, at: datetime) -> None:
+    """The TV's active power model: a FIXED model with a STANDBY level.
+
+    A published level comes only from the subject's power model (Z3a/A1), so
+    the step-8 STANDBY level needs the TV to have one -- as a model learned from
+    earlier plug readings would.  Its spread covers the plug's sampling noise.
+    """
+    registry = core.model_registry_v3
+    version = registry.propose(
+        PowerModelVersion(
+            version_id="pm-tv-1",
+            subject_kind="device",
+            subject_id="tv",
+            number=1,
+            model_class=ModelClass.FIXED,
+            basis=ModelBasis.ABSOLUTE_ANCHOR,
+            spec=FixedSpec(
+                levels={PowerLevelV3.STANDBY: LevelStat(median_w=TV_STANDBY_W, mad_w=0.5, n=20)}
+            ),
+            trainer_version="test-declared",
+            created_at=at,
+        )
+    )
+    registry.activate(version.version_id)
+    registry.refresh()
 
 
 def _cells(core: Any) -> dict[tuple[str, str], dict[str, Any]]:
@@ -263,8 +299,10 @@ def test_step1_measurement_state_is_established_without_fabrication(walk: _Walk)
     assert snapshot.group_estimates == []
     # Matrix: only the TV × plug cell exists; no light cell before the event.
     assert set(walk.prelude_cells) == {("tv", "ct_plug")}
-    # HA: the TV shows its measured standby; the lights have no entity value and
-    # the house totals stay "not computed" (None), never 0 W.
+    # HA: the TV shows its measured standby; the lights have no entity value.
+    # The house total is the topology root's measured reading (Z3a/A3: the
+    # main reading, not a residual and not chosen by name); the unknown total
+    # stays "not computed" (None), never 0 W.
     coerced = _ha(snapshot)
     assert set(coerced["results_by_id"]) == {"tv"}
     tv_values = _device_entity(coerced, "tv", walk.prelude_now)
@@ -274,7 +312,10 @@ def test_step1_measurement_state_is_established_without_fabrication(walk: _Walk)
         coerced, {"status": "ok"}, engine_available=True, now=walk.prelude_now,
         stale_after=STALE_AFTER_S,
     )
-    assert values["total_power"] is None
+    main = {m.reader_id: m for m in snapshot.reader_measurements}["ct_main"]
+    assert main.active_power_w is not None
+    assert values["total_power"] == pytest.approx(main.active_power_w)
+    assert snapshot.reconciliation.main_w == pytest.approx(main.active_power_w)
     assert values["unknown_power"] is None
 
 
@@ -540,6 +581,13 @@ class _Moved:
             core.db.repos.entities.add_entity_link(
                 {"entity_id": "switch.tv_plug", "target_kind": "device", "target_id": "tv",
                  "role": "state", "valid_from": start - timedelta(days=1), "declared_by": "user"}
+            )
+            # The plug is a declared single-subject endpoint for the TV (DEC-05);
+            # only a declared endpoint feeds the relocation detector (Z3a/A2).
+            core.db.repos.entities.upsert_endpoint(
+                {"endpoint_id": "ct_plug", "kind": "smart_plug", "entity_id": "sensor.tv_plug_power",
+                 "scope": "single_subject", "scope_status": "confirmed", "scope_subject_id": "tv",
+                 "enabled": True, "created_at": start - timedelta(days=1)}
             )
 
         self.harness = EngineHarness.start(observation, start_time=start, configure=configure)

@@ -269,9 +269,22 @@ def _hb17_harness():
     from tools.simulator.hb17 import build
 
     house = build(17, variant="relocated_tv", minutes=60)
-    harness = EngineHarness.from_hb17(
-        {"house": house, "observation": house.observation_view()}
-    )
+    observation = house.observation_view()
+
+    def declare_plug(core) -> None:
+        # The plug is a declared single-subject endpoint for the TV (DEC-05);
+        # only a declared endpoint feeds the T7 relocation detector (Z3a/A2),
+        # never a reader whose id happens to contain "plug".
+        core.db.repos.entities.upsert_endpoint(
+            {"endpoint_id": "ct_plug", "kind": "smart_plug", "entity_id": None,
+             "scope": "single_subject", "scope_status": "confirmed", "scope_subject_id": "tv",
+             "enabled": True, "created_at": house.start_time - timedelta(days=1)}
+        )
+
+    # As ``EngineHarness.from_hb17`` does, plus the endpoint declaration.
+    harness = EngineHarness.start(observation, start_time=house.start_time, configure=declare_plug)
+    harness.run(observation)
+    harness.settle()
     return harness
 
 

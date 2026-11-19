@@ -36,7 +36,7 @@ from wattmosaic_engine.contracts import (
     ReconciliationV3,
     VersionTriple,
 )
-from wattmosaic_engine.core.snapshot import SnapshotAssembler
+from wattmosaic_engine.core.snapshot import AssembleInputs, SnapshotAssembler
 from wattmosaic_engine.runtime.interfaces import HeldReading
 from wattmosaic_engine.storage.database import Database
 
@@ -152,19 +152,23 @@ def _held(*readers: str) -> dict[str, HeldReading]:
 
 def test_on_result_builds_hb121_snapshot(db: Database) -> None:
     assembler = _assembler(db)
+    result = _result([_estimate("dev-1")], [_group()])
+    held = _held("Circuit A", "Main")
     snapshot = assembler.on_result(
-        _result(
-            [_estimate("dev-1")],
-            [_group()],
+        result,
+        inputs=AssembleInputs(
+            result=result,
+            held_readings=held,
+            quality=DataQualityReport(timestamp=T0),
+            residual_points=[
+                ReaderResidualPoint(
+                    reader_id="Main", at=T0, residual_w=500.0,
+                    topology_version_id="topo-1", basis=MeasurementBasis.CT_MEASURED,
+                )
+            ],
+            # The active topology's root (``topology_root_readers``).
+            root_reader_ids=("Main",),
         ),
-        _held("Circuit A", "Main"),
-        DataQualityReport(timestamp=T0),
-        residual_points=[
-            ReaderResidualPoint(
-                reader_id="Main", at=T0, residual_w=500.0,
-                topology_version_id="topo-1", basis=MeasurementBasis.CT_MEASURED,
-            )
-        ],
     )
     assert snapshot.snapshot_id.startswith("snap-")
     assert snapshot.versions == VT
@@ -173,7 +177,10 @@ def test_on_result_builds_hb121_snapshot(db: Database) -> None:
     assert [g.group_id for g in snapshot.group_estimates] == ["group-1"]
     assert len(snapshot.reader_measurements) == 2
     assert snapshot.reader_measurements[0].active_power_w == 10.0
-    assert snapshot.reconciliation.main_w == 500.0
+    # main_w is the root's *reading* (held "Main" = 20 W); the root's residual
+    # is its own term (Z3a/A3), not the main reading.
+    assert snapshot.reconciliation.main_w == 20.0
+    assert snapshot.reconciliation.residual_w == 500.0
     assert snapshot.reconciliation.identified_w == 60.0
     assert snapshot.reconciliation.group_w == 45.0
     # Publish is copy-on-write: the published object is the exact object returned.

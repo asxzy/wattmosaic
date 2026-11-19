@@ -70,6 +70,21 @@ class AssembleInputs:
     snapshot_id: SnapshotId | None = None
     stale_sources: Sequence[str] = ()
     unresolved_events: Sequence[str] = ()
+    #: The active topology's root reader(s) (``topology_root_readers``): the
+    #: main reading is their sum and the root residual their residual.  Empty
+    #: means the topology has no root, so ``main_w``/``residual_w`` are ``None``.
+    root_reader_ids: Sequence[str] = ()
+
+
+def _sum_all(values: Sequence[float | None]) -> float | None:
+    """Sum of every term, or ``None`` when there is none or one is absent.
+
+    A partial sum over the root readers would publish a fabricated main
+    reading (HB §18): one missing leg makes the whole total unknown.
+    """
+    if not values or any(value is None for value in values):
+        return None
+    return float(sum(values))  # type: ignore[arg-type]
 
 
 def _reading_value(reading: Any) -> float | None:
@@ -291,11 +306,13 @@ class SnapshotAssembler:
         residual_by_reader = {
             r.reader_id: r.residual_w for r in residuals
         }
-        main_w: float | None = None
-        for candidate in ("Main", "main", "ct_main"):
-            if candidate in residual_by_reader:
-                main_w = residual_by_reader[candidate]
-                break
+        # The main reading is the topology roots' reading (parallel mains and
+        # verified legs summed); the residual is the roots' residual.  Neither
+        # is chosen by reader name, and neither is the other (HB §12.1).
+        roots = tuple(str(r) for r in inputs.root_reader_ids)
+        held_by_reader = {str(k): v for k, v in inputs.held_readings.items()}
+        main_w = _sum_all([_reading_value(held_by_reader.get(r)) for r in roots])
+        residual_w = _sum_all([residual_by_reader.get(r) for r in roots])
         identified = sum(
             float(e.point_w)
             for e in devices.values()
@@ -316,7 +333,7 @@ class SnapshotAssembler:
             identified_w=identified,
             group_w=group_w,
             unknown_w=unknown_w,
-            residual_w=residual_by_reader.get("Main", residual_by_reader.get("main")),
+            residual_w=residual_w,
         )
 
         # The snapshot id is derived from the *content*, so a changed state gets

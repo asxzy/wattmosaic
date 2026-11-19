@@ -31,6 +31,8 @@ from ..contracts import (
     VersionTriple,
 )
 from ..electrical.operator import build_observation_operator
+from ..electrical.topology_change import ENDPOINT_SUBJECT_PREFIX
+from ..electrical.topology_graph import topology_root_readers
 from ..inference.matching import MatchStore
 from ..inference.orchestrator import infer_group, infer_steady
 from ..inference.records import EventRecordStore
@@ -646,11 +648,14 @@ class RuntimeMixin:
     def _record_association_from_step(self, event: MeasurementEvent) -> None:
         """Feed the T7 relocation detector from P3 reader-step events (a feed only).
 
-        For a single-subject endpoint (a leaf reader containing ``plug``) each
-        step is one observation.  The coincident circuit reader whose step
+        For a *declared* single-subject endpoint (DEC-05: an S13 endpoint whose
+        confirmed scope is ``single_subject``, see
+        :meth:`_declared_single_subject_pairs`) that contains no other reader,
+        each step is one observation.  The coincident circuit reader whose step
         amplitude matches the endpoint's step is the reader the subject matched
         on this event.  Recording that per-event pairing is reader-level
         bookkeeping; the detector alone decides whether it constitutes a move.
+        A reader's name never makes it an endpoint.
         """
         reader = str(event.reader_id)
         delta = event.delta_w
@@ -658,23 +663,28 @@ class RuntimeMixin:
             return
         onset = event.onset_hi
         # Store every step: a coincident circuit step is the other half of the
-        # plug endpoint's observation.  Only plug steps trigger a history entry.
+        # endpoint's observation.  Only declared-endpoint steps add history.
         self._recent_step_deltas[reader] = (onset, delta)
-        if "plug" not in reader or reader in self._parent_readers():
+        declared_endpoints = {pair[0] for pair in self._declared_single_subject_pairs()}
+        if reader not in declared_endpoints or reader in self._parent_readers():
             return
         # One observation per ON transition (a toggle cycle): OFF transients
         # are the same event's return, not an independent match observation.
         if delta <= 1.0:
             return
         parents = self._parent_readers()
+        # Pairing window: two readers' onsets for one physical step differ by
+        # their reporting cadence plus any reader clock skew.  A reading older
+        # than ``stale_after_s`` is no longer current evidence for any reader
+        # (P2), so a step farther apart than that cannot be the same physical
+        # event observed on both; amplitude agreement below still rules out
+        # unrelated loads inside the window.  Configurable, not a scenario value.
+        window_s = float(self.config.stale_after_s)
         candidates: list[tuple[float, str]] = []
         for other, (stamp, other_delta) in self._recent_step_deltas.items():
             if other == reader or other in parents:
                 continue
-            # A declared reader clock skew (HB §17: ct_a has +30 s) means the
-            # same physical step can carry onsets 30 s apart; a wider window
-            # plus amplitude agreement still rules out unrelated loads.
-            if abs((stamp - onset).total_seconds()) > 120.0:
+            if abs((stamp - onset).total_seconds()) > window_s:
                 continue
             if abs(other_delta) <= 1.0:
                 continue
@@ -686,7 +696,7 @@ class RuntimeMixin:
             # a fresh window ``[old, new]``.  This is how a "vanished on A,
             # appeared on B over >= 5 events" history is accumulated; the
             # detector still decides whether it is a relocation.
-            key = f"plug:{reader}"
+            key = f"{ENDPOINT_SUBJECT_PREFIX}{reader}"
             history = self._association_history.get(key)
             if history is None:
                 history = deque(maxlen=6)
@@ -702,6 +712,22 @@ class RuntimeMixin:
             if len(history) == 6 and len(set(history)) == 2 and history[-1] == matched:
                 return
             history.append(matched)
+
+    def _root_readers(self, versions: Any) -> tuple[str, ...]:
+        """The active topology's root reader(s) for ``versions`` (HB §12.1).
+
+        ``()`` when there is no version service or the topology has no root;
+        the snapshot then publishes ``main_w``/``residual_w`` as ``None``.
+        """
+        service = self.version_service
+        topology_version_id = getattr(versions, "topology_version_id", None)
+        if service is None or topology_version_id is None:
+            return ()
+        try:
+            view = service.topology_view(topology_version_id)
+        except Exception:  # noqa: BLE001 - unknown version: no roots
+            return ()
+        return topology_root_readers(view)
 
     def _parent_readers(self) -> frozenset[str]:
         """Readers that are CONTAINS parents in the declared topology."""
@@ -884,6 +910,7 @@ class RuntimeMixin:
                         held_readings=held,
                         quality=self.latest_quality,
                         stale_sources=stale_sources_from_quality(self.latest_quality),
+                        root_reader_ids=self._root_readers(result.versions),
                     ),
                 )
                 self._publish_v3_snapshot()
@@ -1599,14 +1626,17 @@ class RuntimeMixin:
     def _relocation_subjects(self, change: Any, map_view: Any) -> tuple[tuple[str, str], ...]:
         """The subjects a relocated endpoint measures, from evidence only.
 
-        A plug relocation's detector subject is the plug reader
-        (``plug:<reader>``).  The subjects it measures are those mapped on the
-        plug reader itself, or else the subjects the HA changes in the plug's
-        own event groups are linked to (``ha_entity_links``) — restricted to
-        subjects mapped on the reader the matches vanished from.
+        A relocation's detector subject is the declared single-subject endpoint
+        (``ENDPOINT_SUBJECT_PREFIX + <reader>``, written only for DEC-05
+        endpoints).  The subjects it measures are those mapped on the endpoint
+        itself, or else the subjects the HA changes in the endpoint's own event
+        groups are linked to (``ha_entity_links``) — restricted to subjects
+        mapped on the reader the matches vanished from.
         """
         raw = str(getattr(change, "subject", ""))
-        reader = raw.split(":", 1)[1] if raw.startswith("plug:") else raw
+        reader = (
+            raw[len(ENDPOINT_SUBJECT_PREFIX):] if raw.startswith(ENDPOINT_SUBJECT_PREFIX) else raw
+        )
         from_id = getattr(change, "from_id", None)
         on_old = set(map_view.subjects_on(from_id)) if from_id else set()
         direct = set(map_view.subjects_on(reader)) & on_old

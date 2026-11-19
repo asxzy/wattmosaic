@@ -49,11 +49,52 @@ from .cells import finite_or_none, validate_bounds_bracket, visual_category
 __all__: list[str] = [
     "materialise_cells",
     "materialise_matrix",
+    "operator_root_readers",
     "physical_total_from_cells",
     "reader_totals_from_cells",
 ]
 
 _SUBJECT_DELIMITER = "|"
+
+
+def operator_root_readers(operator: ObservationOperator) -> tuple[str, ...]:
+    """The topology root reader(s) encoded in ``operator`` (never by name).
+
+    H(T, M, t) carries the CONFIRMED CONTAINS ancestry of the topology it was
+    built from, in two places:
+
+    * every unknown scope ``S`` lists ``S``'s own row plus its ancestors' rows,
+      so each other reader in a scope is an ancestor of ``S``;
+    * a subject column's entries walk its CONTAINS path upwards: the most
+      specific reader has an empty edge path and the depth-``d`` ancestor a
+      path of ``d`` edges.  A column with two entries at the same depth (a
+      SHARED_LOAD partner beside a parent) is ambiguous and is skipped.
+
+    A root is a reader that is an ancestor of some reader and has no ancestor
+    itself.  No ancestry at all yields ``()``: the root is unknown, so the
+    root residual is ``None`` (HB §18), not some reader's residual.
+    """
+    rows = operator.rows
+    ancestors: dict[str, set[str]] = {}
+    for scope, indices in operator.unknown_scopes:
+        for index in indices:
+            if index < len(rows) and rows[index].reader_id != scope:
+                ancestors.setdefault(str(scope), set()).add(rows[index].reader_id)
+    by_column: dict[int, list[tuple[int, str]]] = {}
+    for (row, column), entry in operator.entries.items():
+        if row < len(rows):
+            depth = len(getattr(entry, "edge_ids", ()) or ())
+            by_column.setdefault(column, []).append((depth, rows[row].reader_id))
+    for chain in by_column.values():
+        depths = [depth for depth, _reader in chain]
+        if len(set(depths)) != len(depths) or 0 not in depths:
+            continue
+        chain.sort()
+        for position, (_depth, reader) in enumerate(chain):
+            for _higher_depth, higher in chain[position + 1:]:
+                ancestors.setdefault(reader, set()).add(higher)
+    parents = {parent for found in ancestors.values() for parent in found}
+    return tuple(sorted(parents - {r for r, found in ancestors.items() if found}))
 
 _NON_POINT_IDENTIFIABILITY = frozenset(
     {
@@ -322,11 +363,17 @@ def materialise_cells(
     mapping_view: Any,
     match_view: Any,
     history: Any,
+    *,
+    root_reader_ids: Sequence[str] | None = None,
 ) -> tuple[list[MappingCell], dict[str, ReaderColumnSummary], PhysicalTotal]:
     """Materialise the sparse cells, reader totals and physical total.
 
     Pure and deterministic: for identical inputs the returned cells serialise
     byte-identically via :func:`wattmosaic_engine.mapping.cells.stable_json`.
+
+    ``root_reader_ids`` names the active topology's root reader(s) whose
+    residual enters the physical total; when omitted they are read from the
+    operator's own ancestry (:func:`operator_root_readers`).
 
     Parameters
     ----------
@@ -630,7 +677,10 @@ def materialise_cells(
         )
 
     reader_totals = reader_totals_from_cells(cells, result_or_snapshot)
-    total = physical_total_from_cells(cells, estimates, groups, residual_by_reader)
+    roots = operator_root_readers(operator) if root_reader_ids is None else tuple(root_reader_ids)
+    total = physical_total_from_cells(
+        cells, estimates, groups, residual_by_reader, root_reader_ids=roots
+    )
     return cells, reader_totals, total
 
 
@@ -698,13 +748,14 @@ def physical_total_from_cells(
     estimates: Sequence[Any] = (),
     groups: Sequence[Any] = (),
     residual_by_reader: MappingABC[str, Any] | None = None,
+    root_reader_ids: Sequence[str] | None = None,
 ) -> PhysicalTotal:
     """The household physical total, counting each subject exactly once.
 
     Identified device estimates are summed once each (from the current
     estimates, never from a model total).  Group sums add once per group.  The
-    main reader's residual is added once.  A missing term is ``None``, never
-    ``0.0`` (HB §18).
+    root residual -- the residual of the topology's ``root_reader_ids`` -- is
+    added once.  A missing term is ``None``, never ``0.0`` (HB §18).
     """
     measured_parts: list[float] = []
     identified_parts: list[float] = []
@@ -740,14 +791,21 @@ def physical_total_from_cells(
         if cell.row_kind == "unknown_profile" and cell.power.estimated_power_w is not None:
             unknown_parts.append(cell.power.estimated_power_w)
 
+    # The root residual: the residual of the topology's root reader(s), summed
+    # over parallel roots / verified legs.  No root, or a root without a
+    # residual, leaves the term None -- never another reader's residual.
     residual_w: float | None = None
-    if residual_by_reader:
-        main = "Main" if "Main" in residual_by_reader else next(iter(residual_by_reader), None)
-        if main is not None:
-            raw = residual_by_reader.get(main)
-            residual_w = finite_or_none(raw)
-            if residual_w is None and raw is not None and not isinstance(raw, (int, float)):
-                residual_w = finite_or_none(_resolve(raw, "residual_w", "point_w"))
+    roots = tuple(str(r) for r in (root_reader_ids or ()))
+    if residual_by_reader and roots:
+        parts: list[float | None] = []
+        for root in roots:
+            raw = residual_by_reader.get(root)
+            value = finite_or_none(raw)
+            if value is None and raw is not None and not isinstance(raw, (int, float)):
+                value = finite_or_none(_resolve(raw, "residual_w", "point_w"))
+            parts.append(value)
+        if all(part is not None for part in parts):
+            residual_w = sum(part for part in parts if part is not None)
 
     def total_of(parts: list[float]) -> float | None:
         return sum(parts) if parts else None

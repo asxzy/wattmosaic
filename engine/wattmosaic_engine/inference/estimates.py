@@ -77,12 +77,12 @@ __all__: list[str] = [
     "assemble_status_estimates",
     "build_snapshot",
     "contributing_readers",
+    "level_from_model",
     "reconciliation_from_estimates",
     "status_for",
 ]
 
 _NONZERO_TOL = 1e-9
-_TV_STANDBY_W = 3.0  # HB §17 step 8: reported by the plug, not a fabrication.
 _SINGLE_SUBJECT_ENDPOINTS = frozenset({"ct_plug", "tv_plug", "plug", "TV plug"})
 
 
@@ -105,6 +105,14 @@ def _name(value: Any) -> str:
     if hasattr(value, "value"):
         return str(value.value)
     return str(value) if value is not None else ""
+
+
+def _row_sigma(operator: ObservationOperator, reader_id: str) -> float | None:
+    """The declared noise sigma of ``reader_id``'s operator row, if any."""
+    for row in operator.rows:
+        if row.reader_id == reader_id:
+            return _finite(row.sigma_w)
+    return None
 
 
 def _name_set(values: Sequence[Any]) -> set[str]:
@@ -299,6 +307,58 @@ class EstimateInputs:
     events: Sequence[Any] = ()
     #: Explicit allocation rules (none in 3.0, DEC-20).
     allocations: Mapping[str, str] = field(default_factory=dict)
+    #: Per-subject power-model levels, ``{subject: {level: (mean_w, sigma_w)}}``,
+    #: from the subject's active model (see ``orchestrator._model_levels``).  A
+    #: subject without a model has no entry and its published level is None.
+    model_levels: Mapping[str, Mapping[PowerLevelV3, tuple[float, float | None]]] = field(
+        default_factory=dict
+    )
+
+
+#: A published value is at a model level when it lies within this many
+#: standard deviations of the level's mean -- the same 3σ consistency gate the
+#: steady pass uses for reader conflicts.
+_LEVEL_MATCH_SIGMAS = 3.0
+
+
+def level_from_model(
+    point_w: float | None,
+    levels: Mapping[PowerLevelV3, tuple[float, float | None]] | None,
+    *,
+    reading_sigma_w: float | None = None,
+) -> PowerLevelV3 | None:
+    """The subject's model level that ``point_w`` sits at, or ``None``.
+
+    The level comes only from the subject's own power model: each candidate
+    level is its model mean with the model's spread (combined in quadrature
+    with the reading's sigma when known).  The nearest level within
+    ``_LEVEL_MATCH_SIGMAS`` wins; a level without a known spread can match
+    only exactly.  No model, no point, or no consistent level -> ``None``
+    (HB §18); never a scenario constant.
+    """
+    point = _finite(point_w)
+    if point is None or not levels:
+        return None
+    reading_var = (_finite(reading_sigma_w) or 0.0) ** 2
+    best: tuple[float, str, PowerLevelV3] | None = None
+    for level, (mean_w, sigma_w) in levels.items():
+        mean = _finite(mean_w)
+        if mean is None:
+            continue
+        spread = math.sqrt((_finite(sigma_w) or 0.0) ** 2 + reading_var)
+        gap = abs(point - mean)
+        if spread > 0.0:
+            score = gap / spread
+            if score > _LEVEL_MATCH_SIGMAS:
+                continue
+        elif gap != 0.0:
+            continue
+        else:
+            score = 0.0
+        candidate = (score, _name(level), PowerLevelV3(level))
+        if best is None or candidate[:2] < best[:2]:
+            best = candidate
+    return best[2] if best is not None else None
 
 
 def assemble_status_estimates(
@@ -427,8 +487,12 @@ def assemble_status_estimates(
             identifiability=ident,
             group_id=member_group_id,
             level=(
-                PowerLevelV3.STANDBY
-                if direct is not None and abs(direct.power_w - _TV_STANDBY_W) < 0.5
+                level_from_model(
+                    point,
+                    inputs.model_levels.get(subject_id),
+                    reading_sigma_w=_row_sigma(operator, direct.reader_id) if direct else None,
+                )
+                if status in (EstimateStatus.MEASURED, EstimateStatus.ESTIMATED)
                 else None
             ),
             method=method,
@@ -482,12 +546,15 @@ def reconciliation_from_estimates(
     unknowns: Sequence[UnknownEstimate] = (),
     residual_by_reader: Mapping[str, float | None] | None = None,
     main_w: float | None = None,
+    root_reader_ids: Sequence[str] = (),
 ) -> ReconciliationV3:
     """``main = identified + group + unknown + residual``, every term nullable.
 
     ``identified`` sums each ESTIMATED/MEASURED subject **once** (AT-14), even
     when several nested readers observe it.  A term with no contributing value
-    is ``None``, never ``0.0`` (HB §18).
+    is ``None``, never ``0.0`` (HB §18).  ``residual`` is the residual of the
+    active topology's ``root_reader_ids`` (``topology_root_readers``); with no
+    root it is ``None``.
     """
     identified_parts: list[float] = []
     seen: set[tuple[str, str]] = set()
@@ -510,17 +577,20 @@ def reconciliation_from_estimates(
         if (value := _finite(estimate.delta_w if estimate.delta_w is not None else estimate.point_w))
         is not None
     ]
+    # The root residual: summed over the topology's root reader(s); no root,
+    # or a root without a residual, is None -- never another reader's value.
     residual_w: float | None = None
-    if residual_by_reader:
-        main = "Main" if "Main" in residual_by_reader else (
-            "ct_main" if "ct_main" in residual_by_reader else next(iter(residual_by_reader), None)
-        )
-        if main is not None:
-            residual_w = _finite(residual_by_reader.get(main))
-            if residual_w is None:
-                raw = residual_by_reader.get(main)
-                if raw is not None and not isinstance(raw, (int, float)):
-                    residual_w = _finite(getattr(raw, "residual_w", None))
+    roots = tuple(str(r) for r in root_reader_ids)
+    if residual_by_reader and roots:
+        parts: list[float | None] = []
+        for root in roots:
+            raw = residual_by_reader.get(root)
+            value = _finite(raw)
+            if value is None and raw is not None and not isinstance(raw, (int, float)):
+                value = _finite(getattr(raw, "residual_w", None))
+            parts.append(value)
+        if all(part is not None for part in parts):
+            residual_w = sum(part for part in parts if part is not None)
 
     def total(parts: list[float]) -> float | None:
         return sum(parts) if parts else None
@@ -536,7 +606,16 @@ def reconciliation_from_estimates(
 
 # --------------------------------------------------------------------------- #
 # hb17 observation -> snapshot (the AT-14 target surface).
+#
+# CLASS B stand-in (Z3b removes it): everything from here to the end of
+# ``build_snapshot`` is scenario-specific scaffolding, allowlisted by
+# tests/unit/test_z3a_no_scenario_names.py until Z3b replaces it.
 # --------------------------------------------------------------------------- #
+
+_TV_STANDBY_W = 3.0  # HB §17 step 8: reported by the plug, not a fabrication.
+#: The stand-in's declared TV power model (the HB §17 TV's standby level).  The
+#: production path takes levels from the model registry instead (A1).
+_TV_MODEL_LEVELS = {"tv": {PowerLevelV3.STANDBY: (_TV_STANDBY_W, 0.5)}}
 
 
 @dataclass(frozen=True, slots=True)
@@ -737,6 +816,7 @@ def build_snapshot(observation: Any, *, inputs: SnapshotInputs | None = None) ->
             rid: {"quality": 1.0} for rid in reader_ids
         },
         ages_s={rid: 0.0 for rid in reader_ids},
+        model_levels=_TV_MODEL_LEVELS,
     )
     # Recover the operator built by _synthetic_report via its stored mapping.
     devices, device_groups = assemble_status_estimates(assembly_inputs)
@@ -762,6 +842,8 @@ def build_snapshot(observation: Any, *, inputs: SnapshotInputs | None = None) ->
         unknowns=(),  # residual is its own term; unknown is not double counted.
         residual_by_reader=residual_by_reader,
         main_w=series[main_id][-1][1] if main_id and series.get(main_id) else None,
+        # Stand-in (Z3b): this scenario builder names its own root.
+        root_reader_ids=(main_id,) if main_id else (),
     )
 
     # -- measurements, residuals, quality ----------------------------------- #

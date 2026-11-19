@@ -21,10 +21,17 @@ from datetime import UTC, datetime
 from wattmosaic_engine.contracts import ConfigurationChangeKind
 
 __all__: list[str] = [
+    "ENDPOINT_SUBJECT_PREFIX",
     "InferredChange",
     "detect_inferred_changes",
     "detect_reader_removals",
 ]
+
+#: Namespace of an association-history key whose subject is a *declared*
+#: single-subject endpoint (DEC-05), e.g. ``"plug:<endpoint_id>"``.  The prefix
+#: is a key namespace written by the runtime for declared endpoints only; it is
+#: never derived from, or matched against, a reader's name.
+ENDPOINT_SUBJECT_PREFIX = "plug:"
 
 
 @dataclass(frozen=True)
@@ -140,7 +147,7 @@ def detect_inferred_changes(
             continue
         kind = (
             ConfigurationChangeKind.SMART_PLUG_RELOCATION
-            if subject.startswith("plug:") or subject.startswith("device:")
+            if subject.startswith(ENDPOINT_SUBJECT_PREFIX) or subject.startswith("device:")
             else ConfigurationChangeKind.CT_READER_RELOCATION
         )
         out.append(
