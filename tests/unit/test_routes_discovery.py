@@ -68,6 +68,8 @@ ROUTE_SNAPSHOT: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/api/v1/discover/placements"),
         ("POST", "/api/v1/endpoints/{endpoint_id}/scope"),
         ("POST", "/api/v1/topology/confirm"),
+        ("GET", "/api/v1/unknown-profiles"),
+        ("POST", "/api/v1/unknown-profiles/{profile_id}/promote"),
         ("PUT", "/api/v1/endpoints/{endpoint_id}"),
         ("PUT", "/api/v1/topology"),
     }
@@ -92,6 +94,7 @@ EXPECTED_MODULES = frozenset(
         "snapshot",
         "snapshot_v3",
         "topology",
+        "unknown_profiles",
     }
 )
 
