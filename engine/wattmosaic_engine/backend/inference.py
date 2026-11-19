@@ -1,6 +1,15 @@
 """Inference half of ``WattMosaicBackend.process``: solve, energy, diagnostics.
 
-Owned by I7/Z2 after X03."""
+Owned by I7/Z2 after X03.  I7 adds the v3 path next to the legacy one: the pure
+entry points :func:`~wattmosaic_engine.inference.orchestrator.infer_group` /
+:func:`~wattmosaic_engine.inference.orchestrator.infer_steady` turn event groups
+and held readings into :class:`JointInferenceResult`s.  The legacy engine path
+below stays working until Z2 removes it; the v3 path is selected only when the
+caller supplies the typed v3 inputs (``event_group`` / ``readings`` plus an
+``ObservationOperator``), never by a global flag.
+
+Production code here never imports ``runtime.fakes``.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +26,48 @@ from ..electrical.topology import build_graph
 from .batch import BackendBatch
 
 log = logging.getLogger("wattmosaic.integration")
+
+
+# --------------------------------------------------------------------------- #
+# v3 orchestration path (I7).  These helpers are pure: every time comes from an
+# injected clock, every cross-area value from a typed contract/Protocol.  They
+# are deliberately additive so the legacy ``process`` below is unchanged.
+# --------------------------------------------------------------------------- #
+
+
+def infer_group_v3(
+    group: Any,
+    operator: Any,
+    models: Any,
+    residual: Any,
+    history: Any,
+    matches: Any,
+    versions: Any,
+    clock: Any,
+) -> Any:
+    """Call the pure v3 event-delta entry point with injected inputs."""
+    from ..inference.orchestrator import infer_group
+
+    return infer_group(
+        group, operator, models, residual, history, matches, versions, clock
+    )
+
+
+def infer_steady_v3(
+    readings: Mapping[str, Any],
+    operator: Any,
+    models: Any,
+    residual: Any,
+    established: Any,
+    versions: Any,
+    clock: Any,
+) -> Any:
+    """Call the pure v3 steady-state entry point with injected inputs."""
+    from ..inference.orchestrator import infer_steady
+
+    return infer_steady(
+        readings, operator, models, residual, established, versions, clock
+    )
 
 
 class InferenceMixin:
