@@ -15,15 +15,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
 
 from ...contracts import (
+    Bounds,
     DeviceEstimate,
     InferenceSnapshot,
     JointInferenceResult,
     utcnow,
 )
+from ...contracts.foundation import _BOUNDS_ALLOW_POINT
 from ..repositories import Repository, enum_value, iso
 
 #: Dedicated columns of the rebuilt ``inference_results``, in INSERT order.
@@ -79,6 +83,50 @@ def _json_default(value: Any) -> Any:
 
 def _dump(value: Any) -> str:
     return json.dumps(value, default=_json_default)
+
+
+@contextmanager
+def repair_point_bounds(payload: dict[str, Any]) -> Iterator[None]:
+    """Open the trusted gate that admits a stored I5 point interval on read.
+
+    A MEASURED / IDENTIFIABLE estimate legitimately carries a zero-width bound
+    ``[p, p]`` (HB §8.5).  The public :class:`~wattmosaic_engine.contracts.Bounds`
+    validator deliberately refuses such an interval from an untrusted payload —
+    only the private ``Bounds._point`` constructor may open it, so a fabricated
+    point can never enter through JSON (DEC-19).  When I5 dumps that estimate to
+    storage the trusted flag is lost, so rebuilding the contract object from a
+    stored JSON dict would raise.
+
+    This helper prepares a *trusted, already-persisted* payload for validation:
+
+    1. every zero-width bound dict with a justification ``basis`` is rebuilt as
+       a :class:`Bounds` instance through the private ``Bounds._point`` path;
+    2. the context-local gate is opened while the caller validates the parent
+       object, so re-validating those nested instances is admitted.
+
+    The gate is reset in a ``finally`` and is context-local, so a concurrent
+    payload read never leaks into it.  This is the single shared repair used by
+    the S17 snapshot reader and the S16 event-record reader (the same technique
+    :mod:`mapping.projection` uses for a persisted ``CellPower`` point interval).
+    Nothing widens an interval or changes a value: the payload is already
+    persisted, trusted data, and the gate is open only for the duration of its
+    validation, never for an untrusted/new payload.
+    """
+    for key in ("device_estimates", "group_estimates"):
+        for estimate in payload.get(key, ()) or ():
+            if not isinstance(estimate, dict):
+                continue
+            bounds = estimate.get("bounds")
+            if not isinstance(bounds, dict):
+                continue
+            low, high, basis = bounds.get("lower_w"), bounds.get("upper_w"), bounds.get("basis")
+            if low is not None and high is not None and low == high and basis is not None:
+                estimate["bounds"] = Bounds._point(float(low), basis)  # type: ignore[arg-type]
+    token = _BOUNDS_ALLOW_POINT.set(True)
+    try:
+        yield
+    finally:
+        _BOUNDS_ALLOW_POINT.reset(token)
 
 
 def _estimate_row(estimate: DeviceEstimate, versions: Any, at: str) -> tuple[Any, ...]:
@@ -349,4 +397,4 @@ class InferenceRepository(Repository):
         return out
 
 
-__all__ = ["InferenceRepository"]
+__all__ = ["InferenceRepository", "repair_point_bounds"]

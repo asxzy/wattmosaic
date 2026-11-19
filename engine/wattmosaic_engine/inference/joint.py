@@ -87,6 +87,9 @@ ANCHOR_WEIGHT = 10.0
 #: into an unsatisfiable constraint.
 ANCHOR_MIN_SIGMA_W = 0.5
 
+#: Below this |coefficient| a ΔU column does not constrain a scope.
+_U_NONZERO_TOL = 1e-12
+
 
 @dataclass(frozen=True)
 class JointSolveReport:
@@ -100,6 +103,12 @@ class JointSolveReport:
     solution: JointSolution
     subject_ids: tuple[str, ...]
     unknown_scopes: tuple[str, ...]
+    #: Scopes whose ΔU column is actually constrained by a solved row.  A scope
+    #: listed on the operator but touched by no active measurement row (or by
+    #: no usable sigma) is absent: its ΔU is not a measured value and must never
+    #: be published as 0.0 (HB §18).  Kept as a separate field so callers cannot
+    #: confuse "a scope exists" with "a scope was solved".
+    constrained_unknown_scopes: frozenset[str]
     lambda_u_by_scope: Mapping[str, float]
     unknown_share_by_reader: Mapping[str, float | None]
     sigma: np.ndarray
@@ -121,6 +130,7 @@ class JointSolveReport:
             "subject_ids": list(self.subject_ids),
             "x": {sid: float(v) for sid, v in zip(self.subject_ids, self.solution.x, strict=False)},
             "unknown_scopes": list(self.unknown_scopes),
+            "constrained_unknown_scopes": sorted(self.constrained_unknown_scopes),
             "u": {
                 scope: float(v)
                 for scope, v in zip(self.unknown_scopes, self.solution.u, strict=False)
@@ -361,6 +371,19 @@ def solve_joint_detailed(
         active[row] = True
     active_rows = tuple(int(i) for i in np.flatnonzero(active))
 
+    # A scope is constrained only when at least one *solved* row carries its
+    # ΔU column with a non-zero coefficient.  A row excluded for a missing
+    # observation or missing sigma cannot constrain the scope even though U
+    # has a column for it; its ΔU is then unknown, not 0 (HB §18).
+    constrained_unknown_scopes = frozenset(
+        scope
+        for s, scope in enumerate(scopes)
+        if any(
+            active[row] and abs(U[row, s]) > _U_NONZERO_TOL
+            for row in range(m)
+        )
+    )
+
     warnings: list[str] = []
     if active_rows and len(active_rows) < m:
         warnings.append("inactive_rows_excluded")
@@ -520,6 +543,7 @@ def solve_joint_detailed(
             solution=solution,
             subject_ids=tuple(subject_ids),
             unknown_scopes=tuple(scopes),
+            constrained_unknown_scopes=constrained_unknown_scopes,
             lambda_u_by_scope=lambda_u_by_scope,
             unknown_share_by_reader={meta.reader_id: None for meta in operator.rows},
             sigma=sigma_eff,
@@ -602,6 +626,7 @@ def solve_joint_detailed(
         solution=solution,
         subject_ids=tuple(subject_ids),
         unknown_scopes=tuple(scopes),
+        constrained_unknown_scopes=constrained_unknown_scopes,
         lambda_u_by_scope=lambda_u_by_scope,
         # Rows not listed as an unknown scope report ``None`` (absent, not 0).
         unknown_share_by_reader=unknown_share(operator, solution, delta_y),

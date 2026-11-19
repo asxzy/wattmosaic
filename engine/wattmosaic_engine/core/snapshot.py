@@ -19,7 +19,6 @@ from typing import Any, Protocol, runtime_checkable
 
 from ..api.facade import InvalidRequest, NotFound
 from ..contracts import (
-    Bounds,
     DataQualityReport,
     DeviceEstimate,
     DeviceGroupEstimate,
@@ -243,20 +242,18 @@ class SnapshotAssembler:
             raw = row.get("payload_json")
             data = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
         # The stored payload may contain point-width Bounds that the public
-        # validator only allows through the private constructor (I5's MEASURED
-        # estimates).  Rebuild those through ``Bounds._point`` before validating.
-        SnapshotAssembler._repair_point_bounds(data)
-        return InferenceSnapshot.model_validate(data)
+        # validator only admits through the private constructor (I5's MEASURED
+        # estimates).  Open the shared repair gate while validating.
+        return SnapshotAssembler._decode_validated(data)
 
     @staticmethod
-    def _repair_point_bounds(data: dict[str, Any]) -> None:
-        for estimate in data.get("device_estimates", ()):
-            bounds = estimate.get("bounds")
-            if not isinstance(bounds, dict):
-                continue
-            low, high, basis = bounds.get("lower_w"), bounds.get("upper_w"), bounds.get("basis")
-            if low is not None and high is not None and low == high and basis is not None:
-                estimate["bounds"] = Bounds._point(low, basis).model_dump(mode="json")  # type: ignore[arg-type]
+    def _decode_validated(data: dict[str, Any]) -> InferenceSnapshot:
+        # The S17 snapshot reader and the S16 event-record reader share one
+        # repair implementation; keep this thin wrapper as the stable call site.
+        from ..storage.repositories.inference import repair_point_bounds
+
+        with repair_point_bounds(data):
+            return InferenceSnapshot.model_validate(data)
 
     # -- assembly ----------------------------------------------------------- #
     def on_result(
@@ -328,21 +325,22 @@ class SnapshotAssembler:
             )
         )
         group_w = float(sum(float(g.point_w) for g in groups.values() if g.point_w is not None))
-        # Unknown load is NOT treated as a known-empty sum: the live solvers emit
-        # an unknown-scope value even when the scope's row had no usable sigma
-        # (an unconstrained 0.0, and a delta rather than a level), so a zero
-        # here is not a computed 0 W.  The HB §17 walkthrough pins the unknown
-        # total as "not computed" (None) on the steady prelude; the prior rule is
-        # kept until the solvers mark an unconstrained scope as unknown.
-        unknown_w = None
-        unknowns = getattr(inputs.result, "unknown_estimates", ())
-        if unknowns:
-            parts = [
-                float(u.point_w if u.point_w is not None else u.delta_w)
-                for u in unknowns
-                if (u.point_w if u.point_w is not None else u.delta_w) is not None
-            ]
-            unknown_w = sum(parts) or None
+        # Unknown load follows the same rule as identified_w/group_w (HB §18):
+        # 0.0 over a known, empty set of unknown estimates; the sum when every
+        # estimate carries a value; None when any estimate is unconstrained.
+        # The solvers now emit delta_w=None for a scope no solved row constrains,
+        # so an unconstrained scope's load stays "not computed" rather than a
+        # fabricated 0 W (which is what made the HB §17 prelude total None).
+        unknowns = tuple(getattr(inputs.result, "unknown_estimates", ()) or ())
+        unknown_parts: list[float] = []
+        unknown_absent = False
+        for u in unknowns:
+            value = u.point_w if u.point_w is not None else u.delta_w
+            if value is None:
+                unknown_absent = True
+                break
+            unknown_parts.append(float(value))
+        unknown_w: float | None = None if unknown_absent else float(sum(unknown_parts))
         reconciliation = ReconciliationV3(
             main_w=main_w,
             identified_w=identified,
