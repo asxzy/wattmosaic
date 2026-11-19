@@ -91,7 +91,7 @@
 | Z2 | 5 | NOT_STARTED | | | |
 | Z1 | 5 | NOT_STARTED | | | |
 | L7 | 5 | IN_PROGRESS |  | AT-19 |  |
-| D5 | 5 | IN_PROGRESS |  |  |  |
+| D5 | 5 | VERIFIED |  |  | v021 supersedes link; P6 must pass supersedes_evidence_id |
 | X09 | 5 | NOT_STARTED | | | |
 | V1 | 6 | NOT_STARTED | | all 20 | |
 | V2 | 6 | NOT_STARTED | | | |
