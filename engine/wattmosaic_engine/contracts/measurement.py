@@ -257,13 +257,19 @@ class HAEvent(Model):
 
 
 class MeasurementEvent(Model):
-    """One detected reader change (P3), with a stable, identity-based id."""
+    """One detected reader change (P3), with a stable, identity-based id.
+
+    A ``DATA_GAP`` carries *no* measurement: ``delta_w``, ``sigma_w`` and
+    ``z_score`` are ``None``, never a ``0.0`` sentinel (HB §18).  Every other
+    step class must carry all three numbers.  The invariant is enforced by
+    :meth:`_null_measurements_match_step_class`.
+    """
 
     event_id: str
     reader_id: str
-    delta_w: float  # signed, HB §2.3
-    sigma_w: float
-    z_score: float
+    delta_w: float | None = None  # signed, HB §2.3; None iff DATA_GAP
+    sigma_w: float | None = None  # None iff DATA_GAP
+    z_score: float | None = None  # None iff DATA_GAP
     step_class: StepClass
     onset_lo: datetime
     onset_hi: datetime  # timestamp uncertainty = onset_hi - onset_lo
@@ -276,6 +282,16 @@ class MeasurementEvent(Model):
     def _onset_order(self) -> MeasurementEvent:
         if self.onset_lo > self.onset_hi:
             raise ValueError("onset_lo must not be after onset_hi")
+        return self
+
+    @model_validator(mode="after")
+    def _null_measurements_match_step_class(self) -> MeasurementEvent:
+        is_gap = self.step_class == StepClass.DATA_GAP
+        measured = (self.delta_w, self.sigma_w, self.z_score)
+        if is_gap and any(value is not None for value in measured):
+            raise ValueError("a DATA_GAP event must have delta_w, sigma_w and z_score = None")
+        if not is_gap and any(value is None for value in measured):
+            raise ValueError("a non-DATA_GAP event must carry delta_w, sigma_w and z_score")
         return self
 
 
