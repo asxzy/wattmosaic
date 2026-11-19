@@ -14,7 +14,7 @@
     }
   },
   "additionalProperties": false,
-  "description": "One detected reader change (P3), with a stable, identity-based id.",
+  "description": "One detected reader change (P3), with a stable, identity-based id.\n\nA ``DATA_GAP`` carries *no* measurement: ``delta_w``, ``sigma_w`` and\n``z_score`` are ``None``, never a ``0.0`` sentinel (HB \u00a718).  Every other\nstep class must carry all three numbers.  The invariant is enforced by\n:meth:`_null_measurements_match_step_class`.",
   "properties": {
     "event_id": {
       "title": "Event Id",
@@ -25,16 +25,40 @@
       "type": "string"
     },
     "delta_w": {
-      "title": "Delta W",
-      "type": "number"
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Delta W"
     },
     "sigma_w": {
-      "title": "Sigma W",
-      "type": "number"
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Sigma W"
     },
     "z_score": {
-      "title": "Z Score",
-      "type": "number"
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Z Score"
     },
     "step_class": {
       "$ref": "#/$defs/StepClass"
@@ -86,9 +110,6 @@
   "required": [
     "event_id",
     "reader_id",
-    "delta_w",
-    "sigma_w",
-    "z_score",
     "step_class",
     "onset_lo",
     "onset_hi",

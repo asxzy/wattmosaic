@@ -246,6 +246,44 @@ def test_onset_order_validator() -> None:
         _measurement_event(onset_lo=T1, onset_hi=T0)
 
 
+def test_data_gap_event_has_null_measurements() -> None:
+    # A DATA_GAP carries no measurement: absent is None, never 0.0 (HB §18).
+    gap = _measurement_event(
+        step_class=StepClass.DATA_GAP,
+        delta_w=None,
+        sigma_w=None,
+        z_score=None,
+    )
+    assert gap.delta_w is None
+    assert gap.sigma_w is None
+    assert gap.z_score is None
+    # Even a round-trip must preserve the nulls.
+    restored = MeasurementEvent.model_validate(gap.model_dump(mode="json"))
+    assert restored.delta_w is None
+    assert restored.sigma_w is None
+    assert restored.z_score is None
+
+
+def test_data_gap_rejects_numeric_measurements() -> None:
+    # A gap may not smuggle a 0.0 sentinel (or any other number) past the
+    # contract's null policy.
+    for field in ("delta_w", "sigma_w", "z_score"):
+        with pytest.raises(ValidationError):
+            _measurement_event(step_class=StepClass.DATA_GAP, **{field: 0.0})
+
+
+def test_non_gap_event_rejects_null_delta() -> None:
+    # A non-DATA_GAP step must carry a measured delta (and sigma/z score); a
+    # missing value may not be represented by None.
+    for step_class in (StepClass.SUSTAINED, StepClass.TRANSIENT, StepClass.PERIODIC, StepClass.DRIFT):
+        with pytest.raises(ValidationError):
+            _measurement_event(step_class=step_class, delta_w=None)
+    with pytest.raises(ValidationError):
+        _measurement_event(sigma_w=None)
+    with pytest.raises(ValidationError):
+        _measurement_event(z_score=None)
+
+
 def test_event_evidence_with_sample_returns_new_record_id() -> None:
     original = _evidence(finalized=True)
     updated = original.with_sample(T1 + timedelta(seconds=5), 12.0)

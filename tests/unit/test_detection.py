@@ -369,6 +369,14 @@ def test_missing_reader_emits_single_data_gap() -> None:
         detector.process("ct", times[-1] + timedelta(seconds=30 + extra * 5))
     gaps = [e for e in events if is_class(e, StepClass.DATA_GAP)]
     assert len(gaps) == 1
+    # A gap has no delta measurement: absent is None, never 0.0 (HB §18).
+    assert gaps[0].delta_w is None
+    assert gaps[0].sigma_w is None
+    assert gaps[0].z_score is None
+    # Non-gap events must still carry a real delta.
+    for event in events:
+        if not is_class(event, StepClass.DATA_GAP):
+            assert event.delta_w is not None
 
 
 # --------------------------------------------------------------------------- #

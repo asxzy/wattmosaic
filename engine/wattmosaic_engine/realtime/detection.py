@@ -220,9 +220,9 @@ def _usable(sample: WindowSample) -> bool:
 def build_measurement_event(
     *,
     reader_id: str,
-    delta_w: float,
-    sigma_w: float,
-    z_score: float,
+    delta_w: float | None,
+    sigma_w: float | None,
+    z_score: float | None,
     step_class: StepClass,
     onset_lo: datetime,
     onset_hi: datetime,
@@ -231,16 +231,21 @@ def build_measurement_event(
     quality_score: float,
     detected_at: datetime,
 ) -> MeasurementEvent:
-    """Build a :class:`MeasurementEvent` with its deterministic identity."""
+    """Build a :class:`MeasurementEvent` with its deterministic identity.
+
+    For ``DATA_GAP`` pass ``None`` for the three measurements: a gap has no
+    delta and no quality figures, never a ``0.0`` sentinel (HB §18).  For every
+    other step class all three values are required.
+    """
     onset_lo, onset_hi = _aware(onset_lo), _aware(onset_hi)
     if onset_hi < onset_lo:
         raise ValueError("onset_hi must not precede onset_lo")
     return MeasurementEvent(
         event_id=measurement_event_id(reader_id, onset_lo, DETECTOR_VERSION),
         reader_id=reader_id,
-        delta_w=float(delta_w),
-        sigma_w=float(sigma_w),
-        z_score=float(z_score),
+        delta_w=None if delta_w is None else float(delta_w),
+        sigma_w=None if sigma_w is None else float(sigma_w),
+        z_score=None if z_score is None else float(z_score),
         step_class=step_class,
         onset_lo=onset_lo,
         onset_hi=onset_hi,
@@ -763,14 +768,13 @@ class ChangeDetector:
         if (at - gap_start).total_seconds() < self.config.gap_cooldown_s:
             return
         baseline = self.store.baseline(reader)
-        sigma = self._sigma(reader)
         event = build_measurement_event(
             reader_id=reader,
-            # A gap carries no delta measurement; the contract requires a float,
-            # so 0.0 is a sentinel for "no delta", never a measured value.
-            delta_w=0.0,
-            sigma_w=sigma if sigma is not None else self.config.sigma_min_w,
-            z_score=0.0,
+            # A gap carries no measurement at all: delta, sigma and z are None,
+            # never a 0.0 sentinel (HB §18, "absent is None, never 0").
+            delta_w=None,
+            sigma_w=None,
+            z_score=None,
             step_class=StepClass.DATA_GAP,
             onset_lo=gap_start,
             onset_hi=at,
