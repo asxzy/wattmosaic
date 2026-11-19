@@ -17,8 +17,8 @@ import numpy as np
 
 from wattmosaic_engine.contracts import QualityStatus, StageStatus
 from wattmosaic_engine.electrical.matrix import MeasurementMatrix
-from wattmosaic_engine.electrical.models import ModelView
 from wattmosaic_engine.electrical.topology import TopologyGraph
+from wattmosaic_engine.models.view import ModelView
 
 #: A device explicitly reported OFF must not be credited with more than this
 #: (or twice its modelled standby power) just because its circuit carries an

@@ -27,7 +27,7 @@ from ..contracts import (
     Topology,
     TopologyRelation,
 )
-from ..electrical.models import resolve_model
+from ..models.view import resolve_model
 from .protocols import (
     DiagnosticsProvider,
     DiscoveryProvider,
@@ -504,9 +504,9 @@ class StubFacade(NullFacade):
     def panel_tree(self, *, include_nesting: bool = False) -> dict[str, Any]:
         """Build the tree from the stub topology (no engine, no history)."""
         from ..contracts import Topology
-        from ..electrical.panel_tree import build_panel_tree
+        from ..mapping.display_tree import build_display_tree
 
-        return build_panel_tree(Topology.model_validate(self._topology))
+        return build_display_tree(Topology.model_validate(self._topology))
 
     def nesting_candidates(self, *, hours: float = 12.0) -> dict[str, Any]:
         return {"candidates": [], "reason": "stub facade has no stored history"}

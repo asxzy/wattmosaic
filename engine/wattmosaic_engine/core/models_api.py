@@ -232,7 +232,7 @@ class ModelsApiMixin:
         configuration: deletion must clear the topology projection too, otherwise
         a stale monitoring level or mode entity would outlive the declaration.
         """
-        from ..disaggregation.configuration import project_configuration
+        from ..device_configuration import project_configuration
 
         name = command.command
         if not command.device_id:

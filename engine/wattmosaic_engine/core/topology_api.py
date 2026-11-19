@@ -25,8 +25,8 @@ from ..contracts import (
     TopologyEdgeV3,
     TopologyStatus,
 )
-from ..electrical.nesting import infer_nesting
 from ..electrical.topology_graph import DisplayNode, TopologyGraph
+from ..electrical.topology_inference import infer_nesting
 
 #: Downsample the nesting comparison grid to the channels' declared sampling
 #: cadence instead of using the union of every distinct timestamp.
@@ -814,7 +814,7 @@ class TopologyApiMixin:
                     # phase labels are contradicted by the measurements.
                     "phase": str(ch.phase),
                     "paired_ct_id": ch.paired_ct_id,
-                    "parent_ct_id": ch.parent_ct_id,
+                    "parent_id": ch.parent_ct_id,
                 }
                 for cid, ch in by_id.items()
             },
@@ -833,14 +833,14 @@ class TopologyApiMixin:
         proposals: dict[str, list[str]] = {}
         nested = [c for c in candidates if c.kind == "nested"]
         for candidate in nested:
-            proposals.setdefault(candidate.child_ct_id, []).append(candidate.parent_ct_id)
+            proposals.setdefault(candidate.child_reader_id, []).append(candidate.parent_id)
         # Duplicate feeds are the same *conductor* seen twice, not a nesting.
         # They are offered separately because they answer a different question:
         # "is this CT an alias of another one?" rather than "what feeds it?".
         alias_proposals: dict[str, str] = {}
         for candidate in candidates:
             if candidate.kind == "duplicate":
-                alias_proposals[candidate.child_ct_id] = candidate.parent_ct_id
+                alias_proposals[candidate.child_reader_id] = candidate.parent_id
 
         return {
             "window_hours": float(hours),
@@ -979,7 +979,7 @@ def _sample_grid(
     window contains **76 893** distinct timestamps for 38 channels that each
     carry only ~2 615 samples: the union is dominated by per-channel clock jitter,
     so it is 29–38× larger than the data it describes.  Every instant then costs
-    one comparison per pair in :func:`~wattmosaic_engine.electrical.nesting.infer_nesting`
+    one comparison per pair in :func:`~wattmosaic_engine.electrical.topology_inference.infer_nesting`
     and one cell in every aligned series, for no new information: forward-filling
     a channel between two of its own samples cannot tell you anything the earlier
     sample did not.

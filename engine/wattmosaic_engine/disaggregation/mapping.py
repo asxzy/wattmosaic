@@ -4,7 +4,7 @@ This module is a *read-time projection* over three existing inputs:
 
 * the electrical :class:`~wattmosaic_engine.contracts.Topology` (channels,
   devices, containment and typed relations);
-* the device-model views (``electrical.models.ModelView``) keyed by device id;
+* the device-model views (:class:`~wattmosaic_engine.models.view.ModelView`) keyed by device id;
 * evidence: ``DEVICE_CT_ASSOCIATION`` relations and unknown-load/residual
   records.
 
@@ -54,8 +54,8 @@ from wattmosaic_engine.contracts import (
     UnknownLoadProfile,
     UnknownResidualEvent,
 )
-from wattmosaic_engine.electrical.models import ModelView
 from wattmosaic_engine.electrical.topology import build_graph, version_token
+from wattmosaic_engine.models.view import ModelView
 
 from .association import (
     AMBIGUOUS_MULTIPLIER,

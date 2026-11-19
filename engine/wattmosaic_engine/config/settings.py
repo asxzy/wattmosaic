@@ -200,6 +200,11 @@ class EngineConfig:
     #: derives per channel from its own history rather than from this key.
     default_sample_interval_s: float = 10.0
     stale_after_s: float = 120.0
+    #: Period of the v3 data-quality heartbeat loop (P6, DEC-14).  The heartbeat
+    #: publishes stale-source aging only; it never runs a full solve.  This is a
+    #: genuinely new setting for the three-loop runtime, distinct from the
+    #: retired ``inference_interval_s`` (DEC-03), which accepted and ignored the
+    #: old 5 s solve cadence.
     quality_interval_s: float = 5.0
     queue_max_size: int = 5000
 
