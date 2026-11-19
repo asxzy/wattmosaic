@@ -385,6 +385,18 @@ def assemble_status_estimates(
             and bounds.upper_w is not None
             and bounds.lower_w == bounds.upper_w
         )
+        if (
+            is_point
+            and point is not None
+            and bounds.basis is not None
+            and bounds.lower_w != point
+            and abs(float(bounds.lower_w) - float(point)) <= 1e-6 * max(1.0, abs(float(point)))
+        ):
+            # The point bound came from I4's posterior solve and the point from
+            # the direct reading; they differ only by float round-off.  Pin the
+            # bound to the published point so the interval brackets it exactly
+            # (M2's MappingCell rejects a point outside its own bounds).
+            bounds = Bounds._point(float(point), bounds.basis)  # type: ignore[arg-type]
         group = report.group_of(subject_id)
         member_group_id = (
             group.group_id

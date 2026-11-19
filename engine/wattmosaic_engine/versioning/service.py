@@ -173,9 +173,10 @@ class _FrozenTopologyView:
 class _FrozenMappingView:
     """An immutable :class:`MappingView` over a frozen mapping-edge snapshot."""
 
-    __slots__ = ("_pairs",)
+    __slots__ = ("_edges", "_pairs")
 
     def __init__(self, edges: Sequence[MappingEdge]) -> None:
+        object.__setattr__(self, "_edges", tuple(edges))
         object.__setattr__(
             self,
             "_pairs",
@@ -183,6 +184,15 @@ class _FrozenMappingView:
                 {(edge.subject_kind, edge.subject_id): edge.endpoint_id for edge in edges}
             ),
         )
+
+    def edges(self) -> tuple[MappingEdge, ...]:
+        """Every mapping edge of this version.
+
+        T7's default candidate mapping is "the current mapping view's edges";
+        without this read it proposed an *empty* mapping version, so promoting
+        any confirmed relocation dropped every mapping edge of the install.
+        """
+        return self._edges
 
     def subjects_on(self, reader_id: str) -> tuple[tuple[str, str], ...]:
         return tuple(sorted(subject for subject, reader in self._pairs.items() if reader == reader_id))
@@ -770,7 +780,14 @@ class VersionService:
     # -- T7: declared/inferred change workflow helpers --------------------- #
 
     @classmethod
-    def from_hb17(cls, observation: Any, *, model_set_id: str = "mset-hb17") -> VersionService:
+    def from_hb17(
+        cls,
+        observation: Any,
+        *,
+        model_set_id: str = "mset-hb17",
+        devices: Mapping[str, str] | None = None,
+        db: Any = None,
+    ) -> VersionService:
         """Build a D1 service seeded with the HB §17 reference mapping/topology.
 
         This is the public surface the §21 acceptance tests use.  It constructs a
@@ -780,10 +797,17 @@ class VersionService:
         fixed clock (no wall clock is read).  The observation ground-truth seam
         is respected: only declared ``parent`` metadata and HA entity ids — both
         observable — are used to seed, never the simulator's ``truth`` frame.
+
+        ``devices`` optionally replaces the default declared ``subject ->
+        endpoint`` mapping (a user's up-front declaration, e.g. one subject per
+        HA light and the TV on its plug); the default is unchanged.  ``db``
+        optionally seeds an existing (migrated) database instead of a private
+        in-memory one, so a harness's facade reads (matrix, topology) see the
+        same D1 versions the runtime infers with.
         """
         from wattmosaic_engine.storage.database import Database
 
-        db = Database(":memory:")
+        db = db if db is not None else Database(":memory:")
         clock = lambda: datetime(2026, 1, 1, tzinfo=UTC)  # noqa: E731 - injected fixed clock
         svc = cls(
             topology_repo=db.repos.topology_v3,
@@ -793,7 +817,7 @@ class VersionService:
         )
         svc._hb17_db = db  # keep the connection alive for the service's lifetime
         svc._hb17_origin = clock()
-        svc._seed_hb17(observation)
+        svc._seed_hb17(observation, devices=devices)
         svc._seed_matrix_cells(observation)
         return svc
 
@@ -858,7 +882,7 @@ class VersionService:
                 readings.setdefault(str(reader), []).append((at, value))
         self.set_observation_snapshot(readings)
 
-    def _seed_hb17(self, observation: Any) -> None:
+    def _seed_hb17(self, observation: Any, *, devices: Mapping[str, str] | None = None) -> None:
         """Seed declared topology/mapping edges from observable HB §17 data."""
         from wattmosaic_engine.contracts import EdgeEvidence, Observability, RelationType
 
@@ -897,13 +921,17 @@ class VersionService:
                     pinned=True,
                 )
             )
-        for edge in edges:
-            self._topo.upsert_edge(edge)
+        # The declared edges must belong to the *active topology version*:
+        # every consumer reads ``topology_view(current().topology_version_id)``.
+        # Upserting the rows alone left that view empty, so the operator had no
+        # CONTAINS nesting and P5 co-movement never saw related readers.
+        if edges:
+            self._promote_topology(self.propose_topology(edges, None))
 
         # Seed v3 mapping edges.  The tv's current mapping is ct_a (pre-move);
         # step 9 of the HB §17 truth moves it to ct_c, which the AT-15 event
         # applies.  A single-subject plug endpoint maps tv on ct_plug.
-        device_endpoints = {
+        device_endpoints = dict(devices) if devices is not None else {
             "tv": "ct_a",
             "lights": "ct_a",
             "fridge": "ct_b",

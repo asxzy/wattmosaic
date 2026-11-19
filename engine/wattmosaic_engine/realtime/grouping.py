@@ -198,6 +198,30 @@ def temporal_reason(
     return "temporal_overlap" if a_lo <= b_hi and b_lo <= a_hi else None
 
 
+def ha_temporal_reason(
+    event: HAEvent,
+    other: HAEvent | MeasurementEvent,
+    tolerance_s: float = DEFAULT_TOLERANCE_S,
+) -> str | None:
+    """``"temporal_overlap"`` when an HA change and another sub-event overlap.
+
+    Design §4 rule 2 applies to *any* two sub-events, not only to two reader
+    steps: an HA change is a point interval at its ``observed_at`` and a reader
+    step is its ``[onset_lo, onset_hi]``; both are widened by ``tolerance_s``.
+    This is what puts the HA command and the reader steps that confirm it in
+    one event group (HB §6.6), so candidate generation sees both (HB §17 step 4).
+    """
+    tol = timedelta(seconds=_seconds(tolerance_s, "tolerance_s"))
+    at = _aware(event.observed_at)
+    a_lo, a_hi = at - tol, at + tol
+    if isinstance(other, HAEvent):
+        b_at = _aware(other.observed_at)
+        b_lo, b_hi = b_at - tol, b_at + tol
+    else:
+        b_lo, b_hi = _aware(other.onset_lo) - tol, _aware(other.onset_hi) + tol
+    return "temporal_overlap" if a_lo <= b_hi and b_lo <= a_hi else None
+
+
 def _related(reader_a: str, reader_b: str, topology: TopologyView) -> bool:
     """True when two readers are joined by a CONFIRMED/PROVISIONAL CONTAINS edge.
 
@@ -337,8 +361,14 @@ def form_groups(
             reason: str | None = None
             if a_kind == "ha" and b_kind == "ha" and a_ev is not None and b_ev is not None:
                 reason = context_reason(a_ev, b_ev, config.context_max_spread_s)
+                if reason is None:
+                    reason = ha_temporal_reason(a_ev, b_ev, config.tolerance_s)
             elif a_kind == "reader" and b_kind == "reader" and a_step and b_step:
                 reason = temporal_reason(a_step.event, b_step.event, config.tolerance_s)
+            elif a_ev is not None and b_step is not None:
+                reason = ha_temporal_reason(a_ev, b_step.event, config.tolerance_s)
+            elif b_ev is not None and a_step is not None:
+                reason = ha_temporal_reason(b_ev, a_step.event, config.tolerance_s)
             if reason is not None:
                 uf.union(i, j, reason)
 
@@ -502,6 +532,15 @@ class GroupingEngine:
         entry = self._entries.get(group_id)
         return None if entry is None else entry.group
 
+    def ha_events(self, group_id: str) -> tuple[HAEvent, ...]:
+        """The HA events behind a live group's HA sub-events (read-only).
+
+        A sub-event only references its HA event by id; the event loop needs the
+        entity id and instant to resolve ``ha_entity_links`` (DEC-08).
+        """
+        entry = self._entries.get(group_id)
+        return () if entry is None else tuple(entry.ha_events)
+
     def _persist(self, group: EventGroup) -> None:
         key = (group.group_id, group.revision)
         if key in self._persisted:
@@ -573,15 +612,21 @@ class GroupingEngine:
 
         # Attach to an existing live group by context (or an open, close group).
         target: _Entry | None = None
+        reason: str | None = None
         for entry in self._entries.values():
             for other in entry.ha_events:
-                if context_reason(event, other, self.config.context_max_spread_s) is not None:
+                reason = context_reason(event, other, self.config.context_max_spread_s)
+                if reason is not None:
                     target = entry
                     break
             if target is not None:
                 break
+        if target is None:
+            # Design §4 rule 2: an HA change whose instant overlaps a live
+            # group's sub-event (another HA change or a reader step that was
+            # delivered first) joins that group on temporal overlap.
+            target, reason = self._temporal_target(event)
         if target is not None:
-            reason = context_reason(event, target.ha_events[0], self.config.context_max_spread_s)
             target.ha_events.append(event)
             existing_ids = {s.sub_event_id for s in target.group.sub_events}
             if sub.sub_event_id not in existing_ids:
@@ -593,6 +638,7 @@ class GroupingEngine:
                     update={"grouping_reasons": sorted(set(target.group.grouping_reasons) | {reason})}
                 )
             target.last_activity = now
+            self._refresh_ready(target)
             return target.group
 
         group = form_groups(
@@ -619,20 +665,47 @@ class GroupingEngine:
         now = _aware(now)
         wrapped = _Step(step, evidence_id or f"evd-{step.event_id}")
 
-        # Prefer a live group whose reader is topology-related or whose onset
-        # overlaps; otherwise make a fresh (reader-only) group.
+        # Prefer a live group whose onset overlaps, or whose reader is
+        # topology-related *and* co-temporal (a related reader's step an hour
+        # later is a different physical event, not the same one seen twice);
+        # then a group whose HA change overlaps this step (design §4 rule 2);
+        # otherwise make a fresh (reader-only) group.
         target: _Entry | None = None
+        ha_reason: str | None = None
+        related_window = timedelta(seconds=self.config.context_max_spread_s)
         for entry in self._entries.values():
+            if not self._joinable(entry):
+                continue
             for other in entry.steps:
-                related = self.topology is not None and _related(
-                    step.reader_id, other.reader_id, self.topology
-                )
                 overlaps = temporal_reason(step, other.event, self.config.tolerance_s) is not None
+                related = (
+                    self.topology is not None
+                    and abs(_aware(step.onset_lo) - _aware(other.event.onset_lo)) <= related_window
+                    and _related(step.reader_id, other.reader_id, self.topology)
+                )
                 if related or overlaps:
                     target = entry
                     break
             if target is not None:
                 break
+        if target is None:
+            for entry in self._entries.values():
+                # An HA-only group closed UNRESOLVED (no watts yet) is re-opened
+                # by the reader step that confirms it: P3 confirms a step only
+                # after ``confirm_s`` plus a few samples, which can exceed the
+                # HA group's ``quiet_s`` (design §4 late data).
+                reopenable = (
+                    entry.group.status == EventGroupStatus.UNRESOLVED and not entry.steps
+                )
+                if not (self._joinable(entry) or reopenable):
+                    continue
+                for event in entry.ha_events:
+                    ha_reason = ha_temporal_reason(event, step, self.config.tolerance_s)
+                    if ha_reason is not None:
+                        target = entry
+                        break
+                if target is not None:
+                    break
         if target is None:
             group = form_groups(
                 reader_steps=[wrapped],
@@ -643,6 +716,10 @@ class GroupingEngine:
             entry = self._merge(group, now=now)
         else:
             entry = target
+            if entry.group.status == EventGroupStatus.UNRESOLVED:
+                entry.group = entry.group.model_copy(
+                    update={"status": EventGroupStatus.DETECTED, "closed_at": None}
+                )
             existing_ids = {s.sub_event_id for s in entry.group.sub_events}
             new_sub = build_reader_sub_event(step, wrapped.evidence_id)
             if new_sub.sub_event_id not in existing_ids:
@@ -650,6 +727,8 @@ class GroupingEngine:
                     update={"sub_events": [*entry.group.sub_events, new_sub]}
                 )
             reasons = set(entry.group.grouping_reasons)
+            if ha_reason is not None:
+                reasons.add(ha_reason)
             if self.topology is not None:
                 for other in entry.steps:
                     reason = co_movement_reason(step, [other.event], self.topology)
@@ -666,6 +745,8 @@ class GroupingEngine:
             self._persist(entry.group)
             if self.on_ready is not None:
                 self.on_ready(entry.group)
+        elif target is not None:
+            self._refresh_ready(entry)
 
         # A fully-explained group with all windows closed and quiet becomes
         # CONFIRMED (DEC-14/§12.3).  HA-only groups stay DETECTED.
@@ -685,6 +766,49 @@ class GroupingEngine:
             if end > now:
                 return False
         return True
+
+    @staticmethod
+    def _joinable(entry: _Entry) -> bool:
+        """A fresh sub-event may join only a group that is still open.
+
+        CONFIRMED/UNRESOLVED groups are closed: a late sample reaches them only
+        through :meth:`on_late_reader_step` (a new revision, AT-18), never by
+        silently growing the closed revision in place.
+        """
+        return not entry.terminal and entry.group.status in (
+            EventGroupStatus.DETECTED,
+            EventGroupStatus.MATCHING,
+            EventGroupStatus.PROVISIONAL,
+            EventGroupStatus.REVISED,
+        )
+
+    def _temporal_target(self, event: HAEvent) -> tuple[_Entry | None, str | None]:
+        """The first open group with a sub-event overlapping ``event`` in time."""
+        tolerance = self.config.tolerance_s
+        for entry in self._entries.values():
+            if not self._joinable(entry):
+                continue
+            for other in [*entry.ha_events, *(step.event for step in entry.steps)]:
+                reason = ha_temporal_reason(event, other, tolerance)
+                if reason is not None:
+                    return entry, reason
+        return None, None
+
+    def _refresh_ready(self, entry: _Entry) -> None:
+        """Re-deliver a group already handed to inference after it grew.
+
+        ``on_ready`` hands the event loop the group as it was at its first
+        reader step.  Nested readers (Circuit A, Subpanel, Main — HB §17 step
+        3) and the HA change confirming them arrive one by one; each one that
+        joins a MATCHING/PROVISIONAL group must reach inference too, or the
+        published result keeps only the first reader's delta (HB §7.6:
+        matching is not a one-time assignment).  Same revision: nothing
+        immutable is edited.
+        """
+        if self.on_ready is None:
+            return
+        if entry.group.status in (EventGroupStatus.MATCHING, EventGroupStatus.PROVISIONAL):
+            self.on_ready(entry.group)
 
     def on_provisional(self, evidence: EventEvidence) -> EventGroup | None:
         """P4 hook: a reader's first post-sample makes its group PROVISIONAL."""

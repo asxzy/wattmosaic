@@ -41,6 +41,7 @@ from wattmosaic_engine.contracts import (
     ReaderColumnSummary,
     RelationType,
 )
+from wattmosaic_engine.contracts.foundation import _BOUNDS_ALLOW_POINT
 from wattmosaic_engine.runtime.interfaces import EntryMeta, ObservationOperator
 
 from .cells import finite_or_none, validate_bounds_bracket, visual_category
@@ -201,6 +202,28 @@ def _estimate_identifiability(est: Any) -> IdentifiabilityStatus:
         return IdentifiabilityStatus(_value(ident))
     except ValueError:
         return IdentifiabilityStatus.INSUFFICIENT_EVIDENCE
+
+
+def _cell_power(*, bounds: Bounds | None, **fields: Any) -> CellPower:
+    """Build a :class:`CellPower`, carrying an I5 point interval through.
+
+    A MEASURED / IDENTIFIABLE estimate's zero-width :class:`Bounds` can only be
+    made by the private ``Bounds._point`` path.  ``CellPower.bounds`` is
+    ``Bounds | None``, and pydantic re-runs the interval validator on a union
+    member, so the already-validated point used to raise and abort the whole
+    matrix update.  Only an existing ``Bounds`` instance is let through.
+    """
+    point = (
+        isinstance(bounds, Bounds)
+        and bounds.lower_w is not None
+        and bounds.lower_w == bounds.upper_w
+    )
+    token = _BOUNDS_ALLOW_POINT.set(True) if point else None
+    try:
+        return CellPower(bounds=bounds, **fields)
+    finally:
+        if token is not None:
+            _BOUNDS_ALLOW_POINT.reset(token)
 
 
 def _estimate_bounds(est: Any) -> Bounds | None:
@@ -403,6 +426,13 @@ def materialise_cells(
         emitted_point = None if is_group_member else point
         emitted_status = EstimateStatus.UNKNOWN if is_group_member else estimate_status
 
+        power = _cell_power(
+            measurement_status=emitted_status,
+            estimated_power_w=emitted_point,
+            bounds=bounds,
+            operating_state=_resolve(est, "level") if est is not None else None,
+            uncertainty_w=finite_or_none(_resolve(est, "uncertainty_w")) if est is not None else None,
+        )
         cell = MappingCell(
             row_kind=row_kind,  # type: ignore[arg-type]
             row_id=subject_id,
@@ -415,13 +445,7 @@ def materialise_cells(
                 mapping_confidence=None,
                 valid_from=at,
             ),
-            power=CellPower(
-                measurement_status=emitted_status,
-                estimated_power_w=emitted_point,
-                bounds=bounds,
-                operating_state=_resolve(est, "level") if est is not None else None,
-                uncertainty_w=finite_or_none(_resolve(est, "uncertainty_w")) if est is not None else None,
-            ),
+            power=power,
             identifiability=ident,
             group_id=group_id,
             event_association=CellEvents(

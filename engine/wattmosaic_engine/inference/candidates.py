@@ -194,7 +194,22 @@ def _deepest_scope(reader: str, operator: ObservationOperator) -> str:
     return reader
 
 
-def _source_ha(accs: dict[tuple[str, str], _Acc], group: EventGroup) -> None:
+def _source_ha(
+    accs: dict[tuple[str, str], _Acc],
+    group: EventGroup,
+    ha_subjects: Mapping[str, Sequence[tuple[str, str]]] | None = None,
+) -> None:
+    """Source 1/2 — the subjects named by the group's HA sub-events.
+
+    A runtime HA sub-event references its HA event only by id
+    (``EvidenceRef(kind="ha_event", id=<event id>)``).  ``ha_subjects`` maps
+    that event id to the subjects its entity is linked to (``ha_entity_links``
+    at the event instant, DEC-08; one entity may name several subjects).  When
+    it is supplied, an HA event with no linked subject contributes no device
+    candidate (an opaque event id is never a device).  When it is ``None`` the
+    legacy behaviour applies: the subject is parsed from the reference itself
+    (``device:<id>``), which is how pure callers and replays name subjects.
+    """
     for sub in group.sub_events:
         if _kind(sub) == SubEventKind.HA_STATE.value:
             source, transition = CandidateSource.HA_STATE, _transition(sub.ref)
@@ -203,6 +218,13 @@ def _source_ha(accs: dict[tuple[str, str], _Acc], group: EventGroup) -> None:
         elif _kind(sub) == SubEventKind.PLUG_STEP.value:
             source, transition = CandidateSource.PLUG, None
         else:
+            continue
+        ref_kind = getattr(sub.ref, "kind", None)
+        if ha_subjects is not None and ref_kind == "ha_event":
+            for subject in ha_subjects.get(str(sub.ref.id), ()):
+                acc = _acced(accs, (str(subject[0]), str(subject[1])))
+                if acc is not None:
+                    acc.add(source, transition)
             continue
         acc = _acced(accs, _subject(sub.ref))
         if acc is not None:
@@ -420,6 +442,7 @@ def generate_candidates(
     groups: DeviceGroups | None = None,
     pending_delayed: PendingDelayed | None = None,
     ring: Collection[SubEvent] | None = None,
+    ha_subjects: Mapping[str, Sequence[tuple[str, str]]] | None = None,
 ) -> CandidateSet:
     """Generate, filter, rank and cap candidate hypotheses for ``group``.
 
@@ -432,7 +455,7 @@ def generate_candidates(
     affected = _affected_readers(group)
     accs: dict[tuple[str, str], _Acc] = {}
 
-    _source_ha(accs, group)
+    _source_ha(accs, group, ha_subjects)
     if ring:
         for sub in ring:
             if _kind(sub) == SubEventKind.HA_STATE.value:

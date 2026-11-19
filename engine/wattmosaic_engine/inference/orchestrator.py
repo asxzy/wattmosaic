@@ -298,17 +298,24 @@ def infer_group(
     matches: MatchStore,
     versions: VersionTriple,
     clock: Clock,
+    *,
+    ha_subjects: Mapping[str, Sequence[tuple[str, str]]] | None = None,
 ) -> JointInferenceResult:
     """Compose I1→I2→I3→I4→I5→I6 for one event group (pure).
 
     ``versions`` and ``clock`` are injected: the same inputs (including the
     same clock value) always produce a byte-identical result and ``result_id``.
+
+    ``ha_subjects`` (optional, keyword-only) maps each HA sub-event's event id
+    to the subjects its entity is linked to at the event instant (DEC-08).  P6
+    resolves it from ``ha_entity_links``; it is a pure value, so the call stays
+    deterministic.  Omitted, I1 parses subjects from the references themselves.
     """
     at = clock()
 
     # -- I1: candidate generation (mapping reconstructed from the operator) -- #
     candidate_set = generate_candidates(
-        group, operator, models, _OperatorMapping(operator)
+        group, operator, models, _OperatorMapping(operator), ha_subjects=ha_subjects
     )
     candidates = [
         candidate

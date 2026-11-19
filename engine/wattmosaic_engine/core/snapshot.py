@@ -379,13 +379,16 @@ class SnapshotMixin:
     def _v3_snapshot(self) -> InferenceSnapshot | None:
         """The latest published v3 snapshot, with no hidden in-memory state.
 
-        P6 installs a :class:`SnapshotAssembler` as ``_snapshot_assembler_v3``;
-        before that, the S17 persisted snapshot is the single source of truth
-        (HB §15).  This method never fabricates an empty snapshot — a missing
-        row means "not yet computed" and callers turn that into a 404.
+        P6 installs a :class:`SnapshotAssembler` as ``snapshot_assembler``
+        (``_snapshot_assembler_v3`` is accepted for older composition roots);
+        until it has published, the S17 persisted snapshot is the single source
+        of truth (HB §15).  This method never fabricates an empty snapshot — a
+        missing row means "not yet computed" and callers turn that into a 404.
         """
-        assembler = getattr(self, "_snapshot_assembler_v3", None)
-        if assembler is not None:
+        assembler = getattr(self, "snapshot_assembler", None) or getattr(
+            self, "_snapshot_assembler_v3", None
+        )
+        if assembler is not None and assembler.current is not None:
             return assembler.current
         repos = getattr(self.db, "repos", None)
         if repos is None:

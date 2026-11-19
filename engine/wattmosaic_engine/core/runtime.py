@@ -23,6 +23,7 @@ from ..contracts import (
     ChangeStatus,
     DataQualityReport,
     EventGroup,
+    EventGroupStatus,
     HAEvent,
     JointInferenceResult,
     MeasurementEvent,
@@ -341,6 +342,7 @@ class RuntimeMixin:
         self._reader_last_seen: dict[str, datetime] = {}
         self.late_evidence_count = 0
         self.last_promotion: dict[str, Any] | None = None
+        self.v3_snapshot_published_at: datetime | None = None
         # Metrics (observable, never guessed).
         self.loop_lag_s: dict[str, float] = {"fast": 0.0, "event": 0.0, "background": 0.0}
         self.stage_latency_s: dict[str, float] = {}
@@ -440,7 +442,7 @@ class RuntimeMixin:
             operator=self._build_reconciliation_operator(),
             model_sets={versions.current().model_set_id: self.model_registry_v3},
             residual=self.unknown_prior,
-            history=self.db.repos.evidence,
+            history=EvidenceHistory(self.db.repos.evidence),
             matches=self.match_store,
             clock=self._clock,
         )
@@ -731,6 +733,14 @@ class RuntimeMixin:
         """
         if self.version_service is None:
             return None
+        # The queued group is the value P5 held when it was enqueued; nested
+        # readers and the HA change may have joined since.  Infer the freshest
+        # value of the *same* revision (or a newer one) so the result covers
+        # every co-temporal reader delta, never only the first one.
+        if self.grouping_engine is not None:
+            live = self.grouping_engine.current(group.group_id)
+            if live is not None and live.revision >= group.revision:
+                group = live
         versions: VersionTriple = group.versions or self.version_service.current()
         at = group.opened_at
         topo_view = self.version_service.topology_view(versions.topology_version_id)
@@ -746,19 +756,50 @@ class RuntimeMixin:
         for reader in reader_ids:
             subject_set.update(map_view.subjects_on(reader))
         subjects = tuple(sorted(subject_set))
+        ha_subjects = self._ha_subjects(group)
         operator = build_observation_operator(
             topo_view, map_view, None, reader_ids, subjects, at
         )
         return {
             "group": group,
+            "ha_subjects": ha_subjects,
             "operator": operator,
             "models": self.model_registry_v3,
             "residual": self.unknown_prior,
-            "history": self.db.repos.evidence,
+            "history": EvidenceHistory(self.db.repos.evidence),
             "matches": self.match_store,
             "versions": versions,
             "clock": self._clock,
         }
+
+    def _ha_subjects(self, group: EventGroup) -> dict[str, tuple[tuple[str, str], ...]]:
+        """Resolve each HA sub-event to the subjects its entity is linked to.
+
+        DEC-08: ``ha_entity_links`` is the only entity↔subject relation; it is
+        read as of each event's ``observed_at``.  An unlinked entity resolves to
+        no subject (it can never be a device candidate by itself).
+        """
+        if self.grouping_engine is None:
+            return {}
+        entities = getattr(getattr(self.db, "repos", None), "entities", None)
+        if entities is None:
+            return {}
+        out: dict[str, tuple[tuple[str, str], ...]] = {}
+        for event in self.grouping_engine.ha_events(group.group_id):
+            try:
+                links = entities.links_for_entity(event.entity_id, event.observed_at)
+            except Exception:  # noqa: BLE001 - a link read must not kill inference
+                log.debug("entity link lookup failed", exc_info=True)
+                links = []
+            subjects = tuple(
+                dict.fromkeys(
+                    (str(link.get("target_kind") or "device"), str(link["target_id"]))
+                    for link in links
+                    if link.get("target_id")
+                )
+            )
+            out[event.event_id] = subjects
+        return out
 
     def _run_infer_group(self, bundle: dict[str, Any]) -> JointInferenceResult:
         """Run the pure I7 entry point on the inference executor thread."""
@@ -772,6 +813,7 @@ class RuntimeMixin:
             bundle["matches"],
             bundle["versions"],
             bundle["clock"],
+            ha_subjects=bundle.get("ha_subjects"),
         )
 
     async def _event_loop(self) -> None:
@@ -786,7 +828,9 @@ class RuntimeMixin:
                 if bundle is None:
                     continue
                 result = await asyncio.to_thread(self._run_infer_group, bundle)
-                await asyncio.to_thread(self._publish_group_result, group, result, bundle)
+                await asyncio.to_thread(
+                    self._publish_group_result, bundle["group"], result, bundle
+                )
             except Exception:  # noqa: BLE001 - one bad group must not kill the loop
                 log.exception("event-loop inference failed for group %s", group.group_id)
             finally:
@@ -886,12 +930,19 @@ class RuntimeMixin:
         return observations
 
     def _publish_v3_snapshot(self) -> None:
-        """Expose the current D4 snapshot copy-on-write for facade readers."""
+        """Expose the current D4 snapshot copy-on-write for facade readers.
+
+        The assembler's ``current`` reference *is* the copy-on-write publish
+        point; facade readers reach it through ``SnapshotMixin._v3_snapshot()``.
+        Never bind an instance attribute named ``_v3_snapshot`` here: it shadows
+        that method, so every snapshot/device/group/provenance read would raise
+        ``TypeError`` after the first publish.
+        """
         if self.snapshot_assembler is None:
             return
         snapshot = self.snapshot_assembler.current
         if snapshot is not None:
-            self._v3_snapshot = snapshot
+            self.v3_snapshot_published_at = snapshot.computed_at
 
     # -- steady loop / heartbeat ------------------------------------------ #
 
@@ -913,9 +964,26 @@ class RuntimeMixin:
             finally:
                 self._record_latency("background", (time.monotonic() - started) * 1000.0)
 
+    def tick_groups(self, now: datetime | None = None) -> list[EventGroup]:
+        """Advance P5's group lifecycle on the injected clock (HB §12.3).
+
+        Quiet MATCHING groups become CONFIRMED and HA-only groups with no watts
+        become UNRESOLVED.  A newly CONFIRMED group is re-delivered to the event
+        loop so the published result carries the confirmed status (and the L6
+        learning gate, which only accepts CONFIRMED results, can open).
+        """
+        if self.grouping_engine is None:
+            return []
+        changed = self.grouping_engine.tick(now if now is not None else self._clock())
+        for group in changed:
+            if group.status == EventGroupStatus.CONFIRMED:
+                self.on_group_ready(group)
+        return changed
+
     def _steady_pass(self) -> None:
-        """Run one steady pass: >3σ level changes, then a heartbeat."""
+        """Run one steady pass: group lifecycle, >3σ level changes, heartbeat."""
         now = self._clock()
+        self.tick_groups(now)
         if self.version_service is None:
             return
         versions = self.version_service.current()
@@ -1455,6 +1523,49 @@ class RuntimeMixin:
                 continue
 
 
+class EvidenceHistory:
+    """I4's ``IdentifiabilityHistory`` over the S16 evidence repository.
+
+    ``infer_group`` and L7 call ``history.events_touching(subjects, since)``;
+    the repository only exposes ``history_rows_for_identifiability``.  Handing
+    the bare repository to inference raised ``AttributeError`` as soon as a
+    group had two or more candidates.  Each closed CONFIRMED/REVISED group row
+    becomes one :class:`HistoryRow` whose ``subject_ids`` are the requested
+    subjects that took part in it (``pattern`` value not ``None``; absent is
+    never 0, HB §18).  A row in which none of them took part is skipped.
+    """
+
+    __slots__ = ("_repo",)
+
+    def __init__(self, repo: Any) -> None:
+        self._repo = repo
+
+    def events_touching(self, subject_ids: Any, since: datetime) -> list[Any]:
+        from ..runtime.interfaces import HistoryRow
+
+        rows = self._repo.history_rows_for_identifiability(list(subject_ids), since)
+        out: list[Any] = []
+        for row in rows:
+            touched = tuple(
+                str(sid) for sid, delta in (row.get("pattern") or {}).items() if delta is not None
+            )
+            at = row.get("closed_at") or row.get("opened_at")
+            if not touched or at is None:
+                continue
+            deltas = list(row.get("reader_deltas") or ())
+            out.append(
+                HistoryRow(
+                    group_id=str(row["group_id"]),
+                    at=at,
+                    subject_ids=touched,
+                    reader_ids=tuple(str(d.reader_id) for d in deltas),
+                    delta_w_by_reader={str(d.reader_id): d.delta_w for d in deltas},
+                    revision=int(row.get("revision") or 0),
+                )
+            )
+        return out
+
+
 class _StaticEstablished:
     """An empty ``EstablishedStructure`` for the first steady pass (DEC-22)."""
 
@@ -1466,12 +1577,18 @@ class _StaticEstablished:
 
 
 def _steady_group(result: JointInferenceResult, at: datetime) -> EventGroup:
-    """A lightweight synthetic group for a steady-pass result."""
+    """A lightweight synthetic group for a steady-pass result.
+
+    ``versions`` is required by the K04 contract; omitting it made every steady
+    publish raise ``ValidationError`` (swallowed by ``_steady_loop``), so no
+    steady result was ever published.
+    """
     return EventGroup(
         group_id=f"steady-{result.result_id}",
         revision=1,
         status=result.status,
         opened_at=at,
+        versions=result.versions,
     )
 
 

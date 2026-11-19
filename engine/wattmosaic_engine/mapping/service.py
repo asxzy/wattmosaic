@@ -94,6 +94,33 @@ _FILTER_COLUMNS: frozenset[str] = frozenset(
 # --------------------------------------------------------------------------- #
 
 
+
+def _decode_power(data: dict[str, Any]) -> CellPower:
+    """Rebuild a persisted ``CellPower``, restoring an I5 point interval.
+
+    M2 persists a MEASURED/IDENTIFIABLE cell's zero-width bounds as plain JSON;
+    the public ``Bounds`` validator only admits a point through the private
+    ``Bounds._point`` path, so decoding the stored row raised and broke every
+    ``/matrix`` read once such a cell existed (cf. ``SnapshotAssembler``'s
+    ``_repair_point_bounds`` for the same S17 case).
+    """
+    from wattmosaic_engine.contracts import Bounds
+
+    from .projection import _cell_power
+
+    fields = dict(data)
+    raw = fields.pop("bounds", None)
+    bounds: Bounds | None = None
+    if isinstance(raw, Bounds):
+        bounds = raw
+    elif isinstance(raw, MappingABC):
+        low, high, basis = raw.get("lower_w"), raw.get("upper_w"), raw.get("basis")
+        if low is not None and high is not None and low == high and basis is not None:
+            bounds = Bounds._point(float(low), basis)
+        else:
+            bounds = Bounds(**{k: raw[k] for k in ("lower_w", "upper_w", "basis") if k in raw})
+    return _cell_power(bounds=bounds, **fields)
+
 @runtime_checkable
 class CellSource(Protocol):
     """The read seam the service needs from the materialised view."""
@@ -159,7 +186,7 @@ def decode_cell(row: Any) -> MappingCell:
         reader_id=str(scalar("reader_id", "")),
         load_component_id=scalar("load_component_id"),
         mapping=CellMapping(**known(CellMapping, mapping)),
-        power=CellPower(**known(CellPower, power)),
+        power=_decode_power(known(CellPower, power)),
         identifiability=scalar("identifiability") or "insufficient_evidence",
         group_id=scalar("group_id"),
         event_association=CellEvents(**known(CellEvents, events)),
