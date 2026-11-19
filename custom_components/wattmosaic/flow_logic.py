@@ -13,7 +13,6 @@ from typing import Any
 from urllib.parse import quote
 
 from .const import (
-    COMMAND_SET_DEVICE_CONFIGURATION,
     CONF_AUTO_PLACEMENT,
     CONNECTIVITY_LEVELS,
     CT_ROLE_MAIN,
@@ -1398,17 +1397,6 @@ def _looks_like_ct_id(value: str) -> bool:
     """
     text = str(value).strip()
     return bool(text) and " " not in text and "." not in text
-
-
-def device_configuration_command(
-    device_id: str, parameters: Mapping[str, Any]
-) -> dict[str, Any]:
-    """The ``ServiceCommand`` body for ``set_device_configuration``."""
-    return {
-        "command": COMMAND_SET_DEVICE_CONFIGURATION,
-        "device_id": str(device_id).strip(),
-        "parameters": dict(parameters),
-    }
 
 
 # --------------------------------------------------------------------------- #

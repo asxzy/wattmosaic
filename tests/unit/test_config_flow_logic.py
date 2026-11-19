@@ -322,20 +322,6 @@ def test_validate_rejects_negative_and_non_numeric_watts() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# device_configuration_command
-# --------------------------------------------------------------------------- #
-
-
-def test_command_body_shape() -> None:
-    body = flow.device_configuration_command(" hot_tub ", {"device_type": "hot_tub"})
-    assert body == {
-        "command": "set_device_configuration",
-        "device_id": "hot_tub",
-        "parameters": {"device_type": "hot_tub"},
-    }
-
-
-# --------------------------------------------------------------------------- #
 # H2 — HA setup flow v3 (pure flow_logic tests, no homeassistant)
 # --------------------------------------------------------------------------- #
 

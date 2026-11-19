@@ -163,9 +163,6 @@ LIGHT_TYPES: tuple[str, ...] = (
     "unknown",
 )
 
-#: Command name accepted by the engine for a per-device configuration write.
-COMMAND_SET_DEVICE_CONFIGURATION = "set_device_configuration"
-
 QUALITY_STATES: tuple[str, ...] = ("good", "degraded", "stale", "bad", "missing")
 
 #: Ordered evidence grades from the engine (ADR-0013).  A *grade*, not a
