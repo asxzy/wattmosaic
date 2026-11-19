@@ -51,7 +51,7 @@
 | S17 | 2 | VERIFIED |  |  | insert_reconciliation bug did not exist; round-trip test added |
 | S18 | 2 | VERIFIED |  |  |  |
 | S19 | 2 | VERIFIED |  |  |  |
-| P1 | 3 | IN_PROGRESS |  |  | DEF-01 test first |
+| P1 | 3 | VERIFIED |  |  | new path applies polarity once; legacy-path DEF-01 unproven (removed in Z2) |
 | P2 | 3 | NOT_STARTED | | | |
 | P3 | 3 | NOT_STARTED | | | |
 | P4 | 3 | NOT_STARTED | | | |
@@ -62,8 +62,8 @@
 | T4 | 3 | NOT_STARTED | | | |
 | I1 | 3 | VERIFIED |  | AT-10 | AT-10 property test in unit tests; marker flip pending |
 | I2 | 3 | VERIFIED |  | AT-05 | AT-05 scenario in unit tests; marker flip pending K07 |
-| I3 | 3 | IN_PROGRESS |  | AT-06, 08, 09 |  |
-| I4 | 3 | IN_PROGRESS |  | AT-07 | 250 W test first |
+| I3 | 3 | VERIFIED |  | AT-06, 08, 09 | AT-06/08/09 closed; dropped verify.py side-effect files from merge |
+| I4 | 3 | VERIFIED |  | AT-07 | AT-07 closed; 250 W test proves legacy defect + mutation guards |
 | M1 | 3 | VERIFIED |  | AT-01, 13 | AT-01/13 scenarios in unit tests; marker flip pending; reconcile primary_display_tree with T1 |
 | L1 | 3 | IN_PROGRESS |  |  |  |
 | L2 | 3 | NOT_STARTED | | AT-03 | |
