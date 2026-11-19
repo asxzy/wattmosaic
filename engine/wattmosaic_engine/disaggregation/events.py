@@ -373,6 +373,52 @@ def _td(seconds: float):
     return timedelta(seconds=seconds)
 
 
+def confirm_streaming_step(
+    pre: Sequence[tuple[datetime, float]],
+    post: Sequence[tuple[datetime, float]],
+    *,
+    channel_id: str,
+    sigma_w: float,
+    min_delta_w: float,
+    resolution_w: float | None = None,
+    k_mad: float = DEFAULT_K_MAD,
+) -> StepChange | None:
+    """Confirm a streaming SUSPECT with the offline best-split scan.
+
+    P3's streaming detector establishes the pre level and the onset bounds from
+    the reader's rolling state.  This helper reuses :func:`detect_step` as an
+    independent *confirmation* of the change point and the signed magnitude over
+    the retained ``pre``/``post`` samples.  A single pre-sample is enough here
+    (``min_before_samples=1``) because the baseline is already established by
+    the streaming path; the scan is not the primary detector.
+
+    Returns ``None`` when the window holds no usable samples.  ``sigma_w`` is the
+    reader's long-run noise (never a fabricated zero), used as the MAD floor.
+    """
+    samples = sorted([*pre, *post], key=lambda item: item[0])
+    if len(samples) < 2:
+        return None
+    at = samples[-1][0]
+    reading = ChannelReading(
+        channel_id=channel_id,
+        value_w=samples[-1][1],
+        history=tuple(samples[:-1]),
+        resolution_w=resolution_w,
+    )
+    span = max(1.0, (samples[-1][0] - samples[0][0]).total_seconds())
+    return detect_step(
+        reading,
+        at,
+        before_s=span,
+        after_s=span,
+        k_mad=k_mad,
+        min_delta_w=min_delta_w,
+        noise_floor_w=sigma_w,
+        min_before_samples=1,
+        min_after_samples=1,
+    )
+
+
 def detect_changes(
     readings: dict[str, ChannelReading],
     at: datetime,
