@@ -22,6 +22,16 @@ from ..contracts import (
 )
 
 
+class SchemaVersionError(ValueError):
+    """A persisted model was written by an incompatible (newer) schema version.
+
+    The codec must never silently reinterpret such a blob with defaults: that
+    is how DEF-02 (a model that reloads with the wrong parameters or predicts
+    0 W) would come back.  Keeping the type here lets both the legacy helpers
+    and the v3 codec in :mod:`spec` raise the same, clearly-named error.
+    """
+
+
 def parse_timestamp(value: Any) -> datetime | None:
     if value is None:
         return None
@@ -156,6 +166,7 @@ def next_version(existing: list[DeviceModelVersion]) -> int:
 
 
 __all__ = [
+    "SchemaVersionError",
     "next_version",
     "parameters_from_json",
     "parse_timestamp",

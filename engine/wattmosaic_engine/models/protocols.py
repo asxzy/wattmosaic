@@ -349,7 +349,38 @@ def normalise_timestamp(value: datetime | float | str | None) -> datetime | None
     return _coerce_datetime(value)
 
 
+# --------------------------------------------------------------------------- #
+# V3 registry repository protocol (L1).
+# --------------------------------------------------------------------------- #
+
+
+@runtime_checkable
+class ModelRepositoryProtocol(Protocol):
+    """The narrow storage seam the v3 :class:`Registry` depends on.
+
+    ``storage.repositories.models.ModelsRepository`` satisfies it.  Keeping the
+    seam here (rather than importing the concrete repository) means the registry
+    is pure with respect to storage: a deterministic in-memory double can be
+    supplied in tests, and no production code imports runtime.fakes.
+    """
+
+    def append_version(self, version: Any) -> None: ...
+
+    def append_event(self, event: Any) -> None: ...
+
+    def active_version(self, subject_id: str) -> dict[str, Any] | None: ...
+
+    def versions(self, subject_id: str) -> list[dict[str, Any]]: ...
+
+    def events(self, version_id: str) -> list[dict[str, Any]]: ...
+
+    def is_model_frozen(self, subject_id: str) -> bool: ...
+
+    def set_model_frozen(self, subject_id: str, frozen: bool) -> None: ...
+
+
 __all__ = [
+    "ModelRepositoryProtocol",
     "AlignedWindowProtocol",
     "ModelContextProtocol",
     "SimpleReading",
