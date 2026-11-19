@@ -108,3 +108,4 @@
 | Z3b | ? | VERIFIED | | | HB17 stand-ins removed from engine; 6 ATs on live/generic paths; AT-14 measurement-based asserts (orchestrator decision); gate green at 295eece |
 | Z5 | ? | VERIFIED | | | gates pass on orchestrator run: fast p99 0.086ms, healthz p99 84.97ms, event p95 1.5s; DB growth 3.5GB/day -> Z8 |
 | Z6 | ? | VERIFIED | | | unconstrained unknown None, unknown_w rule, shared bounds repair; gate green |
+| Z7 | ? | VERIFIED | | | phantom OFF re-emission fixed; groups close on promotion; no negative consumer power; gate green at 4aa4aa0 |
