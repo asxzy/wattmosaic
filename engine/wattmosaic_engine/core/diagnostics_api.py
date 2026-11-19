@@ -211,6 +211,7 @@ class DiagnosticsApiMixin:
             "status": health.status,
             "contract_version": CONTRACT_VERSION,
             "engine_version": ENGINE_VERSION,
+            "mapping_version_id": self._matrix_version_id(),
             "started_at": self.started_wall,
             "uptime_seconds": health.uptime_seconds,
             "ha_connected": health.ha_connected,

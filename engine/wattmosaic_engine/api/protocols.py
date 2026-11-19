@@ -59,9 +59,29 @@ class TopologyProvider(Protocol):
 
 @runtime_checkable
 class MappingProvider(Protocol):
-    """The derived mapping matrix and the audit artifacts beside it."""
+    """The mapping matrix (legacy and v2) and the audit artifacts beside it.
+
+    ``mapping_matrix`` serves the legacy ``/mapping`` route (kept until Z1).
+    The ``matrix_*`` methods serve the v2 ``/matrix`` route and its HB §19.4
+    drill-downs from the materialised view (M3).  They are optional on older
+    facades: the transport falls back to a 503 when one is absent.
+    """
 
     def mapping_matrix(self) -> Any: ...
+
+    def matrix_fingerprint(self) -> Any: ...
+
+    def matrix_etag(self) -> Any: ...
+
+    def matrix_payload(self, query: Any = None) -> Any: ...
+
+    def matrix_cell_detail(
+        self, row_id: str, reader_id: str, *, row_kind: str | None = None
+    ) -> Any: ...
+
+    def matrix_reader_detail(self, reader_id: str) -> Any: ...
+
+    def matrix_row_detail(self, row_id: str) -> Any: ...
 
     def inference_records(self, device_id: str, *, limit: int = 200) -> Any: ...
 
