@@ -31,7 +31,10 @@ Reported metrics (JSON + human text)
   the load is running (against ``create_app(core)``).
 * ``background_jobs``: observed durations (ms) of the real background jobs the
   runtime schedules (learning, self-heal, matrix updater, prune).
-* ``db_growth_bytes_per_day``: extrapolated from observed file growth.
+* ``db_growth_bytes_per_day``: per-day growth extrapolated from the dbstat size
+  delta measured **after** the 500x100 matrix seed (the seed is fixture, not
+  growth).  ``db_growth_by_table_bytes_per_day`` reports the same figure per
+  table, so a growth driver such as ``event_evidence`` is visible.
 * ``matrix``: p95 of ``GET /api/v1/matrix`` with 500 devices x 100 readers
   seeded through the production repositories and served by the real mapping
   service, plus the payload-build time.
@@ -198,6 +201,12 @@ def _close_grouping_entries(core: Any, at: datetime) -> None:
     same set small).  This only drives the runtime's own lifecycle; it forms no
     groups and computes no inference result.
     """
+    # P4 window close runs through the runtime's background executor (Z8), like
+    # every other DB-writing housekeeping job -- never on the event loop, which
+    # is what keeps /healthz responsive under load.
+    collector = getattr(core, "window_collector", None)
+    if collector is not None:
+        core.submit_background(collector.tick, at)
     engine = getattr(core, "grouping_engine", None)
     if engine is None:
         return
@@ -304,6 +313,24 @@ def run_benchmark(
     # -- seed the 500x100 matrix through production repositories ------------ #
     matrix_payload, cells_written = seed_matrix(db, 500, 100, origin)
 
+    # The seeded matrix is FIXTURE, not growth.  Take the baseline *after*
+    # seeding so db_growth measures only the synthetic HA/evidence load.
+    db.checkpoint()
+
+    def dbstat_sizes() -> dict[str, int]:
+        """Logical bytes per table from SQLite's dbstat virtual table."""
+        try:
+            rows = db._conn.execute(  # noqa: SLF001 - measurement seam only
+                "SELECT name, SUM(pgsize) AS bytes FROM dbstat "
+                "WHERE name NOT LIKE 'sqlite_%' GROUP BY name"
+            ).fetchall()
+            return {str(name): int(size) for name, size in rows}
+        except Exception:  # noqa: BLE001 - dbstat may be unavailable in a build
+            return {}
+
+    dbstat_start = dbstat_sizes()
+    db_start = db_path.stat().st_size if db_path.exists() else 0
+
     fast_us: list[float] = []
     # Per-dispatch accumulators for the fast-path stages named in the spec:
     # P1 normalize -> P2 reader state -> P3 change detection -> candidate ring.
@@ -320,7 +347,6 @@ def run_benchmark(
     job_ms: dict[str, list[float]] = {}
     enqueued: dict[str, float] = {}
     published_count = 0
-    db_start = db_path.stat().st_size if db_path.exists() else 0
 
     def timed(name: str, fn: Any) -> Any:
         """Wrap a runtime job so its real invocations are measured."""
@@ -540,6 +566,22 @@ def run_benchmark(
     try:
         asyncio.run(drive())
         runtime_metrics = core.runtime_metrics()
+        db.checkpoint()
+        dbstat_end = dbstat_sizes()
+        # Evidence row count under the real load: Z8 keeps this bounded to one
+        # live row per (measurement event, reader) instead of one per sample.
+        try:
+            event_evidence_rows = int(
+                db._conn.execute("SELECT COUNT(*) FROM event_evidence").fetchone()[0]
+            )
+            finalized_rows = int(
+                db._conn.execute(
+                    "SELECT COUNT(*) FROM event_evidence WHERE finalized=1"
+                ).fetchone()[0]
+            )
+        except Exception:  # noqa: BLE001 - table may not exist
+            event_evidence_rows = 0
+            finalized_rows = 0
         db_end = db_path.stat().st_size if db_path.exists() else 0
     finally:
         core.inference_executor.shutdown(wait=False)
@@ -549,9 +591,22 @@ def run_benchmark(
 
     growth = max(0, db_end - db_start)
     simulated_days = duration_s / 86_400.0
-    growth_per_day = (
-        growth / simulated_days if simulated_days > 0 else growth * (86_400.0 / max(1, duration_s))
-    )
+
+    def per_day(delta: int) -> float:
+        return (
+            delta / simulated_days
+            if simulated_days > 0
+            else delta * (86_400.0 / max(1, duration_s))
+        )
+
+    growth_per_day = per_day(growth)
+    # Per-table growth from dbstat (logical bytes), seed excluded.
+    by_table: dict[str, float] = {}
+    if dbstat_start and dbstat_end:
+        for name in sorted(set(dbstat_start) | set(dbstat_end)):
+            delta = max(0, dbstat_end.get(name, 0) - dbstat_start.get(name, 0))
+            if delta:
+                by_table[name] = round(per_day(delta), 1)
     fast_ms = [u / 1000.0 for u in fast_us]
     fast_lat = support.latency_summary(fast_ms)
     health_lat = support.latency_summary(health_ms)
@@ -568,6 +623,8 @@ def run_benchmark(
             "groups_superseded": runtime_metrics.get("groups_superseded", 0),
             "groups_dropped": runtime_metrics.get("groups_dropped", 0),
             "matrix_cells_seeded": cells_written,
+            "event_evidence_rows": event_evidence_rows,
+            "event_evidence_finalized_rows": finalized_rows,
         },
         "fast_path_us_per_sample": {
             "p50_us": round(support.percentile(fast_us, 0.50), 4),
@@ -588,6 +645,7 @@ def run_benchmark(
             for name, values in job_ms.items()
         },
         "db_growth_bytes_per_day": round(growth_per_day, 1),
+        "db_growth_by_table_bytes_per_day": by_table,
         "matrix": {
             "devices": 500,
             "readers": 100,
@@ -618,7 +676,9 @@ def _print_report(report: dict[str, Any]) -> None:
     for name in ("event_loop_ms", "healthz_ms"):
         s = report[name]
         print(f"  {name:17s}: p50 {s['p50_ms']:.2f}  p95 {s['p95_ms']:.2f}  p99 {s['p99_ms']:.2f} ms")
-    print(f"  db growth/day     : {report['db_growth_bytes_per_day']:.0f} bytes (extrapolated)")
+    print(f"  db growth/day     : {report['db_growth_bytes_per_day']:.0f} bytes (extrapolated, post-seed)")
+    for table, value in report["db_growth_by_table_bytes_per_day"].items():
+        print(f"      {table:32s}: {value:.0f} bytes/day")
     for name, job in report["background_jobs"].items():
         print(f"  job {name:20s}: p99 {job['p99_ms']:.2f} ms, total {job['total_ms']:.1f} ms")
     m = report["matrix"]

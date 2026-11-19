@@ -80,6 +80,138 @@ class EvidenceRepository(Repository):
                 ),
             )
 
+    def _evidence_columns(self) -> set[str]:
+        """Column names of ``event_evidence`` (a pre-v026 DB has no ``revision``)."""
+        return {
+            str(row[1])
+            for row in self._conn.execute("PRAGMA table_info(event_evidence)").fetchall()
+        }
+
+    @staticmethod
+    def _evidence_values(evidence: EventEvidence) -> tuple[Any, ...]:
+        return (
+            evidence.evidence_id,
+            evidence.reader_id,
+            evidence.measurement_event_id,
+            iso(evidence.window_start),
+            iso(evidence.window_end),
+            json.dumps(
+                [[iso(at), None if value is None else float(value)] for at, value in evidence.samples],
+                default=str,
+            ),
+            evidence.baseline_w,
+            evidence.sigma_w,
+            float(evidence.delta_w),
+            json.dumps([enum_value(flag) for flag in evidence.quality_flags]),
+            evidence.topology_version_id,
+            int(bool(evidence.finalized)),
+        )
+
+    #: The columns written by :meth:`put_evidence` / :meth:`upsert_evidence`.
+    _EVIDENCE_BASE_COLUMNS: tuple[str, ...] = (
+        "evidence_id",
+        "reader_id",
+        "measurement_event_id",
+        "window_start",
+        "window_end",
+        "samples_json",
+        "baseline_w",
+        "sigma_w",
+        "delta_w",
+        "quality_flags_json",
+        "topology_version_id",
+        "finalized",
+    )
+
+    def upsert_evidence(self, evidence: EventEvidence) -> bool:
+        """Revise the one live evidence row for this event/reader in place.
+
+        Z8: a growing window must not append a new row per post-sample (that was
+        the ~98-rows/event growth defect).  The row is keyed by its deterministic
+        ``evidence_id`` -- one per ``(measurement_event_id, reader_id)`` -- so a
+        repeat write updates the *same* row (samples_json replaced, not appended
+        to) and bumps ``revision``.  Returns ``True`` when a row was inserted,
+        ``False`` when an existing row was revised.  ``supersedes_evidence_id``
+        is never touched here: it belongs only to late-data revisions.
+        """
+        columns = self._evidence_columns()
+        names: list[str] = list(self._EVIDENCE_BASE_COLUMNS)
+        values = list(self._evidence_values(evidence))
+        if "supersedes_evidence_id" in columns:
+            names.append("supersedes_evidence_id")
+            values.append(None)
+        if "revision" in columns:
+            names.append("revision")
+            values.append(0)
+        placeholders = ", ".join("?" for _ in names)
+        updates = ", ".join(f"{name}=excluded.{name}" for name in names if name != "evidence_id")
+        if "revision" in columns:
+            updates += ", revision=revision+1"
+        with self._lock:
+            self._conn.execute(
+                f"INSERT INTO event_evidence({', '.join(names)}) VALUES({placeholders}) "
+                f"ON CONFLICT(evidence_id) DO UPDATE SET {updates}",
+                tuple(values),
+            )
+            row = self._conn.execute(
+                "SELECT revision FROM event_evidence WHERE evidence_id=?",
+                (evidence.evidence_id,),
+            ).fetchone()
+            # ``changes()`` after the ON CONFLICT is 1 for both insert and update,
+            # so compare the revision to decide which happened.
+            was_insert = row is not None and (
+                "revision" not in columns or int(row[0]) == 0
+            )
+        return was_insert
+
+    def clear_evidence_samples(self, evidence_id: str) -> int:
+        """Reduce a superseded row's ``samples_json`` to a bounded summary.
+
+        DEC-30 keeps the immutable summary (Δ, baseline, σ, quality) but not a
+        duplicate of the raw window samples.  When a late-data revision is
+        written, the predecessor keeps its audit row and its provenance link
+        while its samples are thinned to the first and last points.  Returns the
+        number of points dropped.  Idempotent (thinning an already-thin payload
+        drops nothing).
+        """
+        from ..tiers import _thin_samples  # local import: avoids a module cycle
+
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT samples_json FROM event_evidence WHERE evidence_id=?", (str(evidence_id),)
+            ).fetchone()
+            if row is None:
+                return 0
+            kept, dropped = _thin_samples(row[0])
+            if dropped:
+                self._conn.execute(
+                    "UPDATE event_evidence SET samples_json=? WHERE evidence_id=?",
+                    (json.dumps(kept, default=str), str(evidence_id)),
+                )
+            return int(dropped)
+
+    def finalize_evidence(self, evidence: EventEvidence) -> EventEvidence:
+        """Mark the one live evidence row FINAL (in place, no new row).
+
+        The window closes as CONFIRMED/UNRESOLVED; the single live row is updated
+        to ``finalized=1`` so retention can treat it as durable evidence.  If no
+        post-sample ever arrived (so the row was never inserted), the same
+        deterministic id is inserted as FINAL.  Either way exactly one row exists
+        for the event/reader after close.
+        """
+        # Update the stored row in place so its accumulated samples and revision
+        # are preserved; the in-memory copy in ``evidence`` may be stale.  If no
+        # post-sample ever arrived the row does not exist yet -- insert FINAL.
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE event_evidence SET finalized=1 WHERE evidence_id=?",
+                (evidence.evidence_id,),
+            )
+            inserted = cur.rowcount == 0
+        if inserted:
+            self.upsert_evidence(evidence.model_copy(update={"finalized": True}))
+        return self.evidence(evidence.evidence_id)
+
     @staticmethod
     def evidence_from_row(row: sqlite3.Row | dict[str, Any]) -> EventEvidence:
         data = dict(row)
@@ -87,6 +219,8 @@ class EvidenceRepository(Repository):
         # model forbids extra fields, so it is read through ``supersedes_evidence_id``
         # below rather than passed to the model constructor.
         data.pop("supersedes_evidence_id", None)
+        # ``revision`` is the Z8 in-place revision counter, not a contract field.
+        data.pop("revision", None)
         samples = [
             (as_utc(at), None if value is None else float(value))
             for at, value in json.loads(data.pop("samples_json") or "[]")

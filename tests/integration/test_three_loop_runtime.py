@@ -455,6 +455,88 @@ def test_hb17_late_sample_sets_supersedes_evidence_id() -> None:
         harness.close()
 
 
+def test_prune_evidence_honours_retention_settings(tmp_path) -> None:
+    """Z8: the runtime prune job thins raw samples and deletes expired evidence."""
+    from datetime import timedelta as _td
+
+    class Clock:
+        now = T0
+
+        def __call__(self):
+            return self.now
+
+    clock = Clock()
+    core, db = _core(tmp_path, clock=clock)
+    try:
+        core.config.evidence_retention_days = 400
+        core.config.evidence_raw_retention_days = 30
+        repo = db.repos.evidence
+        old = T0 - _td(days=401)
+        samples = [(old + _td(seconds=5 * i), 100.0 + i) for i in range(12)]
+        from wattmosaic_engine.contracts import EventEvidence, QualityFlag
+
+        repo.put_evidence(
+            EventEvidence(
+                evidence_id="evd-prune",
+                reader_id="Main",
+                measurement_event_id="mev-prune",
+                window_start=old,
+                window_end=old + _td(seconds=60),
+                samples=samples,
+                baseline_w=100.0,
+                sigma_w=1.0,
+                delta_w=12.0,
+                quality_flags=[QualityFlag.PRIMED],
+                topology_version_id="topo-1",
+                finalized=True,
+            )
+        )
+        assert repo.evidence("evd-prune") is not None
+        core._prune_evidence()
+        assert repo.evidence("evd-prune") is None
+    finally:
+        db.close()
+
+
+def test_window_close_finalizes_evidence_in_place() -> None:
+    """Z8: a closed window marks its one live evidence row FINAL (no new row)."""
+    harness = _hb17_harness()
+    try:
+        core = harness.core
+        from wattmosaic_engine.contracts import MeasurementEvent, StepClass
+
+        reader = "ct_test_finalize"
+        t0 = T0
+        event = MeasurementEvent(
+            event_id="mev-finalize",
+            reader_id=reader,
+            delta_w=10.0,
+            sigma_w=1.0,
+            z_score=8.0,
+            step_class=StepClass.SUSTAINED,
+            onset_lo=t0,
+            onset_hi=t0 + timedelta(seconds=15),
+            pre_level_w=100.0,
+            post_level_w=110.0,
+            quality_score=0.9,
+            detected_at=t0 + timedelta(seconds=2),
+        )
+        core.window_collector.on_detected(event, at=t0)
+        core.window_collector.on_sample(reader, t0 + timedelta(seconds=1), 110.0)
+        rows = core.db.repos.evidence.evidence_for_event("mev-finalize")
+        assert len(rows) == 1 and rows[0].finalized is False
+        eid = rows[0].evidence_id
+
+        # Drive the runtime's lifecycle tick: the expired window finalizes its
+        # single live row, without appending a second row.
+        core.tick_groups(t0 + timedelta(hours=1))
+        rows = core.db.repos.evidence.evidence_for_event("mev-finalize")
+        assert len(rows) == 1
+        assert rows[0].evidence_id == eid and rows[0].finalized is True
+    finally:
+        harness.close()
+
+
 def test_configuration_events_route_returns_hb17_event() -> None:
     """(d) GET /api/v1/configuration-events returns the HB17 plug-move event."""
 

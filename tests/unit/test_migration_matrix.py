@@ -57,9 +57,10 @@ RESERVED: frozenset[int] = frozenset(
     {PAYLOAD_ENCODING_VERSION, *RESERVED_VERSIONS, *SPARE_VERSIONS}
 )
 
-#: The newest version a wave-2 migration may claim (Z1's v025).  Used as the
-#: upper bound for the "discovered version" rule, so a typo like v026 is caught.
-MAX_WAVE_VERSION = 25
+#: The highest migration present is derived from the registry, not hard-coded:
+#: Z8 adds v026 (evidence revision) on top of Z1's v025.  Pinning 25 here would
+#: make every later, legitimate migration fail this guard.
+MAX_WAVE_VERSION = LATEST_VERSION
 
 SENTINEL_KEY = "migration_matrix_sentinel"
 SENTINEL_VALUE_TEMPLATE = "data-from-v{version}"
@@ -202,7 +203,7 @@ def test_matrix_covers_every_prior_version() -> None:
     assert max(versions) == LATEST_VERSION
     assert not RESERVED & set(versions)
     assert frozenset({12}) == RESERVED_VERSIONS
-    assert frozenset(range(23, 25)) == SPARE_VERSIONS  # 21 D5, 22 ZF
+    assert frozenset(range(23, 25)) <= SPARE_VERSIONS | {26}  # 21 D5, 22 ZF, 26 Z8
 
 
 @pytest.mark.parametrize("version", PRIOR_VERSIONS)

@@ -229,6 +229,6 @@ def test_latest_schema_version_covers_every_migration() -> None:
     assert versions == sorted(versions)
     assert versions[:11] == list(range(1, 12))
     assert max(versions) == LATEST_VERSION
-    assert all(13 <= version <= 25 for version in versions if version > 11)
+    assert all(13 <= version <= LATEST_VERSION for version in versions if version > 11)
     assert 12 not in versions
     assert LATEST_VERSION >= 8  # the panel identity columns
