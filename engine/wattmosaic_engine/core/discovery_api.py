@@ -15,7 +15,12 @@ from typing import Any
 from ..api.facade import InvalidRequest, maybe_await
 from ..api.timeouts import HISTORY_TIMEOUT_BASE_S, HISTORY_TIMEOUT_PER_HOUR_S
 from ..contracts import CTType, Topology
-from ..ingestion.discovery import discover_candidate_topology
+from ..ingestion.discovery import (
+    devices_for_candidate_endpoints,
+    discover_candidate_endpoints,
+    discover_candidate_topology,
+    links_for_candidate_endpoints,
+)
 
 log = logging.getLogger("wattmosaic.main")
 
@@ -134,6 +139,52 @@ class DiscoveryApiMixin:
             "channels": len(discovered.channels),
             "devices": len(discovered.devices),
             "status": "candidate",
+        }
+
+    async def bootstrap_endpoints(self, *, persist: bool = True) -> dict[str, Any]:
+        """Discover Measurement Endpoints and persist them as candidates (D2).
+
+        CT channels become CT endpoints; bare single-load power entities become
+        candidate single-subject endpoints whose ingestion is disabled until the
+        user confirms the scope (DEC-06).  Physical Devices implied by those
+        candidates and their HA power links are created too.  This never mints a
+        ``dev_<ct>`` device and never touches an existing endpoint's scope.
+        """
+        from ..devices.service import DeviceService
+
+        try:
+            states = await self.hasource.state_snapshot()
+            registries = await self.hasource.registries()
+            clock = getattr(self, "_clock", None)
+            endpoints = discover_candidate_endpoints(states, registries, clock=clock)
+            devices = devices_for_candidate_endpoints(
+                endpoints, registries, clock=clock
+            )
+            links = links_for_candidate_endpoints(endpoints, clock=clock)
+        except Exception as exc:  # noqa: BLE001 - discovery must not break startup
+            log.warning("endpoint discovery failed: %s", exc)
+            return {"error": f"{type(exc).__name__}: {exc}"}
+
+        if persist:
+            service = DeviceService(self.db, clock=getattr(self, "_clock", None))
+            known = {e.endpoint_id for e in service.list_endpoints()}
+            created = 0
+            for endpoint in endpoints:
+                if endpoint.endpoint_id not in known:
+                    service.upsert_endpoint(endpoint)
+                    created += 1
+            for device in devices:
+                if service.get(device.device_id) is None:
+                    service.create_device(device)
+            for link in links:
+                self.db.repos.entities.add_entity_link(link)
+
+        from ..contracts import EndpointKind
+
+        return {
+            "discovered": len(endpoints),
+            "ct": sum(1 for e in endpoints if e.kind == EndpointKind.CT),
+            "candidates": sum(1 for e in endpoints if not e.enabled),
         }
 
     async def maybe_bootstrap_topology(self) -> dict[str, Any] | None:

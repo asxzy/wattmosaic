@@ -1,4 +1,12 @@
-"""Read-only topology candidate discovery from Home Assistant states/registries.
+"""Read-only topology/endpoint candidate discovery from HA states/registries.
+
+D2 (endpoint discovery)
+-----------------------
+:func:`discover_candidate_endpoints` proposes Measurement Endpoints (DEC-04/05/06):
+CT channels from a multi-channel monitor, and single-load power entities as
+*candidate single-subject* endpoints whose scope must be user-confirmed before
+ingestion starts.  :func:`discover_candidate_topology` remains the legacy seam
+until Z2; since D2 it no longer mints ``dev_<ct>`` devices.
 
 Why this module exists
 ----------------------
@@ -61,14 +69,22 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
+from datetime import datetime
 from typing import Any
 
 from ..contracts import (
     CTChannel,
     CTType,
     DeviceTopology,
+    EndpointKind,
+    EndpointScope,
+    HaEntityLink,
+    HaEntityRole,
+    MeasurementEndpoint,
     Phase,
+    PhysicalDevice,
     Polarity,
+    ScopeStatus,
     Topology,
     TopologyStatus,
     utcnow,
@@ -203,6 +219,251 @@ def _leg_stem(local: str) -> tuple[str, int] | None:
     if not match:
         return None
     return match.group("stem"), int(match.group("leg"))
+
+
+def _subject_id_for_ha_device(ha_device_id: str) -> str:
+    """The HA-device-derived Physical Device id for a plug/appliance monitor.
+
+    A deterministic, reversible slug keeps repeated discovery runs stable and
+    lets D2's device service create the matching :class:`PhysicalDevice`.  The
+    legacy ``dev_<ct>`` form is deliberately not used: this is a device that
+    owns a load-evidence entity (DEC-04), not a circuit.
+    """
+    cleaned = re.sub(r"[^a-z0-9]+", "_", ha_device_id.lower()).strip("_")
+    if cleaned.startswith("ha_"):
+        cleaned = cleaned[3:]
+    return f"pd_from_ha_{cleaned or 'device'}"
+
+
+def discover_candidate_endpoints(
+    states: Iterable[dict[str, Any]],
+    registries: dict[str, Any] | None = None,
+    *,
+    allow_entities: Iterable[str] | None = None,
+    deny_entities: Iterable[str] | None = None,
+    clock: Any = None,
+    enabled: bool = True,
+) -> list[MeasurementEndpoint]:
+    """Propose candidate Measurement Endpoints from HA states/registries.
+
+    Two kinds are proposed (DEC-04/05/06):
+
+    * each power entity of a **multi-channel monitor** becomes a ``CT`` endpoint
+      (panel feeds ``PANEL_FEED``, circuits ``CIRCUIT``), ingested immediately;
+    * a bare ``sensor.*_power`` whose HA device is **not** a multi-channel
+      monitor (an appliance or plug) becomes a **candidate single-subject**
+      endpoint whose subject is the HA-device-derived Physical Device.  Its
+      ``scope_status`` is ``CANDIDATE`` and it is **disabled**: ingestion of
+      candidate endpoints stays off until the user confirms the scope (DEC-06).
+
+    This is a pure function: ``clock`` is an injected callable; no DB, no wall
+    clock.  It never creates a device — devices come from HA devices that own
+    load-evidence entities, user declaration, or promoted unknown profiles.
+    """
+    now = clock() if clock is not None else utcnow()
+    registries = registries or {}
+    entities: dict[str, Mapping[str, Any]] = {}
+    raw_entities = registries.get("entities") if isinstance(registries, Mapping) else None
+    for entry in raw_entities or []:
+        if isinstance(entry, Mapping) and entry.get("entity_id"):
+            entities[str(entry["entity_id"])] = entry
+    devices_by_id: dict[str, Mapping[str, Any]] = {}
+    raw_devices = registries.get("devices") if isinstance(registries, Mapping) else None
+    for entry in raw_devices or []:
+        if isinstance(entry, Mapping) and entry.get("id"):
+            devices_by_id[str(entry["id"])] = entry
+
+    state_list = [
+        s
+        for s in states
+        if isinstance(s, Mapping)
+        and entity_allowed(
+            str(s.get("entity_id") or ""), allow=allow_entities, deny=deny_entities
+        )
+    ]
+    grouped = _power_entities_by_device(state_list, entities)
+
+    endpoints: list[MeasurementEndpoint] = []
+    for hardware_id in sorted(grouped):
+        power = sorted(grouped[hardware_id])
+        hardware = devices_by_id.get(hardware_id) or {}
+        panel = str(hardware.get("name_by_user") or hardware.get("name") or hardware_id)
+        slug = _panel_prefix(panel)
+        if _is_monitor(power):
+            # CT channels from a multi-channel monitor: one endpoint per channel.
+            prefix = _common_prefix([_object_id(entity_id) for entity_id, _ in power])
+            locals_by_entity = {
+                entity_id: _split_local(_object_id(entity_id), prefix)
+                for entity_id, _ in power
+            }
+            legs: dict[str, dict[int, str]] = {}
+            for entity_id, local in locals_by_entity.items():
+                parsed = _leg_stem(local)
+                if parsed is not None:
+                    stem, leg = parsed
+                    legs.setdefault(stem, {})[leg] = entity_id
+            feed_candidates = [
+                (len(stem), stem)
+                for stem, pair in legs.items()
+                if 1 in pair and 2 in pair
+            ]
+            main_stem = min(feed_candidates)[1] if feed_candidates else None
+            consumed: set[str] = set()
+            if main_stem is not None:
+                for leg, entity_id in sorted(legs[main_stem].items()):
+                    consumed.add(entity_id)
+                    endpoints.append(
+                        _ct_endpoint(
+                            entity_id,
+                            endpoint_id=f"{slug}_l{leg}",
+                            scope=EndpointScope.PANEL_FEED,
+                            panel_id=slug,
+                            enabled=enabled,
+                            created_at=now,
+                        )
+                    )
+            for entity_id, local in sorted(locals_by_entity.items()):
+                if entity_id in consumed:
+                    continue
+                stem, leg = _leg_stem(local) or (local, 0)
+                local_stem = stem or local
+                if stem and len(legs.get(stem) or {}) > 2 and leg:
+                    local_stem = f"{stem}_ct{leg}"
+                consumed.add(entity_id)
+                endpoints.append(
+                    _ct_endpoint(
+                        entity_id,
+                        endpoint_id=f"{slug}_{local_stem}",
+                        scope=EndpointScope.CIRCUIT,
+                        panel_id=slug,
+                        enabled=enabled,
+                        created_at=now,
+                    )
+                )
+        else:
+            # Single-load power entity on an appliance/plug HA device: candidate
+            # single-subject endpoint.  One endpoint per HA device (if several
+            # power entities share a plug, the first is the candidate).
+            subject = _subject_id_for_ha_device(hardware_id)
+            entity_id, _ = power[0]
+            endpoints.append(
+                MeasurementEndpoint(
+                    endpoint_id=f"plug_{hardware_id}",
+                    kind=EndpointKind.SMART_PLUG,
+                    entity_id=entity_id,
+                    energy_entity_id=None,
+                    display_name=str(hardware.get("name_by_user") or hardware.get("name") or entity_id),
+                    scope=EndpointScope.SINGLE_SUBJECT,
+                    scope_status=ScopeStatus.CANDIDATE,
+                    scope_subject_id=subject,
+                    panel_id=None,
+                    enabled=False,  # candidate ingestion stays off until confirm (DEC-06)
+                    created_at=now,
+                )
+            )
+    return endpoints
+
+
+def _ct_endpoint(
+    entity_id: str,
+    *,
+    endpoint_id: str,
+    scope: EndpointScope,
+    panel_id: str,
+    enabled: bool,
+    created_at: datetime,
+) -> MeasurementEndpoint:
+    """Build one CT endpoint from a monitor channel."""
+    return MeasurementEndpoint(
+        endpoint_id=endpoint_id,
+        kind=EndpointKind.CT,
+        entity_id=entity_id,
+        energy_entity_id=None,
+        display_name=_display_name(endpoint_id, panel_id),
+        scope=scope,
+        scope_status=ScopeStatus.CANDIDATE,
+        scope_subject_id=None,
+        panel_id=panel_id,
+        enabled=bool(enabled),
+        created_at=created_at,
+    )
+
+
+# HA devices that own a candidate endpoint imply a Physical Device (DEC-04).
+# The following two helpers turn discovered endpoints into the canonical entity
+# contracts; they are pure and injected with a clock by the caller.
+
+
+def devices_for_candidate_endpoints(
+    endpoints: Iterable[MeasurementEndpoint],
+    registries: dict[str, Any] | None = None,
+    *,
+    clock: Any = None,
+) -> list[PhysicalDevice]:
+    """Physical Devices implied by candidate plug/appliance endpoints.
+
+    Only non-CT single-subject candidates create a device: CT endpoints never
+    mint a device (DEC-04).  The device origin is ``ha_device`` and its id is the
+    HA-device-derived id from :func:`discover_candidate_endpoints`.
+    """
+    now = clock() if clock is not None else utcnow()
+    registries = registries or {}
+    devices_by_id: dict[str, Mapping[str, Any]] = {}
+    raw_devices = registries.get("devices") if isinstance(registries, Mapping) else None
+    for entry in raw_devices or []:
+        if isinstance(entry, Mapping) and entry.get("id"):
+            devices_by_id[str(entry["id"])] = entry
+    result: list[PhysicalDevice] = []
+    seen: set[str] = set()
+    for endpoint in endpoints:
+        if endpoint.kind == EndpointKind.CT or endpoint.scope_subject_id is None:
+            continue
+        subject = endpoint.scope_subject_id
+        if subject in seen:
+            continue
+        seen.add(subject)
+        hardware = devices_by_id.get(subject.replace("pd_from_ha_", "")) or {}
+        result.append(
+            PhysicalDevice(
+                device_id=subject,
+                name=endpoint.display_name or subject,
+                device_type=None,
+                ha_device_id=hardware.get("id"),
+                area_id=None,
+                origin="ha_device",
+                created_at=now,
+            )
+        )
+    return result
+
+
+def links_for_candidate_endpoints(
+    endpoints: Iterable[MeasurementEndpoint],
+    *,
+    clock: Any = None,
+) -> list[HaEntityLink]:
+    """HA entity links that bind a candidate endpoint's power entity to its subject.
+
+    The role is ``power_measurement`` so a later confirm can create the
+    DIRECT mapping edge that yields MEASURED (DEC-05).  Pure: the clock is
+    injected.
+    """
+    now = clock() if clock is not None else utcnow()
+    result: list[HaEntityLink] = []
+    for endpoint in endpoints:
+        if endpoint.kind == EndpointKind.CT or endpoint.entity_id is None:
+            continue
+        result.append(
+            HaEntityLink(
+                entity_id=endpoint.entity_id,
+                target_kind="device",
+                target_id=endpoint.scope_subject_id,
+                role=HaEntityRole.POWER_MEASUREMENT,
+                valid_from=now,
+                declared_by="discovery",
+            )
+        )
+    return result
 
 
 def discover_candidate_topology(
@@ -364,7 +625,11 @@ def discover_candidate_topology(
                 )
                 devices.append(
                     DeviceTopology(
-                        device_id=f"dev_{base}",
+                        # DEC-04: discovery no longer mints ``dev_<ct>`` devices.
+                        # These are HA/stem-derived Physical Device ids; legacy
+                        # ``dev_*`` rows are preserved verbatim by S13 and offered
+                        # for retirement, not renamed here.
+                        device_id=f"pd_{base}",
                         name=_display_name(stem, slug) or panel,
                         branch_ct_ids=[ct_l1, ct_l2],
                         phase=Phase.BOTH,
@@ -388,7 +653,9 @@ def discover_candidate_topology(
             if stem and len(legs.get(stem) or {}) > 2 and leg:
                 local_stem = f"{stem}_ct{leg}"
             ct_id = f"{slug}_{local_stem}"
-            device_id = f"dev_{ct_id}"
+            # DEC-04: a CT is an endpoint, not a device.  Discovery no longer
+            # mints ``dev_{ct_id}``; legacy rows are left intact by S13.
+            device_id = f"pd_{local_stem}"
             # A single CT measures one *conductor*, not one appliance.  Calling it
             # ``dedicated_device`` asserts that exactly one logical device sits on
             # it, and discovery has no evidence for that: the only discriminator
@@ -554,4 +821,10 @@ def _display_name(stem: str, slug: str) -> str:
     return text.replace("_", " ").strip()
 
 
-__all__ = ["MIN_MONITOR_POWER_ENTITIES", "discover_candidate_topology"]
+__all__ = [
+    "MIN_MONITOR_POWER_ENTITIES",
+    "discover_candidate_endpoints",
+    "discover_candidate_topology",
+    "devices_for_candidate_endpoints",
+    "links_for_candidate_endpoints",
+]
