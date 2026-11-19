@@ -88,7 +88,7 @@
 | H2 | 4 | VERIFIED |  |  | partial: async_migrate_entry hook -> H1; v2 forms removal -> Z2 |
 | U2 | 4 | VERIFIED |  | AT-20 | AT-20 closed |
 | P6 | 4 | VERIFIED |  |  | AT-17 closed; P6b live wiring; P6c real T7 detection (harness scaffolding removed) |
-| Z2 | 5 | VERIFIED |  |  | renamed dodges + retained legacy modules -> Z2b; tools -> Z2c; HA v2 forms -> Z2d |
+| Z2 | 5 | VERIFIED |  |  | Z2c tools ported (replay_capture bound to HB17 triple -> V2 must use DB versions) |
 | Z1 | 5 | NOT_STARTED | | | |
 | L7 | 5 | VERIFIED |  | AT-19 | AT-19 closed |
 | D5 | 5 | VERIFIED |  |  | v021 supersedes link; P6 must pass supersedes_evidence_id |
