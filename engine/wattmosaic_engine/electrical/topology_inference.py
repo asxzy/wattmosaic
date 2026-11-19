@@ -57,7 +57,7 @@ from wattmosaic_engine.contracts import (
     TopologyEdgeV3,
 )
 
-from .nesting import (
+from .nesting_math import (
     CONTAINMENT_MIN,
     build_nodes,
     containment,
@@ -282,7 +282,7 @@ def detect_same_conductor(
     channel_meta: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[TopologyEdgeV3]:
     """Emit SAME_CONDUCTOR edges from the ported duplicate detector (T5 step 4)."""
-    from .nesting import (
+    from .nesting_math import (
         DUPLICATE_ACTIVITY_RATIO_MIN,
         DUPLICATE_RATIO_MAX,
         DUPLICATE_REL_DIFF_MAX,

@@ -77,7 +77,7 @@ class TrainingResult:
     notes: list[str] = field(default_factory=list)
 
 
-def infer_model_type(device: Any, samples: Sequence[LearningSample] | None = None) -> ModelType:
+def _infer_model_type(device: Any, samples: Sequence[LearningSample] | None = None) -> ModelType:
     """Choose a model type from device characteristics and observed samples.
 
     Priority is intentional: composites and appliances need their specific
@@ -249,7 +249,7 @@ class Trainer:
                 reason=f"insufficient_samples:{len(accepted)}<{self.thresholds.min_samples_for_model}",
             )
         if model_type is None:
-            model_type = infer_model_type(device, accepted)
+            model_type = _infer_model_type(device, accepted)
         try:
             model_type = ModelType(model_type)
         except ValueError:
@@ -313,4 +313,4 @@ class Trainer:
         )
 
 
-__all__ = ["Trainer", "TrainingResult", "infer_model_type", "training_quality"]
+__all__ = ["Trainer", "TrainingResult", "training_quality"]

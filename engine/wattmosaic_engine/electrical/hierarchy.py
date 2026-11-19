@@ -2,7 +2,7 @@
 
 Why this module exists
 ----------------------
-``CTChannel.parent_ct_id`` is a wiring fact.  A wrong edge silently authorises a
+``CTChannel.parent_endpoint_id`` is a wiring fact.  A wrong edge silently authorises a
 wrong total, and a wrong total is indistinguishable from a correct one once it
 is stored, so parenthood is inferred **only** when measurement scope itself can
 prove containment.  Four relation kinds stay separate and non-implying:
@@ -177,7 +177,7 @@ class ValidationResult:
 class _ScopeGeometry:
     """What the aligned series say about one candidate direction."""
 
-    parent_ct_id: str
+    parent_endpoint_id: str
     child_ct_id: str
     comparable: int
     violation_frac: float
@@ -227,7 +227,7 @@ def _level_count(values: np.ndarray) -> int:
 def _scope_geometry(
     parent: np.ndarray,
     child: np.ndarray,
-    parent_ct_id: str,
+    parent_endpoint_id: str,
     child_ct_id: str,
     config: HierarchyConfig,
 ) -> _ScopeGeometry | None:
@@ -284,7 +284,7 @@ def _scope_geometry(
         spread = 1.0
 
     return _ScopeGeometry(
-        parent_ct_id=parent_ct_id,
+        parent_endpoint_id=parent_endpoint_id,
         child_ct_id=child_ct_id,
         comparable=int(parent_values.size),
         violation_frac=violation_frac,
@@ -324,7 +324,7 @@ def _normalise_channels(
                 "ct_id": key,
                 "ct_type": _coerce_text(meta.ct_type),
                 "alias_of_ct_id": meta.alias_of_ct_id,
-                "parent_ct_id": meta.parent_ct_id,
+                "parent_endpoint_id": meta.parent_endpoint_id,
                 "topology_status": _coerce_text(meta.topology_status),
                 "name": meta.name,
             }
@@ -462,7 +462,7 @@ def parent_cycle(
 def _declared_parents(channels: Mapping[str, Mapping[str, Any]]) -> dict[str, str]:
     declared: dict[str, str] = {}
     for ct_id, meta in channels.items():
-        parent = str(meta.get("parent_ct_id") or "")
+        parent = str(meta.get("parent_endpoint_id") or "")
         if parent:
             declared[ct_id] = parent
     return declared
@@ -781,7 +781,7 @@ class HierarchyFinder:
         if any(
             entry.get("reason") == "mutual_containment"
             and set(entry.get("ct_ids", []))
-            == {geometry.parent_ct_id, geometry.child_ct_id}
+            == {geometry.parent_endpoint_id, geometry.child_ct_id}
             for entry in report["undeterminable"]
         ):
             return "ambiguous_scope_containment"
@@ -804,7 +804,7 @@ class HierarchyFinder:
                 candidates,
                 key=lambda row: (
                     row[0].median_remainder_w,
-                    row[0].parent_ct_id,
+                    row[0].parent_endpoint_id,
                 ),
             )
             geometry, devices = candidates[0]
@@ -812,12 +812,12 @@ class HierarchyFinder:
                 report["superseded"].append(
                     {
                         "child_ct_id": child,
-                        "parent_ct_id": _other.parent_ct_id,
+                        "parent_endpoint_id": _other.parent_endpoint_id,
                         "reason": "not_the_immediate_parent",
                     }
                 )
 
-            pair = (child, geometry.parent_ct_id)
+            pair = (child, geometry.parent_endpoint_id)
             if pair in declared_pairs:
                 report["declared_wins"].append(
                     f"{pair[0]}->{pair[1]}"
@@ -834,7 +834,7 @@ class HierarchyFinder:
                         },
                         {
                             "reason": "contradicts_declared",
-                            "declared_parent_ct_id": pair[0],
+                            "declared_parent_endpoint_id": pair[0],
                             "algorithm_version": self.config.algorithm_version,
                         },
                     )
@@ -865,11 +865,11 @@ class HierarchyFinder:
         consistency_pct = round(100.0 * geometry.consistency, 2)
         return TopologyRelation(
             relation_id=(
-                f"parent_child:{geometry.child_ct_id}->{geometry.parent_ct_id}"
+                f"parent_child:{geometry.child_ct_id}->{geometry.parent_endpoint_id}"
             ),
             kind=_PARENT_CHILD,
             subject_id=geometry.child_ct_id,
-            object_id=geometry.parent_ct_id,
+            object_id=geometry.parent_endpoint_id,
             status=TopologyStatus.CANDIDATE,
             # A containment edge is the strongest claim here, and it is still
             # only a proposal: the lifecycle says so independently of
@@ -935,7 +935,7 @@ class HierarchyFinder:
         """Reject impossible edges **with a reason**; never drop them.
 
         Rules, in order: self edge, alias self edge (canonical ids first),
-        unknown CT, contradiction of a declared ``parent_ct_id``, duplicate of
+        unknown CT, contradiction of a declared ``parent_endpoint_id``, duplicate of
         an already accepted edge, and a transitive cycle.  Non-parent/child
         relations pass through untouched: this method never reclassifies a kind.
         """
@@ -1010,7 +1010,7 @@ class HierarchyFinder:
                         relation,
                         {
                             "reason": "contradicts_declared",
-                            "declared_parent_ct_id": object_key,
+                            "declared_parent_endpoint_id": object_key,
                         },
                     )
                 )
@@ -1021,7 +1021,7 @@ class HierarchyFinder:
                         relation,
                         {
                             "reason": "contradicts_declared",
-                            "declared_parent_ct_id": declared_parent,
+                            "declared_parent_endpoint_id": declared_parent,
                         },
                     )
                 )
@@ -1110,7 +1110,7 @@ class HierarchyFinder:
                         relation,
                         {
                             "reason": "contradicts_declared",
-                            "declared_parent_ct_id": pair[0],
+                            "declared_parent_endpoint_id": pair[0],
                         },
                     )
                 )

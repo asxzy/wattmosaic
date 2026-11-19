@@ -26,7 +26,7 @@ from .sample_filter import (
 )
 from .stages import current_stage, recognize_stages, segment_cycle, stage_distinguishable
 from .thresholds import LearningThresholds
-from .trainer import Trainer, TrainingResult, infer_model_type, training_quality
+from .trainer import Trainer, TrainingResult, training_quality
 from .validation import ValidationReport, compare_models, split_holdout, validate_model
 
 __all__ = [
@@ -54,7 +54,6 @@ __all__ = [
     "current_stage",
     "evaluate_gate",
     "extract_control",
-    "infer_model_type",
     "observation_for_estimate",
     "recognize_stages",
     "rejection_summary",

@@ -303,30 +303,6 @@ def test_aligned_window_can_carry_transitions() -> None:
     assert len(window.state_transitions) == 1
 
 
-def test_transitions_survive_coercion_and_reach_the_engine() -> None:
-    from wattmosaic_engine.disaggregation.engine import _collect_transitions
-    from wattmosaic_engine.electrical.window import coerce_window
-    from wattmosaic_engine.synchronization.aligner import AlignedWindow
-
-    window = AlignedWindow(
-        at=datetime(2026, 1, 1, tzinfo=UTC),
-        max_age_s=120.0,
-        channels={},
-        previous_states={"dev_water_heater": "off"},
-        state_transitions=(
-            {
-                "device_id": "dev_water_heater",
-                "previous_state": "off",
-                "new_state": "on",
-                "occurred_at": None,
-            },
-        ),
-    )
-    transitions = _collect_transitions(coerce_window(window), {"dev_water_heater": "on"})
-    assert list(transitions) == ["dev_water_heater"]
-    assert transitions["dev_water_heater"].direction == "activation"
-
-
 def test_core_records_a_declared_transition_for_the_next_window(tmp_path) -> None:
     """``on_event`` must queue the transition, not just the latest state."""
     core, db = _core(tmp_path)
@@ -607,57 +583,3 @@ def test_a_power_entity_cannot_overwrite_the_device_runtime_state(tmp_path) -> N
 # --------------------------------------------------------------------------- #
 # Defect 5: an emitted event never named its kind
 # --------------------------------------------------------------------------- #
-def test_every_event_names_its_kind() -> None:
-    """Every ``DeviceEvent`` the source emits names exactly one of three kinds.
-
-    A stub event cannot carry stamped attributes, so the production funnel
-    ``HASource._emit_device_event`` is driven directly.  All three emission
-    paths (a normal state change, an availability flip and an entity removal)
-    funnel through it, so stamping there is what makes the guarantee hold for
-    every event rather than for the one path a test happened to exercise.
-    """
-    from wattmosaic_engine.disaggregation.isolation import (
-        EVENT_KINDS,
-        KIND_SOURCE_EVENT_TYPE,
-    )
-    from wattmosaic_engine.ingestion.ha_source import HASource
-
-    source = HASource("http://ha.local:8123", "token")
-    source._entity_meta = {"switch.pump": {"device_id": "dev_pump"}}
-    emitted = []
-
-    async def on_event(event) -> None:
-        emitted.append(event)
-
-    source._on_event = on_event
-    at = dt.datetime(2026, 1, 1, 12, 0, tzinfo=dt.UTC)
-
-    async def emit() -> None:
-        await source._emit_device_event(
-            "switch.pump",
-            {"state": "off", "attributes": {"brightness": 10}},
-            {"state": "on", "attributes": {"brightness": 200}},
-            at,
-        )
-        await source._emit_device_event(
-            "switch.pump",
-            {"state": "on", "attributes": {}},
-            {"state": "unavailable", "attributes": {}},
-            at + dt.timedelta(seconds=5),
-            event_type="availability",
-        )
-        await source._emit_device_event(
-            "switch.pump", {"state": "on", "attributes": {}}, None, at + dt.timedelta(seconds=9)
-        )
-
-    asyncio.run(emit())
-
-    assert len(emitted) == 3, emitted
-    for event in emitted:
-        assert event.attributes["event_kind"] in EVENT_KINDS
-        # HA is the producer here, so the kind is named by the source itself.
-        assert event.attributes["event_kind"] == "ha_driven"
-        assert event.attributes["event_kind_source"] == KIND_SOURCE_EVENT_TYPE
-        # Stamping is additive: the contract fields are untouched.
-        assert event.device_id == "dev_pump"
-        assert event.entity_id == "switch.pump"

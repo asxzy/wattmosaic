@@ -21,8 +21,6 @@ from typing import Any
 
 from ..contracts import InferenceResult, QualityStatus, Reconciliation, Source, Topology
 from ..device_links import STATE_OVERRIDES_KEY, ambiguous_entities, entity_links
-from ..disaggregation.engine import InferenceBatch
-from ..electrical.topology import build_graph
 from .batch import BackendBatch
 
 log = logging.getLogger("wattmosaic.integration")
@@ -82,54 +80,52 @@ class InferenceMixin:
         models: Any = None,
         events: Iterable[Any] | None = None,
     ) -> BackendBatch:
+        # Z2: the legacy 5 s absolute solve is gone.  Production inference now
+        # runs per event group through the three-loop runtime (P6), which calls
+        # ``infer_group``/``infer_steady`` directly.  This compatibility shim
+        # keeps the backend constructible for diagnostics and old callers but
+        # never fabricates a per-device watt value.
+        return BackendBatch(
+            results=[],
+            reconciliation=Reconciliation(
+                timestamp=self._clock(),
+                topology_version=getattr(topology, "version", 0),
+                quality_status="good",
+                explanation=["legacy_inference_removed_use_three_loop_runtime"],
+            ),
+            diagnostics={"legacy_path_removed": True},
+        )
+
+    def _process_legacy_unused(
+        self,
+        window: Any,
+        *,
+        device_states: Any,
+        topology: Topology,
+        models: Any = None,
+        events: Iterable[Any] | None = None,
+    ) -> BackendBatch:
         cycle_events: list[Any] = list(events) if events is not None else []
         if cycle_events:
             for event in cycle_events:
                 self._pending_events.append(event)
         self._refresh_links(topology)
-        registry = models if models is not None else self.registry
-        try:
-            batch: InferenceBatch = self.engine.infer(
-                window,
-                device_states=device_states or {},
-                models=registry,
-                topology=topology,
-            )
-        except Exception as exc:  # noqa: BLE001 - never kill the inference loop
-            self.last_error = f"{type(exc).__name__}: {exc}"
-            log.exception("disaggregation failed; returning empty batch")
-            # Events stay buffered: they are still valid evidence for a later
-            # cycle, and dropping them would silently lose learning data.
-            return BackendBatch(
-                results=[],
-                reconciliation=Reconciliation(
-                    timestamp=self._clock(),
-                    topology_version=topology.version,
-                    quality_status="bad",
-                    explanation=[f"inference_failed: {type(exc).__name__}"],
-                ),
-                diagnostics={"error": str(exc), "topology_version": topology.version},
-            )
-
-        results = list(batch.results)
+        results: list[Any] = []
         self.cycles += 1
         self.last_error = None
-
         self._update_energy(results)
         self._learn(window, topology)
         self._analyze(window, topology, results, cycle_events)
         self._maybe_reanalyze(results, topology)
-
-        diagnostics = dict(batch.diagnostics or {})
+        diagnostics: dict[str, Any] = {}
         diagnostics["energy"] = self._energy_summary()
         diagnostics["learning"] = self._learning_summary()
         diagnostics["audit"] = self._audit_summary()
-        gaps = self._measurement_gap_summary(topology, results, batch.diagnostics or {})
-        diagnostics["measurement_gaps"] = gaps
-        self._explain_measurement_gaps(batch.reconciliation, gaps)
+        # Legacy helper retained for API compatibility only; callers must use
+        # the three-loop runtime for inference.
         return BackendBatch(
             results=results,
-            reconciliation=batch.reconciliation,
+            reconciliation=Reconciliation(timestamp=self._clock()),
             diagnostics=diagnostics,
         )
 
@@ -297,10 +293,7 @@ class InferenceMixin:
         )
         by_device = {r.device_id: r for r in results}
 
-        try:
-            graph = build_graph(topology)
-        except Exception:  # noqa: BLE001 - an explanation must never break inference
-            graph = None
+        graph = None  # legacy topology graph removed in Z2
 
         missing_direct: dict[str, str] = {}
         no_fresh: dict[str, str] = {}
@@ -388,7 +381,7 @@ class InferenceMixin:
         learning = self.learning_status()
         return {
             "backend": "WattMosaicBackend",
-            "disaggregation": type(self.engine).__name__,
+            "disaggregation": "three-loop-v3",
             "model_registry": self.registry is not None,
             "learning": self.learning is not None,
             "learning_active": self.learning_active,

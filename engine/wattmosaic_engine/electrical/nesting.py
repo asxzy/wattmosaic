@@ -2,7 +2,7 @@
 
 Why this module is separate
 ---------------------------
-``CTChannel.parent_ct_id`` describes a *wiring fact*: which feed a CT sits
+``CTChannel.parent_endpoint_id`` describes a *wiring fact*: which feed a CT sits
 behind.  A wiring fact cannot be guessed from an entity id, a device name or a
 panel label without fabricating it, so discovery never writes one.  What
 observation *can* support is a **candidate**, and that is what this module
@@ -179,7 +179,7 @@ class NestingCandidate:
     """A proposed ``child`` fed by ``parent``, with the evidence for it."""
 
     child_ct_id: str
-    parent_ct_id: str
+    parent_endpoint_id: str
     kind: str  # "nested" | "duplicate"
     evidence: dict[str, Any] = field(default_factory=dict)
     requires_confirmation: bool = True
@@ -187,7 +187,7 @@ class NestingCandidate:
     def as_dict(self) -> dict[str, Any]:
         return {
             "child_ct_id": self.child_ct_id,
-            "parent_ct_id": self.parent_ct_id,
+            "parent_endpoint_id": self.parent_endpoint_id,
             "kind": self.kind,
             "evidence": dict(self.evidence),
             "requires_confirmation": self.requires_confirmation,
@@ -540,12 +540,12 @@ def _ancestor_of(
 ) -> bool:
     """True when ``candidate`` is a declared ancestor of ``child``."""
     seen: set[str] = set()
-    current = str(channels.get(child, {}).get("parent_ct_id") or "")
+    current = str(channels.get(child, {}).get("parent_endpoint_id") or "")
     while current and current not in seen:
         if current == candidate:
             return True
         seen.add(current)
-        current = str(channels.get(current, {}).get("parent_ct_id") or "")
+        current = str(channels.get(current, {}).get("parent_endpoint_id") or "")
     return False
 
 
@@ -590,7 +590,7 @@ def infer_nesting(
     """Propose nesting and duplicate relationships from aligned measurements.
 
     ``channels`` maps ct-id to a mapping that may carry ``ct_type``, ``phase``,
-    ``paired_ct_id`` and ``parent_ct_id``.
+    ``paired_ct_id`` and ``parent_endpoint_id``.
 
     ``series`` maps ct-id to an equally long, equally indexed sequence of watts.
     Alignment is the caller's responsibility -- comparing readings taken at
@@ -693,7 +693,7 @@ def infer_nesting(
             candidates.append(
                 NestingCandidate(
                     child_ct_id=member,
-                    parent_ct_id=_leg_matches(parent_node, member, channels),
+                    parent_endpoint_id=_leg_matches(parent_node, member, channels),
                     kind="duplicate",
                     evidence={
                         "activity_ratio": round(evidence.activity_ratio, 4),
@@ -734,7 +734,7 @@ def infer_nesting(
                 }
             )
             continue
-        if any(str(channels.get(m, {}).get("parent_ct_id") or "") for m in child_node.members):
+        if any(str(channels.get(m, {}).get("parent_endpoint_id") or "") for m in child_node.members):
             # A declared parent is already a fact.  Re-proposing the same link
             # adds nothing, and proposing a different one would contradict it.
             diagnostics["suppressed"].append(
@@ -829,7 +829,7 @@ def infer_nesting(
                     "ct_id": child_node.members[0],
                     "node_id": child,
                     "candidate_parents": sorted(row["parent"] for row in ranked),
-                    "candidate_parent_ct_ids": sorted(
+                    "candidate_parent_endpoint_ids": sorted(
                         _leg_matches(nodes[row["parent"]], child_node.members[0], channels)
                         for row in ranked
                     ),
@@ -868,13 +868,13 @@ def infer_nesting(
             candidates.append(
                 NestingCandidate(
                     child_ct_id=member,
-                    parent_ct_id=_leg_matches(parent_node, member, channels),
+                    parent_endpoint_id=_leg_matches(parent_node, member, channels),
                     kind="nested",
                     evidence=dict(evidence),
                 )
             )
 
-    candidates.sort(key=lambda c: (c.kind, c.child_ct_id, c.parent_ct_id))
+    candidates.sort(key=lambda c: (c.kind, c.child_ct_id, c.parent_endpoint_id))
     return candidates
 
 

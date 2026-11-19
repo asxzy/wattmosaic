@@ -151,10 +151,6 @@ class RuntimeMixin:
                 asyncio.create_task(self._maintenance_loop(), name="wm-maintenance"),
                 asyncio.create_task(self._self_heal_loop(), name="wm-self-heal"),
             ]
-            if not self.three_loop_enabled:
-                self._tasks.append(
-                    asyncio.create_task(self._inference_loop(), name="wm-inference")
-                )
 
     async def stop(self) -> None:
         self._stopping = True
@@ -534,22 +530,7 @@ class RuntimeMixin:
                 log.exception("data quality evaluation failed")
             try:
                 await asyncio.wait_for(
-                    self._stop_event.wait(), max(1.0, self.config.inference_interval_s)
-                )
-                return
-            except TimeoutError:
-                continue
-
-    async def _inference_loop(self) -> None:
-        while not self._stopping:
-            if self.inference_backend is not None:
-                try:
-                    await self.run_inference_once()
-                except Exception:  # noqa: BLE001 - never kill the loop
-                    log.exception("inference cycle failed")
-            try:
-                await asyncio.wait_for(
-                    self._stop_event.wait(), max(1.0, self.config.inference_interval_s)
+                    self._stop_event.wait(), max(1.0, self.config.quality_interval_s)
                 )
                 return
             except TimeoutError:

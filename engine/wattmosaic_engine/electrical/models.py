@@ -72,7 +72,7 @@ class ModelView:
 
     def power_for_state(self, state: str | None) -> float | None:
         """Expected watts for a HA state, using the model's parameter set."""
-        return expected_power_w(self.params, state)
+        return _power_for_params(self.params, state)
 
 
 def _finite(value: Any) -> float | None:
@@ -124,7 +124,7 @@ def _quality_from_params(params: DeviceModelParameters, metrics: Mapping[str, An
     return q
 
 
-def expected_power_w(params: DeviceModelParameters, state: str | None) -> float | None:
+def _power_for_params(params: DeviceModelParameters, state: str | None) -> float | None:
     """Parametric power estimate for a HA state string.
 
     Order of precedence:

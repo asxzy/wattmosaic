@@ -465,45 +465,6 @@ def test_latest_schema_version_covers_every_migration() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_engine_split_is_additive_when_spread_exceeds_residual() -> None:
-    """The split adds up even when the meters disagree by more than the residual.
-
-    This used to be a strict ``xfail``: the engine reported the *unbounded*
-    meter-to-meter spread as a part of a bounded residual, so
-    ``unmonitored_w + meter_disagreement_w`` overshot
-    ``unknown_residual_w`` whenever the instruments disagreed by more than the
-    whole gap.  Contract 1.5.0 clips the spread's *contribution* into the
-    residual and reports the spread separately, so the identity now holds for
-    every input shape.
-    """
-    from tests.unit.test_reconciliation_split import _aliased_topology, _infer, _window
-
-    # canonical 1000 W, alias 600 W -> spread 400 W; heater 900 W leaves a
-    # 100 W residual, so the spread exceeds it by 300 W.
-    rec = _infer(
-        _aliased_topology(),
-        _window(
-            {
-                "load_manager_l1": 1000.0,
-                "load_manager_l2": 0.0,
-                "main_panel_l1": 600.0,
-                "main_panel_l2": 0.0,
-                "ct_heater": 900.0,
-            }
-        ),
-    ).reconciliation
-    assert rec.unknown_residual_w == pytest.approx(100.0)
-    # The honest, unbounded diagnostic is still reported in full ...
-    assert rec.meter_spread_w == pytest.approx(400.0)
-    # ... while its contribution to a 100 W residual can only be 100 W.
-    assert rec.meter_disagreement_w == pytest.approx(100.0)
-    assert rec.unmonitored_w == pytest.approx(0.0, abs=1e-9)
-    assert rec.meter_spread_exceeds_residual is True
-    assert (
-        rec.unmonitored_w + rec.meter_disagreement_w - rec.unknown_residual_w
-    ) == pytest.approx(0.0, abs=0.01)
-
-
 def test_meter_spread_survives_the_round_trip(tmp_path: Path) -> None:
     """Contract 1.5.0's spread and flag must persist like the rest of the split.
 

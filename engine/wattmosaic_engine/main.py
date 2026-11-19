@@ -475,10 +475,6 @@ async def _run_engine(config: EngineConfig) -> int:
         supervisor.start("quality", core._quality_loop)
         supervisor.start("event", core._event_loop)
         supervisor.start("steady", core._steady_loop)
-        # The legacy 5 s full recompute remains available behind a flag until
-        # Z2 removes it; the three loops above are the default runtime.
-        if not core.three_loop_enabled:
-            supervisor.start("inference", core._inference_loop)
         supervisor.start("maintenance", core._maintenance_loop)
         await stop_event.wait()
     finally:
