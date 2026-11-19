@@ -25,7 +25,14 @@ from datetime import UTC, datetime, timedelta
 from aiohttp.test_utils import TestClient, TestServer
 from wattmosaic_engine.api.server import create_app
 from wattmosaic_engine.config.settings import EngineConfig
-from wattmosaic_engine.contracts import HAEvent, MeasurementType, ReaderMeasurement
+from wattmosaic_engine.contracts import (
+    EventGroup,
+    EventGroupStatus,
+    HAEvent,
+    MeasurementType,
+    ReaderDelta,
+    ReaderMeasurement,
+)
 from wattmosaic_engine.core.executors import BackgroundExecutor, JobBudget
 from wattmosaic_engine.main import EngineCore
 from wattmosaic_engine.realtime import EngineHarness
@@ -150,6 +157,75 @@ def test_restart_reconstructs_group_from_persisted_evidence(tmp_path) -> None:
         restored = db.repos.evidence.latest_group(group.group_id)
         assert restored is not None
         assert restored.model_dump(mode="json") == group.model_dump(mode="json")
+    finally:
+        db.close()
+
+
+def test_silent_reader_is_stale_and_excluded_from_inference(tmp_path) -> None:
+    """ZF: quality is scored from ReaderStateStore, so a reader that goes silent
+    appears in the snapshot's ``stale_sources`` and is dropped from the next
+    inference's operator rows.
+
+    Before the fix the quality engine read the SampleAligner's power buffers,
+    which the HA source no longer feeds, so both the exclusion and the stale
+    reason were computed from an empty report.
+    """
+    clock = {"now": T0}
+    core, db = _core(tmp_path, clock=lambda: clock["now"])
+    try:
+        # Two readers stream normally for a while so both have a held value.
+        for tick in range(1, 40):
+            clock["now"] = T0 + timedelta(seconds=tick * 15)
+            at = clock["now"]
+            asyncio.run(core.on_reading(_reading("ct_live", 200.0, at, tick)))
+            asyncio.run(core.on_reading(_reading("ct_silent", 100.0, at, tick)))
+
+        # Evaluate quality now: both readers are healthy.
+        core._evaluate_quality()
+        assert "ct_silent" not in core.latest_quality.channels or core.latest_quality.channels[
+            "ct_silent"
+        ]["status"] == "good"
+
+        # ct_silent stops reporting.  Advance the clock past the store's
+        # missing_after_s horizon (5x stale, >= 600 s) while ct_live continues.
+        clock["now"] = T0 + timedelta(seconds=40 * 15 + 700)
+        at = clock["now"]
+        asyncio.run(core.on_reading(_reading("ct_live", 250.0, at, 40)))
+        core._evaluate_quality()
+
+        # The silent reader is now missing/stale with a concrete reason, and the
+        # reason is surfaced as a ``reader: reason`` stale_sources entry.
+        assert "ct_silent" in core.latest_quality.channels
+        stale = core.latest_quality.channels["ct_silent"]["status"]
+        assert stale in ("stale", "missing", "bad", "degraded")
+        from wattmosaic_engine.core.runtime import stale_sources_from_quality
+
+        stale_sources = stale_sources_from_quality(core.latest_quality)
+        assert any(s.startswith("ct_silent:") for s in stale_sources), stale_sources
+
+        # The event loop's input bundle drops the excluded reader from the
+        # operator rows, so no fabricated 0 W estimate can be produced for it.
+        versions = core.version_service.current()
+        group = EventGroup(
+            group_id="grp-zf",
+            revision=1,
+            status=EventGroupStatus.CONFIRMED,
+            opened_at=at,
+            reader_deltas=[
+                ReaderDelta(
+                    reader_id="ct_live", delta_w=50.0, completeness="complete"
+                ),
+                ReaderDelta(
+                    reader_id="ct_silent", completeness="missing"
+                ),
+            ],
+            versions=versions,
+        )
+        bundle = core._build_input_bundle(group)
+        assert bundle is not None
+        reader_rows = {row.reader_id for row in bundle["operator"].rows}
+        assert "ct_live" in reader_rows
+        assert "ct_silent" not in reader_rows
     finally:
         db.close()
 

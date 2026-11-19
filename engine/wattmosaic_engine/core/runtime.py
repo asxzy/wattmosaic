@@ -36,7 +36,11 @@ from ..inference.records import EventRecordStore
 from ..ingestion.queue import BoundedQueue
 from ..mapping.updater import MatrixUpdater
 from ..models.registry import DatabaseModelRepository, Registry
-from ..quality.engine import channel_config_from_endpoints, excluded_readers
+from ..quality.engine import (
+    channel_config_from_endpoints,
+    excluded_readers,
+    reader_state_quality_inputs,
+)
 from ..realtime.candidate_ring import CandidateRing
 from ..realtime.detection import ChangeDetector
 from ..realtime.grouping import GroupingEngine
@@ -226,32 +230,41 @@ class RuntimeMixin:
             self.samples_persisted += self.db.repos.samples.insert_readings(v3_readings)
 
     def _evaluate_quality(self) -> DataQualityReport:
-        """Score every aligned reader against its v3 endpoint declaration.
+        """Score every reader in :class:`ReaderStateStore` against its declaration.
 
-        The aligner keys a reader by the entity object id, which is the reader
-        id P1 assigns, so the window, the health map and the declared
-        :class:`~wattmosaic_engine.quality.engine.ChannelConfig` share one key.
+        Since the HA cutover the source emits only :class:`ReaderMeasurement`
+        (P1) into the store, not into the aligner's power buffers, so evaluating
+        the aligner's window scored nothing: ``excluded_readers`` (D3) and the
+        snapshot's ``stale_sources`` were computed from an empty report.  Build
+        the quality window from the store's held/stale/missing state, sigma,
+        cadence and quality flags instead.
         """
+        now = self._clock()
+        window, health = reader_state_quality_inputs(
+            self.reader_state,
+            now,
+            stale_after_s=self.config.stale_after_s,
+        )
         try:
             endpoints = self.db.repos.entities.endpoints()
             revisions = {
                 str(row["endpoint_id"]): self.db.repos.entities.revisions(row["endpoint_id"])
                 for row in endpoints
             }
-            channels = channel_config_from_endpoints(
+            configs = channel_config_from_endpoints(
                 {**row, "revisions": revisions.get(str(row["endpoint_id"]), [])}
                 for row in endpoints
             )
         except Exception:  # noqa: BLE001 - quality must run without declarations
-            channels = {}
+            configs = {}
         report = self.quality_engine.evaluate(
-            self.aligner.window(max_age_s=self.config.stale_after_s),
-            self.aligner.channel_health(),
-            channels=channels,
+            window,
+            health,
+            channels=configs,
             reconciliation=self.latest_reconciliation,
             unavailable=self.hasource.unavailable_entities,
-            energy_window=self.aligner.energy_window(max_age_s=self.config.stale_after_s),
-            energy_health=self.aligner.energy_health(),
+            energy_window=None,
+            energy_health=None,
         )
         self.latest_quality = report
         return report

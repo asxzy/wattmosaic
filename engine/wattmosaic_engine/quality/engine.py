@@ -51,17 +51,19 @@ import logging
 import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..contracts import (
     DataQualityReport,
     EndpointKind,
     EndpointScope,
+    QualityFlag,
     QualityStatus,
     utcnow,
 )
 from ..synchronization.aligner import (
+    CADENCE_SOURCE_OBSERVED,
     AlignedChannel,
     AlignedWindow,
     ChannelHealth,
@@ -288,6 +290,171 @@ def channel_config_from_endpoints(endpoints: Iterable[Any]) -> dict[str, Channel
             role=role,
         )
     return out
+
+
+def reconciliation_ratio(reconciliation: Any | None) -> float | None:
+    """Derive a v3 reconciliation error ratio from its terms, never from a field.
+
+    :class:`~wattmosaic_engine.contracts.ReconciliationV3` has no
+    ``reconciliation_error_ratio`` attribute, so the old penalty never fired.
+    The ratio is the unexplained share of the main feed:
+
+    ``abs(main_w - (identified_w + group_w + unknown_w)) / abs(main_w)``
+
+    Only those four terms participate (HB §12.1: ``main = identified + group +
+    unknown + residual``; ``residual`` is the deliberately retained unexplained
+    remainder, not part of the accounted sum).  **Any** missing term means "no
+    ratio" -- ``None`` is returned, never ``0.0`` (HB §18: absent is ``None``,
+    never a fabricated zero).  A zero main power likewise yields ``None``: a
+    ratio has no denominator.
+    """
+    if reconciliation is None:
+        return None
+    main = getattr(reconciliation, "main_w", None)
+    identified = getattr(reconciliation, "identified_w", None)
+    group = getattr(reconciliation, "group_w", None)
+    unknown = getattr(reconciliation, "unknown_w", None)
+    if any(term is None for term in (main, identified, group, unknown)):
+        return None
+    try:
+        main_value = float(main)
+        accounted = float(identified) + float(group) + float(unknown)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(main_value) or not math.isfinite(accounted) or main_value == 0.0:
+        return None
+    return abs(main_value - accounted) / abs(main_value)
+
+
+def reader_state_quality_inputs(
+    store: Any,
+    at: datetime,
+    *,
+    stale_after_s: float,
+) -> tuple[AlignedWindow, dict[str, ChannelHealth]]:
+    """Build quality inputs from a P2 :class:`ReaderStateStore`.
+
+    Since the HA cutover the source emits only :class:`ReaderMeasurement` (P1)
+    into the store; the aligner's power buffers receive nothing, so the quality
+    engine used to evaluate an empty window.  This converts the store's held
+    readings into one :class:`AlignedChannel` per reader at ``at`` plus a
+    :class:`ChannelHealth` built from the store's own rolling state:
+
+    * hold state (``held``/``stale``/``missing``) and the observation age;
+    * the reader's noise ``sigma_w`` (long-run noise estimate) and resolution;
+    * its observed ``cadence()`` (labelled ``observed_history`` only when the
+      store actually measured it); and
+    * its ``QualityFlag`` set (unit invalid, implausible, repeated, ...) and
+      evidence/repeat counts from the retained samples.
+
+    All inputs come from the injected ``store``; no clock is read here.  The
+    conversion is deliberately pure so it can be unit-tested independently of
+    the runtime.
+    """
+    channels: dict[str, AlignedChannel] = {}
+    health: dict[str, ChannelHealth] = {}
+    at_aware = at if at.tzinfo is not None else at.replace(tzinfo=UTC)
+    for reader in store.readers():
+        held = store.held(reader, at)
+        state = str(getattr(held.state, "value", held.state))
+        observed_at = getattr(held, "held_since", None)
+        age: float | None = None
+        if observed_at is not None:
+            ref = (
+                observed_at
+                if observed_at.tzinfo is not None
+                else observed_at.replace(tzinfo=UTC)
+            )
+            age = max(0.0, (at_aware - ref).total_seconds())
+
+        samples = tuple(store.window(reader, at - timedelta(days=1), at))
+        sample_count = len(samples)
+        repeat_count = 0
+        evidence_count = 0
+        bad_flags: set[str] = set()
+        for sample in samples:
+            flags = tuple(getattr(sample, "quality_flags", ()) or ())
+            codes = {str(getattr(flag, "value", flag)) for flag in flags}
+            bad_flags |= codes & _NON_EVIDENCE_FLAG_VALUES
+            if QualityFlag.REPEATED.value in codes:
+                repeat_count += 1
+            else:
+                evidence_count += 1
+
+        cadence = store.cadence(reader)
+        cadence_s = float(cadence.seconds) if cadence is not None else None
+        observed_cadence = (
+            cadence_s
+            if cadence is not None
+            and getattr(cadence, "source", None) == CADENCE_SOURCE_OBSERVED
+            else None
+        )
+        sigma = store.sigma(reader)
+        noise = float(sigma) if sigma is not None else None
+        reader_state = store.reader_state(reader)
+        resolution = getattr(reader_state, "resolution_w", None)
+
+        value = getattr(held, "value", None)
+        if state == "missing":
+            value = None
+        if value is None:
+            qstatus = QualityStatus.MISSING.value
+        elif bad_flags or state == "bad":
+            qstatus = QualityStatus.BAD.value
+        elif state == "stale":
+            qstatus = QualityStatus.STALE.value
+        else:
+            qstatus = QualityStatus.GOOD.value
+        repeated = bool(
+            samples
+            and QualityFlag.REPEATED.value
+            in {
+                str(getattr(f, "value", f))
+                for s in samples[-1:]
+                for f in (getattr(s, "quality_flags", ()) or ())
+            }
+        )
+        channels[reader] = AlignedChannel(
+            channel=reader,
+            value_w=value,
+            age_seconds=age,
+            quality=qstatus,
+            repeated=repeated,
+            state_timestamp=observed_at,
+            received_at=observed_at,
+            entity_id=reader,
+        )
+        health[reader] = ChannelHealth(
+            channel=reader,
+            entity_id=reader,
+            sample_count=sample_count,
+            evidence_count=evidence_count,
+            repeat_count=repeat_count,
+            repeat_ratio=(repeat_count / sample_count) if sample_count else 0.0,
+            interval_median_s=observed_cadence,
+            median_interval_s=observed_cadence,
+            noise_mad_w=noise,
+            resolution_w=resolution,
+            last_update_age_s=age,
+            last_value_w=value,
+            missing=state == "missing",
+            stale=state in ("stale", "missing"),
+            quality=qstatus,
+        )
+
+    return (
+        AlignedWindow(at=at_aware, max_age_s=float(stale_after_s), channels=channels),
+        health,
+    )
+
+
+_NON_EVIDENCE_FLAG_VALUES = frozenset(
+    {
+        QualityFlag.UNIT_INVALID.value,
+        QualityFlag.IMPLAUSIBLE_RANGE.value,
+        QualityFlag.OUT_OF_ORDER.value,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -867,6 +1034,11 @@ class DataQualityEngine:
             logged,
         )
 
+    @staticmethod
+    def _reconciliation_ratio(reconciliation: Any | None) -> float | None:
+        """Derive the ratio from ReconciliationV3 terms (see module helper)."""
+        return reconciliation_ratio(reconciliation)
+
     def _apply_reconciliation(
         self,
         reconciliation: Any | None,
@@ -878,10 +1050,14 @@ class DataQualityEngine:
         if reconciliation is None:
             return overall, logged
         t = self.thresholds
+        # ReconciliationV3 has no ``reconciliation_error_ratio`` field; derive
+        # the ratio from its terms.  An explicit ratio (legacy object) still
+        # wins; otherwise the v3 terms supply it.  ``None`` means no ratio --
+        # honest absence, never a fabricated zero or a penalty.
         raw_ratio = getattr(reconciliation, "reconciliation_error_ratio", None)
         if raw_ratio is None:
-            # An absent error ratio (v3 nullable reconciliation) is honest
-            # absence, not a fabricated zero or a penalty.
+            raw_ratio = self._reconciliation_ratio(reconciliation)
+        if raw_ratio is None:
             return overall, logged
         ratio = abs(float(raw_ratio))
         if ratio > t.reconciliation_bad_ratio:
@@ -1007,5 +1183,7 @@ __all__ = [
     "QualityThresholds",
     "channel_config_from_endpoints",
     "excluded_readers",
+    "reader_state_quality_inputs",
+    "reconciliation_ratio",
     "score_to_status",
 ]
