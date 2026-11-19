@@ -21,6 +21,15 @@ Cost is O(1) per sample (one integer increment, one dict increment) and O(k) per
 report with ``k <= MAX_REJECTION_LABELS`` (16).  Nothing is stored per sample, so
 a week of rejections costs exactly the same memory as one.
 
+The gate v2 (L4) adds seven further rejection reasons (design §9).  Together
+with the eleven legacy :class:`~wattmosaic_engine.contracts.SampleRejection`
+values that is 18 distinct labels, still below the bound of 16 reserved slots
+when the overflow bucket is accounted for; the bound guards against unknown or
+future reasons and never folds a real one.  :meth:`LearningAccounting.record`
+already keys on the reason's ``.value``, so a ``GateRejection`` is reported per
+reason exactly like a legacy ``SampleRejection`` -- no code change is needed for
+the tally itself, only this documentation of the enlarged reason set.
+
 Owner decision (OD-51, 2026-11-18): topology is *always* authoritative for
 inference and learning.  A candidate topology no longer blocks learning -- the
 sample filter only rejects genuinely contradictory topology evidence, and the
@@ -42,7 +51,7 @@ STATE_OFF = "off"
 EFFECTIVE_STATES: frozenset[str] = frozenset({STATE_LEARNING, STATE_BLOCKED, STATE_OFF})
 
 #: At most this many distinct rejection labels are remembered.  The contract
-#: currently has 11 ``SampleRejection`` values, so the bound is theoretical — it
+#: currently has 11 ``SampleRejection`` values (plus 7 gate-v2 reasons), so the bound is theoretical — it
 #: exists so a future/unknown reason cannot make the tally grow with traffic.
 MAX_REJECTION_LABELS = 16
 OTHER_LABEL = "other"

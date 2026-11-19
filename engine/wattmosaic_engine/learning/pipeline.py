@@ -15,8 +15,10 @@ from typing import Any
 
 from ..contracts import (
     DeviceModelVersion,
+    EventGroupStatus,
     EventIsolation,
     HaEntityBinding,
+    LearningObservation,
     LearningSample,
     ModelStatus,
     utcnow,
@@ -34,7 +36,15 @@ from ..storage.database import Database
 from .promotion import PromotionDecision, PromotionManager
 from .reporting import FILTER_ERROR_LABEL, LearningAccounting
 from .sample_collector import SampleCollector
-from .sample_filter import SampleEvidence, SampleFilter, sample_notes
+from .sample_filter import (
+    GateDecision,
+    GateInputs,
+    GateRejection,
+    SampleEvidence,
+    SampleFilter,
+    evaluate_gate,
+    sample_notes,
+)
 from .thresholds import LearningThresholds
 from .trainer import Trainer, TrainingResult
 
@@ -316,6 +326,77 @@ class LearningPipeline:
             except Exception as exc:
                 _LOGGER.warning("failed to persist learning sample: %s", exc)
         return accepted, rejected
+
+    # -- observation intake (L4 gate v2) --------------------------------- #
+    def intake_observations(
+        self,
+        observations: Sequence[LearningObservation],
+        *,
+        group_status: EventGroupStatus | str = EventGroupStatus.CONFIRMED,
+        measurement_quality_ok: bool = True,
+        unknown_share_by_subject: Mapping[str, float] | None = None,
+        relationship_suspected_by_subject: Mapping[str, bool] | None = None,
+        independent_event_by_subject: Mapping[str, bool] | None = None,
+        model_consistent_by_subject: Mapping[str, bool] | None = None,
+        model_error_by_subject: Mapping[str, float] | None = None,
+        model_sigma_by_subject: Mapping[str, float] | None = None,
+        edges_confirmed_for: Any = None,
+    ) -> tuple[list[LearningObservation], list[LearningObservation]]:
+        """Evaluate device-attributed observations through the v2 gate v2.
+
+        Persists every observation idempotently through S18 ``put_observation``
+        (a replay of the same event is a true no-op).  Returns
+        ``(accepted, held_or_rejected)``; the second list keeps every
+        observation with its reason so rejections are auditable (design §9,
+        HB §13.1).  Group-only observations are rejected with the
+        ``non_identifiable`` reason and never produce a per-device update.
+
+        T4's ``edges_confirmed_for(subject_id)`` callable is injected here.  It
+        replaces the aggregate ``Topology.status == CONFIRMED`` gate.  Until T4
+        is merged the caller supplies a callable (a fake in tests); production
+        code depends only on the callable seam.
+        """
+        accepted: list[LearningObservation] = []
+        held: list[LearningObservation] = []
+        unknown = unknown_share_by_subject or {}
+        suspected = relationship_suspected_by_subject or {}
+        independent = independent_event_by_subject or {}
+        consistent = model_consistent_by_subject or {}
+        errors = model_error_by_subject or {}
+        sigmas = model_sigma_by_subject or {}
+        for observation in observations:
+            subject = observation.subject_id
+            inputs = GateInputs(
+                group_status=group_status,
+                measurement_quality_ok=measurement_quality_ok,
+                unknown_share=unknown.get(subject),
+                relationship_suspected=bool(suspected.get(subject, False)),
+                independent_event=bool(independent.get(subject, True)),
+                model_consistent=bool(consistent.get(subject, True)),
+                model_abs_error_w=errors.get(subject),
+                model_sigma_w=sigmas.get(subject),
+                edges_confirmed_for=edges_confirmed_for,
+            )
+            try:
+                decision: GateDecision = evaluate_gate(
+                    observation, inputs, clock=utcnow, thresholds=self.thresholds
+                )
+                stamped = decision.apply(observation)
+            except Exception as exc:  # pragma: no cover - defensive, spec §21
+                _LOGGER.warning("learning gate failed for %s: %s", observation.observation_id, exc)
+                decision = GateDecision(
+                    accepted=False,
+                    rejection_reason=GateRejection.MEASUREMENT_QUALITY,
+                    detail="gate_error",
+                )
+                stamped = decision.apply(observation)
+            self.accounting.record(decision.accepted, stamped.rejection_reason)
+            try:
+                self._db.repos.learning.put_observation(stamped)
+            except Exception as exc:  # pragma: no cover - defensive
+                _LOGGER.warning("failed to persist learning observation: %s", exc)
+            (accepted if decision.accepted else held).append(stamped)
+        return accepted, held
 
     # -- training --------------------------------------------------------- #
     def train(
