@@ -53,7 +53,7 @@
 | S19 | 2 | VERIFIED |  |  |  |
 | P1 | 3 | VERIFIED |  |  | new path applies polarity once; legacy-path DEF-01 unproven (removed in Z2) |
 | P2 | 3 | VERIFIED |  |  |  |
-| P3 | 3 | VERIFIED |  |  | DATA_GAP delta 0.0 sentinel fixed by P3b |
+| P3 | 3 | VERIFIED |  |  | P3b follow-up: DATA_GAP delta None |
 | P4 | 3 | NOT_STARTED | | | |
 | P5 | 3 | NOT_STARTED | | | |
 | T1 | 3 | VERIFIED |  |  | primary_display_tree matches M1 build_columns |
@@ -73,14 +73,14 @@
 | D3 | 3 | VERIFIED |  | AT-17 | None-guards in legacy solver for nullable age; AT-17 closes with D4/H1 |
 | U1 | 3 | VERIFIED |  | AT-12 |  |
 | I5 | 4 | VERIFIED |  | AT-14 | AT-14 closed (snapshot single-count); V1 must also check matrix physical total |
-| I6 | 4 | IN_PROGRESS |  | AT-18 |  |
+| I6 | 4 | VERIFIED |  | AT-18 | AT-18 closed; record read index in-memory (persisted via S16) |
 | I7 | 4 | NOT_STARTED | | | |
 | T5 | 4 | IN_PROGRESS |  | AT-02 |  |
 | T6 | 4 | NOT_STARTED | | AT-04 | |
 | T7 | 4 | NOT_STARTED | | AT-15, 16 | |
 | M2 | 4 | VERIFIED |  | AT-11 | AT-11 closed |
 | M3 | 4 | IN_PROGRESS |  |  |  |
-| L4 | 4 | IN_PROGRESS |  |  |  |
+| L4 | 4 | VERIFIED |  |  |  |
 | L5 | 4 | NOT_STARTED | | | |
 | L6 | 4 | NOT_STARTED | | | |
 | D4 | 4 | IN_PROGRESS |  |  |  |
