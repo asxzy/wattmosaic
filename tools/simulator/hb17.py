@@ -228,6 +228,7 @@ def build(
     plug_move_minute: float | None = None,
     interval_s: float = 10.0,
     start_time: datetime | None = None,
+    lead_in_minutes: float = 0.0,
 ) -> HB17House:
     """Build the HB §17 reference house.
 
@@ -237,7 +238,18 @@ def build(
     control) or ``"relocated_tv"`` (after step 9 the TV toggles on/off
     :data:`RELOCATED_TV_TOGGLES` times so the T7 relocation detector sees >= 5
     post-move events).  ``plug_move_minute`` overrides when step 9 happens.
+
+    ``lead_in_minutes`` prepends a quiet, steady prelude (HB §17 step 1,
+    "establish the current measurement state") before the scripted steps: every
+    step instant -- and the horizon -- is shifted later by that amount, and the
+    prelude carries only baseline physics (no HA message, no transition).  A
+    real installation has been observing its readers long before a load event;
+    a streaming detector needs that history to trust its noise estimate (P3
+    ``sigma_warmup_samples``).  The default ``0.0`` keeps the original script.
     """
+    if lead_in_minutes < 0:
+        raise ValueError("lead_in_minutes must be >= 0")
+    lead = float(lead_in_minutes)
     if variant not in ("co_switched", "solo_switches", "relocated_tv"):
         raise ValueError(
             f"unknown hb17 variant {variant!r}: expected "
@@ -245,7 +257,9 @@ def build(
         )
     rng = random.Random(seed ^ 0x17)
     base = start_time or datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
-    move_min = plug_move_minute if plug_move_minute is not None else DEFAULT_STEP_MINUTES[9]
+    move_min = (
+        plug_move_minute if plug_move_minute is not None else DEFAULT_STEP_MINUTES[9]
+    ) + lead
     recon_min = move_min + 2.0
 
     # The relocated variant needs a stream long enough for every post-move TV
@@ -257,9 +271,11 @@ def build(
         needed_min = (
             move_min + spacing_minutes + (RELOCATED_TV_TOGGLES - 1) * spacing_minutes + 1.0
         )
-        minutes = max(float(minutes), needed_min)
+        minutes = max(float(minutes), needed_min - lead)
+    # The caller's ``minutes`` is the scripted duration; the prelude is added.
+    minutes = float(minutes) + lead
 
-    step_minutes = dict(DEFAULT_STEP_MINUTES)
+    step_minutes = {n: m + lead for n, m in DEFAULT_STEP_MINUTES.items()}
     step_minutes[9] = move_min
     step_minutes[10] = recon_min
     step_names = {
@@ -530,6 +546,25 @@ def build(
             "true_fridge_on": fridge_on,
             "true_tv_power_w": round(_tv_power(t_mid), 4),
             "plug_moved": tv_circuit_changed,
+            # Grader-only per-device and per-conductor watts at the sample
+            # instant (the accuracy harness scores published estimates against
+            # these).  Keyed by the subject ids a user declares: one per HA light.
+            "device_power_w": {
+                LIGHT_ENTITIES[0]: _lights_power(t_mid)[0],
+                LIGHT_ENTITIES[1]: _lights_power(t_mid)[1],
+                "tv": round(_tv_power(t_mid), 4),
+                "fridge": _fridge_power(),
+                "hvac_compressor": _compressor_power(t_mid),
+                "blind": _blind_power(t_mid),
+            },
+            "ct_powers_w": {k: round(v, 6) for k, v in _reader_values(t_mid).items()},
+            #: The unmonitored load directly on Main (HB §17 preamble).
+            "unmetered_w": BASELINE_W["ct_main"] - BASELINE_W["ct_sub"] - BASELINE_W["ct_c"],
+            #: Subjects whose individual power the scripted evidence cannot
+            #: separate: the co-switched lights never switch alone.
+            "non_identifiable_groups": (
+                [] if variant == "solo_switches" else [list(LIGHT_ENTITIES)]
+            ),
         }
 
         house.records.append({

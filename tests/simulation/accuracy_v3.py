@@ -2,43 +2,46 @@
 
 Replaces the deleted legacy ``tests/simulation/test_accuracy.py`` and its
 ``EngineAdapter`` (which drove the removed ``DisaggregationEngine``).  It drives
-the **real v3 runtime** through X07 simulator scenarios and grades what the
-engine publishes against simulator ground truth, stratified with the existing
-helpers in :mod:`tests.simulation.metrics`.
+production v3 code over X07 simulator scenarios and grades what the engine
+*publishes* against simulator ground truth, per stratum.
 
 Two paths, both through production code
 ---------------------------------------
-* **EngineCore three-loop runtime** (``wattmosaic_engine.realtime.EngineHarness``)
-  for the HB §17 house.  HA-shaped messages and reader samples are driven by the
-  X07 replay driver through ``EngineCore``'s real callbacks with an injected
-  clock; the published
-  :class:`~wattmosaic_engine.contracts.InferenceSnapshot` / last
-  :class:`~wattmosaic_engine.contracts.JointInferenceResult` is graded.
-* **Pure I7 inference** (``wattmosaic_engine.inference.orchestrator.infer_steady``)
-  for the T-scenario strata.  Each single-subject endpoint (a CT, or paired leg
-  CTs, that measures one device alone) is driven through the real T2 observation
-  operator and T3 residual model; no engine code is edited and no ground truth
-  is ever handed to inference.
+* **EngineCore three-loop runtime** for the HB §17 house
+  (``wattmosaic_engine.realtime.EngineHarness``).  HA-shaped messages and reader
+  samples are replayed record by record through ``EngineCore``'s fast loop; the
+  event and steady loops run after every record on an injected clock; the
+  published :class:`~wattmosaic_engine.contracts.InferenceSnapshot` is graded
+  *at every record*.  The house gets a 15-minute quiet prelude
+  (``lead_in_minutes``) so the P3 detector's 64-sample noise warm-up has passed
+  before the first scripted step (a cold start never detects a step at
+  sample 30).
+* **Pure I7 inference** (``infer_steady``) for the lab strata, over the real T2
+  observation operator built from the *declared* circuit wiring.
 
-Ground truth is read **only by the grader**.  Everything handed to the engine
-passes through :func:`tools.simulator.frames.observation_view` and is checked
-with :func:`tools.simulator.frames.assert_no_ground_truth_keys`.
+Declared configuration (never truth): HB §17 — one subject per HA light on
+Circuit A and the TV on its plug, plus the HA entity links; lab strata — each
+HA-visible device's declared branch circuit(s) (``SimDevice.circuits`` on
+branch CTs; devices declared only on a main leg are the unmetered loads and are
+not declared).  A user supplies exactly this wiring when configuring circuits.
+The simulator's per-device watts, conductor truth and unmetered power are read
+**only by the grader**; everything handed to the engine passes through
+:func:`tools.simulator.frames.observation_view` and the leak detector.
 
 Grading on v3 semantics (HB §8.4/§8.5, HB §18, implementation-plan §8):
 
-* estimate status is MEASURED / ESTIMATED / ALLOCATED / UNKNOWN;
-* ``UNKNOWN`` (a ``None`` point) is *no claim*, never 0 W — it is not scored as
-  a per-device error and its energy is never fabricated;
-* energy of a published group estimate is counted once as *group-identified
-  energy*, never split over its non-identifiable members;
-* a **forced attribution** is a device reported ESTIMATED / MEASURED / ALLOCATED
-  with a point while its evidence only supports a group (a non-identifiable
-  member) — counted per stratum against simulator truth.
-
-A MEASURED single-subject endpoint is graded against the **CT conductor truth**
-(``ground_truth.ct_powers_w``) for the CTs that endpoint observes: this is the
-physical quantity the endpoint measured.  A one-leg CT of a double-pole load is
-therefore honestly graded against its single-leg truth, not the device total.
+* ``UNKNOWN`` (a ``None`` point) is *no claim*, never 0 W;
+* a **forced attribution** is a published point for a subject the simulator's
+  own evidence cannot separate (a member of a truth non-identifiable group:
+  the HB §17 co-switched lights; devices sharing exactly one lab branch CT), or
+  a point for a member of a published group;
+* a published group's sum is counted once as **group-identified energy**;
+* a published unknown-load estimate is counted once as **unknown energy**;
+* **residual preservation**: the observed main reading minus everything the
+  engine claimed (device points + group sums) must not fall below the true
+  unmetered load by more than ``max(10 %, 5 W)`` — claims never eat the residual;
+* a MEASURED single-subject endpoint is graded against the CT conductor truth
+  of the CTs it observes.
 
 ``python -m tests.simulation.accuracy_v3`` prints the stratified report for
 ``docs/acceptance_report.md``.
@@ -73,7 +76,8 @@ from tools.simulator.frames import (
 
 __all__ = [
     "DEFAULT_SCENARIOS",
-    "MEASUREMENT_SIGMA_W",
+    "HB17_DEVICES",
+    "HB17_LEAD_IN_MIN",
     "V3StratumReport",
     "V3Report",
     "run_scenario",
@@ -90,13 +94,18 @@ _VERSIONS = VersionTriple(
     model_set_id="mset-sim-v3",
 )
 
-#: Declared CT noise sigma (design §3: sigma_min = 1 W; simulator adds < 1 W
-#: of _snap perturbation).  A MEASURED single-subject endpoint is graded
-#: against its CT truth within this sigma.
-MEASUREMENT_SIGMA_W = 3.0
+#: HB §17 declared configuration (see the module docstring).
+HB17_LIGHTS = ("light.living_room_1", "light.living_room_2")
+HB17_DEVICES: dict[str, str] = {HB17_LIGHTS[0]: "ct_a", HB17_LIGHTS[1]: "ct_a", "tv": "ct_plug"}
+HB17_ENTITY_LINKS = (
+    (HB17_LIGHTS[0], HB17_LIGHTS[0]),
+    (HB17_LIGHTS[1], HB17_LIGHTS[1]),
+    ("switch.tv_plug", "tv"),
+)
+HB17_LEAD_IN_MIN = 15.0
+HB17_SCRIPT_MIN = 12.0
 
-#: Scenarios the accuracy report grades.  Keys are stable report labels; values
-#: are ``("hb17", variant)`` or ``("lab", stratum)``.
+#: Scenarios the accuracy report grades.
 DEFAULT_SCENARIOS: tuple[tuple[str, str], ...] = (
     ("hb17_co_switched", "hb17:co_switched"),
     ("hb17_solo_switches", "hb17:solo_switches"),
@@ -106,23 +115,30 @@ DEFAULT_SCENARIOS: tuple[tuple[str, str], ...] = (
     ("lab_automation_burst", "lab:automation_burst"),
 )
 
+_CLAIMED_STATUSES = frozenset({"measured", "estimated", "allocated"})
+
 
 # --------------------------------------------------------------------------- #
-# Result containers (additive; metrics.py containers are reused unchanged).
+# Result containers.
 # --------------------------------------------------------------------------- #
 
 
 @dataclass(slots=True)
 class V3StratumReport:
-    """Per-stratum v3 semantics metrics (built on metrics.py primitives)."""
+    """Per-stratum v3 metrics (built on metrics.py primitives)."""
 
     stratum: str
     n_records: int = 0
     attributed_pct: float = 0.0
     group_identified_energy_kwh: float = 0.0
-    residual_preservation_ratio: float = 0.0
+    unknown_energy_kwh: float = 0.0
+    truth_energy_kwh: float = 0.0
+    residual_preservation_ratio: float | None = None
+    residual_checked: int = 0
     forced_attribution_count: int = 0
     attributed_points: int = 0
+    published_points: int = 0
+    group_points: int = 0
     unknown_points: int = 0
     #: MEASURED single-subject endpoints: (truth_w, published_w) per sample.
     measured_pairs: list[tuple[float, float]] = field(default_factory=list)
@@ -134,19 +150,29 @@ class V3StratumReport:
             "n_records": self.n_records,
             "attributed_pct": round(self.attributed_pct, 4),
             "group_identified_energy_kwh": round(self.group_identified_energy_kwh, 6),
-            "residual_preservation_ratio": round(self.residual_preservation_ratio, 4),
+            "unknown_energy_kwh": round(self.unknown_energy_kwh, 6),
+            "truth_energy_kwh": round(self.truth_energy_kwh, 6),
+            "residual_preservation_ratio": (
+                None
+                if self.residual_preservation_ratio is None
+                else round(self.residual_preservation_ratio, 4)
+            ),
+            "residual_checked": self.residual_checked,
             "forced_attribution_count": self.forced_attribution_count,
             "attributed_points": self.attributed_points,
+            "published_points": self.published_points,
+            "group_points": self.group_points,
             "unknown_points": self.unknown_points,
+            "measured_points": len(self.measured_pairs),
         }
-        if self.error is not None:
+        if self.error is not None and self.measured_pairs:
             out["error"] = self.error.as_dict()
         return out
 
 
 @dataclass(slots=True)
 class V3Report:
-    """Graded report for every scenario, plus metrics.py's stratified base."""
+    """Graded report for every scenario."""
 
     scenarios: dict[str, V3StratumReport] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
@@ -165,56 +191,69 @@ class V3Report:
 
 
 # --------------------------------------------------------------------------- #
-# Scenario construction and observation-only endpoint discovery.
+# Frames: observation for the engine, truth for the grader.
 # --------------------------------------------------------------------------- #
 
 
-def _frames(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def _hb17_truth(record: Mapping[str, Any]) -> dict[str, Any]:
+    truth = record.get("truth") or {}
+    return {
+        "t_s": float(record.get("t_s") or 0.0),
+        "devices": {
+            dev: {"power_w": float(watts), "attributable": True}
+            for dev, watts in (truth.get("device_power_w") or {}).items()
+        },
+        "ct_powers_w": dict(truth.get("ct_powers_w") or {}),
+        "unmetered_w": float(truth.get("unmetered_w") or 0.0),
+        "non_identifiable_groups": [list(g) for g in truth.get("non_identifiable_groups") or ()],
+    }
+
+
+def _frames(observations: Sequence[Mapping[str, Any]], truths: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    for rec in records:
-        obs = observation_view(rec)
+    for obs, truth in zip(observations, truths, strict=True):
         assert_no_ground_truth_keys(obs, where="accuracy_v3 observation view")
-        out.append({"observation": obs, "ground_truth": truth_view(rec)})
+        out.append({"observation": obs, "ground_truth": truth})
     return out
 
 
-def _build_frames(spec: str, *, seed: int) -> list[dict[str, Any]]:
+def _lab_declared(house: Any) -> dict[str, tuple[str, ...]]:
+    """Declared branch wiring: ``device -> sorted branch CT ids`` (no main legs)."""
+    main = {c.ct_id for c in house.topology.channels if str(getattr(c.ct_type, "value", c.ct_type)) == "main"}
+    declared: dict[str, tuple[str, ...]] = {}
+    for device in house.scenario.devices:
+        cts = tuple(sorted(ct for ct in device.circuits if ct not in main))
+        if cts:
+            declared[str(device.device_id)] = cts
+    return declared
+
+
+def _lab_non_identifiable(declared: Mapping[str, tuple[str, ...]]) -> list[list[str]]:
+    """Grader-only: devices whose declared CT set is shared exactly (inseparable)."""
+    by_cts: dict[tuple[str, ...], list[str]] = defaultdict(list)
+    for device, cts in declared.items():
+        by_cts[cts].append(device)
+    return [sorted(devs) for devs in by_cts.values() if len(devs) >= 2]
+
+
+def _build(spec: str, *, seed: int) -> tuple[list[dict[str, Any]], Any]:
     if spec.startswith("hb17:"):
-        house = build_hb17(seed, minutes=12, variant=spec.split(":", 1)[1])
-        return _frames(house.records)
-    stratum = spec.split(":", 1)[1] if spec.startswith("lab:") else spec
+        house = build_hb17(
+            seed, minutes=HB17_SCRIPT_MIN, variant=spec.split(":", 1)[1],
+            lead_in_minutes=HB17_LEAD_IN_MIN,
+        )
+        frames = _frames(house.observation_view(), [_hb17_truth(r) for r in house.records])
+        return frames, house
+    stratum = spec.split(":", 1)[1]
     house = build_scenario(stratum, seed=seed, minutes=6)
-    return _frames(house.to_list())
-
-
-def _observed_endpoints(records: Sequence[Mapping[str, Any]]) -> dict[str, tuple[str, ...]]:
-    """Device -> observed dedicated CTs, from HA device ids + CT ids only.
-
-    A CT whose id contains the device key (e.g. ``ct_main_water_heater_ct1``)
-    is treated as measuring that device.  A paired-leg device exposes two such
-    CTs (``_ct1`` / ``_ct2``); both are summed into the single-subject endpoint.
-    Devices with no dedicated CT are not endpoints.
-    """
-    if not records:
-        return {}
-    obs0 = records[0]["observation"]
-    measurements = obs0.get("latest_measurements") or obs0.get("measurements") or {}
-    reader_ids = tuple(sorted(measurements))
-    ha_devices = sorted(
-        {
-            str(st["device_id"])
-            for rec in records
-            for st in (rec["observation"].get("ha_states") or {}).values()
-            if st.get("device_id")
-        }
-    )
-    endpoints: dict[str, tuple[str, ...]] = {}
-    for dev in ha_devices:
-        key = dev.replace("_", "")
-        matched = tuple(r for r in reader_ids if key in r.replace("_", "").lower())
-        if matched:
-            endpoints[dev] = matched
-    return endpoints
+    records = house.to_list()
+    groups = _lab_non_identifiable(_lab_declared(house))
+    truths = []
+    for record in records:
+        truth = truth_view(record)
+        truth["non_identifiable_groups"] = groups
+        truths.append(truth)
+    return _frames([observation_view(r) for r in records], truths), house
 
 
 def _value_of(sample: Mapping[str, Any]) -> float | None:
@@ -226,26 +265,8 @@ def _value_of(sample: Mapping[str, Any]) -> float | None:
 
 
 # --------------------------------------------------------------------------- #
-# Grader: v3 semantics on top of metrics.py primitives.
+# Grader.
 # --------------------------------------------------------------------------- #
-
-
-def _truth_attributable(truth: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
-    return {
-        dev_id: info
-        for dev_id, info in (truth.get("devices") or {}).items()
-        if info.get("attributable", True)
-    }
-
-
-def _group_members(groups: Sequence[Mapping[str, Any]]) -> set[str]:
-    members: set[str] = set()
-    for group in groups:
-        members.update(str(m) for m in (group.get("member_ids") or ()))
-    return members
-
-
-_CLAIMED_STATUSES = frozenset({"measured", "estimated", "allocated"})
 
 
 def grade_v3(
@@ -254,143 +275,156 @@ def grade_v3(
     *,
     stratum: str = "all",
 ) -> V3StratumReport:
-    """Grade one scenario's published predictions against simulator truth.
+    """Grade one scenario's per-record published view against simulator truth.
 
-    Each prediction may carry ``measured_refs: {subject_id: [ct_id, ...]}``:
-    for a MEASURED single-subject endpoint the grader grades the published value
-    against the CT conductor truth curve.  A CT sample delivered at a record can
-    describe a physical instant up to one cadence earlier — at an ON/OFF step
-    the sample instant's truth differs from the record instant's truth.  The
-    harness scores at the *sample instant* (the conservative, physically honest
-    definition): for the endpoint's CT(s) it picks the truth value closest to
-    the published point.  That value is grader-only; inference never sees it.
+    Each prediction is ``{"devices": {sid: {"point_w", "status"}}, "groups":
+    [{"group_id", "member_ids", "point_w"}], "unknown_w": float | None,
+    "residual_w": float | None, "measured_refs": {sid: [ct, ...]}}``.
     """
     report = V3StratumReport(stratum=stratum, n_records=len(records))
     if len(predictions) != len(records):
         raise ValueError(f"prediction/record count mismatch: {len(predictions)} != {len(records)}")
 
-    group_energy: dict[str, list[tuple[float, float]]] = defaultdict(list)
-    residual_preserved = 0
-    residual_checked = 0
-    attributed_sum = 0.0
-    truth_attr_sum = 0.0
-
-    # Per-CT truth curves across the scenario.  A single-subject endpoint's
-    # published point is a held CT sample; a sample taken just before a step is
-    # stale at the record instant but was physically true at its sampling
-    # instant.  Grade it against the closest truth level on that CT's curve so
-    # an honest stale sample is not scored as fabrication (cf. metrics.py's
-    # SAMPLE_VINTAGE_TOLERANCE_S).
+    group_series: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    unknown_series: list[tuple[float, float]] = []
+    claimed_series: list[tuple[float, float]] = []
+    truth_series: list[tuple[float, float]] = []
+    preserved = 0
     ct_truth_curves: dict[str, list[float]] = defaultdict(list)
     for rec in records:
         for ct_id, value in (rec["ground_truth"].get("ct_powers_w") or {}).items():
             ct_truth_curves[str(ct_id)].append(float(value))
 
     for rec, pred in zip(records, predictions, strict=True):
-        truth = _truth_attributable(rec["ground_truth"])
-        unmetered_w = float(rec["ground_truth"].get("unmetered_w") or 0.0)
-        at_s = float(rec["ground_truth"].get("t_s") or 0.0)
+        truth = rec["ground_truth"]
+        at_s = float(truth.get("t_s") or 0.0)
+        devices_truth = {
+            dev: info for dev, info in (truth.get("devices") or {}).items()
+            if info.get("attributable", True)
+        }
+        inseparable = {m for group in truth.get("non_identifiable_groups") or () for m in group}
         devices: Mapping[str, Any] = pred.get("devices") or {}
         groups: Sequence[Mapping[str, Any]] = pred.get("groups") or ()
-        group_members = _group_members(groups)
+        group_members = {str(m) for g in groups for m in (g.get("member_ids") or ())}
         measured_refs: Mapping[str, Sequence[str]] = pred.get("measured_refs") or {}
 
-        attributed_w = 0.0
-        for dev_id, info in truth.items():
-            claim = devices.get(dev_id) or {}
+        claimed_w = 0.0
+        report.published_points += len(devices)
+        for dev_id, claim in devices.items():
             point = claim.get("point_w")
             status = str(claim.get("status", "unknown")).lower()
-            truth_w = float(info.get("power_w", 0.0))
-            truth_attr_sum += truth_w
-            if dev_id in group_members:
-                if point is not None and status in _CLAIMED_STATUSES:
-                    report.forced_attribution_count += 1
-                report.unknown_points += 1
+            if point is None or status not in _CLAIMED_STATUSES:
                 continue
-            if point is None or status == "unknown":
-                report.unknown_points += 1
+            if dev_id in inseparable or dev_id in group_members:
+                report.forced_attribution_count += 1
                 continue
             report.attributed_points += 1
-            attributed_w += float(point)
+            claimed_w += float(point)
             if status == "measured":
-                # Grade against the closest true level of the observed CT(s):
-                # a held sample just before a step is stale at the record
-                # instant but was true when sampled.  Paired legs sum to the
-                # endpoint total, matched on each leg's truth level.
                 refs = [c for c in (measured_refs.get(dev_id) or ()) if c in ct_truth_curves]
                 if refs:
+                    # A held sample just before a step was true when sampled:
+                    # grade against the closest true level of each observed CT.
                     expected = sum(
                         min(ct_truth_curves[c], key=lambda v: abs(v - float(point) / len(refs)))
                         for c in refs
                     )
                 else:
-                    expected = truth_w
+                    expected = float((devices_truth.get(dev_id) or {}).get("power_w", 0.0))
                 report.measured_pairs.append((expected, float(point)))
-
-        group_energy_w = 0.0
+        report.unknown_points += sum(
+            1 for dev in devices_truth
+            if (devices.get(dev) or {}).get("point_w") is None
+            or str((devices.get(dev) or {}).get("status", "unknown")).lower() not in _CLAIMED_STATUSES
+        )
         for group in groups:
             point = group.get("point_w")
             if point is None:
                 continue
-            group_energy_w += float(point)
-            group_energy[str(group.get("group_id", "group"))].append((at_s, float(point)))
-        attributed_sum += attributed_w + group_energy_w
+            report.group_points += 1
+            claimed_w += float(point)
+            group_series[str(group.get("group_id", "group"))].append((at_s, float(point)))
+        unknown = pred.get("unknown_w")
+        if unknown is not None:
+            unknown_series.append((at_s, float(unknown)))
+        claimed_series.append((at_s, claimed_w))
+        truth_series.append((at_s, sum(float(i.get("power_w", 0.0)) for i in devices_truth.values())))
 
-        residual = pred.get("residual_w")
-        if residual is not None:
-            residual_checked += 1
-            if float(residual) >= unmetered_w - max(0.10 * max(unmetered_w, 1.0), 5.0):
-                residual_preserved += 1
+        main = pred.get("main_w")
+        if main is not None:
+            report.residual_checked += 1
+            residual = float(main) - claimed_w
+            unmetered = float(truth.get("unmetered_w") or 0.0)
+            if residual >= unmetered - max(0.10 * max(unmetered, 1.0), 5.0):
+                preserved += 1
 
-    report.attributed_pct = (attributed_sum / truth_attr_sum * 100.0) if truth_attr_sum else 0.0
+    truth_kwh = trapezoid_energy_kwh(truth_series)
+    claimed_kwh = trapezoid_energy_kwh(claimed_series)
+    report.truth_energy_kwh = truth_kwh
+    report.attributed_pct = (claimed_kwh / truth_kwh * 100.0) if truth_kwh else 0.0
+    report.group_identified_energy_kwh = sum(trapezoid_energy_kwh(s) for s in group_series.values())
+    report.unknown_energy_kwh = trapezoid_energy_kwh(unknown_series)
     report.residual_preservation_ratio = (
-        residual_preserved / residual_checked if residual_checked else 0.0
-    )
-    report.group_identified_energy_kwh = sum(
-        trapezoid_energy_kwh(samples) for samples in group_energy.values()
+        preserved / report.residual_checked if report.residual_checked else None
     )
     report.error = error_stats(report.measured_pairs)
     return report
 
 
 # --------------------------------------------------------------------------- #
-# Prediction adapters.
+# Engine drivers.
 # --------------------------------------------------------------------------- #
 
 
-def _v3_view(result: Any) -> dict[str, Any]:
-    devices: dict[str, Any] = {}
-    for est in getattr(result, "device_estimates", ()):
-        devices[str(est.subject_id)] = {
-            "point_w": est.point_w,
-            "status": str(getattr(est.status, "value", est.status)),
-        }
-    groups = [
-        {
-            "group_id": str(g.group_id),
-            "member_ids": [str(m) for m in g.member_ids],
-            "point_w": g.point_w,
-        }
-        for g in getattr(result, "group_estimates", ())
-    ]
-    residual_by_reader: Mapping[str, Any] = getattr(result, "residual_w_by_reader", {}) or {}
-    residuals = [float(v) for v in residual_by_reader.values() if v is not None]
+def _snapshot_view(snapshot: Any, main_w: float | None) -> dict[str, Any]:
+    if snapshot is None:
+        return {"devices": {}, "groups": [], "unknown_w": None, "main_w": main_w}
     return {
-        "devices": devices,
-        "groups": groups,
-        "residual_w": min(residuals) if residuals else None,
+        "devices": {
+            str(e.subject_id): {"point_w": e.point_w, "status": str(getattr(e.status, "value", e.status))}
+            for e in snapshot.device_estimates
+        },
+        "groups": [
+            {"group_id": str(g.group_id), "member_ids": [str(m) for m in g.member_ids], "point_w": g.point_w}
+            for g in snapshot.group_estimates
+        ],
+        "unknown_w": snapshot.reconciliation.unknown_w,
+        "main_w": main_w,
     }
 
 
-def _as_datetime(value: Any) -> datetime | None:
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, str):
-        try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
-        except ValueError:
-            return None
-    return None
+def _run_hb17_runtime(house: Any) -> list[dict[str, Any]]:
+    """Replay an HB §17 house through EngineCore; one published view per record."""
+    from wattmosaic_engine.contracts.entities import PhysicalDevice
+    from wattmosaic_engine.realtime import EngineHarness
+
+    start = house.start_time
+    observation = house.observation_view()
+
+    def configure(core: Any) -> None:
+        at = start - timedelta(days=1)
+        for device_id in (*HB17_LIGHTS, "tv"):
+            core.db.repos.entities.upsert_device(
+                PhysicalDevice(device_id=device_id, name=device_id, origin="user", created_at=at)
+            )
+        for entity_id, target in HB17_ENTITY_LINKS:
+            core.db.repos.entities.add_entity_link(
+                {"entity_id": entity_id, "target_kind": "device", "target_id": target,
+                 "role": "state", "valid_from": at, "declared_by": "user"}
+            )
+
+    harness = EngineHarness.start(observation, start_time=start, devices=HB17_DEVICES, configure=configure)
+    views: list[dict[str, Any]] = []
+    try:
+        for record in observation:
+            harness.feed(record)
+            main = _value_of((record.get("reader_samples") or {}).get("ct_main") or {})
+            view = _snapshot_view(harness.snapshot, main)
+            view["measured_refs"] = {"tv": ["ct_plug"]}
+            views.append(view)
+    finally:
+        harness.close()
+    return views
 
 
 class _EmptyEstablished:
@@ -407,105 +441,77 @@ class _EmptyEstablished:
 
 
 def _held(value: float, at: datetime) -> HeldReading:
-    return HeldReading(
-        value=value,
-        held_since=at - timedelta(seconds=30),
-        last_confirmed_at=at,
-        state="held",
-    )
+    return HeldReading(value=value, held_since=at - timedelta(seconds=30), last_confirmed_at=at, state="held")
 
 
-def _run_i7_scenario(
-    records: Sequence[Mapping[str, Any]], endpoints: Mapping[str, tuple[str, ...]]
-) -> list[dict[str, Any]]:
-    """Drive pure I7 ``infer_steady`` over one scenario's observation frames.
+def _as_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+        except ValueError:
+            return None
+    return None
 
-    Each single-subject endpoint's reader value is the sum of its observed CT
-    readings (paired legs -> endpoint total).  Feeding them as DIRECT endpoints
-    through the real T2 operator makes I5 publish MEASURED.  Devices with no
-    dedicated CT are left UNKNOWN (no claim).  Only observation values are
-    handed to the engine.
+
+def _run_lab_steady(frames: Sequence[Mapping[str, Any]], house: Any) -> list[dict[str, Any]]:
+    """Pure I7 ``infer_steady`` over the declared branch wiring, per record.
+
+    One endpoint per distinct declared CT set: a single CT (shared by every
+    device declared on it) or a double-pole pair whose leg readings are summed
+    into the endpoint total.  Only observed CT values reach the engine.
     """
-    if not records:
-        return []
-    if not endpoints:
-        return [{"devices": {}, "groups": [], "residual_w": None} for _ in records]
-
-    pairs = {("device", dev): f"ep::{dev}" for dev in sorted(endpoints)}
-
-    predictions: list[dict[str, Any]] = []
-    for rec in records:
-        obs = rec["observation"]
+    declared = _lab_declared(house)
+    endpoints: dict[str, tuple[str, ...]] = {}
+    pairs: dict[tuple[str, str], str] = {}
+    for device, cts in sorted(declared.items()):
+        endpoint = "+".join(cts)
+        endpoints[endpoint] = cts
+        pairs[("device", device)] = endpoint
+    measured_refs = {dev: list(cts) for dev, cts in declared.items()}
+    readers = tuple(sorted(endpoints))
+    subjects = tuple(sorted(pairs))
+    views: list[dict[str, Any]] = []
+    for frame in frames:
+        obs = frame["observation"]
         at = _as_datetime(obs.get("timestamp")) or _T0
-        latest = obs.get("latest_measurements") or obs.get("measurements") or {}
-        clear_operator_cache()
-        operator = build_observation_operator(
-            FakeTopology.from_tree({f"ep::{dev}": {} for dev in sorted(endpoints)}, at=at),
-            FakeMapping.from_pairs(pairs),
-            None,
-            tuple(f"ep::{dev}" for dev in sorted(endpoints)),
-            tuple(sorted(pairs)),
-            at,
-        )
+        latest = obs.get("latest_measurements") or {}
+        main_values = [
+            _value_of(latest.get(ct) or {}) for ct in ("ct_main_l1", "ct_main_l2")
+        ]
+        main = sum(v for v in main_values if v is not None) if any(v is not None for v in main_values) else None
         readings: dict[str, HeldReading] = {}
-        for dev, cts in endpoints.items():
+        for endpoint, cts in endpoints.items():
             values = [_value_of(latest.get(ct) or {}) for ct in cts]
-            usable = [v for v in values if v is not None]
-            if usable:
-                readings[f"ep::{dev}"] = _held(sum(usable), at)
+            if values and all(v is not None for v in values):
+                readings[endpoint] = _held(sum(v for v in values if v is not None), at)
+        view: dict[str, Any] = {"devices": {}, "groups": [], "unknown_w": None, "main_w": main}
         if readings:
+            clear_operator_cache()
+            operator = build_observation_operator(
+                FakeTopology.from_tree({r: {} for r in readers}, at=at),
+                FakeMapping.from_pairs(pairs),
+                None,
+                readers,
+                subjects,
+                at,
+            )
             result = infer_steady(
-                readings,
-                operator,
-                FakeModelSet.fixed({}),
-                UnknownPriorModel(),
-                _EmptyEstablished(),
-                _VERSIONS,
-                lambda at=at: at,
+                readings, operator, FakeModelSet.fixed({}), UnknownPriorModel(),
+                _EmptyEstablished(), _VERSIONS, lambda at=at: at,
             )
-            v3 = _v3_view(result)
-        else:
-            v3 = {"devices": {}, "groups": [], "residual_w": None}
-        # Observation-side reconciliation: unexplained power on the root main
-        # after the endpoint claims.  Derived only from observed readings and
-        # published points — never from ground truth.
-        main = sum(
-            value for ct_id, value in (
-                (ct, _value_of(latest.get(ct) or {})) for ct in ("ct_main_l1", "ct_main_l2")
-            ) if value is not None
-        )
-        if main:
-            claimed = sum(
-                float(c["point_w"]) for c in (v3.get("devices") or {}).values()
-                if c.get("point_w") is not None
-            )
-            v3["residual_w"] = max(0.0, main - claimed)
-        v3["measured_refs"] = {dev: list(cts) for dev, cts in endpoints.items()}
-        predictions.append(v3)
-    return predictions
-
-
-def _run_hb17_runtime(seed: int, variant: str) -> tuple[list[dict[str, Any]], Any]:
-    """Drive an HB §17 house through EngineCore's real three-loop runtime.
-
-    Returns one prediction view per record (the event-driven result held across
-    the window) and the engine's last JointInferenceResult.
-    """
-    from wattmosaic_engine.realtime import EngineHarness
-
-    house = build_hb17(seed, minutes=12, variant=variant)
-    observation = [observation_view(rec) for rec in house.records]
-    for obs in observation:
-        assert_no_ground_truth_keys(obs, where="accuracy_v3 hb17 observation")
-    harness = EngineHarness.from_hb17({"house": house, "observation": observation})
-    try:
-        result = harness.result
-        view = _v3_view(result) if result is not None and hasattr(result, "device_estimates") else {
-            "devices": {}, "groups": [], "residual_w": None,
-        }
-        return [dict(view) for _ in house.records], result
-    finally:
-        harness.close()
+            view["devices"] = {
+                str(e.subject_id): {"point_w": e.point_w, "status": str(getattr(e.status, "value", e.status))}
+                for e in result.device_estimates
+            }
+            view["groups"] = [
+                {"group_id": str(g.group_id), "member_ids": [str(m) for m in g.member_ids], "point_w": g.point_w}
+                for g in result.group_estimates
+            ]
+        view["measured_refs"] = measured_refs
+        views.append(view)
+    return views
 
 
 # --------------------------------------------------------------------------- #
@@ -519,38 +525,27 @@ def run_scenario(
     *,
     seed: int = 17,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], V3StratumReport]:
-    """Build one scenario, drive the engine and grade it.
-
-    Returns ``(frames, predictions, v3_report)``.  Ground truth stays in
-    ``frames`` for the grader only.
-    """
-    frames = _build_frames(spec, seed=seed)
-    for frame in frames:
-        assert_no_ground_truth_keys(frame["observation"], where="accuracy_v3 engine input")
-
-    if spec.startswith("hb17:"):
-        predictions, _result = _run_hb17_runtime(seed, spec.split(":", 1)[1])
-        endpoints = {}
-    else:
-        endpoints = _observed_endpoints(frames)
-        predictions = _run_i7_scenario(frames, endpoints)
-
-    v3 = grade_v3(frames, predictions, stratum=label)
-    return frames, predictions, v3
+    """Build one scenario, drive the engine and grade it."""
+    frames, house = _build(spec, seed=seed)
+    hb17 = spec.startswith("hb17:")
+    predictions = _run_hb17_runtime(house) if hb17 else _run_lab_steady(frames, house)
+    return frames, predictions, grade_v3(frames, predictions, stratum=label)
 
 
 def run_all(
     *, seed: int = 17, scenarios: Sequence[tuple[str, str]] = DEFAULT_SCENARIOS
 ) -> V3Report:
-    """Run every configured scenario and assemble the full stratified report."""
+    """Run every configured scenario and assemble the stratified report."""
     report = V3Report()
     for label, spec in scenarios:
-        _frames, _preds, v3 = run_scenario(label, spec, seed=seed)
-        report.scenarios[label] = v3
-    if not any(s.measured_pairs for s in report.scenarios.values()):
+        _frames, _preds, graded = run_scenario(label, spec, seed=seed)
+        report.scenarios[label] = graded
+    if not any(s.group_points for s in report.scenarios.values()):
         report.notes.append(
-            "no MEASURED single-subject endpoints were published; the "
-            "per-device sigma check is vacuous"
+            "no group estimate was published in any stratum: I4 publishes a group only with "
+            ">= 2 independent historical events (MIN_HISTORY_EVENTS) and the live runtime "
+            "never persists subject-level history (strict xfail in test_accuracy_v3 / "
+            "test_hb17_walkthrough)"
         )
     return report
 
@@ -560,20 +555,29 @@ def run_all(
 # --------------------------------------------------------------------------- #
 
 
+def _fmt(value: float | None, spec: str) -> str:
+    return "n/a" if value is None else format(value, spec)
+
+
 def print_report(report: V3Report) -> None:
     print("v3 simulator accuracy report")
     print("=" * 60)
-    for label, stratum in sorted(report.scenarios.items()):
+    for label, stratum in report.scenarios.items():
         print(f"\n[{label}]  records={stratum.n_records}")
         print(f"  attributed %          : {stratum.attributed_pct:.2f}")
         print(f"  group-identified kWh  : {stratum.group_identified_energy_kwh:.6f}")
-        print(f"  residual preserved    : {stratum.residual_preservation_ratio:.4f}")
+        print(f"  unknown-load kWh      : {stratum.unknown_energy_kwh:.6f}")
+        print(f"  truth device kWh      : {stratum.truth_energy_kwh:.6f}")
+        print(f"  residual preserved    : {_fmt(stratum.residual_preservation_ratio, '.4f')}"
+              f" ({stratum.residual_checked} checked)")
         print(f"  forced attributions   : {stratum.forced_attribution_count}")
+        print(f"  published estimates   : {stratum.published_points}")
+        print(f"  attributed points     : {stratum.attributed_points}")
         print(f"  MEASURED points       : {len(stratum.measured_pairs)}")
         print(f"  UNKNOWN (no claim)    : {stratum.unknown_points}")
         if stratum.measured_pairs:
-            print(f"  MEASURED MAE / RMSE   : "
-                  f"{stratum.error.mae_w:.3f} W / {stratum.error.rmse_w:.3f} W")
+            print(f"  MEASURED MAE / RMSE   : {stratum.error.mae_w:.3f} W / {stratum.error.rmse_w:.3f} W"
+                  f" (max {stratum.error.max_abs_w:.3f} W)")
     print("-" * 60)
     print(f"TOTAL forced_attribution_count: {report.forced_attribution_count}")
     for note in report.notes:
@@ -583,7 +587,7 @@ def print_report(report: V3Report) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     import argparse
 
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("--seed", type=int, default=17, help="simulator seed")
     parser.add_argument("--json", action="store_true", help="print JSON instead of text")
     args = parser.parse_args(argv)
