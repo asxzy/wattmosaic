@@ -81,6 +81,7 @@ Evidence for each row is in `analysis/` (the six gap reports, file:line cited th
 | **DEC-35** | Reconciliation reach | Replay writes into the engine's **versioned derived namespace** only. HA long-term statistics are not rewritten. | HA statistics are append-only. HB §13.3 is satisfied inside the engine. | ADR-0041 | L7 |
 | **DEC-36** | Active learning (HB §13.4) | Deferred to the optional task L8 (after cutover). Suggestions only, never actuation. Safety-relevant loads (HVAC, garage door, water heater) are suppressed. | HB marks it "eventually". | — | L8 |
 | **DEC-37** | Background compute budget | One background worker thread. Each job is capped at 2 s of CPU (chunked). `/healthz` p99 < 100 ms under load is a CI gate. | ADR-0033 class outage (`analysis/B-…` C2). | ADR-0038 | P6, L6 |
+| **DEC-38** | Smart Plug relocation (HB §17 step 9) and the TV's mapping | Product owner ruling (2026-11-19): after a plug relocation the TV **may or may not** be remapped. The current behaviour (a declared relocation retires the old mapping edge and promotes a new one, topology version unchanged) is accepted as AT-15 asserts. Keeping the TV mapped to its plug and moving the plug in topology would also be acceptable; neither reading is required. | HB step 9/10 admit both readings; AT-15 pins the current one. | — | Z7 |
 
 ## 8. Suspected defects to confirm, not decide
 
