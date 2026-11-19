@@ -90,7 +90,7 @@
 | P6 | 4 | IN_PROGRESS |  |  |  |
 | Z2 | 5 | NOT_STARTED | | | |
 | Z1 | 5 | NOT_STARTED | | | |
-| L7 | 5 | IN_PROGRESS |  | AT-19 |  |
+| L7 | 5 | VERIFIED |  | AT-19 | AT-19 closed |
 | D5 | 5 | VERIFIED |  |  | v021 supersedes link; P6 must pass supersedes_evidence_id |
 | X09 | 5 | NOT_STARTED | | | |
 | V1 | 6 | NOT_STARTED | | all 20 | |
