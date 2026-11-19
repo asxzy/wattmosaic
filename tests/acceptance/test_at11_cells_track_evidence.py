@@ -6,12 +6,7 @@ event groups; 100 samples from one event change the count by exactly 1.
 
 from __future__ import annotations
 
-import pytest
-
-pytestmark = [
-    pytest.mark.acceptance,
-    pytest.mark.xfail(strict=True, reason="closed by M2"),
-]
+CLOSED_BY = "M2"
 
 
 def test_cell_counts_distinct_event_groups_only() -> None:

@@ -1,4 +1,4 @@
-"""Matrix projection core (owned by M1, contract 3.0).
+"""Matrix core: projection (M1) and the store/updater/reconciler (M2).
 
 A pure, deterministic projection from the typed runtime handoffs (``K08``) and
 the v3 matrix contracts (``K05``) into the sparse cell set, the L0–L4 column
@@ -28,7 +28,10 @@ from .projection import (
     physical_total_from_cells,
     reader_totals_from_cells,
 )
+from .reconcile import Reconciler
 from .rows import build_rows
+from .store import CellEventsV3, MatrixStore
+from .updater import MatrixUpdater
 
 __all__: list[str] = [
     "finite_or_none",
@@ -41,4 +44,8 @@ __all__: list[str] = [
     "materialise_matrix",
     "physical_total_from_cells",
     "reader_totals_from_cells",
+    "CellEventsV3",
+    "MatrixStore",
+    "MatrixUpdater",
+    "Reconciler",
 ]
