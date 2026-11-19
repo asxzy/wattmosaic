@@ -45,9 +45,6 @@ from datetime import datetime
 from typing import Any
 
 from ..contracts import utcnow
-from ..disaggregation.audit import AuditConfig, AuditPass
-from ..disaggregation.engine import DisaggregationEngine
-from ..disaggregation.events import StepTracker
 from .audit import AuditMixin
 from .batch import (
     DEFAULT_EVENT_BUFFER,
@@ -71,6 +68,18 @@ __all__ = [
     "build_backend",
     "load_inference_backend",
 ]
+
+
+class _DisabledAuditConfig:
+    """All audit families disabled after the Z2 cutover."""
+
+    write_records = False
+    write_isolation = False
+    write_association = False
+    write_circuits = False
+    write_residual = False
+    write_hierarchy = False
+    algorithm_version = "disabled@z2"
 
 
 class WattMosaicBackend(
@@ -102,22 +111,14 @@ class WattMosaicBackend(
         train_interval_s: float = DEFAULT_TRAIN_INTERVAL_S,
         flush_every_cycles: int = DEFAULT_FLUSH_EVERY_CYCLES,
         event_buffer: int = DEFAULT_EVENT_BUFFER,
-        audit: AuditConfig | None = None,
         reanalysis_interval_s: float = 0.0,
         reanalysis_lookback_s: float = 21600.0,
         clock: Callable[[], datetime] = utcnow,
     ) -> None:
         self._clock = clock
-        # The synchroniser exposes only a point-in-time snapshot (no per-channel
-        # history, cadence or previous cycle).  Without a tracker the CT step
-        # detector would never see two comparable samples, so production
-        # inference would silently degrade to state-only attribution.  The
-        # tracker is per-backend, append-only and bounded, so one process
-        # restart loses at most ``max_samples`` cycles of history.
-        self.tracker = StepTracker()
-        self.engine = DisaggregationEngine(
-            max_measurement_age_s=max_measurement_age_s, tracker=self.tracker
-        )
+        # Z2: the 5 s full-solve path is gone.  The backend is now only the
+        # aggregation / learning / diagnostics adapter for the three-loop
+        # runtime; there is no DisaggregationEngine and no step tracker.
         self.database = database
         self.registry: Any | None = None
         self.aggregator: Any | None = None
@@ -159,8 +160,6 @@ class WattMosaicBackend(
         # artifacts existed.  The pass runs on this backend's existing inference
         # loop -- it starts no thread, task or timer of its own -- and writes its
         # versioned ``InferenceRecord`` audit trail beside the existing output.
-        self.audit_config = audit or AuditConfig()
-        self.audit = AuditPass(database, config=self.audit_config, tracker=self.tracker)
         #: DEPRECATED as a throttle (realtime learning): ``0`` (the default) means
         #: reanalysis fires as soon as relevant matured evidence exists.  A
         #: positive value is now only a short *debounce*, not a 3600 s gate.
@@ -174,6 +173,10 @@ class WattMosaicBackend(
         self.last_reanalysis_at: datetime | None = None
         self._reanalysis_evidence_seen: datetime | None = None
         self.last_audit_report: Any | None = None
+        # Z2: the legacy AuditPass is gone.  Keep a minimal disabled config and
+        # a null audit so the read-only diagnostics still report honestly.
+        self.audit: Any | None = None
+        self.audit_config: Any = _DisabledAuditConfig()
         self._reanalysis_history: deque[datetime] = deque(
             maxlen=DEFAULT_REANALYSIS_HISTORY
         )
@@ -205,34 +208,18 @@ class WattMosaicBackend(
             except Exception:  # noqa: BLE001 - aggregation is optional
                 log.warning("energy aggregator unavailable; energy_kwh will stay null")
                 self.aggregator = None
-            if learning_enabled:
-                try:
-                    from ..learning.pipeline import LearningPipeline
-                    from ..learning.thresholds import LearningThresholds
-
-                    thresholds = LearningThresholds(stale_after_s=max_measurement_age_s)
-                    self.learning = LearningPipeline(
-                        database,
-                        thresholds=thresholds,
-                        registry=self.registry,
-                    )
-                except Exception:  # noqa: BLE001 - learning is optional
-                    log.warning("learning pipeline unavailable; no model training")
-                    self.learning = None
+            # Z2: the legacy learning pipeline is gone; incremental learning
+            # now runs in the background worker (L6).  ``self.learning`` stays
+            # None and the status surface reports learning as off here.
+            self.learning = None
 
 
 def build_backend(config: Any, database: Any | None = None) -> WattMosaicBackend:
-    """Construct the backend with config-derived settings.
-
-    The analysis pass is configured from the same ``EngineConfig`` the rest of
-    the process reads, so an install that turns a family off gets that family
-    unwritten without the other families changing value (see ``AuditConfig``).
-    """
+    """Construct the backend with config-derived settings."""
     return WattMosaicBackend(
         database,
         max_measurement_age_s=float(getattr(config, "stale_after_s", 120.0)),
         learning_enabled=bool(getattr(config, "learning_enabled", True)),
-        audit=AuditConfig.from_settings(config),
         train_interval_s=float(getattr(config, "train_interval_s", 0.0)),
         reanalysis_interval_s=float(
             getattr(config, "reanalysis_interval_s", 0.0)

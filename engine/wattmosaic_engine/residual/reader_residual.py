@@ -36,14 +36,46 @@ from wattmosaic_engine.contracts import (
     MeasurementBasis,
     ReaderResidualPoint,
 )
-from wattmosaic_engine.models.residual_power import baseline_and_dynamic, signed_residual_w
 from wattmosaic_engine.runtime.interfaces import (
     HeldReading,
     ObservationOperator,
     UnknownPrior,
 )
 
+
+def signed_residual_w(circuit_power_w: float, known_load_w: float) -> float:
+    """``CircuitPower - KnownLoads``, sign preserved (T3).
+
+    This is the single place the residual difference is formed; it must never be
+    wrapped in ``max(0.0, ...)`` or ``abs(...)``.  A negative residual means the
+    accounted power exceeds the measured total — that is information, not an
+    error to clamp away.
+    """
+    return float(circuit_power_w) - float(known_load_w)
+
+
+def baseline_and_dynamic(
+    residual_w: float | None, window: Sequence[float]
+) -> tuple[float | None, float | None]:
+    """Robust baseline plus the moving part for one signed residual.
+
+    ``baseline`` is the median of the recent residual observations (oldest
+    first) and ``dynamic = residual_w - baseline``, so the two always add back
+    to the total.  No finite window → no dynamic claim.  A missing residual is
+    honest absence (``None``), never a fabricated zero pair.
+    """
+    if residual_w is None:
+        return None, None
+    values = [float(value) for value in window if math.isfinite(float(value))]
+    if not values:
+        return residual_w, 0.0
+    baseline = float(median(values))
+    return baseline, residual_w - baseline
+
+
 __all__: list[str] = [
+    "baseline_and_dynamic",
+    "signed_residual_w",
     "DEFAULT_PENALTY_SCALE",
     "INITIAL_PENALTY_SCALE_FRACTION",
     "MAE_WINDOW_DAYS",

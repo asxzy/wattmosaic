@@ -1,4 +1,11 @@
-"""Load disaggregation: event detection, confidence, inference orchestration."""
+"""Load disaggregation helpers retained after the Z2 cutover.
+
+The legacy absolute solver (``DisaggregationEngine``), ambiguity/group-bounds
+logic, per-member model split and step credit were removed with the 5 s solve
+path.  The remaining modules are pure, standalone helpers still consumed by the
+audit/association tooling and by historical replay; their public names are
+re-exported here so existing imports keep resolving.
+"""
 
 from __future__ import annotations
 
@@ -17,22 +24,6 @@ from wattmosaic_engine.disaggregation.circuits import (
 )
 from wattmosaic_engine.disaggregation.circuits import (
     persist as persist_circuits,
-)
-from wattmosaic_engine.disaggregation.confidence import (
-    ConfidenceBreakdown,
-    ConfidenceInputs,
-    compute_confidence,
-    event_isolation_score,
-)
-from wattmosaic_engine.disaggregation.engine import DisaggregationEngine, InferenceBatch
-from wattmosaic_engine.disaggregation.events import (
-    DEFAULT_K_MAD,
-    MAD_TO_SIGMA,
-    StepChange,
-    detect_changes,
-    detect_step,
-    mad_sigma,
-    median,
 )
 from wattmosaic_engine.disaggregation.isolation import (
     EventIsolator,
@@ -53,18 +44,12 @@ from wattmosaic_engine.disaggregation.mapping import (
 )
 
 __all__ = [
-    "DEFAULT_K_MAD",
-    "MAD_TO_SIGMA",
     "AssociationConfig",
     "AssociationFinder",
     "CONFIRM_MIN_EVENTS",
     "CircuitClassifier",
     "CircuitConfig",
-    "ConfidenceBreakdown",
-    "ConfidenceInputs",
-    "DisaggregationEngine",
     "EventIsolator",
-    "InferenceBatch",
     "IsolationConfig",
     "IsolationWindow",
     "MappingCoverage",
@@ -73,15 +58,8 @@ __all__ = [
     "Observation",
     "PhysicalDeviceEvent",
     "SampleCoverage",
-    "StepChange",
     "clean_attribution_inputs",
-    "compute_confidence",
-    "detect_changes",
-    "detect_step",
-    "event_isolation_score",
     "explain_circuit",
-    "mad_sigma",
-    "median",
     "build_mapping_matrix",
     "persist",
     "persist_circuits",

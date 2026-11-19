@@ -42,7 +42,6 @@ from wattmosaic_engine.electrical.matrix import (
 from wattmosaic_engine.electrical.models import (
     ABSOLUTE_DEVICE_CAP_W,
     ModelView,
-    expected_power_w,
     model_upper_bounds,
     resolve_model,
 )
@@ -182,7 +181,6 @@ __all__ = [
     "build_measurement_matrix",
     "classify_basis",
     "coerce_window",
-    "expected_power_w",
     "explain",
     "main_power_w",
     "model_upper_bounds",

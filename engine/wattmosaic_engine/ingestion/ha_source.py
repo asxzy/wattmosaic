@@ -27,7 +27,6 @@ import logging
 import math
 import random
 import ssl
-import uuid
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from enum import Enum
@@ -42,22 +41,16 @@ except Exception:  # pragma: no cover - only if websockets is absent
 
 
 from ..contracts import (
-    DeviceEvent,
     HAEvent,
-    Measurement,
-    Polarity,
     QualityFlag,
-    QualityStatus,
     ReaderMeasurement,
     utcnow,
 )
-from ..disaggregation.isolation import EVENT_KIND_HA, KIND_SOURCE_EVENT_TYPE
 from .correlation import level_from_attributes
 from .normalize import (
     canonical_unit,
     entity_allowed,
     is_own_entity,
-    normalize_unit,
     parse_float,
     parse_state_timestamp,
 )
@@ -183,10 +176,12 @@ class WebSocketLike(Protocol):
     async def close(self) -> None: ...
 
 
-SampleHandler = Callable[[Measurement], Any]
-EventHandler = Callable[[DeviceEvent], Any]
+#: Legacy sample callback alias (the v3 path uses ``on_reading``).
+SampleHandler = Callable[[Any], Any]
 ReadingHandler = Callable[["ReaderMeasurement"], Any]
 HAEventHandler = Callable[["HAEvent"], Any]
+#: Legacy callback alias, retained for callers that still pass ``on_event``.
+EventHandler = Callable[[Any], Any]
 
 
 def compute_backoff(
@@ -1046,9 +1041,6 @@ class HASource:
         if new_state is None:
             # Entity removed; surface availability loss as an event.
             self._unavailable.add(entity_id)
-            await self._emit_device_event(
-                entity_id, old_state, None, parse_state_timestamp(fired_at) or utcnow()
-            )
             return
         if not isinstance(new_state, dict):
             self.stats["malformed_skipped"] += 1
@@ -1098,15 +1090,6 @@ class HASource:
         value_text = raw_value.strip().lower() if isinstance(raw_value, str) else ""
         if value_text in ("unavailable", "unknown", "none", ""):
             self._unavailable.add(entity_id)
-            await self._emit_device_event(
-                entity_id,
-                old_state,
-                new_state,
-                parse_state_timestamp(new_state.get("last_updated"))
-                or parse_state_timestamp(fired_at)
-                or utcnow(),
-                event_type="availability",
-            )
             return
         self._unavailable.discard(entity_id)
 
@@ -1117,37 +1100,13 @@ class HASource:
         is_power = unit in ("W", "kW") or device_class == "power"
         is_energy = unit in ("kWh", "Wh") or device_class == "energy"
         if numeric is not None and (is_power or (is_energy and self.include_energy)):
-            emitted = await self._emit_measurement(
-                entity_id, numeric, unit, attributes, new_state, fired_at, initial=initial
-            )
-            # P1: also emit the canonical ReaderMeasurement (polarity + multiplier
-            # applied exactly once), in parallel with the legacy Measurement until
-            # P6 switches consumers.  Never deliver a quarantined value.
+            # Z2: only the canonical P1 ReaderMeasurement is emitted.  The
+            # legacy Measurement / DeviceEvent streams fed the removed 5 s
+            # solver and no longer exist.
             await self._emit_reading(
                 entity_id, raw_value, unit, new_state, fired_at, initial=initial
             )
-            if emitted and not self.emit_measurement_events:
-                return
-
-        # Non-measurement (state-bearing) entities produce device events.
-        previous_state = old_state.get("state") if isinstance(old_state, dict) else None
-        changed = previous_state != raw_value
-        # A brightness change on a light that stays ``on`` is a real observation
-        # of how much power the fixture is drawing now.  Dropping it as
-        # "attribute churn" is why a dimmer's level was invisible to inference:
-        # the row moved, the state did not, and nothing recorded why.  The event
-        # still carries the same state on both sides; only the attributes differ,
-        # which is exactly the information being preserved.
-        level_changed = not changed and self._level_changed(old_state, new_state)
-        if changed or level_changed or initial:
-            await self._emit_device_event(
-                entity_id,
-                old_state,
-                new_state,
-                parse_state_timestamp(new_state.get("last_updated"))
-                or parse_state_timestamp(fired_at)
-                or utcnow(),
-            )
+            return
 
     async def _emit_reading(
         self,
@@ -1262,102 +1221,7 @@ class HASource:
         after = level_from_attributes(new_state.get("attributes"))
         return before is not None and after is not None and before != after
 
-    async def _emit_measurement(
-        self,
-        entity_id: str,
-        numeric: float,
-        unit: str | None,
-        attributes: dict[str, Any],
-        new_state: dict[str, Any],
-        fired_at: Any,
-        *,
-        initial: bool,
-    ) -> bool:
-        try:
-            value, base_unit = normalize_unit(numeric, unit or ("kWh" if attributes.get("device_class") == "energy" else "W"))
-        except ValueError as exc:
-            self.stats["malformed_skipped"] += 1
-            log.warning("skipping %s: %s", entity_id, exc)
-            return False
-
-        state_ts = (
-            parse_state_timestamp(new_state.get("last_updated"))
-            or parse_state_timestamp(new_state.get("last_changed"))
-            or parse_state_timestamp(fired_at)
-            or utcnow()
-        )
-        received_at = self._clock()
-        age = max(0.0, (received_at - state_ts).total_seconds())
-        quality = QualityStatus.STALE if age > self.stale_after_s else QualityStatus.GOOD
-
-        repeated = self._last_numeric.get(entity_id) == value
-        self._last_numeric[entity_id] = value
-        if repeated:
-            self.stats["repeated_samples"] += 1
-
-        self._sequence += 1
-        measurement = Measurement(
-            entity_id=entity_id,
-            ct_id=_ct_id_for(entity_id),
-            value=value,
-            unit=base_unit,  # type: ignore[arg-type]
-            value_w=value if base_unit == "W" else None,
-            state_timestamp=state_ts,
-            received_at=received_at,
-            quality=quality,
-            repeated=repeated,
-            polarization=Polarity.NORMAL,
-            sequence=self._sequence,
-        )
-        self.stats["samples_emitted"] += 1
-        await self._call(self._on_sample, measurement, "sample")
-        return True
-
-    async def _emit_device_event(
-        self,
-        entity_id: str,
-        old_state: dict[str, Any] | None,
-        new_state: dict[str, Any] | None,
-        occurred_at: datetime,
-        *,
-        event_type: str = "state_changed",
-    ) -> None:
-        meta = self._entity_meta.get(entity_id, {})
-        device_id = meta.get("device_id") or entity_id
-        new_value = new_state.get("state") if isinstance(new_state, dict) else None
-        old_value = old_state.get("state") if isinstance(old_state, dict) else None
-        if (
-            new_value == old_value
-            and event_type == "state_changed"
-            and not self._level_changed(old_state, new_state)
-        ):
-            # Attribute-only update with no change in runtime *or* output level:
-            # not an event.  A changed level is kept, because it is the only way
-            # inference learns how much a dimmer draws after it has been dimmed.
-            return
-        raw_attributes = new_state.get("attributes") if isinstance(new_state, dict) else None
-        attributes: dict[str, Any] = dict(raw_attributes) if isinstance(raw_attributes, dict) else {}
-        # Every event names its own kind (spec 07 §2).  The kind is *stamped* at
-        # production rather than left to downstream inference: this is the only
-        # path that knows the observation came from Home Assistant.  Additive
-        # attribute keys only -- ``DeviceEvent``'s contract fields are untouched.
-        attributes["event_kind"] = EVENT_KIND_HA
-        attributes["event_kind_source"] = KIND_SOURCE_EVENT_TYPE
-        event = DeviceEvent(
-            event_id=str(uuid.uuid4()),
-            device_id=device_id,
-            entity_id=entity_id,
-            event_type=event_type,  # type: ignore[arg-type]
-            previous_state=None if old_value is None else str(old_value),
-            new_state=None if new_value is None else str(new_value),
-            attributes=attributes,
-            occurred_at=occurred_at,
-            received_at=utcnow(),
-        )
-        self.stats["events_emitted"] += 1
-        await self._call(self._on_event, event, "event")
-
-    async def _call(self, callback: SampleHandler | EventHandler | None, payload: Any, kind: str) -> None:
+    async def _call(self, callback: Callable[[Any], Any] | None, payload: Any, kind: str) -> None:
         if callback is None:
             return
         try:
@@ -1383,19 +1247,8 @@ async def smoke_test(seconds: float = 30.0) -> dict[str, Any]:
     if problems:
         raise SystemExit("configuration invalid: " + "; ".join(problems))
 
-    samples: list[Measurement] = []
-    events: list[DeviceEvent] = []
-
-    async def on_sample(m: Measurement) -> None:
-        if len(samples) < 10:
-            samples.append(m)
-
-    async def on_event(e: DeviceEvent) -> None:
-        if len(events) < 10:
-            events.append(e)
-
     source = HASource.from_config(config)
-    await source.start(on_sample=on_sample, on_event=on_event)
+    await source.start()
     connected = await source.wait_connected(timeout=20.0)
     await asyncio.sleep(max(1.0, seconds))
     result = {
@@ -1403,8 +1256,6 @@ async def smoke_test(seconds: float = 30.0) -> dict[str, Any]:
         "ha_url": config.ha_url,
         "last_event_at": source.last_event_at.isoformat() if source.last_event_at else None,
         "stats": dict(source.stats),
-        "sample_examples": [m.model_dump(mode="json") for m in samples],
-        "event_examples": [e.model_dump(mode="json") for e in events],
     }
     await source.stop()
     return result

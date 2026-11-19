@@ -46,20 +46,10 @@ from scipy.optimize import lsq_linear
 from wattmosaic_engine.contracts import (
     CTChannel,
     CTType,
-    DeviceModelParameters,
-    DeviceModelVersion,
-    DeviceState,
-    DeviceTopology,
     IdentifiabilityStatus,
-    ModelStatus,
-    ModelType,
     Phase,
-    Source,
-    Topology,
     TopologyStatus,
 )
-from wattmosaic_engine.disaggregation import DisaggregationEngine
-from wattmosaic_engine.electrical import ObservationWindow
 from wattmosaic_engine.inference import identifiability as identifiability_module
 from wattmosaic_engine.inference.identifiability import (
     IdentifiabilityAnalyzer,
@@ -379,120 +369,6 @@ def _channel(cid: str, ct_type: CTType = CTType.BRANCH, *, parent: str | None = 
     )
 
 
-def _legacy_topology() -> Topology:
-    return Topology(
-        version=1,
-        status=TopologyStatus.CONFIRMED,
-        channels=[
-            _channel("Main", CTType.MAIN),
-            _channel("Subpanel", parent="Main"),
-            _channel("Circuit A", parent="Subpanel"),
-        ],
-        devices=[
-            DeviceTopology(
-                device_id=member,
-                branch_ct_ids=["Circuit A"],
-                phase=Phase.L1,
-                topology_status=TopologyStatus.CONFIRMED,
-            )
-            for member in GROUP_MEMBERS
-        ],
-    )
-
-
-def _legacy_model(device_id: str, on_w: float) -> DeviceModelVersion:
-    return DeviceModelVersion(
-        device_id=device_id,
-        model_type=ModelType.BINARY,
-        version=1,
-        status=ModelStatus.ACTIVE,
-        sample_count=120,
-        training_quality=0.9,
-        validation_metrics={"r2": 0.9},
-        confidence=0.85,
-        parameters=DeviceModelParameters(on_power_w=on_w, off_power_w=0.0),
-    )
-
-
-def _legacy_window(values: Mapping[str, float], *, transition: bool) -> ObservationWindow:
-    history = {
-        reader: [
-            (T0 - timedelta(seconds=CADENCE_S * 5) + timedelta(seconds=CADENCE_S * i), value)
-            for i in range(5)
-        ]
-        for reader, value in values.items()
-    }
-    transitions = (
-        [
-            dict(device_id="L1", previous_state="off", new_state="on"),
-            dict(device_id="L2", previous_state="off", new_state="on"),
-        ]
-        if transition
-        else None
-    )
-    return ObservationWindow.from_values(
-        T0,
-        dict(values),
-        histories=history,
-        cadence_s=CADENCE_S,
-        previous_states=(
-            {item["device_id"]: item["previous_state"] for item in transitions}
-            if transitions
-            else None
-        ),
-        state_transitions=transitions,
-    )
-
-
-def _legacy_status(result) -> str:
-    if result.source == Source.UNKNOWN:
-        return "unknown"
-    return "estimated"
-
-
-def run_legacy(*, values: Mapping[str, float], models: Mapping[str, float], transition: bool) -> Published:
-    """Run the unmodified ``DisaggregationEngine.infer`` and normalise it."""
-    batch = DisaggregationEngine().infer(
-        _legacy_window(values, transition=transition),
-        device_states={
-            member: DeviceState(entity_id=f"switch.{member}", state="on")
-            for member in GROUP_MEMBERS
-        },
-        models={device_id: _legacy_model(device_id, on_w) for device_id, on_w in models.items()},
-        topology=_legacy_topology(),
-    )
-    ambiguous = set(batch.diagnostics.get("ambiguity", {}).get("devices", []))
-    points: dict[str, float | None] = {}
-    statuses: dict[str, str] = {}
-    ident: dict[str, str] = {}
-    bounds: dict[str, tuple[float | None, float | None]] = {}
-    basis: dict[str, str | None] = {}
-    group_ids: dict[str, str | None] = {}
-    for result in batch.results:
-        points[result.device_id] = None if result.source == Source.UNKNOWN else result.power_w
-        statuses[result.device_id] = _legacy_status(result)
-        ident[result.device_id] = (
-            "non_identifiable"
-            if result.device_id in ambiguous
-            or result.provenance.get("identifiable") is False
-            else "identifiable"
-        )
-        bounds[result.device_id] = (result.min_w, result.max_w)
-        basis[result.device_id] = "non_negativity" if result.min_w is not None else None
-        group_ids[result.device_id] = None
-    return Published(
-        points=points,
-        statuses=statuses,
-        identifiability=ident,
-        bounds=bounds,
-        basis=basis,
-        group_ids=group_ids,
-        groups=(),
-        residual_by_reader={"Circuit A": None, "Subpanel": None, "Main": None},
-        unknown_total_w=batch.reconciliation.unknown_residual_w,
-    )
-
-
 def _versions():
     from wattmosaic_engine.contracts import VersionTriple
 
@@ -598,65 +474,11 @@ def test_the_three_variants_agree_on_members():
 
 
 # --------------------------------------------------------------------------- #
-# The legacy engine must FAIL the same assertions (the test proves DEF-04).
+# Published intervals must contain the measured group sum (DEF-04).
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize(
-    ("label", "models", "values", "transition"),
-    [
-        (
-            "A transition, no models",
-            {},
-            {"Main": 250.0, "Subpanel": 249.7, "Circuit A": 250.4},
-            True,
-        ),
-        (
-            "B transition, 125 W models",
-            {"L1": 125.0, "L2": 125.0},
-            {"Main": 250.0, "Subpanel": 249.7, "Circuit A": 250.4},
-            True,
-        ),
-        (
-            "C steady state, 125 W models",
-            {"L1": 125.0, "L2": 125.0},
-            {"Main": 250.0, "Subpanel": 249.7, "Circuit A": 250.4},
-            False,
-        ),
-    ],
-)
-def test_the_legacy_engine_cannot_satisfy_the_group_contract(label, models, values, transition):
-    legacy = run_legacy(values=values, models=models, transition=transition)
-    with pytest.raises(AssertionError):
-        _assert_group_not_fabricated(legacy)
-
-
-def test_the_legacy_probe_range_excludes_the_measured_sum():
-    """The old ``max_w=337.5 < 500`` defect: a published range must contain the sum.
-
-    Two 250 W models on one 500 W row published ``[250, 337.5]`` for each member
-    — a range that does not contain the 500 W actually measured.  No interval in
-    the new output may exclude the measured value it describes.
-    """
-    legacy = run_legacy(
-        values={"Main": 500.0, "Subpanel": 500.0, "Circuit A": 500.0},
-        models={"L1": 250.0, "L2": 250.0},
-        transition=True,
-    )
+def test_published_range_contains_the_measured_sum():
+    """No interval in the v3 output may exclude the measured value it describes."""
     measured = 500.0
-
-    def assert_range_contains_the_measured_sum(published: Published) -> None:
-        for member in GROUP_MEMBERS:
-            lower, upper = published.bounds[member]
-            assert lower is not None and upper is not None
-            # This exact assertion fails on the legacy engine: the old code
-            # published [250, 337.5] for a 500 W row.
-            assert lower <= measured <= upper, (
-                f"range for {member} is [{lower}, {upper}], which excludes the "
-                f"measured {measured} W"
-            )
-
-    with pytest.raises(AssertionError):
-        assert_range_contains_the_measured_sum(legacy)
-
     fixed = run_new_pipeline(
         readings={"Circuit A": 500.0, "Subpanel": 500.0, "Main": 500.0},
         history=[
@@ -672,8 +494,6 @@ def test_the_legacy_probe_range_excludes_the_measured_sum():
         models={"L1": 250.0, "L2": 250.0},
     )
     _assert_group_not_fabricated(fixed, point_w=500.0)
-    # Each member's own interval also contains the measured sum: it is a bound
-    # on what the member *could* be, and no member can exceed the group.
     for member in GROUP_MEMBERS:
         lower, upper = fixed.bounds[member]
         assert lower is not None and upper is not None

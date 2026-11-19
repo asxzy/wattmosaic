@@ -200,7 +200,7 @@ class EngineConfig:
     #: derives per channel from its own history rather than from this key.
     default_sample_interval_s: float = 10.0
     stale_after_s: float = 120.0
-    inference_interval_s: float = 5.0
+    quality_interval_s: float = 5.0
     queue_max_size: int = 5000
 
     # -- three-loop runtime (P6, HB §5) ----------------------------------- #
@@ -345,9 +345,9 @@ class EngineConfig:
             or cfg.default_sample_interval_s
         )
         cfg.stale_after_s = float(get("WM_STALE_AFTER_S", default=str(cfg.stale_after_s)) or 120)
-        raw_interval = get("WM_INFERENCE_INTERVAL_S", default=str(cfg.inference_interval_s))
-        cfg.inference_interval_s = float(raw_interval or 5)
-        cfg.inference_interval_s = max(1.0, cfg.inference_interval_s)
+        raw_interval = get("WM_INFERENCE_INTERVAL_S", default=str(cfg.quality_interval_s))
+        cfg.quality_interval_s = float(raw_interval or 5)
+        cfg.quality_interval_s = max(1.0, cfg.quality_interval_s)
         if get("WM_INFERENCE_INTERVAL_S") is not None:
             # DEC-03: accepted, ignored, logged once at startup/load.  The value
             # is still parsed so a typo cannot hide, but it never drives a loop.
@@ -447,8 +447,8 @@ class EngineConfig:
             problems.append("HA token is not configured (HA_TOKEN)")
         if self.api_port <= 0 or self.api_port > 65535:
             problems.append("api_port out of range")
-        if self.inference_interval_s <= 0:
-            problems.append("inference_interval_s must be positive")
+        if self.quality_interval_s <= 0:
+            problems.append("quality_interval_s must be positive")
         if self.default_sample_interval_s <= 0:
             problems.append("default_sample_interval_s must be positive")
         if self.queue_max_size < 100:
@@ -586,7 +586,7 @@ class EngineConfig:
             "auto_placement": self.auto_placement,
             "stale_after_s": self.stale_after_s,
             "default_sample_interval_s": self.default_sample_interval_s,
-            "inference_interval_s": self.inference_interval_s,
+            "inference_interval_s": self.quality_interval_s,
             "event_queue_max": self.event_queue_max,
             "steady_heartbeat_s": self.steady_heartbeat_s,
             "unknown_penalty_scale": self.unknown_penalty_scale,

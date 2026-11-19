@@ -48,8 +48,8 @@ from ..contracts import (
     StepClass,
     measurement_event_id,
 )
-from ..disaggregation.events import confirm_streaming_step
 from .reader_state import ReaderStateStore, WindowSample
+from .step_detection import confirm_streaming_step
 
 __all__ = [
     "DETECTOR_VERSION",
