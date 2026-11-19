@@ -1,4 +1,4 @@
-# Troubleshooting
+# Troubleshooting (contract 3.0)
 
 Ordered from "first thing to check" outward. Every command is read-only.
 
@@ -6,19 +6,25 @@ Ordered from "first thing to check" outward. Every command is read-only.
 
 ```bash
 # Is the engine alive?
-curl -s http://localhost:8787/api/v1/health | jq
+curl -s http://localhost:8787/healthz
 
-# Is it talking to Home Assistant?
-curl -s -H "X-API-Token: $WM_API_TOKEN" http://localhost:8787/api/v1/health | jq '{status,ha_connected,database}'
+# Is it talking to Home Assistant, and which contract does it speak?
+curl -s -H "X-API-Token: $WM_API_TOKEN" \
+  http://localhost:8787/api/v1/health | jq '{status,ha_connected,contract_version,details}'
 
-# What does the engine think the channels are doing?
+# Which responses carry the 3.0 contract marker?
+curl -sI -H "X-API-Token: $WM_API_TOKEN" \
+  http://localhost:8787/api/v1/health | grep -i x-wattmosaic-contract-version
+
+# Event-loop health and endpoint quality
+curl -s -H "X-API-Token: $WM_API_TOKEN" http://localhost:8787/api/v1/runtime-metrics | jq
 curl -s -H "X-API-Token: $WM_API_TOKEN" http://localhost:8787/api/v1/quality | jq
 ```
 
 If `ha_connected` is `false`, go to §2. If `status` is `degraded`, read the
-`details` object — it names the failing subsystem.
-
----
+`details` object — it names the failing subsystem. If the integration reports a
+contract mismatch, upgrade the engine and integration together: both are at
+**3.0.0** and no 2.x form is accepted.
 
 ## 2. Engine cannot connect to Home Assistant
 
@@ -29,222 +35,98 @@ Symptom: `ha_connected: false`, log shows `ha_auth_failed` or repeated
 | --- | --- | --- |
 | Wrong host/port | `curl -s -o /dev/null -w '%{http_code}' http://<ha>:8123/api/` | Must return `200`. `HA_HOST` without a port defaults to `8123`. |
 | Token invalid/expired | `curl -s -H "Authorization: Bearer $HA_TOKEN" http://<ha>:8123/api/` | `401` means regenerate the long-lived token. |
-| Token leaked into a log | — | Rotate it immediately; tokens are read-only but still sensitive. |
-| App cannot reach HA | Inside the App container: `curl http://homeassistant:8123/api/` | Use `http://homeassistant:8123`, not the LAN IP, from the App. |
+| App cannot reach HA | Inside the App container: `curl http://homeassistant:8123/api/` | Use the supervisor hostname, not the LAN IP. |
 | Self-signed TLS | Log shows certificate verification error | Set `WM_HA_VERIFY_SSL=false` **only** on a trusted local network. |
-| HA restarting | `state` in `/api/config` | Wait; the engine reconnects automatically with backoff up to 60 s. |
+| HA restarting | `state` in `/api/config` | Wait; the engine reconnects with jittered backoff. |
 
 The engine never gives up: it retries with jittered exponential backoff
 indefinitely. A persistent failure is configuration, not a transient bug.
 
----
+## 3. A device shows `unknown` instead of watts
 
-## 3. Integration shows entities as unavailable
-
-1. Confirm the engine is up (§1).
-2. Confirm the integration's **scan interval** has elapsed.
-3. Check the result age: entities become unavailable when results exceed
-   `stale_after` (default 120 s) or the engine is unreachable for
-   `unavailable_after` (default 120 s).
-4. Check the integration's diagnostics download (Settings → Devices & Services →
-   WattMosaic → ⋮ → Download diagnostics). It shows engine health, contract
-   version, last error and topology status.
-
-This behaviour is intentional. A stale value presented as a current measurement
-would be a correctness bug.
-
-### A single device is unavailable while its neighbours are fine
-
-Usually an **idle circuit on a push-on-change sensor**, not a fault.
-
-Many power integrations publish only when the value changes. A circuit that is
-genuinely off stops publishing, so its last state sits at `0.0 W` and stops
-advancing. Once the reading is older than `stale_after`, the engine reports the
-channel as `missing`, and any device measured only by that channel becomes
-`unavailable`.
-
-Confirm it from the engine:
+This is usually correct behaviour, not a fault. The HA power sensor publishes a
+point only for `MEASURED`, or `ESTIMATED` + `IDENTIFIABLE`; everything else is
+`None` (DEC-25).
 
 ```bash
-curl -s -H "X-API-Token: $WM_API_TOKEN" http://localhost:8787/api/v1/quality \
-  | jq '.channels | to_entries[] | select(.value.status == "missing") | .key'
+curl -s -H "X-API-Token: $WM_API_TOKEN" \
+  http://localhost:8787/api/v1/devices/<device_id> | jq
 ```
 
-The channel is named there as `missing_sample (no sample in window)`. If the
-device draws power again, its state publishes immediately — no restart or
-reconfiguration is needed.
+| `estimate_status` / `identifiability` | Meaning | Action |
+| --- | --- | --- |
+| `UNKNOWN`, `insufficient_evidence` | no accepted endpoints or no events yet | Wait for state changes; verify endpoints are accepted |
+| `ESTIMATED`, `non_identifiable` | two devices share a row with no separating evidence | Check topology edges; the group sum is the honest answer |
+| `ESTIMATED`, `group_identifiable` | member of a non-separable group | Read the group sensor, not a per-member number |
+| `MEASURED` expected but absent | single-subject scope not confirmed | Confirm the plug/appliance-monitor scope |
 
-WattMosaic does **not** invent a `0 W` reading from silence: a held value is not
-a new measurement. See ADR-0015.
+Past 0 W history is not rewritten; `unknown` going forward leaves a gap in HA
+statistics. That is intentional.
 
----
+## 4. Nothing is being inferred
 
-## 4. `contract_mismatch` on setup
+- Are any HA power entities **accepted as measurement endpoints**? Only accepted
+  endpoints are ingested; discovery lists candidates but does not ingest until
+  you accept them.
+- Are events arriving? Check `/api/v1/runtime-metrics` for group counters. A
+  `groups_dropped` count means the event queue (`WM_EVENT_QUEUE_MAX`) is full.
+- Is the topology absent? `details.topology.configured = false` in health means
+  `WM_TOPOLOGY_BOOTSTRAP` found nothing — configure endpoints and review edges.
+- `WM_INFERENCE_INTERVAL_S` no longer drives inference: it is accepted and
+  ignored. Do not expect changing it to change cadence (DEC-03).
 
-The integration and engine disagree on the API contract version (shown in the
-`X-WattMosaic-Contract-Version` header).
+## 5. Learning is blocked
 
-- Update both to the same release. The versions are released together.
-- Do not edit the version header to force compatibility; the schemas may have
-  changed incompatibly.
+| Engine health `details.learning_status` | Meaning | Action |
+| --- | --- | --- |
+| `samples_seen: 0`, `samples_rejected: 0` | dead intake — no state change reached the engine | Check `state_links` and `devices_without_state_entity` in diagnostics; links must resolve to runtime entities, never power sensors |
+| `samples_seen: N > 0`, most rejected as `ambiguous_topology` | alive but blocked | Confirm the relevant topology edges / endpoint scopes |
+| many `concurrent_events` | fixtures co-toggle | expected for scene-driven lights; use group estimates |
+| `samples_accepted > 0` | learning works | nothing |
 
----
+Legacy whole-circuit models are read-only (`LEGACY_ABSOLUTE`) and retrained from
+delta evidence; a device may stay `model_status: pending` while its events are
+always contaminated.
 
-## 5. Power values look wrong
+## 6. Migration / upgrade problems
 
-### 5.1 Every device reads zero
+The engine automatically writes a pre-migration backup before any migration
+≥ 13 (`<db>.pre-vNNN.<timestamp>.bak`, newest three kept). There are **no
+down-migrations**: rollback means reinstalling the previous engine version and
+restoring the matching backup. If a migration fails mid-apply, `user_version` is
+left unchanged. Legacy tables were archived (renamed `*_legacy`, read-only) by
+migration v025. See [`docs/deployment.md`](deployment.md).
 
-- Check that the CT entities actually update: `/api/v1/quality` reports
-  `median_interval_s` per channel. All-null intervals mean no subscription data.
-- Check `WM_STALE_AFTER_S`: if your CT integration's poll is slower than this on
-  your installation, readings will be marked stale. A typical polling CT
-  integration reports ~15.7 s median; if yours is slower, raise the threshold.
+## 7. Contract / integration mismatch
 
-### 5.2 Main power roughly doubles the sum of branches
+- Every `/api/v1` response carries `X-WattMosaic-Contract-Version: 3.0.0`. An
+  integration refusing to start against the engine means the two are on
+  different contracts.
+- `/mapping`, `PUT /topology`, `POST /topology/confirm`, `/confidence_tiers` and
+  `/relations` were removed. Clients must use `/matrix`, the typed topology
+  routes and the snapshot's estimate statuses.
+- A stale panel showing old wording needs a fresh image (the gateway serves
+  static `ui/` assets from the image).
 
-This is the classic nested-CT double-count. Verify in
-`GET /api/v1/topology` that a branch CT is not also listed as an independent
-main, and that panel B is not modelled as a sibling of panel A when
-it is physically downstream. See `docs/electrical_model.md` §nesting.
+## 8. Common container issues
 
-### 5.3 One device absorbs all the residual
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| Container exits immediately, `no Home Assistant token` | `ha_token` empty and no `SUPERVISOR_TOKEN` | Set `ha_token`, or keep it empty with `homeassistant_api: true` in App mode |
+| `no Home Assistant URL` | Standalone run without a URL | Set `HA_URL` / `HA_HOST` in `.env` |
+| `integrity_check` fails at start | corrupt DB or bad restore | Restore a backup; copy the file aside before deleting anything |
+| Database grows unexpectedly | raw retention too high | Lower `WM_RETENTION_DAYS_RAW`; evidence/version tiers are operator-bounded |
+| Watchdog restarts repeatedly | `/healthz` returns 503 | Check engine logs; `/healthz` only turns 200 when `/api/v1/health` answers |
+| `groups_dropped` climbing | event loop cannot keep up | Reduce endpoint churn or raise `WM_EVENT_QUEUE_MAX` |
 
-It should not. If it does, inspect the device's `explanation` in
-`GET /api/v1/devices/{id}`:
-
-- `ambiguous_concurrent_events` — the solver could not separate them. This is
-  correct behaviour.
-- A suspiciously high confidence with a large `unknown_residual_w` indicates a
-  topology error, not an algorithm error. Re-check CT roles.
-
-### 5.4 Negative power appears
-
-Negative means reverse flow (solar export, or an inverted CT). This is preserved
-by design. If a CT is physically reversed, set its polarity to `inverted` in the
-integration options.
-
----
-
-## 6. A device never gets a model
-
-- `model_status: pending` means too few accepted samples. Check
-  `/api/v1/models/{device_id}` for sample counts and rejection reasons.
-- If most samples are rejected with `concurrent_events`, the device usually runs
-  at the same time as others. That is an electrical measurement limitation, not
-  a bug. The engine will not fabricate a model from confounded data.
-- If samples are rejected with `stale_measurement`, your CT cadence is slower than
-  expected; raise `WM_STALE_AFTER_S`.
-
-Sample rejection reasons are enumerated and each one is surfaced in diagnostics.
-
----
-
-## 7. Energy counters reset or jump
-
-- Energy is integrated over actual elapsed time. A gap longer than
-  `stale_after` deliberately accrues **no** energy rather than guessing.
-- On engine restart the last incomplete bucket is recomputed from stored results,
-  so counters continue rather than reset.
-- If the Home Assistant entity loses state restoration, it resumes from the
-  engine's stored total on the next snapshot.
-
----
-
-## 8. Database problems
+### Collecting a diagnostic bundle
 
 ```bash
-# Integrity and size
-curl -s -H "X-API-Token: $WM_API_TOKEN" http://localhost:8787/api/v1/status | jq '.database'
-
-# From the host
-sqlite3 /data/wattmosaic.db "PRAGMA integrity_check; PRAGMA user_version;"
+curl -s -H "X-API-Token: $WM_API_TOKEN" localhost:8787/healthz
+curl -s -H "X-API-Token: $WM_API_TOKEN" localhost:8787/api/v1/health | jq
+curl -s -H "X-API-Token: $WM_API_TOKEN" localhost:8787/api/v1/diagnostics | jq > diagnostics.json
+curl -s -H "X-API-Token: $WM_API_TOKEN" localhost:8787/api/v1/runtime-metrics | jq > runtime.json
+docker logs --tail 200 <container> 2>&1 | tail -200
 ```
 
-| Symptom | Meaning | Action |
-| --- | --- | --- |
-| `database: corrupt` | integrity check failed | Stop the engine, restore a backup. Do not delete the file first — recover what you can. |
-| Database grows without bound | Retention not running or set too high | Lower `WM_RETENTION_DAYS_RAW`; retention runs on a timer. |
-| `database is locked` | Another process opened the file | Run only one engine instance per database. |
-
-The engine refuses to start on a corrupt database rather than silently losing
-history.
-
----
-
-## 9. App does not start
-
-1. **Logs** tab of the App: look for `config_invalid` with the specific problem.
-2. Confirm `ha_token` is set in App options (it is a password field and is not
-   shown after saving).
-3. Confirm `database_path` is `/data/...` so it is inside the persistent volume.
-4. Confirm the architecture is supported (`amd64` or `aarch64`).
-5. `watchdog: true` means the Supervisor restarts a hung App; repeated restarts
-   usually indicate a missing token or an unreachable HA URL.
-
-### 9.1 The Supervisor says "Timeout while waiting for app … to start"
-
-This message means the container ran but never reported healthy within 120
-seconds. Check the App log for one of these:
-
-| Log line | Cause | Fix |
-| --- | --- | --- |
-| `server rejected WebSocket connection: HTTP 401` repeating, and Supervisor logs `No API token provided for /core:8123/api/websocket` | The Core proxy URL was mangled by a default-port heuristic: `http://supervisor/core` became `http://supervisor/core:8123`. | Fixed in 0.1.1 and later. On an older image, set `ha_token` to a long-lived user token; the direct `http://homeassistant:8123` path is unaffected. |
-| `unhealthy: engine rejected WM_API_TOKEN (401)` | The container health probe tried to authenticate directly, but `WM_API_TOKEN` is set inside PID 1 and is not visible to a Docker `HEALTHCHECK` exec. | Fixed in 0.1.1 and later; the probe now uses the gateway's `/healthz`. |
-| `engine_starting` present but `ha_connected` never appears | The App cannot reach Home Assistant at `ha_url`. | Verify `ha_url` is `http://homeassistant:8123` (no trailing path). |
-| Engine is healthy but ingestion stalls for ~1 s at a time, and `/api/v1/health` takes seconds | A whole-file `PRAGMA integrity_check` was running on the health path. On a 392 MB database it costs ~1.2 s (6.8 s cold), and the 5 s probe polls it. | Fixed in 0.1.2. `health` now uses a cheap liveness query and reports the startup scan's cached verdict. |
-
-An empty `api_token` is **not** a startup problem: the API is then served only
-to loopback and the Supervisor's internal network, which is enough for the
-integration and the ingress panel. Set it if you publish a host port.
-
-If you are upgrading from 0.1.0, install the new App version and restart it; the
-database and options are preserved.
-
-### 9.2 Device discovery returns HTTP 504 on a long window
-
-| Symptom | Cause | Fix |
-| --- | --- | --- |
-| "Discover devices" with a long window fails with `504`, the panel shows `Request failed (HTTP 504)`, or the App restarts mid-analysis | The engine blocked its own event loop while correlating history. Pairing every state transition against every CT row scanned each row's whole history, so the cost was `transitions × rows × readings`. At production volume that was 25 s for a 72 h window and 139 s for 168 h, inline in the request. The loop could not answer `/health` (which the gateway cuts off at 4 s) or `/healthz` (the Supervisor watchdog probe), so the App was reported unreachable and could be restarted. | Fixed in `0.2.1-dev.30`. Pairing is now binary-searched per row (identical output, linear cost) and the whole compute block runs in a worker thread, so health stays responsive while a discovery works. |
-
-Two separate layers that are *not* this defect, but have the same symptom, are
-worth knowing:
-
-* **The gateway's own liveness budget is 4 s.** Before the fix above, a busy
-  engine answered `GET /api/v1/health` in 4.0–4.1 s and the gateway returned
-  `504 {"error": "upstream_timeout"}` — that JSON is the gateway, not the engine.
-* **A reverse proxy in front of Home Assistant adds a ceiling.** The reference
-  install sits behind openresty, whose default `proxy_read_timeout` is 90 s; it
-  answers an HTML `<center>504 Gateway Time-out</center>` at exactly 90.0 s. A
-  168 h window exceeded that even after the engine fix, because a whole-week
-  recorder read really does take longer than 90 s. Raise that timeout if you
-  need week-long windows through an external proxy.
-
-`Request failed (HTTP 504)` in the panel is the fallback text used when the body
-is not JSON, which is how an HTML 504 from an outer proxy is told apart from the
-engine's and gateway's own JSON errors.
-
-### 9.3 The panel returns 401 after it has been open for a while
-
-| Symptom | Cause | Fix |
-| --- | --- | --- |
-| The panel shows an "unauthorized" error after the tab was hidden for a while, or after the page sat open overnight | Home Assistant's ingress session is a 15-minute sliding window that is renewed on every request the Supervisor proxies. Polling pauses while the tab is hidden, so nothing renews the session and the next call answers 401. | Fixed in the next release. The panel now reloads the document once to obtain a fresh session (only the Supervisor can mint one), and it probes `/health` on every tab resume, not just on the overview. |
-
-A 401 that says `unauthorized` in JSON is *not* an expired session — that is the
-gateway rejecting a wrong `WM_API_TOKEN`, and reloading will not fix it. Check
-that the integration's `api_token` matches the App's.
-
----
-
-## 10. Working with support
-
-Collect these **before** asking for help:
-
-```bash
-curl -s -H "X-API-Token: $WM_API_TOKEN" http://localhost:8787/api/v1/diagnostics > diagnostics.json
-curl -s -H "X-API-Token: $WM_API_TOKEN" http://localhost:8787/api/v1/status > status.json
-```
-
-`/api/v1/diagnostics` is designed to be shareable: tokens and secrets are
-redacted. Still skim it before posting publicly.
-
-Never paste `.env`, raw tokens, or the `Authorization` header into an issue.
+Diagnostics never include tokens; verify before sharing.

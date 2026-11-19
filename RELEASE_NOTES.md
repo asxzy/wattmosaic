@@ -1,5 +1,75 @@
 # Release Notes
 
+## v0.3.0-dev.1 — 2026-11-19 (development channel)
+
+**This release breaks the API contract: `CONTRACT_VERSION` 2.x → 3.0.0.** It is
+the real-time, topology-aware cutover. The **engine and the integration must be
+updated together** — a 3.0 engine rejects a 2.x integration, and a 3.0
+integration refuses an incompatible contract rather than misreading data. All
+product documentation has been rewritten for 3.0, linking the
+[technical handbook](docs/specs/realtime-topology-disaggregation/handbook.md)
+and its [implementation spec](docs/specs/realtime-topology-disaggregation/README.md).
+
+### Breaking changes
+
+- **Contract 3.0.0.** Legacy contract models, their v2 forms, the legacy HA
+  topology-confirmation endpoint and the `/mapping` route are removed. Engine
+  and integration are released and upgraded as one unit. Update both together;
+  check `x-wattmosaic-contract-version: 3.0.0` on a health response to confirm.
+- **`/mapping` → `/matrix`.** The device-by-reader mapping matrix is served from
+  `/api/v1/matrix` with drill-down routes (`/matrix/cells/...`,
+  `/matrix/readers/{id}`, `/matrix/rows/{id}`). Clients using `/mapping` must
+  switch (DEC-28).
+- **Discovery no longer creates one device per CT.** A CT is a Measurement
+  Endpoint; unexplained load on it is a Reader Residual row or an Unknown Load
+  Profile, not a fabricated device. Existing device ids are preserved verbatim,
+  so HA entity ids and long-term statistics survive (DEC-04).
+
+### What you will notice in Home Assistant
+
+- **Unknown is shown as unknown, not 0 W.** A device power sensor publishes a
+  point only for `MEASURED`, or `ESTIMATED` and `IDENTIFIABLE`; every other case
+  (including ALLOCATED shares and non-identifiable members) publishes `None`.
+  Non-identifiable subjects get justified bounds as attributes. Past 0 W history
+  is **not rewritten**: going forward those sensors leave **gaps** in HA
+  statistics, which is the honest representation of what the engine cannot know.
+  Energy integration never integrates a null (DEC-25).
+- **New group sensors.** Each identified but non-separable device group gets one
+  group power sensor on a synthetic "WattMosaic group" device, keyed by a stable
+  `group_id`. Adding groups never changes a pre-existing device entity's unique
+  id (DEC-25).
+- **`MEASURED` via single-subject endpoints.** A confirmed smart plug or
+  appliance monitor whose scope is exactly one device reads it directly. A
+  circuit CT never qualifies automatically (DEC-05).
+- **Four estimate statuses** — `MEASURED`, `ESTIMATED`, `ALLOCATED`, `UNKNOWN` —
+  with identifiability reported independently and a seven-component confidence
+  vector that is explicitly not a probability.
+
+### Learning and models
+
+- **Legacy learned models retired.** Whole-circuit absolute models are kept
+  read-only and flagged `LEGACY_ABSOLUTE`; they are not served as validated power
+  and are retrained from device-attributed **delta (ΔP) evidence** (DEC-31).
+  `WM_INFERENCE_INTERVAL_S` is deprecated and ignored — the three-loop runtime
+  runs inference per event group, not on a fixed timer (DEC-03).
+
+### Upgrading, backup and rollback
+
+- **Automatic pre-migration backup.** Before any migration numbered 13 or above
+  the engine writes `<db>.pre-vNNN.<UTC-timestamp>.bak` beside the database
+  (after a WAL checkpoint, newest three kept). A failed backup aborts startup —
+  a destructive migration never runs without a rollback point.
+- **Rollback (DEC-02).** There are **no down-migrations**. To roll back, reinstall
+  the previous engine version **and restore the matching pre-migration backup**:
+  stop the container, replace `/data/wattmosaic.db` with the `.bak` file, remove
+  any stale `-wal`/`-shm` sidecars, then start the older image. Never run an older
+  engine against a newer-schema database. If a migration fails mid-apply,
+  `user_version` is left unchanged. Legacy tables were archived (renamed
+  `*_legacy`, read-only) by migration v025; no table was dropped. See
+  [`docs/deployment.md`](docs/deployment.md) for the full procedure.
+
+---
+
 ## v0.2.1-dev.42 — 2026-11-18 (development channel)
 
 Automatic development build.
