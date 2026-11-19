@@ -13,6 +13,11 @@ seeds a sentinel row in ``engine_state`` (present since schema v1) and verifies
 it survives; before/after table+column inventories verify no schema object is
 lost; a second ``apply_migrations`` verifies idempotence at the entry-point level.
 
+The one sanctioned exception is the contract-3.0.0 cutover (v025): each legacy
+table ``t`` is archived read-only as ``t_legacy``.  The inventory check accepts
+exactly those documented renames -- the archive must keep every column and the
+seeded row -- and nothing else.
+
 **Released fixtures only.**  The matrix upgrades the schemas for which this repo
 ships a settled fixture -- the three released versions 9, 10 and 11.  Wave-2
 migrations (13-20, 25) land in parallel and out of order and may have gaps, so
@@ -34,6 +39,10 @@ from wattmosaic_engine.storage.migrations import (
     SPARE_VERSIONS,
     apply_migrations,
     current_version,
+)
+from wattmosaic_engine.storage.migrations.v025_legacy_readonly import (
+    LEGACY_TABLES,
+    archived_name,
 )
 
 #: The released prior versions for which settled fixtures exist.  These are the
@@ -78,13 +87,76 @@ def _build_at(path: Path, upto: int) -> sqlite3.Connection:
     return conn
 
 
+#: One raw-SQL row per legacy table (valid against schemas 9-11), so the
+#: v025 archive rename is checked against real rows, not empty tables.
+LEGACY_SEED: dict[str, tuple[str, tuple[object, ...]]] = {
+    "ct_channels": (
+        "INSERT INTO ct_channels(ct_id, entity_id, ct_type, updated_at) "
+        "VALUES('ct_main', 'sensor.ct_main', 'main', ?)",
+        (NOW,),
+    ),
+    "devices": (
+        "INSERT INTO devices(device_id, name, updated_at) VALUES('dev_a', 'Dev A', ?)",
+        (NOW,),
+    ),
+    "topology_versions": (
+        "INSERT INTO topology_versions(created_at, status, payload_json) "
+        "VALUES(?, 'candidate', '{}')",
+        (NOW,),
+    ),
+    "topology_relations": (
+        "INSERT INTO topology_relations(relation_id, kind, subject_id, object_id, created_at) "
+        "VALUES('rel_1', 'feeds', 'ct_main', 'dev_a', ?)",
+        (NOW,),
+    ),
+    "device_model_versions": (
+        "INSERT INTO device_model_versions(device_id, model_type, version, status, created_at) "
+        "VALUES('dev_a', 'constant', 1, 'active', ?)",
+        (NOW,),
+    ),
+    "device_models": (
+        "INSERT INTO device_models(model_id, device_id, model_type, active_version, "
+        "created_at, updated_at) VALUES('m1', 'dev_a', 'constant', 1, ?, ?)",
+        (NOW, NOW),
+    ),
+    "learning_samples": (
+        "INSERT INTO learning_samples(sample_id, device_id, captured_at, created_at) "
+        "VALUES('s1', 'dev_a', ?, ?)",
+        (NOW, NOW),
+    ),
+    "residual_power": (
+        "INSERT INTO residual_power(timestamp, residual_w) VALUES(?, 12.5)",
+        (NOW,),
+    ),
+    "device_events": (
+        "INSERT INTO device_events(event_id, device_id, entity_id, event_type, "
+        "occurred_at, received_at) VALUES('e1', 'dev_a', 'switch.dev_a', 'state_changed', ?, ?)",
+        (NOW, NOW),
+    ),
+    "ha_entity_bindings": (
+        "INSERT INTO ha_entity_bindings(entity_id, device_id) VALUES('switch.dev_a', 'dev_a')",
+        (),
+    ),
+}
+
+#: The only renames a migration may perform: v025 archives each legacy table
+#: ``t`` as ``t_legacy`` (same columns, same rows).
+DOCUMENTED_RENAMES: dict[str, str] = {table: archived_name(table) for table in LEGACY_TABLES}
+
+
 def _seed(conn: sqlite3.Connection, version: int) -> None:
-    """Write the sentinel row that must survive every migration."""
+    """Write the sentinel row and one row per legacy table."""
     conn.execute(
         "INSERT INTO engine_state(key, value, updated_at) VALUES(?, ?, ?)",
         (SENTINEL_KEY, SENTINEL_VALUE_TEMPLATE.format(version=version), NOW),
     )
+    for sql, params in LEGACY_SEED.values():
+        conn.execute(sql, params)
     conn.commit()
+
+
+def _row_counts(conn: sqlite3.Connection, tables: set[str]) -> dict[str, int]:
+    return {table: conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] for table in tables}
 
 
 def _snapshot(conn: sqlite3.Connection) -> dict[str, set[str]]:
@@ -144,6 +216,8 @@ def test_migration_to_latest_is_lossless_and_idempotent(
         assert current_version(conn) == version, "fixture is not at the intended version"
         _seed(conn, version)
         schema_before = _snapshot(conn)
+        counts_before = _row_counts(conn, set(schema_before))
+        assert set(DOCUMENTED_RENAMES) <= set(schema_before)
         expected_sentinel = SENTINEL_VALUE_TEMPLATE.format(version=version)
 
         # First application reaches LATEST and preserves the row + every object.
@@ -152,9 +226,19 @@ def test_migration_to_latest_is_lossless_and_idempotent(
         assert _sentinel(conn) == expected_sentinel, "sentinel data was lost or rewritten"
         schema_after = _snapshot(conn)
         for table, columns in schema_before.items():
-            assert table in schema_after, f"migration dropped table {table}"
-            assert columns <= schema_after[table], (
-                f"migration dropped columns of {table}: {columns - schema_after[table]}"
+            # The only permitted disappearance is a documented v025 rename: the
+            # legacy table reappears as ``t_legacy`` with its columns and rows.
+            target = DOCUMENTED_RENAMES.get(table, table)
+            if target != table:
+                assert table not in schema_after, f"{table} was not archived as {target}"
+                assert target in schema_after, f"legacy table {table} vanished (no {target})"
+                after_count = conn.execute(f'SELECT COUNT(*) FROM "{target}"').fetchone()[0]
+                assert after_count == counts_before[table] == 1, (
+                    f"{table} -> {target} changed row count"
+                )
+            assert target in schema_after, f"migration dropped table {table}"
+            assert columns <= schema_after[target], (
+                f"migration dropped columns of {table}: {columns - schema_after[target]}"
             )
 
         # Second application at LATEST is a true no-op: version, data and schema

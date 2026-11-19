@@ -1,4 +1,11 @@
-"""End-to-end: storage schema, persistence round-trips and restart recovery."""
+"""End-to-end: storage schema, persistence round-trips and restart recovery.
+
+Since the contract-3.0.0 cutover the legacy topology tables are read-only
+archives and the legacy write helpers (``save_topology``, ``insert_ct_samples``,
+``insert_inference_results``, ``insert_reconciliation``) are gone.  Samples are
+written as ``ReaderMeasurement`` through ``db.repos.samples.insert_readings`` and
+inference history through the v3 ``db.repos.inference.put_estimates`` writer.
+"""
 
 from __future__ import annotations
 
@@ -7,8 +14,8 @@ import sqlite3
 
 import pytest
 
-from tests.end_to_end.conftest import measurement_rows
-from tools.simulator import REAL_HOME_TOPOLOGY, HouseholdScenario, SimulatorConfig
+from tests.end_to_end.conftest import measurement_readings
+from tools.simulator import HouseholdScenario, SimulatorConfig
 from tools.simulator.sensors import QualityLevel
 
 
@@ -81,110 +88,8 @@ def test_migration_from_v1_upgrades_in_place(tmp_db_path) -> None:
         assert db.schema_version == LATEST_VERSION
         assert db.get_state("legacy") == {"a": 1}
         # A table added by a later migration now exists and is usable.
-        db.set_model_frozen("any_device", True)
-        assert db.is_model_frozen("any_device") is True
-    finally:
-        db.close()
-
-
-# --------------------------------------------------------------------------- #
-# Topology round-trip
-# --------------------------------------------------------------------------- #
-
-
-def test_topology_round_trip_is_lossless(tmp_db_path) -> None:
-    from wattmosaic_engine.storage.database import Database
-
-    db = Database(tmp_db_path)
-    try:
-        topology = REAL_HOME_TOPOLOGY.to_contract_topology()
-        version = db.save_topology(topology, note="round trip")
-        assert version >= 1
-
-        loaded = db.load_topology()
-        assert loaded is not None
-        assert loaded.version == version
-        assert len(loaded.channels) == len(topology.channels) == 36
-        assert len(loaded.devices) == len(topology.devices) == 37
-
-        by_id = {c.ct_id: c for c in topology.channels}
-        for channel in loaded.channels:
-            original = by_id[channel.ct_id]
-            assert channel.entity_id == original.entity_id
-            assert channel.ct_type == original.ct_type
-            assert channel.phase == original.phase
-            assert channel.parent_ct_id == original.parent_ct_id
-            assert channel.device_id == original.device_id
-            assert channel.paired_ct_id == original.paired_ct_id
-            assert channel.expected_interval_s == pytest.approx(
-                original.expected_interval_s
-            )
-            assert channel.metadata.get("panel") == original.metadata.get("panel")
-
-        by_dev = {d.device_id: d for d in topology.devices}
-        for device in loaded.devices:
-            original = by_dev[device.device_id]
-            assert device.branch_ct_ids == original.branch_ct_ids
-            assert device.double_pole == original.double_pole
-            assert device.phase == original.phase
-        # NOTE (contract gap): ``topology_versions`` stores the full payload but
-        # ``ct_channels``/``devices`` have no notes column, so ``load_topology``
-        # cannot reconstruct ``Topology.notes``.  Documented, not hidden.
-        assert loaded.notes == []
-    finally:
-        db.close()
-
-
-def test_topology_save_is_versioned(tmp_db_path) -> None:
-    from wattmosaic_engine.storage.database import Database
-
-    db = Database(tmp_db_path)
-    try:
-        topology = REAL_HOME_TOPOLOGY.to_contract_topology()
-        v1 = db.save_topology(topology, note="first")
-        v2 = db.save_topology(topology, note="second")
-        assert v2 > v1
-        assert db.load_topology().version == v2
-    finally:
-        db.close()
-
-
-def test_confirmed_topology_status_survives_a_restart(tmp_db_path) -> None:
-    """A user-confirmed topology must not reload as ``candidate``.
-
-    ``ct_channels``/``devices`` do not carry the topology-level status, so
-    reading it from those tables alone silently downgraded a confirmed topology
-    on every restart.  Learning rejects every sample while the topology is
-    ``candidate``, so the downgrade silently disabled learning for good.
-    """
-    from wattmosaic_engine.contracts import TopologyStatus
-    from wattmosaic_engine.storage.database import Database
-
-    db = Database(tmp_db_path)
-    try:
-        topology = REAL_HOME_TOPOLOGY.to_contract_topology()
-        confirmed = topology.model_copy(update={"status": TopologyStatus.CONFIRMED})
-        db.save_topology(confirmed)
-
-        loaded = db.load_topology()
-        assert loaded is not None
-        assert loaded.status == TopologyStatus.CONFIRMED.value
-        # The version row's timestamp is restored too, not reset to ``now``.
-        assert loaded.created_at is not None
-    finally:
-        db.close()
-
-
-def test_candidate_topology_still_reloads_as_candidate(tmp_db_path) -> None:
-    from wattmosaic_engine.contracts import TopologyStatus
-    from wattmosaic_engine.storage.database import Database
-
-    db = Database(tmp_db_path)
-    try:
-        db.save_topology(REAL_HOME_TOPOLOGY.to_contract_topology(confirmed=False))
-        loaded = db.load_topology()
-        assert loaded is not None
-        assert loaded.status == TopologyStatus.CANDIDATE.value
+        db.repos.models.set_model_frozen("any_device", True)
+        assert db.repos.models.is_model_frozen("any_device") is True
     finally:
         db.close()
 
@@ -194,105 +99,121 @@ def test_candidate_topology_still_reloads_as_candidate(tmp_db_path) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_ct_samples_persist_all_three_timestamps(engine_db) -> None:
-    db, _topology = engine_db
+def test_reader_samples_persist_both_timestamps(engine_db) -> None:
+    db = engine_db
     records = list(_scenario(minutes=10).records())
-    rows = [row for rec in records for row in measurement_rows(rec)]
-    inserted = db.insert_ct_samples(rows)
-    assert inserted == len(rows) > 0
+    readings = [reading for rec in records for reading in measurement_readings(rec)]
+    inserted = db.repos.samples.insert_readings(readings)
+    assert inserted == len(readings) > 0
 
-    first = records[0]
-    ct_id, m = next(iter(first["measurements"].items()))
-    latest = db.latest_ct_sample(ct_id)
+    last = records[-1]
+    ct_id, m = next(iter(last["measurements"].items()))
+    latest = db.repos.samples.latest_ct_sample(ct_id)
     assert latest is not None
     assert latest["ct_id"] == ct_id
-    assert latest["entity_id"] == m["entity_id"]
     assert latest["state_timestamp"]
     assert latest["received_at"]
-    assert latest["quality"] in ("excellent", "good", "degraded", "stale")
-    # physical_timestamp is optional in the contract and may be null.
+    # physical_timestamp is a legacy column the reader contract does not carry.
     assert "physical_timestamp" in latest
+
+    # The typed read path restores the observation and arrival instants exactly.
+    reading = db.repos.samples.latest_reading(ct_id)
+    assert reading is not None
+    assert reading.observed_at == dt.datetime.fromisoformat(m["state_timestamp"])
+    assert reading.received_at == dt.datetime.fromisoformat(m["received_at"])
+    assert reading.active_power_w == pytest.approx(float(m["value_w"]))
+    assert reading.sequence == int(m["sequence"])
 
 
 def test_samples_between_filters_by_window(engine_db) -> None:
-    db, _topology = engine_db
+    db = engine_db
     records = list(_scenario(minutes=10).records())
     for rec in records:
-        db.insert_ct_samples(measurement_rows(rec))
+        db.repos.samples.insert_readings(measurement_readings(rec))
 
     start = dt.datetime.fromisoformat(records[0]["timestamp"])
     end = dt.datetime.fromisoformat(records[len(records) // 2]["timestamp"])
-    in_window = db.ct_samples_between(start, end)
+    in_window = db.repos.samples.ct_samples_between(start, end)
     assert in_window
     for row in in_window:
         ts = dt.datetime.fromisoformat(row["received_at"])
         assert start <= ts <= end
 
-    only_main = db.ct_samples_between(start, end, ct_ids=["ct_main_l1"])
+    only_main = db.repos.samples.ct_samples_between(start, end, ct_ids=["ct_main_l1"])
     assert only_main
     assert {row["ct_id"] for row in only_main} == {"ct_main_l1"}
 
 
 # --------------------------------------------------------------------------- #
-# Inference & reconciliation persistence
+# Inference persistence (v3 writer)
 # --------------------------------------------------------------------------- #
 
+_BASE = dt.datetime(2026, 1, 1, 0, 0, tzinfo=dt.UTC)
 
-def test_inference_and_reconciliation_persist_and_read_back(engine_db) -> None:
+
+def _put_history(db, device_id: str, points: list[tuple[dt.datetime, float]]) -> int:
+    """Persist ``(at, watts)`` points through the v3 ``inference_results`` writer."""
     from wattmosaic_engine.contracts import (
-        InferenceResult,
-        Reconciliation,
-        Source,
+        Bounds,
+        ConfidenceVectorV3,
+        DeviceEstimate,
+        EstimateStatus,
+        EventGroupStatus,
+        IdentifiabilityStatus,
+        InferenceMethod,
+        JointInferenceResult,
+        VersionTriple,
     )
 
-    db, topology = engine_db
-    ts = dt.datetime(2026, 1, 1, 12, 0, tzinfo=dt.UTC)
-    results = [
-        InferenceResult(
-            device_id=f"dev_{i}",
-            timestamp=ts,
-            power_w=100.0 + i,
-            source=Source.DIRECT_MEASURED,
-            confidence=0.9,
-            supporting_ct_channels=["ct_main_l1"],
-            explanation=["unit-test"],
+    versions = VersionTriple(
+        topology_version_id="topo-1", mapping_version_id="map-1", model_set_id="mset-1"
+    )
+    estimates = [
+        DeviceEstimate(
+            subject_kind="device",
+            subject_id=device_id,
+            point_w=power,
+            bounds=Bounds(),
+            status=EstimateStatus.ESTIMATED,
+            identifiability=IdentifiabilityStatus.IDENTIFIABLE,
+            method=InferenceMethod.JOINT_DELTA,
+            confidence=ConfidenceVectorV3(identifiability=0.9),
+            source_reader_ids=["ct_main_l1"],
+            evidence_refs=[],
+            versions=versions,
+            updated_at=at,
         )
-        for i in range(3)
+        for at, power in points
     ]
-    assert db.insert_inference_results(results) == 3
-    latest = db.latest_inference_results()
+    return db.repos.inference.put_estimates(
+        JointInferenceResult(
+            status=EventGroupStatus.CONFIRMED,
+            device_estimates=estimates,
+            group_estimates=[],
+            unknown_estimates=[],
+            candidates=[],
+            matches={},
+            residual_w_by_reader={},
+            versions=versions,
+            computed_at=points[-1][0],
+        )
+    )
+
+
+def test_inference_results_persist_and_read_back(engine_db) -> None:
+    db = engine_db
+    ts = dt.datetime(2026, 1, 1, 12, 0, tzinfo=dt.UTC)
+    for i in range(3):
+        assert _put_history(db, f"dev_{i}", [(ts, 100.0 + i)]) == 1
+    latest = db.repos.inference.latest_inference_results()
     assert {r["device_id"] for r in latest} == {"dev_0", "dev_1", "dev_2"}
 
-    # A newer batch replaces the "latest" view but history is preserved.
-    newer = [
-        InferenceResult(
-            device_id="dev_0",
-            timestamp=ts + dt.timedelta(seconds=15),
-            power_w=250.0,
-            source=Source.INFERRED,
-            confidence=0.5,
-        )
-    ]
-    db.insert_inference_results(newer)
-    latest = {r["device_id"]: r for r in db.latest_inference_results()}
+    # A newer write replaces the "latest" view but history is preserved.
+    _put_history(db, "dev_0", [(ts + dt.timedelta(seconds=15), 250.0)])
+    latest = {r["device_id"]: r for r in db.repos.inference.latest_inference_results()}
     assert latest["dev_0"]["power_w"] == 250.0
     history = db.inference_history("dev_0", since=ts - dt.timedelta(minutes=1))
     assert len(history) == 2
-
-    rec = Reconciliation(
-        timestamp=ts,
-        topology_version=topology.version,
-        main_power_w=10_000.0,
-        direct_measured_w=6_000.0,
-        inferred_w=1_000.0,
-        unknown_residual_w=3_000.0,
-        explanation=["residual_never_redistributed"],
-    )
-    db.insert_reconciliation(rec)
-    stored = db.latest_reconciliation()
-    assert stored is not None
-    assert stored["main_power_w"] == pytest.approx(10_000.0)
-    assert stored["unknown_residual_w"] == pytest.approx(3_000.0)
 
 
 def test_wal_database_survives_reopen(tmp_db_path) -> None:
@@ -317,31 +238,40 @@ def test_wal_database_survives_reopen(tmp_db_path) -> None:
 
 
 def _inference_results(duration_s: int = 1200, step_s: int = 15):
-    from wattmosaic_engine.contracts import InferenceResult, Source
+    """A square-wave load (1 kW / 200 W, 5-minute period) as aggregator results.
 
-    base = dt.datetime(2026, 1, 1, 0, 0, tzinfo=dt.UTC)
+    ``EnergyAggregator.add_result`` is duck-typed; the legacy ``InferenceResult``
+    contract no longer exists, so a namespace with the fields it reads is used.
+    """
+    from types import SimpleNamespace
+
     out = []
     for k in range(duration_s // step_s + 1):
-        at = base + dt.timedelta(seconds=k * step_s)
+        at = _BASE + dt.timedelta(seconds=k * step_s)
         power = 1000.0 if (k * step_s) % 300 < 150 else 200.0
         out.append(
-            InferenceResult(
+            SimpleNamespace(
                 device_id="test_device",
                 timestamp=at,
                 power_w=power,
-                source=Source.DIRECT_MEASURED,
-                confidence=0.9,
+                source="inferred",
+                quality_status=None,
+                provenance={},
             )
         )
     return out
 
 
+def _store(db, results) -> None:
+    _put_history(db, "test_device", [(r.timestamp, r.power_w) for r in results])
+
+
 def test_energy_aggregation_persists_buckets(engine_db) -> None:
     from wattmosaic_engine.aggregation.aggregator import EnergyAggregator
 
-    db, _ = engine_db
+    db = engine_db
     results = _inference_results()
-    db.insert_inference_results(results)
+    _store(db, results)
 
     agg = EnergyAggregator(db)
     for r in results:
@@ -360,9 +290,9 @@ def test_restart_recovery_reproduces_energy_total(engine_db) -> None:
     """Crash/restart must not lose or double-count energy."""
     from wattmosaic_engine.aggregation.aggregator import EnergyAggregator
 
-    db, _ = engine_db
+    db = engine_db
     results = _inference_results()
-    db.insert_inference_results(results)
+    _store(db, results)
 
     agg = EnergyAggregator(db)
     for r in results:
@@ -398,9 +328,9 @@ def test_restart_recovery_reproduces_energy_total(engine_db) -> None:
 def test_restart_recovery_is_idempotent(engine_db) -> None:
     from wattmosaic_engine.aggregation.aggregator import EnergyAggregator
 
-    db, _ = engine_db
+    db = engine_db
     results = _inference_results(duration_s=900)
-    db.insert_inference_results(results)
+    _store(db, results)
     agg = EnergyAggregator(db)
     for r in results:
         agg.add_result(r)
@@ -420,32 +350,33 @@ def test_restart_recovery_is_idempotent(engine_db) -> None:
 
 
 def test_prune_removes_old_raw_rows_only(engine_db) -> None:
-    db, _ = engine_db
+    from wattmosaic_engine.contracts import MeasurementType, ReaderMeasurement
+
+    db = engine_db
     old = dt.datetime(2020, 1, 1, tzinfo=dt.UTC)
     new = dt.datetime.now(dt.UTC)
 
-    def row(ct_id: str, at: dt.datetime) -> dict:
-        return {
-            "ct_id": ct_id,
-            "entity_id": f"sensor.{ct_id}",
-            "value_w": 1.0,
-            "raw_value": 1.0,
-            "unit": "W",
-            "state_timestamp": at,
-            "received_at": at,
-            "quality": "good",
-            "repeated": False,
-            "sequence": 1,
-        }
+    def reading(ct_id: str, at: dt.datetime) -> ReaderMeasurement:
+        return ReaderMeasurement(
+            reader_id=ct_id,
+            observed_at=at,
+            received_at=at,
+            active_power_w=1.0,
+            phase="l1",
+            measurement_type=MeasurementType.INSTANTANEOUS,
+            calibration_version="cal-1",
+            measurement_basis="ct_measured",
+            sequence=1,
+        )
 
-    db.insert_ct_samples([row("ct_main_l1", old), row("ct_main_l2", new)])
+    db.repos.samples.insert_readings([reading("ct_main_l1", old), reading("ct_main_l2", new)])
     db.upsert_energy_aggregate("test_device", old, 300, 1.0)
     db.upsert_energy_aggregate("test_device", new, 300, 2.0)
 
     removed = db.prune(raw_days=30, aggregate_days=730)
     assert removed["ct_samples"] == 1
-    assert db.latest_ct_sample("ct_main_l1") is None
-    assert db.latest_ct_sample("ct_main_l2") is not None
+    assert db.repos.samples.latest_ct_sample("ct_main_l1") is None
+    assert db.repos.samples.latest_ct_sample("ct_main_l2") is not None
     # The 2020 aggregate is past the 730-day aggregate retention window and is
     # removed; only the recent one survives.
     assert db.energy_total("test_device") == pytest.approx(2.0)

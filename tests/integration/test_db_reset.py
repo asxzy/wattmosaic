@@ -28,6 +28,7 @@ import aiohttp
 import aiohttp.web as web
 from wattmosaic_engine.api.server import RESET_DB_PATH, create_app
 from wattmosaic_engine.config.settings import EngineConfig
+from wattmosaic_engine.contracts import MeasurementType, ReaderMeasurement
 from wattmosaic_engine.main import EngineCore
 from wattmosaic_engine.storage import Database
 from wattmosaic_engine.storage.migrations import LATEST_VERSION
@@ -77,16 +78,19 @@ def _seed_data(db: Database) -> None:
     db.log_system_event("info", "test", "before-reset-marker")
     db.set_state("reset_marker", {"seeded": True})
     stamp = datetime(2026, 1, 1, tzinfo=UTC)
-    db.insert_ct_samples(
+    db.repos.samples.insert_readings(
         [
-            {
-                "ct_id": "ct_main",
-                "entity_id": "sensor.main_power",
-                "value_w": 100.0,
-                "raw_value": 100.0,
-                "state_timestamp": stamp,
-                "received_at": stamp,
-            }
+            ReaderMeasurement(
+                reader_id="ct_main",
+                observed_at=stamp,
+                received_at=stamp,
+                active_power_w=100.0,
+                phase="l1",
+                measurement_type=MeasurementType.INSTANTANEOUS,
+                calibration_version="cal-1",
+                measurement_basis="ct_measured",
+                sequence=1,
+            )
         ]
     )
 
@@ -158,8 +162,12 @@ def test_confirmed_call_backs_up_wipes_and_remigrates(tmp_path: Path) -> None:
         backup_path = Path(body["backup_path"])
         # All app-data tables empty except the one row migrations seed.
         counts = {t: _table_count(harness.db, t) for t in (
-            "ct_samples", "device_events", "inference_results", "system_events",
-            "engine_state", "ct_channels", "devices", "residual_power",
+            "ct_samples", "ha_events_v3", "event_evidence", "inference_results",
+            "system_events", "engine_state", "measurement_endpoints", "physical_devices",
+            "reader_residual_series", "learning_observations", "power_model_versions_v3",
+            # The read-only legacy archives come back empty on a fresh schema too.
+            "ct_channels_legacy", "devices_legacy", "device_events_legacy",
+            "residual_power_legacy",
         )}
         schema_version = harness.db.schema_version
         # A fresh record can be written through the very same object the engine

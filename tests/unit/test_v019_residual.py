@@ -12,6 +12,7 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from wattmosaic_engine.contracts import (
     MeasurementBasis,
     ReaderResidualPoint,
@@ -212,24 +213,25 @@ def test_apply_migrations_reaches_v019(tmp_path: Path) -> None:
 
 
 def test_legacy_rows_are_flagged_scope_unknown(tmp_path: Path) -> None:
+    """v019 flags the install-wide legacy rows; v025 then archives them read-only."""
     path = tmp_path / "legacy.db"
     _build_pre_migration_db(path)
     db = _open(path)
     try:
-        columns = {row[1] for row in db._conn.execute("PRAGMA table_info(residual_power)")}
+        columns = {row[1] for row in db._conn.execute("PRAGMA table_info(residual_power_legacy)")}
         assert "legacy_scope" in columns
-        rows = db._conn.execute("SELECT residual_w, legacy_scope FROM residual_power").fetchall()
+        rows = db._conn.execute(
+            "SELECT residual_w, legacy_scope FROM residual_power_legacy"
+        ).fetchall()
         assert len(rows) == 1
         assert rows[0]["legacy_scope"] == LEGACY_SCOPE
         assert rows[0]["residual_w"] == 123.5
-        # The legacy insert path still works and flags new install-wide rows too.
-        from wattmosaic_engine.contracts import ResidualPower
-
-        db.insert_residual_power(ResidualPower(residual_w=7.0))
-        flagged = db._conn.execute(
-            "SELECT legacy_scope FROM residual_power ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        assert flagged["legacy_scope"] == LEGACY_SCOPE
+        # The archived table is immutable: no new legacy row can be written.
+        with pytest.raises(sqlite3.IntegrityError, match="read-only"):
+            db._conn.execute(
+                "INSERT INTO residual_power_legacy(timestamp, residual_w) VALUES(?, ?)",
+                ("2026-11-01T00:00:00+00:00", 7.0),
+            )
     finally:
         db.close()
 

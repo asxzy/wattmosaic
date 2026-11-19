@@ -307,10 +307,12 @@ def test_migration_21_adds_the_column_idempotently(tmp_path: Path) -> None:
 
 
 def test_device_events_is_declared_as_the_legacy_event_table() -> None:
-    assert LEGACY_EVENT_TABLES == ("device_events",)
+    assert LEGACY_EVENT_TABLES == ("device_events_legacy",)
     assert canonical_evidence_table() == "event_evidence"
-    # The legacy growth driver keeps its shipped raw-horizon prune until Z1.
-    assert PRUNABLE_TABLES["device_events"][1] == "raw"
+    # Z1 archived the legacy table read-only, so nothing prunes it any more
+    # (a DELETE would abort on its read-only trigger).
+    assert "device_events" not in PRUNABLE_TABLES
+    assert "device_events_legacy" not in PRUNABLE_TABLES
 
 
 def test_storage_health_lists_every_registered_table(db: Database) -> None:

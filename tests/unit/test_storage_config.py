@@ -1,9 +1,11 @@
-"""Storage: per-device configuration persistence (migration 4) and the tier registry.
+"""Storage: the configuration table's schema (migration 4) and the tier registry.
 
-Exercises the real ``Database`` against a temporary SQLite file, so the schema,
-the atomic replace and the tolerant reader are all covered end to end.  The
-``TASK-STORAGE-001`` half of the file covers the four-tier registry, the
-per-tier retention ranges, the payload encoding and the retention pass.
+Exercises the real ``Database`` against a temporary SQLite file.  The legacy
+``DeviceConfiguration`` contract and its save/load helpers were removed with the
+contract-3.0.0 cutover, so the configuration half only pins the schema and that a
+prior-schema payload survives the upgrade byte-for-byte.  The
+``TASK-STORAGE-001`` half covers the four-tier registry, the per-tier retention
+ranges, the payload encoding and the retention pass.
 """
 
 from __future__ import annotations
@@ -18,19 +20,6 @@ from wattmosaic_engine.config.settings import (
     RETENTION_DAYS_AGGREGATES_RANGE,
     RETENTION_DAYS_RAW_RANGE,
     EngineConfig,
-)
-from wattmosaic_engine.contracts import (
-    ControllerConfiguration,
-    ControllerStateMapping,
-    DeviceConfiguration,
-    DeviceConfigurationSet,
-    DeviceType,
-    ExpectedPower,
-    HaConnectivity,
-    LightConfiguration,
-    LightType,
-    MonitoringLevel,
-    PowerBehavior,
 )
 from wattmosaic_engine.storage.database import Database
 from wattmosaic_engine.storage.migrations import (
@@ -63,67 +52,6 @@ from wattmosaic_engine.storage.tiers import (
     tier_of,
 )
 
-
-def _rich_config(device_id: str = "kitchen_lights") -> DeviceConfiguration:
-    return DeviceConfiguration(
-        device_id=device_id,
-        device_type=DeviceType.LIGHT_GROUP,
-        connectivity=HaConnectivity.CONNECTED,
-        state_entity_ids=["light.kitchen", "light.kitchen_under_cabinet"],
-        mode_entity_ids=["sensor.kitchen_scene"],
-        controllable_entity_ids=["light.kitchen"],
-        monitoring=MonitoringLevel.SHARED,
-        monitored_by_ct_ids=["ct_sub_l1"],
-        behavior=PowerBehavior.VARIABLE,
-        expected=ExpectedPower(
-            on_w=45.0,
-            idle_w=0.5,
-            standby_w=0.3,
-            startup_w=48.0,
-            tolerance_w=3.0,
-            tolerance_fraction=0.15,
-        ),
-        light=LightConfiguration(
-            light_type=LightType.LED,
-            bulb_count=5,
-            watts_per_bulb_on=9.0,
-            standby_w=0.2,
-            min_output_fraction=0.05,
-            dimming_curve=[[0.0, 0.0], [0.5, 0.6], [1.0, 1.0]],
-        ),
-        controller=ControllerConfiguration(
-            mode_entity_id="climate.kitchen",
-            load_entity_ids=["binary_sensor.kitchen_load"],
-            states=[
-                ControllerStateMapping(label="heat", role="load", power_w=1200.0, confirmed=True),
-                ControllerStateMapping(label="heat_cool", role="mode", confirmed=False),
-            ],
-            on_delay_s=30.0,
-            off_delay_s=15.0,
-            obeys_control=True,
-        ),
-        configured_by="user",
-        notes=["audited 2026-11-01", "five-bulb fixture"],
-    )
-
-
-def _controller_config(device_id: str = "hvac_fan") -> DeviceConfiguration:
-    return DeviceConfiguration(
-        device_id=device_id,
-        device_type=DeviceType.HVAC_COMBINED,
-        connectivity=HaConnectivity.CONNECTED,
-        mode_entity_ids=["climate.thermostat"],
-        monitoring=MonitoringLevel.HOME_TOTAL_ONLY,
-        behavior=PowerBehavior.COMPLEX,
-        controller=ControllerConfiguration(
-            mode_entity_id="climate.thermostat",
-            load_entity_ids=["binary_sensor.fan_running"],
-            states=[ControllerStateMapping(label="fan", role="load", power_w=85.0, confirmed=True)],
-        ),
-        notes=["mode entity is context only"],
-    )
-
-
 # --------------------------------------------------------------------------- #
 # Migrations
 # --------------------------------------------------------------------------- #
@@ -153,184 +81,6 @@ def test_migrations_reach_version_4_and_are_idempotent(tmp_path) -> None:
         second.close()
 
 
-# --------------------------------------------------------------------------- #
-# Round-trip
-# --------------------------------------------------------------------------- #
-
-
-def test_save_load_round_trip_preserves_rich_configuration(tmp_path) -> None:
-    db = Database(tmp_path / "config.db")
-    try:
-        rich = _rich_config()
-        controller = _controller_config()
-        payload = DeviceConfigurationSet(
-            version=7,
-            updated_at=datetime(2026, 11, 6, 12, 0, tzinfo=UTC),
-            devices=[rich, controller],
-        )
-        db.save_device_configurations(payload)
-
-        loaded = db.load_device_configurations()
-        assert loaded.version == 7
-        assert [d.device_id for d in loaded.devices] == ["hvac_fan", "kitchen_lights"]
-
-        by_id = loaded.by_device()
-        light = by_id["kitchen_lights"]
-        assert light.device_type == DeviceType.LIGHT_GROUP
-        assert light.monitoring == MonitoringLevel.SHARED
-        assert light.behavior == PowerBehavior.VARIABLE
-        assert light.monitored_by_ct_ids == ["ct_sub_l1"]
-        assert light.state_entity_ids == ["light.kitchen", "light.kitchen_under_cabinet"]
-        assert light.mode_entity_ids == ["sensor.kitchen_scene"]
-        assert light.light is not None
-        assert light.light.bulb_count == 5
-        assert light.light.light_type == LightType.LED
-        assert light.light.watts_per_bulb_on == 9.0
-        assert light.light.min_output_fraction == 0.05
-        assert light.light.dimming_curve == [(0.0, 0.0), (0.5, 0.6), (1.0, 1.0)]
-        assert light.expected.on_w == 45.0
-        assert light.expected.startup_w == 48.0
-        assert light.expected.tolerance_fraction == 0.15
-        assert light.controller is not None
-        assert light.controller.load_states() == {"heat": 1200.0}
-        assert light.controller.on_delay_s == 30.0
-        assert light.notes == ["audited 2026-11-01", "five-bulb fixture"]
-
-        fan = by_id["hvac_fan"]
-        assert fan.controller is not None
-        assert fan.controller.load_states() == {"fan": 85.0}
-        assert fan.controller.roles()["fan"] == "load"
-    finally:
-        db.close()
-
-
-def test_get_device_configuration_returns_none_for_unknown_device(tmp_path) -> None:
-    db = Database(tmp_path / "config.db")
-    try:
-        db.save_device_configurations(
-            DeviceConfigurationSet(version=1, devices=[_rich_config()])
-        )
-        assert db.get_device_configuration("does_not_exist") is None
-        found = db.get_device_configuration("kitchen_lights")
-        assert found is not None
-        assert found.device_id == "kitchen_lights"
-        assert found.light is not None
-        assert found.light.bulb_count == 5
-    finally:
-        db.close()
-
-
-def test_upsert_replaces_row_instead_of_duplicating(tmp_path) -> None:
-    db = Database(tmp_path / "config.db")
-    try:
-        first = _rich_config()
-        db.save_device_configurations(DeviceConfigurationSet(version=1, devices=[first]))
-        assert db.load_device_configurations().version == 1
-
-        second = _controller_config("kitchen_lights")
-        db.save_device_configurations(
-            DeviceConfigurationSet(
-                version=2,
-                updated_at=datetime(2026, 11, 6, 13, 0, tzinfo=UTC),
-                devices=[second],
-            )
-        )
-
-        rows = db._conn.execute("SELECT COUNT(*) AS n FROM device_configurations").fetchone()
-        assert rows["n"] == 1
-        loaded = db.load_device_configurations()
-        assert loaded.version == 2
-        assert len(loaded.devices) == 1
-        assert loaded.devices[0].device_type == DeviceType.HVAC_COMBINED
-    finally:
-        db.close()
-
-
-def test_corrupt_payload_row_is_skipped_not_raised(tmp_path) -> None:
-    db = Database(tmp_path / "config.db")
-    try:
-        db.save_device_configurations(
-            DeviceConfigurationSet(version=4, devices=[_rich_config()])
-        )
-        db._conn.execute(
-            "INSERT INTO device_configurations(device_id, payload_json, updated_at) VALUES(?,?,?)",
-            ("broken", "{not json", "2026-11-06T00:00:00+00:00"),
-        )
-        loaded = db.load_device_configurations()
-        assert [d.device_id for d in loaded.devices] == ["kitchen_lights"]
-        assert db.get_device_configuration("broken") is None
-    finally:
-        db.close()
-
-
-def test_empty_table_returns_empty_set(tmp_path) -> None:
-    db = Database(tmp_path / "config.db")
-    try:
-        loaded = db.load_device_configurations()
-        assert isinstance(loaded, DeviceConfigurationSet)
-        assert loaded.devices == []
-    finally:
-        db.close()
-
-
-# --------------------------------------------------------------------------- #
-# Contract 1.6.0 — typed entity bindings survive the round trip
-# --------------------------------------------------------------------------- #
-
-
-def test_entity_bindings_round_trip_through_storage(tmp_path) -> None:
-    """A typed role must survive persistence, or WP4 cannot dedup on it.
-
-    ``DeviceConfiguration.entity_bindings`` is what lets "many HA entities, one
-    appliance" be a contract rather than a convention.  It is stored inside the
-    configuration payload, so the round-trip guard has to live here.
-    """
-    from wattmosaic_engine.contracts import HaEntityBinding, HaEntityRole
-
-    db = Database(tmp_path / "bindings.db")
-    try:
-        config = _rich_config()
-        config.entity_bindings = [
-            HaEntityBinding(
-                entity_id="sensor.kitchen_power",
-                device_id=config.device_id,
-                role=HaEntityRole.POWER_MEASUREMENT,
-                is_load_evidence=True,
-                contributes_power=True,
-                attributes_key="current_power_w",
-            ),
-            HaEntityBinding(
-                entity_id="light.kitchen",
-                device_id=config.device_id,
-                role=HaEntityRole.LOAD_STATE,
-                is_load_evidence=True,
-            ),
-            HaEntityBinding(
-                entity_id="sensor.kitchen_energy",
-                device_id=config.device_id,
-                role=HaEntityRole.ENERGY_COUNTER,
-            ),
-        ]
-        db.save_device_configurations(
-            DeviceConfigurationSet(version=8, devices=[config])
-        )
-
-        loaded = db.load_device_configurations().by_device()["kitchen_lights"]
-        assert len(loaded.entity_bindings) == 3
-        power = [b for b in loaded.entity_bindings if b.contributes_power]
-        assert len(power) == 1
-        assert power[0].entity_id == "sensor.kitchen_power"
-        assert power[0].role == HaEntityRole.POWER_MEASUREMENT
-        assert power[0].attributes_key == "current_power_w"
-        assert {b.role for b in loaded.entity_bindings} == {
-            HaEntityRole.POWER_MEASUREMENT,
-            HaEntityRole.LOAD_STATE,
-            HaEntityRole.ENERGY_COUNTER,
-        }
-    finally:
-        db.close()
-
-
 def test_latest_schema_includes_the_audit_tables(tmp_path) -> None:
     """Migrations 9 and 10 are additive audit state; config is unaffected."""
     db = Database(tmp_path / "audit_schema.db")
@@ -342,11 +92,11 @@ def test_latest_schema_includes_the_audit_tables(tmp_path) -> None:
         }
         assert {
             "circuits",
-            "topology_relations",
+            "topology_relations_legacy",
             "inference_records",
             "ct_measurement_factors",
-            "ha_entity_bindings",
-            "residual_power",
+            "ha_entity_bindings_legacy",
+            "residual_power_legacy",
             "isolation_verdicts",
         } <= tables
         # And the migration is idempotent on reopen.
@@ -422,15 +172,17 @@ def test_stats_publishes_the_tier_classification(tmp_path) -> None:
 def test_prunable_tables_match_the_shipped_retention_pass(tmp_path) -> None:
     """The registry's prune declaration is the shipped behaviour, entry by entry.
 
-    ``device_events`` is the recorded conflict: classified L2, pruned on the raw
-    horizon because the shipped pass always did and the spec names it as the
-    ~1.5 GB/day growth driver.
+    ``device_events`` was the recorded conflict (L2, pruned on the raw horizon).
+    The contract-3.0.0 cutover archived it read-only as ``device_events_legacy``
+    -- still L2 -- and nothing prunes it any more: a DELETE would abort on its
+    read-only trigger, and no runtime path writes it, so it cannot grow.
     """
     db = Database(tmp_path / "prune_registry.db")
     try:
         declared = {table: (col, horizon) for table, col, horizon in prunable_tables()}
         assert declared["ct_samples"] == ("received_at", RAW_HORIZON)
-        assert declared["device_events"] == ("occurred_at", RAW_HORIZON)
+        assert "device_events" not in declared
+        assert "device_events_legacy" not in declared
         assert declared["power_aggregates"] == ("bucket_start", AGGREGATE_HORIZON)
         assert declared["energy_aggregates"] == ("bucket_start", AGGREGATE_HORIZON)
         # Every declared table exists and every declared column is its age key.
@@ -444,9 +196,9 @@ def test_prunable_tables_match_the_shipped_retention_pass(tmp_path) -> None:
             assert is_prunable(table)
         # The registry is the single source: ``PRUNABLE_TABLES`` is built from it.
         assert {t: (c, h) for t, (c, h) in PRUNABLE_TABLES.items()} == declared
-        # The conflict is visible: L2 by classification, pruned on the raw horizon.
-        assert tier_of("device_events") == "L2"
-        assert declared["device_events"][1] == RAW_HORIZON
+        # The archive keeps its classification but is exempt from pruning.
+        assert tier_of("device_events_legacy") == "L2"
+        assert not is_prunable("device_events_legacy")
     finally:
         db.close()
 
@@ -465,41 +217,43 @@ def test_prune_reports_every_exempt_table_with_zero(tmp_path) -> None:
             assert isinstance(count, int)
         assert removed["inference_records"] == 0
         assert removed["isolation_verdicts"] == 0
-        assert removed["residual_power"] == 0
+        assert removed["residual_power_legacy"] == 0
         assert removed["circuits"] == 0
     finally:
         db.close()
 
 
-def test_device_events_is_still_age_pruned(tmp_path) -> None:
-    """The §A regression guard: the shipped pass still prunes ``device_events``.
+def test_archived_device_events_are_not_age_pruned(tmp_path) -> None:
+    """The archived ``device_events_legacy`` survives the retention pass.
 
-    The registry classifies it L2, so a tier-derived prune would leave it alone
-    and silently stop bounding the documented ~1.5 GB/day growth driver.  This
-    asserts the shipped behaviour is preserved.
+    Before the cutover the shipped pass pruned ``device_events`` on the raw
+    horizon.  The table is now a read-only rollback record: the pass must leave
+    it alone (a DELETE would abort the whole prune on its trigger), even for a
+    row far older than the raw window.
     """
-    db = Database(tmp_path / "events.db")
-    old = datetime.now(UTC) - timedelta(days=400)
-    new = datetime.now(UTC)
+    path = tmp_path / "events.db"
+    _build_prior_schema(path)
+    old = (datetime.now(UTC) - timedelta(days=400)).isoformat()
+    conn = sqlite3.connect(path)
     try:
-        for event_id, at in (("old", old), ("new", new)):
-            db.insert_device_event(
-                {
-                    "event_id": event_id,
-                    "device_id": "dev1",
-                    "entity_id": "switch.dev1",
-                    "event_type": "state_changed",
-                    "occurred_at": at,
-                    "received_at": at,
-                }
-            )
+        conn.execute(
+            """INSERT INTO device_events(event_id, device_id, entity_id, event_type,
+            occurred_at, received_at) VALUES(?,?,?,?,?,?)""",
+            ("old", "dev1", "switch.dev1", "state_changed", old, old),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    db = Database(path)
+    try:
         removed = db.prune(raw_days=30, aggregate_days=730)
-        assert removed["device_events"] == 1
+        assert removed["device_events_legacy"] == 0
         surviving = {
             row["event_id"]
-            for row in db._conn.execute("SELECT event_id FROM device_events").fetchall()
+            for row in db._conn.execute("SELECT event_id FROM device_events_legacy").fetchall()
         }
-        assert surviving == {"new"}
+        assert surviving == {"e1", "old"}
     finally:
         db.close()
 
@@ -613,70 +367,6 @@ def test_payload_round_trip_across_encodings() -> None:
     assert decode_payload("") is None
 
 
-def test_configuration_payloads_read_through_one_path(tmp_path) -> None:
-    """A saved configuration is encoded on write and decodes on read."""
-    db = Database(tmp_path / "encoded.db")
-    try:
-        db.save_device_configurations(
-            DeviceConfigurationSet(version=3, devices=[_rich_config()])
-        )
-        stored = db._conn.execute(
-            "SELECT payload_json FROM device_configurations WHERE device_id='kitchen_lights'"
-        ).fetchone()["payload_json"]
-        assert payload_is_encoded(stored)
-        loaded = db.load_device_configurations().by_device()["kitchen_lights"]
-        assert loaded.notes == ["audited 2026-11-01", "five-bulb fixture"]
-        # A legacy row written by an older binary still loads through the same
-        # path.  ``DeviceConfigurationSet`` forbids two rows declaring the same
-        # device, so the legacy row carries its own declared id.
-        legacy_payload = _rich_config("legacy_device").model_dump(mode="json")
-        db._conn.execute(
-            "INSERT INTO device_configurations(device_id, payload_json, updated_at) VALUES(?,?,?)",
-            ("legacy", json.dumps(legacy_payload), "2026-11-06T00:00:00+00:00"),
-        )
-        by_id = db.load_device_configurations().by_device()
-        assert by_id["legacy_device"].device_id == "legacy_device"
-        assert by_id["legacy_device"].notes == loaded.notes
-    finally:
-        db.close()
-
-
-def test_topology_snapshot_is_encoded_and_a_legacy_row_loads(tmp_path) -> None:
-    """The topology snapshot is the column compression pays on; history is safe."""
-    from wattmosaic_engine.contracts import (
-        CTChannel,
-        CTType,
-        DeviceTopology,
-        Topology,
-        TopologyStatus,
-    )
-
-    db = Database(tmp_path / "topology_encoded.db")
-    try:
-        topology = Topology(
-            status=TopologyStatus.CANDIDATE,
-            channels=[CTChannel(ct_id="main_l1", entity_id="sensor.main", ct_type=CTType.MAIN)],
-            devices=[DeviceTopology(device_id="dev1", branch_ct_ids=["main_l1"])],
-        )
-        db.save_topology(topology)
-        stored = db._conn.execute(
-            "SELECT payload_json FROM topology_versions ORDER BY version DESC LIMIT 1"
-        ).fetchone()["payload_json"]
-        assert payload_is_encoded(stored)
-        assert db.load_topology() is not None
-
-        # A legacy (uncompressed) snapshot written before the encoding loads too.
-        legacy = json.dumps(topology.model_dump(mode="json"), default=str)
-        db._conn.execute(
-            "INSERT INTO topology_versions(created_at, status, payload_json, note) "
-            "VALUES(?,?,?,?)",
-            ("2026-01-01T00:00:00+00:00", "candidate", legacy, "legacy"),
-        )
-        assert db.load_topology() is not None
-    finally:
-        db.close()
-
-
 # --------------------------------------------------------------------------- #
 # TASK-STORAGE-001 -- partitioning decision
 # --------------------------------------------------------------------------- #
@@ -705,6 +395,19 @@ def test_the_partitioning_decision_carries_its_measurement() -> None:
 # --------------------------------------------------------------------------- #
 
 
+#: A configuration payload as an older binary stored it (uncompressed JSON).
+LEGACY_CONFIG_PAYLOAD: dict[str, object] = {
+    "device_id": "kitchen_lights",
+    "device_type": "light_group",
+    "state_entity_ids": ["light.kitchen", "light.kitchen_under_cabinet"],
+    "monitoring": "shared",
+    "monitored_by_ct_ids": ["ct_sub_l1"],
+    "expected": {"on_w": 45.0, "idle_w": 0.5},
+    "configured_by": "user",
+    "notes": ["audited 2026-11-01", "five-bulb fixture"],
+}
+
+
 def _build_prior_schema(path: Path, upto: int = 10) -> None:
     """Create a pre-migration database with raw ``sqlite3`` only.
 
@@ -724,15 +427,13 @@ def _build_prior_schema(path: Path, upto: int = 10) -> None:
                 migration.apply(conn)
         conn.execute(f"PRAGMA user_version = {upto}")
         # A legacy (uncompressed) configuration payload, as an older binary wrote.
-        config = _rich_config().model_dump(mode="json")
+        config = LEGACY_CONFIG_PAYLOAD
         conn.execute(
             "INSERT INTO device_configurations(device_id, payload_json, updated_at) "
             "VALUES(?,?,?)",
             ("kitchen_lights", json.dumps(config), "2026-11-06T00:00:00+00:00"),
         )
-        # A legacy topology snapshot and a device event, both uncompressed.
-        # ``load_topology`` reads the per-row channel/device tables, so the
-        # snapshot row is what exercises the decode path.
+        # A legacy channel, topology snapshot and device event, all uncompressed.
         conn.execute(
             """INSERT INTO ct_channels(ct_id, entity_id, name, ct_type, phase,
             polarity, enabled, reliability, topology_status, metadata_json, updated_at)
@@ -774,13 +475,26 @@ def test_prior_schema_database_migrates_and_loads(tmp_path) -> None:
     db = Database(path)
     try:
         assert db.schema_version == LATEST_VERSION
-        # The legacy configuration payload reads through the new decode path.
-        loaded = db.load_device_configurations().by_device()["kitchen_lights"]
-        assert loaded.notes == ["audited 2026-11-01", "five-bulb fixture"]
-        assert db.load_topology() is not None
-        assert db.recent_device_events(
-            datetime(2026, 11, 1, tzinfo=UTC)
-        )[0]["event_id"] == "e1"
+        # The legacy configuration payload reads through the shared decode path.
+        stored = db._conn.execute(
+            "SELECT payload_json FROM device_configurations WHERE device_id='kitchen_lights'"
+        ).fetchone()["payload_json"]
+        assert decode_payload(stored) == LEGACY_CONFIG_PAYLOAD
+        # The legacy channel became a canonical endpoint; the originals are kept
+        # as read-only archives with every row.
+        endpoint = db._conn.execute(
+            "SELECT scope FROM measurement_endpoints WHERE endpoint_id='main_l1'"
+        ).fetchone()
+        assert endpoint is not None and endpoint["scope"] == "panel_feed"
+        snapshot = db._conn.execute(
+            "SELECT payload_json FROM topology_versions_legacy"
+        ).fetchone()["payload_json"]
+        assert decode_payload(snapshot) == {"version": 1, "channels": [], "devices": []}
+        events = [
+            row["event_id"]
+            for row in db._conn.execute("SELECT event_id FROM device_events_legacy")
+        ]
+        assert events == ["e1"]
         # And the migration is idempotent on reopen.
         assert apply_migrations(db._conn) == LATEST_VERSION
     finally:

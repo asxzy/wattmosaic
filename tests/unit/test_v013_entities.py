@@ -213,8 +213,43 @@ def test_all_tables_created(schema11_db: Path) -> None:
 
 
 def test_legacy_tables_are_not_dropped_or_altered(schema11_db: Path) -> None:
+    """v013 copies the legacy rows; it neither drops nor alters the sources.
+
+    At LATEST the v025 cutover has archived ``ct_channels``/``devices``/
+    ``ha_entity_bindings`` as read-only ``*_legacy`` tables, so the originals are
+    checked under their archived names with every seeded row intact.
+    """
+    source = sqlite3.connect(schema11_db)
+    try:
+        before = {
+            table: source.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("ct_channels", "devices", "ha_entity_bindings")
+        }
+    finally:
+        source.close()
     conn = _migrated(schema11_db)
     try:
+        tables = _tables(conn)
+        assert {"ct_channels_legacy", "devices_legacy", "device_configurations",
+                "ct_measurement_factors", "ha_entity_bindings_legacy"} <= tables
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(ct_channels_legacy)")}
+        assert {"ct_id", "measurement_multiplier", "panel_id"} <= columns
+        for table, count in before.items():
+            assert count > 0
+            assert conn.execute(f"SELECT COUNT(*) FROM {table}_legacy").fetchone()[0] == count
+    finally:
+        conn.close()
+
+
+def test_legacy_tables_survive_v013_under_original_names(schema11_db: Path) -> None:
+    """Right after v013 (before the v025 archive) the sources are untouched."""
+    conn = sqlite3.connect(schema11_db)
+    try:
+        for statement in _V013.statements:
+            conn.execute(statement)
+        assert _V013.apply is not None
+        _V013.apply(conn)
+        conn.commit()
         tables = _tables(conn)
         assert {"ct_channels", "devices", "device_configurations", "ct_measurement_factors",
                 "ha_entity_bindings"} <= tables

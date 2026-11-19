@@ -20,40 +20,45 @@ for path in (REPO_ROOT, ENGINE_ROOT):
 
 
 @pytest.fixture()
-def engine_db(tmp_db_path, sample_topology):
-    """A real ``Database`` initialised with the audited topology."""
+def engine_db(tmp_db_path):
+    """A real, freshly migrated ``Database``.
+
+    The legacy contract topology (and ``save_topology``) was removed with the
+    contract-3.0.0 cutover, so the fixture no longer seeds one; storage tests
+    write v3 rows through ``db.repos``.
+    """
     from wattmosaic_engine.storage.database import Database
 
     db = Database(tmp_db_path)
-    topology = sample_topology.to_contract_topology()
-    db.save_topology(topology, note="e2e fixture")
     try:
-        yield db, topology
+        yield db
     finally:
         db.close()
 
 
-def measurement_rows(record: dict) -> list[dict]:
-    """Contract-shaped sample rows for one simulator record."""
-    rows = []
+def measurement_readings(record: dict) -> list:
+    """``ReaderMeasurement`` rows for one simulator record (one per reader)."""
+    from wattmosaic_engine.contracts import (
+        MeasurementBasis,
+        MeasurementType,
+        QualityFlag,
+        ReaderMeasurement,
+    )
+
+    readings = []
     for ct_id, m in record["measurements"].items():
-        rows.append(
-            {
-                "ct_id": ct_id,
-                "entity_id": m["entity_id"],
-                "value_w": float(m["value_w"]),
-                "raw_value": float(m["value_w"]),
-                "unit": "W",
-                "state_timestamp": dt.datetime.fromisoformat(m["state_timestamp"]),
-                "received_at": dt.datetime.fromisoformat(m["received_at"]),
-                "physical_timestamp": (
-                    dt.datetime.fromisoformat(m["physical_timestamp"])
-                    if m.get("physical_timestamp")
-                    else None
-                ),
-                "quality": m["quality"],
-                "repeated": m["repeated"],
-                "sequence": m["sequence"],
-            }
+        readings.append(
+            ReaderMeasurement(
+                reader_id=ct_id,
+                observed_at=dt.datetime.fromisoformat(m["state_timestamp"]),
+                received_at=dt.datetime.fromisoformat(m["received_at"]),
+                active_power_w=float(m["value_w"]),
+                phase="unknown",
+                measurement_type=MeasurementType.INSTANTANEOUS,
+                calibration_version="sim-1",
+                measurement_basis=MeasurementBasis.CT_MEASURED.value,
+                quality_flags=[QualityFlag.REPEATED] if m["repeated"] else [],
+                sequence=int(m["sequence"]),
+            )
         )
-    return rows
+    return readings

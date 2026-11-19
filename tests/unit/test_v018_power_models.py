@@ -233,9 +233,22 @@ def test_legacy_table_is_untouched(tmp_path: Path) -> None:
         count = before.execute("SELECT COUNT(*) FROM device_model_versions").fetchone()[0]
     finally:
         before.close()
+    # Right after v018 the legacy source is still present and unchanged.
+    conn = sqlite3.connect(path)
+    try:
+        for statement in V018.statements:
+            conn.execute(statement)
+        assert V018.apply is not None
+        V018.apply(conn)
+        conn.commit()
+        after_v018 = conn.execute("SELECT COUNT(*) FROM device_model_versions").fetchone()[0]
+        assert after_v018 == count == 3
+    finally:
+        conn.close()
+    # At LATEST the v025 cutover has archived it read-only with every row kept.
     db = _open(path)
     try:
-        after = db._conn.execute("SELECT COUNT(*) FROM device_model_versions").fetchone()[0]
+        after = db._conn.execute("SELECT COUNT(*) FROM device_model_versions_legacy").fetchone()[0]
         assert after == count == 3
     finally:
         db.close()

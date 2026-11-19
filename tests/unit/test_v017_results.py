@@ -477,54 +477,6 @@ def test_group_history_is_ordered_and_filtered(tmp_path: Path) -> None:
         db.close()
 
 
-def test_reconciliation_round_trip_writes_every_column(tmp_path: Path) -> None:
-    """The pre-v17 INSERT bound 20 values into 21 placeholders and failed at
-    runtime; the rebuilt path writes and reads back every column, including the
-    new nullable ``group_w``.
-    """
-    from wattmosaic_engine.contracts import Reconciliation
-
-    path = tmp_path / "reconciliation.db"
-    _build_pre_migration_db(path)
-    db = _open(path)
-    try:
-        rec = Reconciliation(
-            timestamp=NOW,
-            topology_version=1,
-            main_power_w=100.0,
-            l1_power_w=20.0,
-            l2_power_w=30.0,
-            direct_measured_w=10.0,
-            inferred_w=10.0,
-            model_estimated_w=10.0,
-            configured_prior_w=5.0,
-            unknown_residual_w=5.0,
-            unmonitored_w=2.0,
-            meter_disagreement_w=1.0,
-            meter_spread_w=0.5,
-            meter_spread_exceeds_residual=True,
-            reconciliation_error_w=0.25,
-            reconciliation_error_ratio=0.01,
-            accounted_fraction=0.99,
-            measurement_uncertainty_w=1.5,
-            quality_status="good",
-            explanation=["balanced"],
-            topology_confirmed=True,
-        )
-        db.insert_reconciliation(rec)
-        stored = db.latest_reconciliation()
-        assert stored is not None
-        assert stored["main_power_w"] == 100.0
-        assert stored["configured_prior_w"] == 5.0
-        assert stored["unmonitored_w"] == 2.0
-        assert stored["meter_spread_exceeds_residual"] == 1
-        assert stored["topology_confirmed"] == 1
-        assert stored["group_w"] is None
-        assert json.loads(stored["explanation_json"]) == ["balanced"]
-    finally:
-        db.close()
-
-
 def test_migration_is_part_of_the_discovered_registry() -> None:
     # Discovery loads the module under a private name, so the registry holds a
     # distinct Migration instance -- identity is by version, not object equality.

@@ -34,6 +34,15 @@ stopped at ``user_version = 8``.
 what the callback does -- it cannot detect a double-add bug.  Idempotency is
 tested by calling the version-11 ``apply=`` callback twice on one connection.
 
+**Reading the result at LATEST**
+
+The contract-3.0.0 cutover (v025) archives ``ct_channels``, ``devices`` and
+``topology_versions`` as read-only ``*_legacy`` tables, and the legacy load paths
+(``load_topology``, ``load_device_configurations``, the legacy contract models)
+are gone.  The v11 outcome is therefore read from the archived tables, and
+"still loads" is checked on the canonical v3 tables the S13-S15 backfills derive
+from those rows (endpoints, physical devices, mapping edges).
+
 **Where version 11 lives now**
 
 Migrations 1-11 were moved verbatim into
@@ -56,14 +65,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from wattmosaic_engine.contracts import (
-    CTType,
-    DeviceConfiguration,
-    InferenceResult,
-    MonitoringLevel,
-    Topology,
-)
-from wattmosaic_engine.electrical.topology import build_graph
 from wattmosaic_engine.storage.database import Database
 from wattmosaic_engine.storage.migrations import (
     LATEST_VERSION,
@@ -230,14 +231,25 @@ def schema8_db(tmp_path: Path) -> Path:
     return _build_schema8(tmp_path / "schema8.db")
 
 
+def _legacy(conn: sqlite3.Connection, table: str) -> str:
+    """The name a legacy table has now: ``*_legacy`` once v025 archived it."""
+    archived = f"{table}_legacy"
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (archived,)
+    ).fetchone()
+    return archived if row is not None else table
+
+
 def _rows(path: Path) -> dict[str, Any]:
     """Read the migrated tables back on a plain connection."""
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     try:
+        channels = _legacy(conn, "ct_channels")
+        devices = _legacy(conn, "devices")
         return {
-            "channels": {r["ct_id"]: dict(r) for r in conn.execute("SELECT * FROM ct_channels")},
-            "devices": {r["device_id"]: dict(r) for r in conn.execute("SELECT * FROM devices")},
+            "channels": {r["ct_id"]: dict(r) for r in conn.execute(f"SELECT * FROM {channels}")},
+            "devices": {r["device_id"]: dict(r) for r in conn.execute(f"SELECT * FROM {devices}")},
             "configurations": {
                 r["device_id"]: dict(r)
                 for r in conn.execute("SELECT * FROM device_configurations")
@@ -353,12 +365,8 @@ def test_v11_migrates_device_configuration_payload(schema8_db: Path) -> None:
     assert payload["state_entity_ids"] == ["binary_sensor.hot_tub_running"]
     assert payload["expected"] == {"on_w": 2200.0, "idle_w": 40.0}
     assert payload["configured_by"] == "user"
-    # And the row still validates, which is the whole point of migrating it.
-    config = DeviceConfiguration.model_validate(payload)
-    # ``Model`` sets ``use_enum_values=True``, so a validated field holds the
-    # plain string; the assertion is on the value, not on enum identity.
-    assert config.monitoring == MonitoringLevel.SHARED.value
-    assert MonitoringLevel(payload["monitoring"]) is MonitoringLevel.SHARED
+    # No retired vocabulary survives anywhere in the stored payload.
+    assert "dedicated" not in json.dumps(payload)
 
 
 def test_v11_migrates_historical_inference_rows(schema8_db: Path) -> None:
@@ -366,17 +374,9 @@ def test_v11_migrates_historical_inference_rows(schema8_db: Path) -> None:
 
     rows = _rows(schema8_db)["inference"]
     assert [r["monitoring_level"] for r in rows] == ["shared"]
-    # The historical row must still validate against the contract.
-    result = InferenceResult(
-        device_id=rows[0]["device_id"],
-        timestamp=rows[0]["timestamp"],
-        power_w=rows[0]["power_w"],
-        source=rows[0]["source"],
-        confidence=rows[0]["confidence"],
-        monitoring_level=rows[0]["monitoring_level"],
-    )
-    assert result.monitoring_level == MonitoringLevel.SHARED.value
-    assert MonitoringLevel(result.monitoring_level) is MonitoringLevel.SHARED
+    # The historical value is otherwise preserved (v017 flags, never rewrites).
+    assert rows[0]["device_id"] == "hot_tub"
+    assert rows[0]["power_w"] == 1200.0
 
 
 def test_apply_callback_is_idempotent(schema8_db: Path) -> None:
@@ -422,44 +422,66 @@ def test_apply_callback_is_idempotent(schema8_db: Path) -> None:
 
 
 def test_pre_change_database_loads_after_upgrade(schema8_db: Path) -> None:
-    """AC-2: the database opens, migrates and loads without error."""
+    """AC-2: the database opens, migrates to LATEST and its data is all present.
+
+    The canonical v3 tables are backfilled from the post-v11 legacy rows, so the
+    demoted legs are ``circuit`` endpoints, the device and its configuration
+    survive, and the archived legacy rows carry the demoted role.
+    """
     db = Database(schema8_db)
     try:
         assert db.schema_version == LATEST_VERSION
-        topology = db.load_topology()
-        assert topology is not None
-        channels = {c.ct_id: c for c in topology.channels}
-        assert channels["tub_l1"].ct_type == CTType.BRANCH.value
-        assert channels["main_l1"].ct_type == CTType.MAIN.value
-        devices = {d.device_id: d for d in topology.devices}
-        assert sorted(devices["hot_tub"].branch_ct_ids) == ["tub_l1", "tub_l2"]
+        conn = db._conn
+        endpoints = {
+            r["endpoint_id"]: r["scope"]
+            for r in conn.execute("SELECT endpoint_id, scope FROM measurement_endpoints")
+        }
+        assert endpoints == {
+            "main_l1": "panel_feed",
+            "tub_l1": "circuit",
+            "tub_l2": "circuit",
+            "lights_ct": "circuit",
+        }
+        archived = {
+            r["ct_id"]: r["ct_type"]
+            for r in conn.execute("SELECT ct_id, ct_type FROM ct_channels_legacy")
+        }
+        assert archived["tub_l1"] == "branch"
+        assert archived["main_l1"] == "main"
+        devices = [r[0] for r in conn.execute("SELECT device_id FROM physical_devices")]
+        assert devices == ["hot_tub"]
         # The configuration set must not have lost the row.
-        configurations = db.load_device_configurations()
-        assert [c.device_id for c in configurations.devices] == ["hot_tub"]
+        configured = [r[0] for r in conn.execute("SELECT device_id FROM device_configurations")]
+        assert configured == ["hot_tub"]
     finally:
         db.close()
 
 
 def test_no_attribution_loss(schema8_db: Path) -> None:
-    """AC-3: every device keeps at least one attribution row.
+    """AC-3: every device keeps at least one attribution path.
 
     This is the failure the id move exists to prevent: with the channel demoted
-    and nothing in ``branch_ct_ids``, ``attribution_ct_ids`` resolves to ``()``
-    and the device silently reports nothing forever.
+    and nothing in ``branch_ct_ids``, the device would have no endpoint and would
+    silently report nothing forever.  In v3 the attribution path is the active
+    mapping edge the v015 backfill derives from ``branch_ct_ids``.
     """
     db = Database(schema8_db)
     try:
-        topology = db.load_topology()
+        conn = db._conn
+        device_ids = [r[0] for r in conn.execute("SELECT device_id FROM physical_devices")]
+        edges: dict[str, set[str]] = {}
+        for row in conn.execute(
+            "SELECT subject_id, endpoint_id FROM mapping_edges "
+            "WHERE subject_kind = 'device' AND valid_until IS NULL"
+        ):
+            edges.setdefault(row[0], set()).add(row[1])
     finally:
         db.close()
-    assert isinstance(topology, Topology)
-    graph = build_graph(topology)
 
-    assert graph.device_ids, "the fixture must contain a device"
-    for device_id in graph.device_ids:
-        assert graph.attribution_ct_ids(device_id) != (), (
-            f"device {device_id} lost every attribution row"
-        )
+    assert device_ids, "the fixture must contain a device"
+    for device_id in device_ids:
+        assert edges.get(device_id), f"device {device_id} lost every attribution row"
+    assert edges["hot_tub"] == {"tub_l1", "tub_l2"}
 
 
 def test_migration_does_not_fake_a_topology_version(schema8_db: Path) -> None:
@@ -474,7 +496,9 @@ def test_migration_does_not_fake_a_topology_version(schema8_db: Path) -> None:
 
     conn = sqlite3.connect(schema8_db)
     try:
-        after = conn.execute("SELECT COUNT(*) FROM topology_versions").fetchone()[0]
+        after = conn.execute(
+            f"SELECT COUNT(*) FROM {_legacy(conn, 'topology_versions')}"
+        ).fetchone()[0]
     finally:
         conn.close()
     assert before == after == 0
@@ -503,7 +527,7 @@ def test_apply_migrations_is_a_no_op_on_a_migrated_database(schema8_db: Path) ->
         assert apply_migrations(conn) == LATEST_VERSION
         branch = json.loads(
             conn.execute(
-                "SELECT branch_ct_ids_json FROM devices WHERE device_id='hot_tub'"
+                "SELECT branch_ct_ids_json FROM devices_legacy WHERE device_id='hot_tub'"
             ).fetchone()[0]
         )
     finally:
