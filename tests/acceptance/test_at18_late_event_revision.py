@@ -9,16 +9,15 @@ from __future__ import annotations
 
 import pytest
 
-pytestmark = [
-    pytest.mark.acceptance,
-    pytest.mark.xfail(strict=True, reason="closed by I6"),
-]
+pytestmark = pytest.mark.acceptance
+
+CLOSED_BY = "I6"
 
 
 def test_late_sample_revises_without_rewriting_history(hb17) -> None:
     """A late sample appends a new revision; the original record is immutable."""
     from wattmosaic_engine.contracts import EventGroupStatus
-    from wattmosaic_engine.inference import record_revision  # target surface (I6)
+    from wattmosaic_engine.inference import records as record_revision  # I6 target surface
 
     store = record_revision.EventRecordStore()
     rev1 = store.open_provisional(readers=["ct_main"])
