@@ -60,11 +60,11 @@
 | T2 | 3 | VERIFIED |  |  |  |
 | T3 | 3 | VERIFIED |  |  | live loop wiring deferred to P6 |
 | T4 | 3 | VERIFIED |  |  | orchestrator removed deps guard so v3 routes mount in production |
-| I1 | 3 | VERIFIED |  | AT-10 | AT-10 property test in unit tests; marker flip pending |
-| I2 | 3 | VERIFIED |  | AT-05 | AT-05 scenario in unit tests; marker flip pending K07 |
+| I1 | 3 | VERIFIED |  | AT-10 | AT-10 closed via ATX |
+| I2 | 3 | VERIFIED |  | AT-05 | AT-05 closed via ATX |
 | I3 | 3 | VERIFIED |  | AT-06, 08, 09 | AT-06/08/09 closed; dropped verify.py side-effect files from merge |
 | I4 | 3 | VERIFIED |  | AT-07 | AT-07 closed; 250 W test proves legacy defect + mutation guards |
-| M1 | 3 | VERIFIED |  | AT-01, 13 | AT-01/13 scenarios in unit tests; marker flip pending; reconcile primary_display_tree with T1 |
+| M1 | 3 | VERIFIED |  | AT-01, 13 | AT-01/13 closed via ATX |
 | L1 | 3 | VERIFIED |  |  | /models/{id} now serves v3 payload via facade; U2 must adapt device view |
 | L2 | 3 | VERIFIED |  | AT-03 | AT-03 closed |
 | L3 | 3 | VERIFIED |  |  | timed out without summary; verified by tests; registry expected_window wired via spec |
