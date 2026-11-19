@@ -418,6 +418,8 @@ class ReplayResult:
     invariants: dict[str, Any] = field(default_factory=dict)
     reconciliation: dict[str, Any] = field(default_factory=dict)
     coverage: dict[str, Any] = field(default_factory=dict)
+    #: L7: the id of the model set this replay ran under, when one was supplied.
+    model_set_id: str | None = None
 
 
 def _measurement(sample: CaptureSample) -> Any:
@@ -449,6 +451,7 @@ def replay(
     cadence_s: float = DEFAULT_CADENCE_S,
     tick_s: float | None = None,
     states: dict[str, Any] | None = None,
+    models: Any = None,
 ) -> ReplayResult:
     """Feed a capture through ``Measurement`` -> ``SampleAligner`` -> engine.
 
@@ -457,11 +460,17 @@ def replay(
     would both misrepresent the workload (the aligner is a point-in-time view,
     so consecutive samples of one channel add nothing) and take hours on a
     day-long capture.  ``tick_s`` defaults to the audited CT cadence.
+
+    ``models`` is the optional model set to replay against (L7: the replay
+    fingerprint includes its ``model_set_id``).  It is passed straight through
+    to the production engine; ``None`` keeps the legacy unmodelled replay.
     """
     from wattmosaic_engine.contracts import QualityStatus
     from wattmosaic_engine.disaggregation import DisaggregationEngine
     from wattmosaic_engine.electrical.topology import build_graph
     from wattmosaic_engine.synchronization.aligner import SampleAligner
+
+    model_set_id = getattr(models, "model_set_id", None) if models is not None else None
 
     started = time.monotonic()
     tick = float(tick_s if tick_s is not None else cadence_s)
@@ -514,7 +523,7 @@ def replay(
         batch = engine.infer(
             window,
             device_states=dict(states or {}),
-            models=None,
+            models=models,
             topology=topology,
         )
         rec = batch.reconciliation
@@ -611,6 +620,7 @@ def replay(
             "unknown_residual_w": sum(residuals) / n if residuals else 0.0,
             "accounted_w": sum(accounted_values) / n if accounted_values else 0.0,
         },
+        model_set_id=model_set_id,
         coverage={
             "n": len(main_values),
             "n_unavailable": n_unavailable,

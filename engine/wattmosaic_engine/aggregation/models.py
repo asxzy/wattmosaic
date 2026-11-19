@@ -20,6 +20,10 @@ class EnergyBucket:
     sample_count: int = 0
     complete: bool = False
     source: str | None = None
+    #: L7 version tags: the model set / topology version an aggregate was
+    #: computed under.  Absent tags stay None (HB §18), never a placeholder.
+    model_set_id: str | None = None
+    topology_version_id: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -33,6 +37,8 @@ class EnergyBucket:
             "sample_count": self.sample_count,
             "complete": self.complete,
             "source": self.source,
+            "model_set_id": self.model_set_id,
+            "topology_version_id": self.topology_version_id,
         }
 
 
@@ -51,6 +57,9 @@ class DeviceRun:
     stage_status: StageStatus = StageStatus.UNKNOWN
     source: Source = Source.INFERRED
     sample_count: int = 0
+    #: L7 version tags (None when the run predates versioned replay).
+    model_set_id: str | None = None
+    topology_version_id: str | None = None
 
     @property
     def runtime_s(self) -> float:
@@ -69,6 +78,8 @@ class DeviceRun:
             "mean_power_w": self.mean_power_w,
             "stages": [stage.model_dump(mode="json") for stage in self.stages],
             "source": self.source.value if hasattr(self.source, "value") else str(self.source),
+            "model_set_id": self.model_set_id,
+            "topology_version_id": self.topology_version_id,
         }
 
 

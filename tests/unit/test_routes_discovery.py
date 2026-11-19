@@ -47,6 +47,7 @@ ROUTE_SNAPSHOT: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/v1/metrics"),
         ("GET", "/api/v1/models/{device_id}"),
         ("GET", "/api/v1/provenance/{kind}/{id}"),
+        ("GET", "/api/v1/provenance/derived_run/{run_id}"),
         ("GET", "/api/v1/quality"),
         ("GET", "/api/v1/relations"),
         ("GET", "/api/v1/residuals"),
@@ -77,6 +78,7 @@ ROUTE_SNAPSHOT: frozenset[tuple[str, str]] = frozenset(
 EXPECTED_MODULES = frozenset(
     {
         "commands",
+        "derived_runs",
         "diagnostics",
         "devices",
         "discovery",

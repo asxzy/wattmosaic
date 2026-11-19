@@ -53,12 +53,14 @@ class DeviceRunRepository:
         with self._lock, self._connect() as conn:
             conn.execute(
                 """INSERT INTO device_runs(run_id, device_id, started_at, ended_at, energy_kwh,
-                peak_power_w, mean_power_w, stages_json, source)
-                VALUES(?,?,?,?,?,?,?,?,?)
+                peak_power_w, mean_power_w, stages_json, source, model_set_id, topology_version_id)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(run_id) DO UPDATE SET
                 ended_at=excluded.ended_at, energy_kwh=excluded.energy_kwh,
                 peak_power_w=excluded.peak_power_w, mean_power_w=excluded.mean_power_w,
-                stages_json=excluded.stages_json, source=excluded.source""",
+                stages_json=excluded.stages_json, source=excluded.source,
+                model_set_id=excluded.model_set_id,
+                topology_version_id=excluded.topology_version_id""",
                 (
                     row["run_id"],
                     row["device_id"],
@@ -69,6 +71,8 @@ class DeviceRunRepository:
                     float(run.mean_power_w),
                     json.dumps(row["stages"], default=str),
                     str(row["source"]),
+                    run.model_set_id,
+                    run.topology_version_id,
                 ),
             )
             conn.execute("DELETE FROM operating_stages WHERE run_id=?", (run.run_id,))
@@ -245,6 +249,8 @@ def run_from_row(row: dict[str, Any]) -> DeviceRun | None:
             else StageStatus.UNKNOWN
         ),
         source=source,
+        model_set_id=row.get("model_set_id"),
+        topology_version_id=row.get("topology_version_id"),
     )
 
 
