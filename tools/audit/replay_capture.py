@@ -18,7 +18,9 @@ What it does, in order:
    :class:`wattmosaic_engine.learning.reconciliation.Reconciler` over the pure
    :func:`wattmosaic_engine.inference.orchestrator.infer_group` entry point under
    an explicit version triple. ``models`` accepts a ``ModelSet`` (a
-   ``ModelSetView``/``ModelSetId``); ``None`` keeps the built-in HB §17 v1 set.
+   ``ModelSetView``/``ModelSetId``); without stored versions the simulator's
+   replay scenario (``tools/simulator/replay_scenario.py``) is written into a
+   scratch database and its ``v1`` set is used.
    When ``versions`` (from the replayed database or ``--versions``) is given it
    is passed straight to ``replay_week`` as a :class:`VersionTriple`, so the
    operator, mapping and model set are rebuilt from that database's *stored*
@@ -565,13 +567,14 @@ def replay(
     states: dict[str, Any] | None = None,
     reason: str = "replay",
     versions: dict[str, str] | None = None,
+    db_path: str | Path | None = None,
 ) -> Any:
     """Replay a capture through the v3 replay surface.
 
     ``models`` is a ``ModelSet`` (any :class:`~wattmosaic_engine.runtime.interfaces.ModelSetView`)
-    or the id of a built-in model set. It is handed straight to
-    :func:`wattmosaic_engine.replay.replay_week`; ``None`` selects the built-in
-    HB §17 ``"v1"`` set. The returned value is a
+    or the name of a model set of the simulator's replay scenario
+    (:mod:`tools.simulator.replay_scenario`, used only when no ``versions`` are
+    given); ``None`` selects its ``"v1"`` set. The returned value is a
     :class:`~wattmosaic_engine.learning.reconciliation.DerivedRun` carrying the
     versioned, immutable derived output.
 
@@ -579,7 +582,7 @@ def replay(
     ``--versions`` override): ``{'topology_version_id', 'mapping_version_id',
     'model_set_id'}``. It is passed straight to
     :func:`wattmosaic_engine.replay.replay_week` (with ``db_path`` taken from the
-    capture source) so the production replay builds its operator, mapping and
+    capture source, or ``db_path``) so the production replay builds its operator, mapping and
     model set from that database's stored topology/mapping/model versions. The
     returned run is the real result under that triple, not an HB §17 run whose
     identity was relabelled afterwards.
@@ -592,7 +595,6 @@ def replay(
     from wattmosaic_engine.replay import replay_week
 
     tick = float(tick_s if tick_s is not None else cadence_s)
-    model_set = "v1" if models is None else models
     frames = observation_frames(
         capture,
         tick_s=tick,
@@ -603,28 +605,41 @@ def replay(
         from wattmosaic_engine.contracts import VersionTriple  # noqa: PLC0415
 
         # A legacy database may carry topology/mapping versions but no active
-        # model versions; fall back to the built-in model-set id in that case.
+        # model versions: that is the empty model set, never a scenario's.
         from wattmosaic_engine.contracts import model_set_id as make_model_set_id  # noqa: PLC0415
 
-        model_set_id = versions.get("model_set_id") or make_model_set_id(
-            ("mdl-tv-v1", "mdl-lights-v1", "mdl-fridge-v1")
-        )
         triple = VersionTriple(
             topology_version_id=versions["topology_version_id"],
             mapping_version_id=versions["mapping_version_id"],
-            model_set_id=model_set_id,
+            model_set_id=versions.get("model_set_id") or make_model_set_id([]),
         )
-        # Only a database-backed capture has stored versions to rebuild from.
-        # A JSONL capture (or an inline synthetic one) has no DB path; in that
-        # case the explicit override still names the triple, but the engine
-        # falls back to its built-in operator because no stored topology exists.
-        from pathlib import Path  # noqa: PLC0415
-
-        db_path: str | None = None
-        if capture.source and Path(capture.source).is_file():
+        # The stored versions are rebuilt from a database: the capture's own
+        # (a DB-backed capture) or the explicitly supplied one.
+        if db_path is None and capture.source and Path(capture.source).is_file():
             db_path = capture.source
+        if db_path is None:
+            raise ValueError("a version triple needs a database to rebuild its versions from")
         return replay_week(frames, triple=triple, db_path=db_path, reason=reason)
-    return replay_week(frames, model_set=model_set, reason=reason)
+
+    # No stored versions: replay against the simulator's declared replay
+    # scenario (tools/simulator/replay_scenario.py), written into a scratch DB.
+    import tempfile  # noqa: PLC0415
+
+    from tools.simulator.replay_scenario import build_replay_db  # noqa: PLC0415
+
+    name = models if isinstance(models, str) else "v1"
+    with tempfile.TemporaryDirectory(prefix="replay-scenario-") as scratch:
+        scenario_db = Path(scratch) / "scenario.db"
+        triples = build_replay_db(scenario_db, frames)
+        if name not in triples:
+            raise ValueError(f"unknown model set {name!r}; expected one of {sorted(triples)}")
+        return replay_week(
+            frames,
+            triple=triples[name],
+            db_path=scenario_db,
+            model_set=None if models is None or isinstance(models, str) else models,
+            reason=reason,
+        )
 
 
 def _derived_run_dict(run: Any) -> dict[str, Any]:
@@ -745,7 +760,10 @@ def main() -> int:
     ap.add_argument(
         "--model-set",
         default=None,
-        help="built-in v3 model set id ('v1'/'v2'); default 'v1'",
+        help=(
+            "model set of the simulator replay scenario ('v1'/'v2'), used only "
+            "without stored versions; default 'v1'"
+        ),
     )
     ap.add_argument(
         "--topology-as-shipped",
@@ -875,6 +893,9 @@ def main() -> int:
         versions = None
         versions_source = "engine-default"
 
+    # The database the triple's stored versions are rebuilt from.
+    versions_db = topology_db if versions is not None and topology_db.exists() else None
+
     started = time.monotonic()
     with _Deadline(args.timeout_s):
         try:
@@ -903,6 +924,7 @@ def main() -> int:
                 models=models,
                 max_age_s=args.max_age_s,
                 versions=versions,
+                db_path=versions_db,
             )
         except ReplayTimeout as exc:
             print(
@@ -927,6 +949,7 @@ def main() -> int:
                         models=other,
                         max_age_s=args.max_age_s,
                         versions=versions,
+                        db_path=versions_db,
                     )
                 delta = {
                     "summary": (

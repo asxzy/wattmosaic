@@ -46,8 +46,10 @@ def _derived_run_payload(derived_run_id: str) -> dict[str, object] | None:
 async def derived_run(request: web.Request) -> web.Response:
     """Serve ``GET /provenance/derived_run/{run_id}``."""
     # Prefer the facade's provider when one is attached (a live engine may keep
-    # its own derived namespace).  Fall back to the module registry, which D4
-    # resolves through the same typed answers as a live snapshot.
+    # its own derived namespace).  Fall back to the replay module's registry,
+    # which holds only runs actually replayed in this process from a stored
+    # database (``replay_week`` has no built-in scenario); an unknown id is
+    # ``None``.  D4 resolves a run through the same typed answers as a snapshot.
     payload: object = None
     method = getattr(_facade(request), "derived_run", None)
     if callable(method):

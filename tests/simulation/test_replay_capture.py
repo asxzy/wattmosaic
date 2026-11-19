@@ -64,6 +64,18 @@ def _capture_from_house(house):
     )
 
 
+def _link_tv_entity(db, at) -> None:
+    """Declare the HA entity that drives ``tv`` (the replay reads stored links)."""
+    from wattmosaic_engine.contracts import HaEntityLink
+
+    db.repos.entities.add_entity_link(
+        HaEntityLink(
+            entity_id="switch.tv_plug", target_kind="device", target_id="tv",
+            role="load_state", valid_from=at, declared_by="user",
+        )
+    )
+
+
 @pytest.fixture(scope="module")
 def house():
     return build_hb17(seed=7, minutes=25, interval_s=10.0)
@@ -90,7 +102,7 @@ def test_replay_returns_a_derived_run(replayed) -> None:
 
 def test_replay_accepts_a_model_set_object(house) -> None:
     """``models=ModelSet`` (a ModelSetView) is accepted, not just a builtin id."""
-    from wattmosaic_engine.runtime.fakes import FakeModelSet
+    from tests.support.fakes import FakeModelSet
 
     module = _replay_module()
     capture = _capture_from_house(house)
@@ -271,7 +283,7 @@ def test_replay_stamps_db_derived_versions_on_the_run(tmp_path) -> None:
     assert versions is not None
     house = build_hb17(seed=7, minutes=10, interval_s=10.0)
     capture = _capture_from_house(house)
-    run = module.replay(capture, tick_s=10.0, versions=versions)
+    run = module.replay(capture, tick_s=10.0, versions=versions, db_path=path)
     assert run.versions.topology_version_id == topo_v
     assert run.versions.mapping_version_id == map_v
     assert run.versions.model_set_id == versions["model_set_id"]
@@ -342,13 +354,19 @@ def test_replay_uses_the_stored_db_topology_not_hb17(tmp_path) -> None:
         None,
     )
     svc.promote_mapping(map_v, "alt seed")
+    _link_tv_entity(db, at)
     triple = svc.current()
     db.close()
 
-    house = build_hb17(seed=7, minutes=20, interval_s=10.0)
+    from tools.simulator.replay_scenario import build_replay_db
+
+    # The TV toggles on/off after its plug move, so its own HA entity drives it.
+    house = build_hb17(seed=7, minutes=20, interval_s=10.0, variant="relocated_tv")
     frames = house.observation_view()
     db_run = replay_week(frames, triple=triple, db_path=path, reason="db-topology")
-    hb_run = replay_week(frames, model_set="v1", reason="hb17")
+    scenario_path = tmp_path / "scenario.db"
+    scenario = build_replay_db(scenario_path, frames)
+    hb_run = replay_week(frames, triple=scenario["v1"], db_path=scenario_path, reason="hb17")
 
     # Identity and versions come from the DB, not from the HB §17 triple.
     assert db_run.versions.topology_version_id == triple.topology_version_id
@@ -425,6 +443,7 @@ def test_replay_capture_passes_db_derived_triple_through(tmp_path) -> None:
         None,
     )
     svc.promote_mapping(map_v, "seed")
+    _link_tv_entity(db, at)
     from wattmosaic_engine.contracts import SPEC_SCHEMA_VERSION
 
     db._conn.execute(
@@ -442,7 +461,7 @@ def test_replay_capture_passes_db_derived_triple_through(tmp_path) -> None:
 
     versions = module.read_versions_from_db(path)
     assert versions is not None
-    house = build_hb17(seed=7, minutes=20, interval_s=10.0)
+    house = build_hb17(seed=7, minutes=20, interval_s=10.0, variant="relocated_tv")
     capture = _capture_from_house(house)
     capture.source = str(path)  # a DB-backed capture
     run = module.replay(capture, tick_s=10.0, versions=versions)

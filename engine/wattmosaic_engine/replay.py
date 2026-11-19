@@ -6,13 +6,13 @@ and returns a :class:`DerivedRun`.  Raw samples and evidence frames are carried
 through unchanged (the replay never writes them), and each run is retrievable
 by its ``derived_run_id`` via :func:`get_derived_run`.
 
-A replay against a real database additionally accepts an explicit
-:class:`~wattmosaic_engine.contracts.VersionTriple` and a ``db_path``.  In that
-mode the observation operator, the subject↔reader mapping and the model set are
-all rebuilt from that triple's *stored* topology/mapping/model versions in the
-given database -- never relabelled afterwards.  The default (no ``db_path``) is
-the built-in HB §17 house and the built-in ``v1``/``v2`` model sets, so existing
-callers are unchanged.
+A replay always runs against a real database: the caller passes an explicit
+:class:`~wattmosaic_engine.contracts.VersionTriple` and a ``db_path``.  The
+observation operator, the subject↔reader mapping, the HA entity → subject links
+and the model set are all rebuilt from that triple's *stored*
+topology/mapping/entity-link/model versions in the given database -- never
+relabelled afterwards.  There is no built-in house and no built-in model set:
+a scenario is whatever the database declares.
 
 Production code here depends only on the K08 runtime Protocols and production
 value objects (``versioning.service`` frozen views, the production observation
@@ -33,14 +33,10 @@ from typing import Any
 
 from wattmosaic_engine.contracts import (
     DeltaPrior,
-    EdgeEvidence,
-    EdgeLifecycleV3,
     EventGroup,
     EventGroupStatus,
     MappingEdge,
-    Observability,
     ReaderDelta,
-    RelationType,
     TopologyEdgeV3,
     VersionTriple,
 )
@@ -61,34 +57,6 @@ from wattmosaic_engine.versioning.service import (
 
 __all__: list[str] = ["replay_week", "get_derived_run", "reset_replay_runs"]
 
-_V1_IDS: tuple[str, ...] = ("mdl-tv-v1", "mdl-lights-v1", "mdl-fridge-v1")
-_V2_IDS: tuple[str, ...] = ("mdl-tv-v2", "mdl-lights-v2", "mdl-fridge-v2")
-
-#: (subject_id, watts under v1, watts under v2).
-_DEFAULT_SUBJECTS: tuple[tuple[str, float, float], ...] = (
-    ("tv", 100.0, 120.0),
-    ("lights", 60.0, 45.0),
-    ("fridge", 80.0, 60.0),
-)
-# Observation-side HA entity ids → (subject id, reader).  The entity ids are
-# part of the observation frame; no truth key is consulted.
-_SUBJECT_READERS: dict[str, str] = {
-    "tv": "ct_c",
-    "lights": "ct_a",
-    "fridge": "ct_b",
-}
-_ENTITY_SUBJECT: dict[str, str] = {
-    "switch.tv_plug": "tv",
-    "light.living_room_1": "lights",
-    "light.living_room_2": "lights",
-}
-_ANCESTORS: dict[str, tuple[str, ...]] = {
-    "ct_c": ("Main",),
-    "ct_a": ("Sub", "Main"),
-    "ct_b": ("Sub", "Main"),
-}
-#: Triple stamped on the built-in HB §17 replay (kept for existing callers).
-_HB17_TRIPLE = ("topo-hb17", "map-hb17", "mset-hb17")
 
 
 class _ReplayModelSet:
@@ -151,28 +119,6 @@ class _ZeroResidual:
 _RUNS: dict[str, DerivedRun] = {}
 
 
-def _build_model_set(model_set: str | ModelSetView) -> ModelSetView:
-    if not isinstance(model_set, str):
-        return model_set
-    version_ids = _V1_IDS if model_set == "v1" else _V2_IDS if model_set == "v2" else ()
-    if not version_ids:
-        raise ValueError(f"unknown model set {model_set!r}; expected 'v1' or 'v2'")
-    priors: dict[str, DeltaPrior] = {}
-    for (subject, v1_w, v2_w), model_version_id in zip(
-        _DEFAULT_SUBJECTS, version_ids, strict=True
-    ):
-        watts = v1_w if model_set == "v1" else v2_w
-        priors[subject] = DeltaPrior(
-            mean_w=watts,
-            sigma_w=3.0,
-            sign="pos",
-            model_version_id=model_version_id,
-        )
-    from wattmosaic_engine.contracts import model_set_id as make_model_set_id
-
-    return _ReplayModelSet(make_model_set_id(version_ids), priors)
-
-
 # --------------------------------------------------------------------------- #
 # Topology / mapping / model views from a stored database (V2b).
 # --------------------------------------------------------------------------- #
@@ -205,7 +151,7 @@ def _views_from_db(
 
     The ids come from the version rows themselves, and the edge rows come from
     the same S14/S15 tables the live engine reads, so a replay of a database
-    whose topology differs from HB §17 uses *that* topology.
+    with its own topology uses *that* topology.
     """
     topo_ids = _edge_ids(conn, "topology_versions_v3", "edge_ids_json", triple.topology_version_id)
     topo_edges: list[TopologyEdgeV3] = []
@@ -245,12 +191,19 @@ def _views_from_db(
 def _model_set_from_db(conn: sqlite3.Connection, triple: VersionTriple) -> ModelSetView:
     """Build the model set named by ``triple`` from the stored L1 versions.
 
-    A version is active iff its last activation-relevant event is ``activated``
-    (the same rule L1's registry uses).  Fixed models contribute their stored
-    transition delta as a signed prior; unknown specs contribute no prior
-    (never a fabricated 0 W, HB §18).
+    ``triple.model_set_id`` is content-derived (``mset-<hash>`` of the active
+    version ids), so the set is located in the append-only event log: the log is
+    walked instant by instant and, at each instant, every subject's active
+    version is derived with L1's own rule (:func:`derive_active_version_id`).
+    The first instant (latest first) whose active ids hash to the requested id
+    names the versions replayed.  An id that names no stored set yields an
+    empty model set -- never another set relabelled with that id.  Fixed
+    models contribute their stored transition delta as a signed prior; other
+    specs contribute no prior (never a fabricated 0 W, HB §18).
     """
     from wattmosaic_engine.contracts import FixedSpec
+    from wattmosaic_engine.contracts import model_set_id as make_model_set_id
+    from wattmosaic_engine.models.registry import derive_active_version_id
     from wattmosaic_engine.models.spec import SPEC_SCHEMA_VERSION, decode_spec
 
     try:
@@ -267,18 +220,35 @@ def _model_set_from_db(conn: sqlite3.Connection, triple: VersionTriple) -> Model
     except sqlite3.Error:
         events = []
 
-    by_version: dict[str, list[tuple[str, int]]] = {}
-    for row in events:
-        event = str(row["event"])
-        if event in ("frozen", "unfrozen"):
-            continue
-        by_version.setdefault(str(row["version_id"]), []).append((event, int(row["id"] or 0)))
+    subject_of = {str(row["version_id"]): str(row["subject_id"]) for row in rows}
+    logged = [
+        {"version_id": str(e["version_id"]), "event": str(e["event"]), "at": str(e["at"]),
+         "id": int(e["id"] or 0)}
+        for e in events
+        if str(e["version_id"]) in subject_of
+    ]
+
+    def active_at(instant: str) -> list[str]:
+        per_subject: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        for event in logged:
+            if event["at"] > instant:
+                continue
+            vid = event["version_id"]
+            per_subject.setdefault(subject_of[vid], {}).setdefault(vid, []).append(event)
+        active = (derive_active_version_id(by_version) for by_version in per_subject.values())
+        return [vid for vid in active if vid is not None]
+
+    chosen: list[str] = []
+    for instant in sorted({event["at"] for event in logged}, reverse=True):
+        active = active_at(instant)
+        if active and make_model_set_id(active) == triple.model_set_id:
+            chosen = active
+            break
 
     priors: dict[str, DeltaPrior] = {}
     for row in rows:
         version_id = str(row["version_id"])
-        history = by_version.get(version_id, [])
-        if not history or history[-1][0] != "activated":
+        if version_id not in chosen:
             continue
         try:
             schema = int(row["schema_version"] or SPEC_SCHEMA_VERSION)
@@ -306,59 +276,29 @@ def _model_set_from_db(conn: sqlite3.Connection, triple: VersionTriple) -> Model
     return _ReplayModelSet(triple.model_set_id, priors)
 
 
-def _hb17_views(start: datetime) -> tuple[Any, Any, tuple[str, ...], tuple[tuple[str, str], ...]]:
-    """The built-in HB §17 house views (the default replay target)."""
-    tree = {
-        "Main": {
-            "Sub": {"ct_a": {}, "ct_b": {}},
-            "ct_c": {},
-        }
-    }
-    edges: list[TopologyEdgeV3] = []
-    evidence = EdgeEvidence()
+def _entity_subjects_from_db(
+    conn: sqlite3.Connection, subjects: Sequence[tuple[str, str]]
+) -> dict[str, str]:
+    """HA entity id -> subject id, from the stored ``ha_entity_links`` (DEC-08).
 
-    def walk(parent: str, children: Mapping[str, Any]) -> None:
-        for child, subtree in children.items():
-            edges.append(
-                TopologyEdgeV3(
-                    edge_id=f"e::{parent}->{child}",
-                    relation=RelationType.CONTAINS,
-                    source_endpoint_id=parent,
-                    target_endpoint_id=child,
-                    lifecycle=EdgeLifecycleV3.CONFIRMED,
-                    declared_by="user",
-                    beta=1.0,
-                    beta_basis="unity",
-                    evidence=evidence,
-                    valid_from=start,
-                    pinned=True,
-                )
-            )
-            walk(child, subtree if isinstance(subtree, Mapping) else {})
-
-    for root, subtree in tree.items():
-        walk(root, subtree)
-
-    mapping_edges = [
-        MappingEdge(
-            mapping_edge_id=f"m::{subject}->{reader}",
-            subject_kind="device",
-            subject_id=subject,
-            endpoint_id=reader,
-            observability=Observability.DIRECT,
-            lifecycle=EdgeLifecycleV3.CONFIRMED,
-            declared_by="user",
-            evidence=evidence,
-            valid_from=start,
-        )
-        for subject, reader in _SUBJECT_READERS.items()
-    ]
-    return (
-        _FrozenTopologyView(edges),
-        _FrozenMappingView(mapping_edges),
-        ("Main", "Sub", "ct_a", "ct_b", "ct_c"),
-        tuple(("device", sid) for sid, _v1, _v2 in _DEFAULT_SUBJECTS),
-    )
+    Only links to a subject the replayed mapping version knows are kept; an
+    entity linked to several of them is ambiguous and dropped (a replay never
+    guesses which subject an HA transition belongs to).
+    """
+    known = {subject_id for kind, subject_id in subjects if kind == "device"}
+    try:
+        rows = conn.execute(
+            "SELECT entity_id, target_id FROM ha_entity_links "
+            "WHERE target_kind='device' ORDER BY entity_id, target_id"
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    targets: dict[str, set[str]] = {}
+    for row in rows:
+        target = str(row["target_id"])
+        if target in known:
+            targets.setdefault(str(row["entity_id"]), set()).add(target)
+    return {entity: next(iter(ids)) for entity, ids in targets.items() if len(ids) == 1}
 
 
 def _build_operator(
@@ -379,15 +319,17 @@ def _evidence_from_frames(
     triple: VersionTriple,
     topo_view: Any,
     map_view: Any,
+    entity_subjects: Mapping[str, str],
 ) -> list[EventGroup]:
-    """Derive immutable event groups from an HB §17 observation frame.
+    """Derive immutable event groups from an observation frame.
 
     Only observation keys are read (HA states/messages and reader samples); no
     truth key is consulted.  The deltas are content-derived (the signed level
     change around each HA on/off step), so replaying the same frame twice yields
-    byte-identical evidence.  ``triple`` and the two views decide which reader
-    a subject is mapped on and which ancestors observe it: a database whose
-    topology differs from HB §17 therefore produces different evidence.
+    byte-identical evidence.  ``entity_subjects`` (the stored HA entity links)
+    names the subject of each HA transition; ``triple`` and the two views decide
+    which reader a subject is mapped on and which ancestors observe it, so a
+    database with a different topology produces different evidence.
     """
     by_reader: dict[str, list[tuple[datetime, float]]] = {}
     for record in observation:
@@ -418,16 +360,16 @@ def _evidence_from_frames(
 
     groups: list[EventGroup] = []
     for index, (at, entity, state) in enumerate(transitions):
-        subject = _ENTITY_SUBJECT.get(entity)
+        subject = entity_subjects.get(entity)
         if subject is None:
             continue
-        reader = map_view.most_specific_reader(("device", subject)) or _SUBJECT_READERS.get(subject)
+        reader = map_view.most_specific_reader(("device", subject))
         if reader is None:
             continue
         delta_w = _step_delta(by_reader.get(reader, ()), at)
         if delta_w is None:
             continue
-        ancestors = tuple(topo_view.ancestors(reader)) if hasattr(topo_view, "ancestors") else _ANCESTORS.get(reader, ())
+        ancestors = tuple(topo_view.ancestors(reader)) if hasattr(topo_view, "ancestors") else ()
         readers = [reader, *ancestors]
         deltas = [
             ReaderDelta(reader_id=rid, delta_w=delta_w, sigma_w=2.0, completeness="complete")
@@ -473,54 +415,42 @@ def _parse_time(value: Any) -> datetime | None:
 def replay_week(
     raw_bytes: Sequence[Mapping[str, Any]],
     *,
-    model_set: str | ModelSetView = "v1",
+    triple: VersionTriple,
+    db_path: str | Path,
+    model_set: ModelSetView | None = None,
     reason: str = "replay",
-    triple: VersionTriple | None = None,
-    db_path: str | Path | None = None,
 ) -> DerivedRun:
     """Replay one week of immutable evidence under an explicit version triple.
 
-    ``raw_bytes`` is the HB §17 observation frame.  It is read, never written:
-    the returned run carries its canonical serialisation as
+    ``raw_bytes`` is an observation frame (HA messages + reader samples).  It is
+    read, never written: the returned run carries it as
     ``raw_samples_bytes``/``evidence_bytes``.  The run is registered so
     :func:`get_derived_run` can retrieve it by id.
 
-    With ``triple`` **and** ``db_path`` the operator, mapping and model set are
-    rebuilt from that triple's stored versions in the database (opened
-    read-only).  With ``triple`` alone the built-in HB §17 operator is used but
-    the run is stamped with the given triple (an explicit override against a
-    capture with no database).  Without either the built-in HB §17 house and
-    ``model_set`` are used, preserving the original L7/AT-19 behaviour.
+    The operator, mapping, HA entity links and model set are rebuilt from
+    ``triple``'s stored versions in ``db_path`` (opened read-only).  An explicit
+    ``model_set`` (any :class:`ModelSetView`) replaces the stored model set; the
+    run is then stamped with that view's ``model_set_id``.
     """
-    if db_path is not None and triple is None:
-        raise ValueError("db_path requires an explicit triple")
+    if triple is None or db_path is None:
+        raise ValueError("replay_week needs an explicit triple and db_path")
 
-    if db_path is not None and triple is not None:
-        conn = _open_ro(db_path)
-        try:
-            topo_view, map_view, readers, subjects = _views_from_db(conn, triple)
-            models = _model_set_from_db(conn, triple)
-        finally:
-            conn.close()
-        effective_triple = triple
-    else:
-        models = _build_model_set(model_set)
-        if triple is None:
-            # The HB §17 triple is stamped from the models actually replayed so
-            # the built-in path stays byte-identical to the pre-V2b behaviour.
-            effective_triple = VersionTriple(
-                topology_version_id=_HB17_TRIPLE[0],
-                mapping_version_id=_HB17_TRIPLE[1],
-                model_set_id=models.model_set_id,
-            )
-        else:
-            effective_triple = triple
-        topo_view, map_view, _readers, _subjects = _hb17_views(
-            datetime(2026, 1, 1, tzinfo=UTC)
-        )
-        readers, subjects = _readers, _subjects
+    conn = _open_ro(db_path)
+    try:
+        topo_view, map_view, readers, subjects = _views_from_db(conn, triple)
+        entity_subjects = _entity_subjects_from_db(conn, subjects)
+        models = model_set if model_set is not None else _model_set_from_db(conn, triple)
+    finally:
+        conn.close()
+    effective_triple = (
+        triple
+        if model_set is None
+        else triple.model_copy(update={"model_set_id": model_set.model_set_id})
+    )
 
-    evidence = _evidence_from_frames(raw_bytes, effective_triple, topo_view, map_view)
+    evidence = _evidence_from_frames(
+        raw_bytes, effective_triple, topo_view, map_view, entity_subjects
+    )
     if evidence:
         start = min(g.opened_at for g in evidence)
         end = max(g.closed_at or g.opened_at for g in evidence)
