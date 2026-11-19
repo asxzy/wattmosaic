@@ -26,12 +26,16 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ..contracts import (
+    AdjustableSpec,
     DeviceModelParameters,
     ExpectedPower,
+    FixedSpec,
     LearningSample,
+    LevelStat,
     LoadShape,
     ModelType,
     PowerLevel,
+    PowerLevelV3,
 )
 from .base import _linear_interp, enforce_monotonic, finite
 
@@ -451,6 +455,61 @@ class DevicePowerProfile:
     def is_adjustable(self) -> bool:
         """True when a declared adjustable response is attached."""
         return self.adjustable_response is not None
+
+    # -- declared priors on the same v3 specs (DEC-33) ------------------------
+    def as_fixed_spec(self) -> FixedSpec:
+        """The declared levels as a :class:`FixedSpec` prior (DEC-33).
+
+        Every field is taken from the declaration only -- no device name, no
+        learning output.  An undeclared level stays absent (``None`` median),
+        never a fabricated 0 W.  Learning seeds from this spec but never
+        overwrites it (a >3σ discrepancy is a diagnostic, not a rewrite).
+        """
+        levels: dict[PowerLevelV3, LevelStat] = {}
+        mapping = (
+            (PowerLevelV3.STANDBY, self.standby_w),
+            (PowerLevelV3.IDLE, self.idle_w),
+            (PowerLevelV3.ACTIVE, self.active_w),
+            (PowerLevelV3.TRANSIENT, self.transient_w),
+        )
+        for level, value in mapping:
+            if value is not None:
+                levels[level] = LevelStat(median_w=float(value))
+        return FixedSpec(levels=levels)
+
+    def as_adjustable_spec(self) -> AdjustableSpec | None:
+        """The declared curve as an :class:`AdjustableSpec` prior, when declared.
+
+        ``None`` when no adjustable response was declared, so a FIXED device is
+        never silently given an adjustable prior.  The control variable is the
+        one declared on :class:`AdjustableResponse` -- there is no hard-coded
+        vocabulary here either.
+        """
+        response = self.adjustable_response
+        if response is None:
+            return None
+        knots_x = [x for x, _ in response.points]
+        knots_w = [y for _, y in response.points]
+        standby = self.standby_w
+        return AdjustableSpec(
+            control_variable=response.control_variable,
+            knots_x=knots_x,
+            knots_w=knots_w,
+            monotone=bool(response.monotonic),
+            x_coverage=(knots_x[0], knots_x[-1]) if knots_x else None,
+            standby=LevelStat(median_w=float(standby)) if standby is not None else LevelStat(),
+        )
+
+    def as_spec_priors(self) -> dict[PowerLevelV3, LevelStat]:
+        """Declared level values as a prior map keyed by power level.
+
+        This is the shape L2's fitters accept as ``declared_priors``; it lets a
+        declaration seed the learned spec without ever being replaced by it.
+        """
+        priors: dict[PowerLevelV3, LevelStat] = {}
+        for level, stat in self.as_fixed_spec().levels.items():
+            priors[level] = stat
+        return priors
 
     def as_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
