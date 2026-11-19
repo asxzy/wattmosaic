@@ -16,8 +16,13 @@ Two paths, both through production code
   (``lead_in_minutes``) so the P3 detector's 64-sample noise warm-up has passed
   before the first scripted step (a cold start never detects a step at
   sample 30).
-* **Pure I7 inference** (``infer_steady``) for the lab strata, over the real T2
-  observation operator built from the *declared* circuit wiring.
+* **EngineCore three-loop runtime** for ``lab_shared`` too, over one simulated
+  hour (:data:`LAB_RUNTIME_MIN`): its requirement — a group estimate for two
+  loads that share one CT (HB §21.7) — needs CONFIRMED co-switch history, which
+  only the live runtime accumulates.  The lab observation is replayed as
+  HA-shaped records (:func:`_lab_stream`).
+* **Pure I7 inference** (``infer_steady``) for the other lab strata, over the
+  real T2 observation operator built from the *declared* circuit wiring.
 
 Declared configuration (never truth): HB §17 — one subject per HA light on
 Circuit A and the TV on its plug, plus the HA entity links; lab strata — each
@@ -103,6 +108,10 @@ HB17_ENTITY_LINKS = (
     ("switch.tv_plug", "tv"),
 )
 HB17_LEAD_IN_MIN = 15.0
+#: A lab stratum replayed through the live runtime runs one simulated hour: the
+#: P3 detector needs ~17 min (64 samples at the ~15.7 s cadence) before its
+#: first step, and a group needs >= 2 earlier CONFIRMED co-switches in history.
+LAB_RUNTIME_MIN = 60.0
 HB17_SCRIPT_MIN = 12.0
 
 #: Scenarios the accuracy report grades.
@@ -110,7 +119,7 @@ DEFAULT_SCENARIOS: tuple[tuple[str, str], ...] = (
     ("hb17_co_switched", "hb17:co_switched"),
     ("hb17_solo_switches", "hb17:solo_switches"),
     ("lab_dedicated", "lab:dedicated"),
-    ("lab_shared", "lab:shared"),
+    ("lab_shared", "lab-runtime:shared"),
     ("lab_ambiguous_pair", "lab:ambiguous_pair"),
     ("lab_automation_burst", "lab:automation_burst"),
 )
@@ -245,7 +254,8 @@ def _build(spec: str, *, seed: int) -> tuple[list[dict[str, Any]], Any]:
         frames = _frames(house.observation_view(), [_hb17_truth(r) for r in house.records])
         return frames, house
     stratum = spec.split(":", 1)[1]
-    house = build_scenario(stratum, seed=seed, minutes=6)
+    minutes = LAB_RUNTIME_MIN if spec.startswith("lab-runtime:") else 6
+    house = build_scenario(stratum, seed=seed, minutes=minutes)
     records = house.to_list()
     groups = _lab_non_identifiable(_lab_declared(house))
     truths = []
@@ -393,6 +403,16 @@ def _snapshot_view(snapshot: Any, main_w: float | None) -> dict[str, Any]:
     }
 
 
+def _declare_single_subject(
+    core: Any, endpoint_id: str, subject: str, at: datetime, *, kind: str = "ct"
+) -> None:
+    """Declare ``endpoint_id`` as measuring ``subject`` alone (DEC-05, S13)."""
+    core.db.repos.entities.upsert_endpoint(
+        {"endpoint_id": endpoint_id, "kind": kind, "entity_id": None, "scope": "single_subject",
+         "scope_status": "confirmed", "scope_subject_id": subject, "enabled": True, "created_at": at}
+    )
+
+
 def _run_hb17_runtime(house: Any) -> list[dict[str, Any]]:
     """Replay an HB §17 house through EngineCore; one published view per record."""
     from wattmosaic_engine.contracts.entities import PhysicalDevice
@@ -407,6 +427,7 @@ def _run_hb17_runtime(house: Any) -> list[dict[str, Any]]:
             core.db.repos.entities.upsert_device(
                 PhysicalDevice(device_id=device_id, name=device_id, origin="user", created_at=at)
             )
+        _declare_single_subject(core, "ct_plug", "tv", at, kind="smart_plug")
         for entity_id, target in HB17_ENTITY_LINKS:
             core.db.repos.entities.add_entity_link(
                 {"entity_id": entity_id, "target_kind": "device", "target_id": target,
@@ -514,6 +535,105 @@ def _run_lab_steady(frames: Sequence[Mapping[str, Any]], house: Any) -> list[dic
     return views
 
 
+def _lab_stream(frames: Sequence[Mapping[str, Any]], house: Any) -> list[dict[str, Any]]:
+    """A lab stratum's observation frames as HA-shaped replay records.
+
+    Each tick's *delivered* samples become ``reader_samples`` (with the
+    declared panel parent of each CT); every change of an HA state
+    (``state``/``last_changed``) becomes one ``state_changed`` message stamped
+    with its own ``last_changed``.  Only observation fields are used.
+    """
+    parents = {c.ct_id: c.parent_ct_id for c in house.topology.channels}
+    previous: dict[str, tuple[Any, Any]] = {}
+    stream: list[dict[str, Any]] = []
+    for frame in frames:
+        obs = frame["observation"]
+        messages: list[dict[str, Any]] = []
+        for entity_id, state in sorted((obs.get("ha_states") or {}).items()):
+            key = (state.get("state"), state.get("last_changed"))
+            if previous.get(entity_id) == key:
+                continue
+            previous[entity_id] = key
+            stamp = state.get("last_changed") or state.get("last_updated")
+            messages.append({
+                "entity_id": entity_id,
+                "state": state.get("state"),
+                "attributes": dict(state.get("attributes") or {}),
+                "context": dict(state.get("context") or {}),
+                "last_changed": stamp,
+                "last_updated": stamp,
+                "observed_at": stamp,
+                "received_at": state.get("received_at") or stamp,
+            })
+        messages.sort(key=lambda m: str(m["observed_at"]))
+        samples: dict[str, Any] = {}
+        for ct_id, sample in (obs.get("measurements") or {}).items():
+            if not sample.get("delivered", True) or _value_of(sample) is None:
+                continue
+            samples[ct_id] = {**dict(sample), "reader_id": ct_id, "parent": parents.get(ct_id)}
+        stream.append({
+            "t_s": obs.get("t_s"),
+            "timestamp": obs.get("timestamp"),
+            "ha_messages": messages,
+            "reader_samples": samples,
+        })
+    return stream
+
+
+def _run_lab_runtime(frames: Sequence[Mapping[str, Any]], house: Any) -> list[dict[str, Any]]:
+    """Replay a lab stratum through EngineCore's three loops; one view per record.
+
+    Declared configuration: each device's single branch circuit (multi-leg
+    devices are not part of the strata run this way) and its HA entity link.
+    """
+    from wattmosaic_engine.realtime import EngineHarness
+
+    declared = _lab_declared(house)
+    devices = {dev: cts[0] for dev, cts in declared.items() if len(cts) == 1}
+    links = [
+        (str(d.ha_entity_id), str(d.device_id))
+        for d in house.scenario.devices
+        if str(d.device_id) in devices and d.ha_entity_id
+    ]
+    stream = _lab_stream(frames, house)
+    start = _as_datetime(stream[0]["timestamp"]) if stream else _T0
+    start = (start or _T0) - timedelta(seconds=float(stream[0]["t_s"] or 0.0)) if stream else _T0
+
+    exclusive: dict[str, list[str]] = defaultdict(list)
+    for dev, ct in devices.items():
+        exclusive[ct].append(dev)
+
+    def configure(core: Any) -> None:
+        at = start - timedelta(days=1)
+        # A branch CT the declared wiring gives exactly one device is declared
+        # as that device's single-subject endpoint (the same reading the pure
+        # steady path makes of a one-subject row).
+        for ct, devs in sorted(exclusive.items()):
+            if len(devs) == 1:
+                _declare_single_subject(core, ct, devs[0], at)
+        for entity_id, target in links:
+            core.db.repos.entities.add_entity_link(
+                {"entity_id": entity_id, "target_kind": "device", "target_id": target,
+                 "role": "state", "valid_from": at, "declared_by": "user"}
+            )
+
+    harness = EngineHarness.start(stream, start_time=start, devices=devices, configure=configure)
+    measured_refs = {dev: [ct] for dev, ct in devices.items()}
+    views: list[dict[str, Any]] = []
+    try:
+        for frame, record in zip(frames, stream, strict=True):
+            harness.feed(record)
+            latest = frame["observation"].get("latest_measurements") or {}
+            values = [_value_of(latest.get(ct) or {}) for ct in ("ct_main_l1", "ct_main_l2")]
+            main = sum(v for v in values if v is not None) if any(v is not None for v in values) else None
+            view = _snapshot_view(harness.snapshot, main)
+            view["measured_refs"] = measured_refs
+            views.append(view)
+    finally:
+        harness.close()
+    return views
+
+
 # --------------------------------------------------------------------------- #
 # Orchestration.
 # --------------------------------------------------------------------------- #
@@ -527,8 +647,12 @@ def run_scenario(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], V3StratumReport]:
     """Build one scenario, drive the engine and grade it."""
     frames, house = _build(spec, seed=seed)
-    hb17 = spec.startswith("hb17:")
-    predictions = _run_hb17_runtime(house) if hb17 else _run_lab_steady(frames, house)
+    if spec.startswith("hb17:"):
+        predictions = _run_hb17_runtime(house)
+    elif spec.startswith("lab-runtime:"):
+        predictions = _run_lab_runtime(frames, house)
+    else:
+        predictions = _run_lab_steady(frames, house)
     return frames, predictions, grade_v3(frames, predictions, stratum=label)
 
 
@@ -541,12 +665,7 @@ def run_all(
         _frames, _preds, graded = run_scenario(label, spec, seed=seed)
         report.scenarios[label] = graded
     if not any(s.group_points for s in report.scenarios.values()):
-        report.notes.append(
-            "no group estimate was published in any stratum: I4 publishes a group only with "
-            ">= 2 independent historical events (MIN_HISTORY_EVENTS) and the live runtime "
-            "never persists subject-level history (strict xfail in test_accuracy_v3 / "
-            "test_hb17_walkthrough)"
-        )
+        report.notes.append("no group estimate was published in any stratum")
     return report
 
 

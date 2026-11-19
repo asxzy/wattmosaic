@@ -19,8 +19,9 @@ After each HB §17 step the test asserts what a user would see:
 * the HB §18 provenance answers (``core.provenance``).
 
 Declared configuration (what a user sets up before step 1, never truth): one
-physical device per HA light and the TV, the HA entity links, and the
-subject → endpoint mapping (lights on Circuit A, the TV on its plug).  The
+physical device per HA light and the TV, the HA entity links, the
+subject → endpoint mapping (lights on Circuit A, the TV on its plug) and the
+plug's single-subject scope (DEC-05).  The
 fridge has no HA entity and is not declared (HB §17 step 7).
 
 The house gets a 15-minute quiet prelude (``lead_in_minutes``): the P3 detector
@@ -28,8 +29,8 @@ trusts its noise estimate only after 64 samples, so a step at sample 30 of a
 cold start is never detected.  HB §17 step 1 ("establish the current
 measurement state") is exactly that prelude.
 
-Two HB §17 outcomes are not reachable through the live runtime today; each is a
-strict xfail naming the engine defect (see the module-level notes on each).
+Every step, including the step 5 identifiability history and the step 9 new
+mapping candidate, is reached through the live runtime (no xfail).
 """
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ from typing import Any
 
 import pytest
 from wattmosaic_engine.api.facade import NotFound
+from wattmosaic_engine.contracts import EventGroupStatus
 from wattmosaic_engine.contracts.entities import PhysicalDevice
 from wattmosaic_engine.core.runtime import EvidenceHistory
 from wattmosaic_engine.realtime import EngineHarness
@@ -103,6 +105,13 @@ def _configure(start):
             core.db.repos.entities.upsert_device(
                 PhysicalDevice(device_id=device_id, name=device_id, origin="user", created_at=at)
             )
+        # The plug is a smart plug that measures the TV alone (DEC-05: a
+        # single-subject scope is declared by the endpoint, never inferred).
+        core.db.repos.entities.upsert_endpoint(
+            {"endpoint_id": "ct_plug", "kind": "smart_plug", "entity_id": "sensor.tv_plug_power",
+             "scope": "single_subject", "scope_status": "confirmed", "scope_subject_id": "tv",
+             "enabled": True, "created_at": at}
+        )
         for entity_id, target in ENTITY_LINKS:
             core.db.repos.entities.add_entity_link(
                 {
@@ -238,14 +247,29 @@ def test_step1_measurement_state_is_established_without_fabrication(walk: _Walk)
         assert held[reader].value == pytest.approx(baseline + standby, abs=STEP_TOL_W), reader
     # The plug reads the TV's 3 W standby: a real non-zero value, not a default.
     assert held["ct_plug"].value == pytest.approx(TV_STANDBY_W, abs=1.0)
-    # No event has happened: nothing was inferred and nothing was invented.
-    assert walk.prelude_results == []
-    assert walk.prelude_snapshot is None
-    assert walk.prelude_snapshot_route == "404"
-    assert walk.prelude_cells == {}
-    # HA sees "not yet computed" (None), never 0 W.
-    coerced = _ha(walk.prelude_snapshot)
-    assert coerced["results_by_id"] == {}
+    # No event has happened.  The only thing published is what is *measured*:
+    # the TV through its single-subject plug (steady pass, HB §17 step 8 state).
+    assert walk.prelude_results, "the plug reading was never published"
+    for result in walk.prelude_results:
+        assert getattr(result, "event_group_id", None) is None  # steady, not an event
+        assert [e.subject_id for e in result.device_estimates] == ["tv"]
+    snapshot = walk.prelude_snapshot
+    assert snapshot is not None and walk.prelude_snapshot_route == "published"
+    assert [e.subject_id for e in snapshot.device_estimates] == ["tv"]
+    tv = snapshot.device_estimates[0]
+    assert str(tv.status) == "measured"
+    assert tv.source_reader_ids == ["ct_plug"]
+    assert tv.point_w == pytest.approx(held["ct_plug"].value, abs=1.0)
+    assert snapshot.group_estimates == []
+    # Matrix: only the TV × plug cell exists; no light cell before the event.
+    assert set(walk.prelude_cells) == {("tv", "ct_plug")}
+    # HA: the TV shows its measured standby; the lights have no entity value and
+    # the house totals stay "not computed" (None), never 0 W.
+    coerced = _ha(snapshot)
+    assert set(coerced["results_by_id"]) == {"tv"}
+    tv_values = _device_entity(coerced, "tv", walk.prelude_now)
+    assert tv_values["power"] == pytest.approx(TV_STANDBY_W, abs=1.0)
+    assert tv_values["estimate_status"] == "measured"
     values = entity_values.global_values(
         coerced, {"status": "ok"}, engine_available=True, now=walk.prelude_now,
         stale_after=STALE_AFTER_S,
@@ -370,22 +394,10 @@ def test_step5_lights_are_not_split_into_fabricated_individual_values(walk: _Wal
         assert values["lower_w"] == 0.0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "engine defect: the live runtime never accumulates identifiability history. "
-        "realtime/grouping.py persists a group revision once (GroupingEngine._persist dedups "
-        "(group_id, revision)), so the CONFIRMED transition is never written and tick() sets no "
-        "closed_at; storage/repositories/evidence.py put_group_revision records reader evidence "
-        "ids (subject_kind='reader') in event_group_members, never subjects.  "
-        "history_rows_for_identifiability therefore returns no row touching the lights, I4 can "
-        "never reach GROUP_IDENTIFIABLE for a co-switched pair, and HB §17 step 5's group "
-        "estimate is unreachable through EngineCore however many co-switches are observed."
-    ),
-)
 def test_step5_confirmed_lights_event_becomes_identifiability_history(walk: _Walk) -> None:
     group = walk.group(walk.lights_results[-1])
-    assert str(group.status) == "confirmed"
+    assert group.status == EventGroupStatus.CONFIRMED
+    assert group.closed_at is not None
     rows = EvidenceHistory(walk.core.db.repos.evidence).events_touching(
         list(LIGHTS), walk.house.start_time
     )
@@ -429,15 +441,21 @@ def test_step6_provenance_answers_for_a_light(walk: _Walk) -> None:
         assert answer.lower_w == 0.0 and answer.upper_w is None
         assert answer.bounds_basis == "non_negativity"
         assert answer.point_w is None
-        # Event associations: the estimate names exactly the HA changes of its
-        # event group.  The snapshot-scoped resolver holds no HA events, so they
-        # are listed as unresolved refs rather than resolved records.
+        # Event associations: exactly the HA changes of its event group, resolved
+        # to the persisted HA events (entity, instant, transition); nothing the
+        # estimate cites is left unresolved.
         group = walk.group(walk.lights_results[-1])
-        ha_refs = {
-            f"ha_event:{e.event_id}" for e in walk.core.grouping_engine.ha_events(group.group_id)
+        group_events = {
+            e.event_id: e for e in walk.core.grouping_engine.ha_events(group.group_id)
         }
-        assert len(ha_refs) >= 2
-        assert set(answer.unresolved_refs) == ha_refs
+        assert {e.entity_id for e in group_events.values()} >= set(LIGHTS)
+        assert answer.unresolved_refs == ()
+        associations = {a.event_id: a for a in answer.event_associations}
+        assert set(associations) == set(group_events)
+        for event_id, association in associations.items():
+            assert association.entity_id == group_events[event_id].entity_id
+            assert association.observed_at == group_events[event_id].observed_at
+            assert association.to_state == group_events[event_id].to_state
         assert answer.updated_at == walk.lights_results[-1].computed_at
 
 
@@ -479,17 +497,26 @@ def test_step7_fridge_step_without_ha_is_unknown_load_counted_once(walk: _Walk) 
 # --------------------------------------------------------------------------- #
 
 
-def test_step8_tv_standby_is_never_reported_as_zero(walk: _Walk) -> None:
+def test_step8_tv_standby_is_measured_from_its_plug_never_zero(walk: _Walk) -> None:
     snapshot = walk.final_snapshot
     plug = {m.reader_id: m for m in snapshot.reader_measurements}["ct_plug"]
     assert plug.active_power_w == pytest.approx(TV_STANDBY_W, abs=1.0)
-    # The TV never changed state, so no event solved it; whatever is published
-    # for it must not be 0 W, and HA must not show 0 W.
-    for estimate in snapshot.device_estimates:
-        if estimate.subject_id == "tv":
-            assert estimate.point_w is None or estimate.point_w > 0.0
+    # The TV never steps, yet its standby is published: MEASURED through the
+    # single-subject plug endpoint (HB §17 step 8, HB §8.5), not 0 W, not None.
+    tv = {e.subject_id: e for e in snapshot.device_estimates}["tv"]
+    assert str(tv.status) == "measured"
+    assert str(tv.identifiability) == "identifiable"
+    assert tv.source_reader_ids == ["ct_plug"]
+    assert tv.point_w == pytest.approx(TV_STANDBY_W, abs=1.0)
+    assert tv.bounds.lower_w == tv.bounds.upper_w == tv.point_w
+    assert str(tv.level) == "standby" or getattr(tv.level, "value", None) == "standby"
     values = _device_entity(_ha(snapshot), "tv", walk.final_now)
-    assert values.get("power") != 0.0
+    assert values["available"] is True
+    assert values["power"] == pytest.approx(TV_STANDBY_W, abs=1.0)
+    assert values["estimate_status"] == "measured"
+    answer = walk.core.provenance("device", "tv")
+    assert [m.reader_id for m in answer.reader_measurements] == ["ct_plug"]
+    assert answer.point_w == pytest.approx(TV_STANDBY_W, abs=1.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -498,12 +525,24 @@ def test_step8_tv_standby_is_never_reported_as_zero(walk: _Walk) -> None:
 
 
 class _Moved:
-    """The relocated-TV variant: six post-move TV cycles feed the T7 detector."""
+    """The relocated-TV variant: six post-move TV cycles feed the T7 detector.
+
+    Default ``from_hb17`` mapping (the TV on Circuit A) plus the one declared HA
+    link that says which device the plug's switch controls.
+    """
 
     def __init__(self) -> None:
         self.house = build_hb17(SEED, variant="relocated_tv", minutes=60, lead_in_minutes=LEAD_IN_MIN)
         observation = self.house.observation_view()
-        self.harness = EngineHarness.start(observation, start_time=self.house.start_time)
+        start = self.house.start_time
+
+        def configure(core: Any) -> None:
+            core.db.repos.entities.add_entity_link(
+                {"entity_id": "switch.tv_plug", "target_kind": "device", "target_id": "tv",
+                 "role": "state", "valid_from": start - timedelta(days=1), "declared_by": "user"}
+            )
+
+        self.harness = EngineHarness.start(observation, start_time=start, configure=configure)
         self.core = self.harness.core
         self.initial = self.core.version_service.current()
         move = self.house.step_at(9).at_s
@@ -550,7 +589,9 @@ def test_step10_new_versions_keep_models_mapping_and_history(moved: _Moved) -> N
     # Promoting the relocation does not drop unrelated mapping edges.
     new_map = versions.mapping_view(now.mapping_version_id)
     assert new_map.most_specific_reader(("device", "lights")) == "ct_a"
-    assert new_map.most_specific_reader(("device", "fridge")) == "ct_b"
+    # The fridge has no HA entity (HB §17): never declared, before or after.
+    assert new_map.most_specific_reader(("device", "fridge")) is None
+    assert new_map.subjects_on("ct_b") == ()
     # Historical event evidence is preserved, not rewritten.
     after = {(g.group_id, g.revision) for g in core.db.repos.evidence.groups()}
     assert moved.groups_before_move and moved.groups_before_move <= after
@@ -562,18 +603,18 @@ def test_step10_new_versions_keep_models_mapping_and_history(moved: _Moved) -> N
     assert payload["mapping_version_id"] == now.mapping_version_id
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "engine defect: a confirmed SMART_PLUG_RELOCATION promotes a mapping version that never "
-        "gains the new mapping candidate.  core/runtime.py _self_heal_cycle calls "
-        "ConfigurationWorkflow.observe_confirming_event without candidate_mapping_edges, so "
-        "versioning/workflow.py proposes the current edges unchanged; nothing turns the "
-        "detector's from_id/to_id (ct_a -> ct_c) into a subject edge.  HB §17 step 9 "
-        "('a new mapping candidate is created') is not met."
-    ),
-)
 def test_step9_relocation_creates_a_new_mapping_candidate(moved: _Moved) -> None:
     versions = moved.core.version_service
-    new_map = versions.mapping_view(versions.current().mapping_version_id)
+    now = versions.current()
+    new_map = versions.mapping_view(now.mapping_version_id)
+    old_map = versions.mapping_view(moved.initial.mapping_version_id)
+    assert old_map.most_specific_reader(("device", "tv")) == "ct_a"
+    # The promoted mapping moves the TV off Circuit A onto Circuit C ...
     assert new_map.most_specific_reader(("device", "tv")) == "ct_c"
+    assert ("device", "tv") not in new_map.subjects_on("ct_a")
+    edge = {(e.subject_id, e.endpoint_id): e for e in new_map.edges()}[("tv", "ct_c")]
+    # ... as a new candidate the evidence proposed, not a user declaration.
+    assert str(getattr(edge.lifecycle, "value", edge.lifecycle)) == "provisional"
+    assert edge.declared_by == "inference"
+    # The lights stay where they were.
+    assert new_map.most_specific_reader(("device", "lights")) == "ct_a"
