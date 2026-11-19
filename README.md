@@ -4,14 +4,16 @@ Intelligent multi-CT home energy monitoring, **load disaggregation** and
 **self-learning** for Home Assistant.
 
 WattMosaic turns the measurements you already have — incoming L1/L2 CTs, branch
-circuit CTs, dedicated appliance CTs and Home Assistant device states — into
-per-device power estimates, with an explicit, honest treatment of what it cannot
-know.
+circuit CTs, single-subject endpoints (smart plugs and appliance energy monitors)
+and Home Assistant device states — into per-device power estimates, with an
+explicit, honest treatment of what it cannot know.
 
-> **Status:** v0.1.3 — engineering-complete core, validated on synthetic ground
-> truth over a read-only Home Assistant ingestion path. It does
-> **not** claim real-world per-device accuracy; see
-> [`docs/real_ha_validation.md`](docs/real_ha_validation.md).
+> **Status:** contract **3.0.0** — a real-time, topology-aware engine driven by
+> measurement events rather than a fixed timer. It does **not** claim real-world
+> per-device accuracy; see [`docs/real_ha_validation.md`](docs/real_ha_validation.md).
+> The algorithm design and the breaking-change policy are specified in the
+> [technical handbook](docs/specs/realtime-topology-disaggregation/handbook.md)
+> and its [implementation spec](docs/specs/realtime-topology-disaggregation/README.md).
 
 ---
 
@@ -19,24 +21,31 @@ know.
 
 - Reads **all** available power and energy entities plus device state changes from
   Home Assistant (read-only, over WebSocket).
-- Models the **electrical topology**: main CTs, branch CTs, dedicated CTs, nested
-  circuits, L1/L2 phases and double-pole 240 V loads.
-- Estimates individual device power using a measurement hierarchy:
-  1. `direct_measured` — a verified dedicated CT.
-  2. `inferred` — constrained solving against CT measurements and state events.
-  3. `model_estimated` — learned device model with supporting state.
-  4. `unknown` — insufficient evidence. **No fabricated numbers.**
-- Preserves the **unexplained residual** instead of distributing it.
-- Learns device models automatically from normal operation, validates them
-  against hold-out data, and only promotes a model when it beats the active one.
+- Models the **measurement topology**: incoming endpoints, branch endpoints,
+  smart-plug endpoints, nested circuits, L1/L2 phases and double-pole 240 V loads.
+  A CT is a *measurement endpoint*, never a device.
+- Publishes each estimate with one of four explicit statuses (HB §8.5):
+  1. `MEASURED` — a confirmed single-subject endpoint read one subject directly.
+  2. `ESTIMATED` — a joint delta/absolute solve, or a validated model priors.
+  3. `ALLOCATED` — a share of a non-separable device group, with an allocation rule.
+  4. `UNKNOWN` — insufficient evidence; **no fabricated number and no 0 W placeholder**.
+     The point value is `None` and justified bounds are carried as attributes.
+- Reports **identifiability** independently of status: a non-identifiable member
+  gets `None` and justified bounds, never a divided-out group share (HB §8.4).
+- Preserves the **unexplained residual** per reader instead of distributing it.
+- Learns device models from **delta (ΔP) evidence** on confirmed observations;
+  legacy whole-circuit models are read-only and retrained from delta evidence.
 - Tracks appliance cycles, operating stages, runtime and energy.
-- Exposes per-device and whole-home sensors in Home Assistant.
+- Exposes per-device, per-group and whole-home sensors in Home Assistant. Unknown
+  values are published as `unknown`, so history shows honest gaps rather than
+  fabricated zeros.
 
 ## What it deliberately does not do
 
 - It does not switch devices, change settings or control anything.
 - It does not guess when loads are ambiguous. If two devices changed at once and
-  the meters cannot distinguish them, it says so.
+  the meters cannot distinguish them, it says so — or reports the identified
+  group sum, not invented per-member watts.
 - It does not treat a repeated sensor value as a new measurement.
 - It does not report a confidence number as a probability.
 
@@ -44,25 +53,26 @@ know.
 
 ## Architecture
 
-```
-Home Assistant ──state_changed──► Engine ingestion ──► alignment ──► quality
-                                        │
-                                        ▼
-                              electrical model (y = Ax)
-                                        │
-                                        ▼
-                          disaggregation + residual analysis
-                                   │              │
-                                   ▼              ▼
-                            device models    energy aggregation
-                                   │              │
-                                   └──────┬───────┘
-                                          ▼
-                                   SQLite (WAL)
-                                          │
-                                    HTTP API /api/v1
-                                          │
-                          WattMosaic HA Integration ──► sensors
+```text
+Home Assistant ──state_changed / reader samples──► Engine ingestion
+                                                      │
+                     ┌────────────────────────────────┼──────────────────┐
+                     ▼                                ▼                  ▼
+              fast measurement loop            event loop          background loop
+              (O(1) per sample)             (event groups)        (learning, retention)
+                     └────────────────────────────────┼──────────────────┘
+                                                      ▼
+                              topology / mapping / model versions
+                                                      ▼
+                                       joint delta + absolute inference
+                                                      ▼
+                                estimates + justified bounds + residual
+                                                      ▼
+                                           SQLite (WAL, versioned)
+                                                      ▼
+                                        HTTP API /api/v1 → matrix
+                                                      ▼
+                           WattMosaic HA Integration ──► sensors & groups
 ```
 
 The Home Assistant integration is a thin HTTP client. All inference and learning
@@ -78,7 +88,7 @@ Full detail: [`docs/architecture.md`](docs/architecture.md),
 | --- | --- |
 | Two mains (L1 + L2) only | Yes — inference with explicit ambiguity |
 | Mains + branch CTs | Yes |
-| Mains + dedicated appliance CTs | Yes — `direct_measured` |
+| Incoming + smart plug / appliance-monitor endpoints (`SINGLE_SUBJECT` scope) | Yes — `MEASURED` once the user confirms the scope |
 | Nested branch CTs (main → branch → sub-branch) | Yes — no double counting |
 | Double-pole 240 V appliance (`*_ct1`/`*_ct2` pair) | Yes — one logical load |
 | Multiple panels (panel A + panel B) | Yes — as separate measurement groups |
@@ -160,21 +170,27 @@ Core variables:
 | `WM_LEARNING_ENABLED` | Enable automatic learning |
 | `WM_STALE_AFTER_S` | Age after which a reading is stale |
 | `WM_RETENTION_DAYS_RAW` | Raw data retention |
+| `WM_EVENT_QUEUE_MAX` | Bound on ready event groups in the event loop |
+| `WM_STEADY_HEARTBEAT_S` | Staleness-only heartbeat period (never a full solve) |
+| `WM_UNKNOWN_PENALTY_SCALE` | Multiplier on the unknown-load penalty in the joint solve |
+
+`WM_INFERENCE_INTERVAL_S` is **deprecated and ignored**: the three-loop runtime
+runs inference per event group, not on a fixed timer. It is still accepted so
+existing App options keep validating, with a startup warning.
 
 ---
 
 ## Current limitations
 
-- **Topology must be confirmed by you.** Auto-derived CT↔device mappings are
-  candidates (`topology_status=candidate`) and are not treated as facts.
+- **Topology and endpoint scope must be confirmed by you.** Auto-derived topology
+  edges and `SINGLE_SUBJECT` scopes start as candidates (`CANDIDATE`); a single
+  event never promotes an edge past `CANDIDATE`, and PROVISIONAL edges are soft.
 - **No per-device ground truth in a real home.** Accuracy figures in
   `docs/acceptance_report.md` come from synthetic ground truth, clearly labelled
   as such.
-- **Learning needs declared state entities.** A device's `switch.*`/`climate.*`
-  entity is named in `DeviceTopology.metadata["state_entity_ids"]` — never
-  guessed from names. Without it, real HA events cannot be linked to devices and
-  no learning sample matures (the sample is still recorded with its rejection
-  reason).
+- **Learning needs declared state entities.** A device's runtime entity is named
+  in its HA entity links — never guessed from names. Without it, real HA events
+  cannot be linked to devices and no learning sample matures.
 - Many CT integrations do not expose a hardware measurement timestamp; staleness
   is computed from the HA state timestamp. A typical polling multi-channel CT
   integration reports at ~15.7 s median cadence, not 2 s.

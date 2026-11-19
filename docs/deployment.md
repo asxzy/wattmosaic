@@ -9,9 +9,10 @@ using the same image contents and the same database migrations:
 | **B. docker compose** | Home Assistant Container, or a separate Docker host | [B](#b-docker-compose) |
 | **C. Plain `docker run`** | Minimal hosts, orchestration elsewhere | [C](#c-plain-docker-run) |
 
-User-facing install steps with screenshots belong in
-[`installation.md`](installation.md); this document covers the container
-internals, storage, health, upgrade and recovery procedures.
+User-facing install steps belong in [`installation.md`](installation.md); this
+document covers container internals, storage, health, upgrade and recovery.
+The engine speaks **contract 3.0.0**: the engine and integration must be upgraded
+together, migrations are forward-only, and there are no down-migrations (DEC-02).
 
 ---
 
@@ -19,23 +20,24 @@ internals, storage, health, upgrade and recovery procedures.
 
 ```text
   :8787  gateway.py            aiohttp reverse proxy
-            ├── /healthz        unauthenticated liveness (no data)
-            ├── /              panel for Supervisor ingress, JSON otherwise
-            ├── /ui/{asset}     panel stylesheet, script and mark (allowlisted)
-            └── /api/v1/*       proxied, X-API-Token injected for ingress peers
-  :8788  engine (loopback)     WattMosaic /api/v1, requires X-API-Token
-            ├── Home Assistant WebSocket ingestion (read-only)
-            ├── SQLite (WAL) at WM_DATABASE_PATH
-            └── inference / learning loops
-  /data  persistent volume     database, WAL, -shm
+             ├── /healthz        unauthenticated liveness (no data)
+             ├── /              panel for Supervisor ingress, JSON otherwise
+             ├── /ui/{asset}     panel stylesheet, script and mark (allowlisted)
+             └── /api/v1/*       proxied, X-API-Token injected for ingress peers
+  :8788  engine (loopback)     WattMosaic /api/v1 (contract 3.0.0), token-protected
+             ├── Home Assistant WebSocket ingestion (read-only)
+             ├── three-loop runtime: fast / event / background
+             ├── joint delta + absolute inference, groups, residual, matrix
+             └── SQLite (WAL) at WM_DATABASE_PATH
+  /data  persistent volume     database, WAL, -shm, pre-migration backups
   /app   code                  run.sh, gateway.py, healthcheck.py, ui/
   /opt/venv                    engine + pinned dependencies, no build tools
 ```
 
-Why two ports? The engine's API is token-protected. Home Assistant's Supervisor
-watchdog cannot send custom headers, and an ingress user should not have to paste a
-token. The gateway solves both while keeping the token requirement on the actual
-API. Direct (non-ingress) callers still need `X-API-Token`.
+Why two ports? The engine's API is token-protected. The Supervisor watchdog
+cannot send custom headers, and an ingress user should not have to paste a token.
+The gateway solves both while keeping the token requirement on the actual API.
+Direct (non-ingress) callers still need `X-API-Token`.
 
 Process model:
 
@@ -43,9 +45,9 @@ Process model:
   ownership, then `exec`s the engine as UID 10001 with `no_new_privs` and all
   capabilities dropped (via `setpriv`).
 - The engine is PID 1, so `docker stop` / Supervisor stop delivers `SIGTERM`
-  directly to it: SQLite checkpoints the WAL and the HTTP server closes cleanly.
-- The gateway is a supervised child process. It exits if the engine has been
-  unreachable, and the container runtime tears it down with the engine.
+  directly: SQLite checkpoints the WAL and the HTTP server closes cleanly.
+- The gateway is a supervised child process; it exits if the engine has been
+  unreachable, and the runtime tears it down with the engine.
 
 Set `WM_DROP_PRIVILEGES=false` only when the data volume is already owned by
 UID 10001 and you want the whole container to run unprivileged.
@@ -63,8 +65,8 @@ options UI is mapped to these variables by `addon/run.sh`.
 /data/options.json (App options)  >  container environment  >  built-in default
 ```
 
-An explicitly set environment variable is therefore never silently overwritten —
-except by an App option, which is the user's own configured intent.
+An explicitly set environment variable is never silently overwritten — except by
+an App option, which is the user's own configured intent.
 
 ### 2.2 Variables the engine reads
 
@@ -73,7 +75,7 @@ Source of truth: `engine/wattmosaic_engine/config/settings.py`.
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `WM_HA_URL` (alias `HA_URL`, `HA_HOST`) | — | `http://host:8123`; a bare host gets `http://` and `:8123`. |
-| `WM_HA_TOKEN` (alias `HA_TOKEN`, `HA_LONG_LIVED_TOKEN`) | — | Long-lived **user** token. Falls back to `SUPERVISOR_TOKEN` in App mode. |
+| `WM_HA_TOKEN` (alias `HA_TOKEN`) | — | Long-lived **user** token. Falls back to `SUPERVISOR_TOKEN` in App mode. |
 | `WM_HA_VERIFY_SSL` | `true` | Only disable for a trusted self-signed local instance. |
 | `WM_API_HOST` | `127.0.0.1` (image) | Keep on loopback so only the gateway is reachable. |
 | `WM_API_PORT` | `8788` (image) | Engine port. Must differ from the gateway port. |
@@ -82,9 +84,12 @@ Source of truth: `engine/wattmosaic_engine/config/settings.py`.
 | `WM_RETENTION_DAYS_RAW` | `30` | Raw retention; must exceed your longest training horizon. |
 | `WM_RETENTION_DAYS_AGGREGATES` | `730` | Aggregate retention. |
 | `WM_LEARNING_ENABLED` | `true` | Inference continues when false. |
-| `WM_STALE_AFTER_S` | `120` | Staleness threshold; typical CT cadence for a polling multi-channel monitor is ~15.7 s. |
-| `WM_INFERENCE_INTERVAL_S` | `5` | Inference cadence. |
-| `WM_QUEUE_MAX_SIZE` | `5000` | Bounded queue; overflow drops the oldest items and increments a metric. |
+| `WM_STALE_AFTER_S` | `120` | Staleness threshold; typical CT cadence ~15.7 s. |
+| `WM_INFERENCE_INTERVAL_S` | `5` | **Deprecated and ignored** (accepted with a startup warning). Inference runs per event group, not on a timer. |
+| `WM_EVENT_QUEUE_MAX` | `1000` | Max ready event groups; overflow drops oldest. |
+| `WM_STEADY_HEARTBEAT_S` | `60` | Staleness-only heartbeat period; never a full solve. |
+| `WM_UNKNOWN_PENALTY_SCALE` | `1.0` | Unknown-load penalty multiplier in the joint solve. |
+| `WM_QUEUE_MAX_SIZE` | `5000` | Bounded ingestion queue. |
 | `WM_LOG_LEVEL` | `INFO` | Normalised to upper case by `run.sh`. |
 | `WM_LOG_JSON` | `true` | `false` for human-readable logs. |
 
@@ -92,10 +97,10 @@ Source of truth: `engine/wattmosaic_engine/config/settings.py`.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `WM_GATEWAY_ENABLED` | `true` | Set `false` to expose the engine API directly (then `WM_API_PORT` must be 8787 and you must publish it). |
+| `WM_GATEWAY_ENABLED` | `true` | Set `false` to expose the engine API directly (then `WM_API_PORT` must be 8787 and published). |
 | `WM_GATEWAY_PORT` | `8787` | Must match `ingress_port` in `addon/config.yaml`. |
 | `WM_GATEWAY_BIND` | `0.0.0.0` | Inside the container only. |
-| `WM_GATEWAY_TRUSTED_INGRESS_IPS` | `172.30.32.2` | Supervisor address(es), comma-separated. Ingress requests from these peers get the token injected. |
+| `WM_GATEWAY_TRUSTED_INGRESS_IPS` | `172.30.32.2` | Supervisor address(es), comma-separated. |
 | `WM_DROP_PRIVILEGES` | `true` | `run.sh` drops from root to UID 10001. |
 | `WM_OPTIONS_FILE` | `/data/options.json` | Override for testing only. |
 
@@ -124,20 +129,11 @@ a long-lived token for it.
 There are two supported ways to get the App onto a box, and they use different
 Docker build contexts. Mixing them up is the usual cause of a failed install.
 
-**1. App store (default).** `repository.yaml` at the repository root registers
-the repository; the store finds the app folder `addon/` by scanning for
-`config.yaml`. `addon/config.yaml` sets
-
-```yaml
-image: "ghcr.io/asxzy/wattmosaic-engine"
-```
-
-so the Supervisor **pulls** `ghcr.io/asxzy/wattmosaic-engine:<version>` — a
-multi-arch manifest list for `linux/amd64` and `linux/aarch64`, published by
-`.github/workflows/release.yaml`. Nothing is built on the HA host, and the
-app folder never needs to be self-contained. The tag is always the `version:`
-field in `addon/config.yaml`; bump the version and push, and the workflow
-publishes the matching tag.
+**1. App store (default).** `repository.yaml` registers the repository; the
+store finds the app folder `addon/` by scanning for `config.yaml`.
+`addon/config.yaml` sets `image: "ghcr.io/asxzy/wattmosaic-engine"`, so the
+Supervisor **pulls** the multi-arch image published by
+`.github/workflows/release.yaml`. Nothing is built on the HA host.
 
 **2. Local copy (offline / no GHCR).** The Supervisor's Docker build context is
 the app folder itself, so a locally built app must contain the engine sources.
@@ -148,64 +144,34 @@ scripts/package_addon.sh                 # -> dist/addon/wattmosaic_engine/
 scripts/package_addon.sh --install root@homeassistant
 ```
 
-The staged directory contains `config.yaml`, `Dockerfile`, `run.sh`,
-`gateway.py`, `healthcheck.py`, `constraints.txt`, `icon.png`, `logo.png`,
-`README.md`, `pyproject.toml`, `LICENSE` and `engine/`. Staging **removes** the
-`image:` line, because a self-contained folder must be built locally rather than
-pull a prebuilt image.
-
-Copying `addon/` on its own does not work: it has no `engine/`, so a local build
-fails at the `COPY engine ./engine` step.
+Staging **removes** the `image:` line, because a self-contained folder must be
+built locally rather than pull a prebuilt image. Copying `addon/` on its own does
+not work: it has no `engine/`, so a local build fails at `COPY engine ./engine`.
 
 Then **Settings → Apps → App store → ⋮ → Check for updates** → *WattMosaic
 Engine* → **Install**.
 
 ### 3.2 Manifest decisions
 
-`addon/config.yaml` is deliberately explicit:
-
-- `image: ghcr.io/asxzy/wattmosaic-engine` — prebuilt multi-arch image, tagless
-  (the Supervisor supplies `<version>`); only `{arch}` would be substituted.
-- `init: false` — no s6 overlay; `run.sh` is the init for its two processes.
-- `startup: application`, `boot: auto` — start after Home Assistant Core, on boot.
-- `ingress: true`, `ingress_port: 8787` — sidebar panel, HA-authenticated.
-- `host_network: false` — internal Docker network only.
-- `homeassistant_api: true` — enables the `SUPERVISOR_TOKEN` Core proxy path.
-- `map: data:rw, share:rw` — `/data` for the database, `/share` for exports.
-- `backup: cold` — SQLite WAL is copied consistently.
-- `watchdog: http://[HOST]:[PORT:8787]/healthz`.
-- `ports: 8787/tcp: null` — not published unless the user enables it.
+`addon/config.yaml` is deliberately explicit: `image` is the tagless prebuilt
+multi-arch image, `init: false` (run.sh is the init), `startup: application`,
+`boot: auto`, `ingress: true` port 8787, `host_network: false`,
+`homeassistant_api: true`, `map: data:rw, share:rw`, `backup: cold` (so the SQLite
+WAL is copied consistently), `watchdog` on `/healthz`, and `ports: 8787/tcp: null`.
 
 ### 3.3 Integration endpoint
 
-From the Home Assistant integration, use the container host name:
-
-```text
-http://<hostname>:8787
-```
-
-The Supervisor names an installed app `{repository}_{slug}` and registers that
-hostname with `_` replaced by `-`:
-
-| Install shape | Repository ID | Hostname |
-| --- | --- | --- |
-| App store (`https://github.com/asxzy/wattmosaic`) | `f48de52e` | `f48de52e-wattmosaic-engine` |
-| Local copy (`/local_apps/wattmosaic_engine`, or `/addons/` before 2026.11) | `local` | `local-wattmosaic-engine` |
-
-The repository ID is the first 8 hex characters of the SHA-1 of the lowercased
-repository URL, so a URL typed with `.git` or a trailing slash yields a
-*different* ID and a different hostname. Do not compute it by hand — the app's
-own page shows **Hostname** under its info tab, and that value is authoritative.
-
-Do not use `127.0.0.1` or the host IP: the app's port is not published.
+From the Home Assistant integration, use the container host name
+`http://<hostname>:8787`. The Supervisor names an installed app
+`{repository}_{slug}` and registers that hostname with `_` replaced by `-`
+(e.g. `f48de52e-wattmosaic-engine` or `local-wattmosaic-engine`). The app's own
+page shows **Hostname** under its info tab — that value is authoritative. Do not
+use `127.0.0.1` or the host IP: the app's port is not published.
 
 ### 3.4 Storage
 
-- `/data` → host path `/mnt/data/supervisor/apps/data/<repo>_wattmosaic_engine`
-  (the Supervisor renamed `addons/` to `apps/` in 2026.11; older releases use
-  `addons/data/`).
-- Survives app updates, restarts and reboots.
-- Included in Home Assistant backups (cold).
+- `/data` survives app updates, restarts and reboots, and is included in HA
+  backups (cold).
 - `/share` is available read-write for manual exports, e.g.
   `/api/v1/export/{device_id}` piped to `/share/wattmosaic/`.
 
@@ -220,27 +186,13 @@ docker compose up -d --build
 docker compose logs -f wattmosaic
 ```
 
-`.env` is the only place secrets live. It is git-ignored and `.dockerignore`
-keeps it out of the image build context.
-
-The compose file applies:
-
-- `restart: unless-stopped`, `init: true`, `stop_grace_period: 30s`;
-- `read_only: true` root filesystem with a single writable volume `/data`;
-- `cap_drop: ALL`, `security_opt: no-new-privileges`;
-- a `tmpfs` `/tmp` (the app needs no other writable path);
-- a healthcheck using the same `/app/healthcheck.py` as the image;
-- a 1 GB memory limit and bounded JSON logs.
-
-Override the published port/interface:
-
-```bash
-WM_BIND_ADDRESS=192.168.1.10 docker compose up -d
-```
-
-Only port `8787` is published. The engine's `8788` stays on container loopback.
-
-Verify:
+`.env` is the only place secrets live; it is git-ignored and excluded from the
+image build context. The compose file applies `restart: unless-stopped`,
+`init: true`, `stop_grace_period: 30s`, `read_only: true` root filesystem with a
+single writable `/data` volume, `cap_drop: ALL`, `no-new-privileges`, a `tmpfs`
+`/tmp`, the same `/app/healthcheck.py` healthcheck, a 1 GB memory limit and
+bounded JSON logs. Only port `8787` is published; the engine's `8788` stays on
+container loopback.
 
 ```bash
 curl -s http://localhost:8787/healthz                       # ok
@@ -257,7 +209,8 @@ docker compose up -d
 docker compose ps          # wait for "healthy"
 ```
 
-Migrations run automatically at start. Forward-only: take a backup first.
+Migrations run automatically at start, forward-only; an automatic pre-migration
+backup is taken first (§7).
 
 ---
 
@@ -276,8 +229,8 @@ docker run -d --name wattmosaic \
   wattmosaic-engine:<version>
 ```
 
-Binding the published port to `127.0.0.1` is the safe default; put a TLS reverse
-proxy in front for remote access.
+Binding to `127.0.0.1` is the safe default; put a TLS reverse proxy in front for
+remote access.
 
 ---
 
@@ -287,49 +240,52 @@ Three independent signals:
 
 | Check | Endpoint | Auth | Healthy when |
 | --- | --- | --- | --- |
-| Gateway liveness | `GET /healthz` | none | `200 ok`; it has just reached `/api/v1/health` |
-| Engine health | `GET /api/v1/health` | `X-API-Token` | `status` is `ok` or `degraded` |
-| Docker HEALTHCHECK | `/app/healthcheck.py` (both of the above) | token from env | exit 0 |
+| Gateway liveness | `GET /healthz` | none | `200 ok`; it reached `/api/v1/health` |
+| Engine health | `GET /api/v1/health` | `X-API-Token` | `status` is `ok` or `degraded`, `contract_version` is `3.0.0` |
+| Docker HEALTHCHECK | `/app/healthcheck.py` (both) | token from env | exit 0 |
 
 `degraded` is intentionally treated as healthy by the container healthcheck: it
-usually means HA is reconnecting or the inference backend is not yet installed,
-and restarting the container would not fix either — it would only lose the
-connection and re-enter the loop. `error` and hard failures (401, connection
-refused, non-JSON) fail the check.
-
+usually means HA is reconnecting or the runtime is not yet settled, and
+restarting would not fix either. `error` and hard failures fail the check.
 Supervisor watchdog uses `/healthz` only, because it cannot send headers.
-
-Inspect:
-
-```bash
-docker inspect --format '{{json .State.Health}}' wattmosaic-engine | jq
-curl -s -H "X-API-Token: $WM_API_TOKEN" localhost:8787/api/v1/status | jq
-curl -s -H "X-API-Token: $WM_API_TOKEN" localhost:8787/api/v1/diagnostics | jq
-```
 
 Contract compatibility is visible on every response:
 
 ```bash
 curl -sI -H "X-API-Token: $WM_API_TOKEN" localhost:8787/api/v1/health \
-  | grep -i x-wattmosaic-contract-version
+  | grep -i x-wattmosaic-contract-version    # X-WattMosaic-Contract-Version: 3.0.0
 ```
 
 ---
 
-## 7. Persistence, backup and restore
+## 7. Persistence, backup and rollback
 
 ### What must persist
 
-Only `/data` — the SQLite database (`wattmosaic.db`, `-wal`, `-shm`). Nothing
-else in the container is stateful. Models, learning samples, topology versions and
-energy aggregates all live in that database.
+Only `/data` — the SQLite database (`wattmosaic.db`, `-wal`, `-shm`) and the
+pre-migration backups. Models, learning observations, topology/mapping/model
+versions, estimates and energy aggregates all live in that database.
 
-### Backup
+### Automatic pre-migration backup (DEC-02)
+
+Before applying any migration numbered **13 or above**, the engine writes a
+backup file beside the database **before the first destructive statement**:
+
+```text
+/data/wattmosaic.db.pre-v025.<UTC-timestamp>.bak
+```
+
+The file is made after a WAL checkpoint and includes any surviving `-wal`/`-shm`
+sidecars, so it is self-contained. The newest three backups are kept (older ones
+are rotated away). A fresh or unversioned database produces no backup — there is
+nothing to roll back to. **If a backup copy fails, startup aborts**: running a
+destructive migration without a rollback point is worse than not starting.
+
+### Manual backup
 
 **Consistent, while running** (SQLite online backup):
 
 ```bash
-# App
 docker exec app_local_wattmosaic_engine \
   python -c "import sqlite3;s=sqlite3.connect('/data/wattmosaic.db');d=sqlite3.connect('/data/wbm.db');s.backup(d)"
 docker cp app_local_wattmosaic_engine:/data/wbm.db ./wattmosaic-$(date +%F).db
@@ -343,54 +299,41 @@ docker compose cp engine:/data/wbm.db ./wattmosaic-$(date +%F).db
 **Cold copy**: stop the container, copy the volume, start it. This is what the
 Supervisor does with `backup: cold`.
 
-### Restore
+### Rollback (DEC-02)
+
+There are **no down-migrations**. Rollback is: reinstall the previous engine
+(and integration) version, then restore the matching backup.
 
 1. Stop the container/app.
-2. Replace `/data/wattmosaic.db` with the backup and remove any stale
-   `wattmosaic.db-wal` / `-shm` (they belong to the old file).
-3. Start the container. The engine runs `PRAGMA integrity_check` and refuses to
-   serve corrupt data rather than silently discarding it.
-4. Verify with `/api/v1/status` and `/api/v1/health`.
+2. Replace `/data/wattmosaic.db` with the pre-migration backup
+   (`wattmosaic.db.pre-vNNN.<timestamp>.bak`) and remove any stale
+   `wattmosaic.db-wal` / `wattmosaic.db-shm` (they belong to the new file).
+3. Start the **previous** engine version. The engine runs `PRAGMA
+   integrity_check` and refuses corrupt data rather than silently discarding it.
+4. Verify with `/api/v1/status` and contract `3.0.0` / the previous contract on
+   `/api/v1/health`, depending on the version restored.
 
-Never restore a database into an **older** engine than the one that wrote it:
-migrations are forward-only.
+Never run an older engine against a newer-schema database, and never restore a
+newer database into an older engine: migrations are forward-only. If a migration
+fails mid-apply, `user_version` is left unchanged and the database is still usable
+by the previous version; restore the backup before retrying.
 
-### Schema 7 — downgrade is NOT supported in place
+### Legacy tables
 
-Schema **7** is the first bump since 0.1.6's schema 6. It adds five nullable
-columns to `reconciliation_results` (`unmonitored_w`, `meter_disagreement_w`,
-`configured_prior_w`, `measurement_uncertainty_w`, `topology_confirmed`) with
-`ALTER TABLE ... ADD COLUMN`. That is a metadata-only change: no table rewrite,
-no downtime, and existing rows keep `NULL` for the new columns (readers resolve
-`NULL` to the model default).
-
-**Every release from 0.1.6 up to and including 0.2.1-dev.12 is schema 6.**
-Upgrading is automatic and additive. **Downgrading from schema 7 to schema 6 in
-place is not supported**: the pre-deploy backup is the only supported rollback.
-If you roll the image back, restore the matching database backup as well:
-
-1. Stop the container/app.
-2. Replace `/data/wattmosaic.db` with the pre-deploy backup and remove stale
-   `wattmosaic.db-wal` / `-shm`.
-3. Start the older image.
-
-Do not run an older image against a schema-7 database and then re-upgrade it —
-the migration is idempotent, so it would not corrupt anything, but the split and
-the sibling fields written by the newer engine would be invisible to the older
-one, and any row written in between would keep `NULL`. Take the backup before
-every upgrade.
+Migration v025 renames legacy tables to `<name>_legacy` and makes them read-only
+with triggers. No table is dropped, so historical data remains available for one
+release. Migrations 1–24 read the legacy table and column names as SQL data while
+upgrading historical databases; those strings are not live code paths.
 
 ### Retention
 
-`WM_RETENTION_DAYS_RAW` / `WM_RETENTION_DAYS_AGGREGATES` bound growth. Pruning
-never deletes `device_model_versions` or `learning_samples`. Monitor size:
+`WM_RETENTION_DAYS_RAW` bounds L1 growth; L2 evidence and L4 version history are
+operator-bounded (unset by default, so retained). Pruning never deletes model
+versions or versioned evidence that a provenance reference may still cite.
 
 ```bash
 docker exec app_local_wattmosaic_engine ls -lh /data
 ```
-
-Rule of thumb: ~15 s CT cadence across ~20 channels is a few hundred MB per month
-of raw samples; the default 30 days keeps that bounded.
 
 ---
 
@@ -401,9 +344,11 @@ of raw samples; the default 30 days keeps that bounded.
 1. Re-run `scripts/package_addon.sh --install …` (or copy the new folder).
 2. **Check for updates** → **Update**. The `version` in `config.yaml` is the
    update trigger; bump it for every release.
-3. Migrations run at start. Watch the log for `database_ready schema_version=N`.
+3. Migrations run at start (with automatic backup). Watch the log for
+   `database_ready schema_version=N` and the `pre-migration backup ... written`
+   line.
 4. Rollback: re-install the previous version **and restore the matching database
-   backup**. Do not downgrade the DB in place.
+   backup** (§7). Do not downgrade the DB in place.
 
 ### Docker
 
@@ -412,98 +357,41 @@ docker compose build --pull
 docker compose up -d
 ```
 
-Tag images by version (`wattmosaic-engine:<version>`) and keep the previous tag for
-rollback.
+Tag images by version and keep the previous tag for rollback.
 
 ### Version compatibility
 
-The engine reports `contract_version` (`1.4.0`) on every response. The
-integration refuses to run against an incompatible contract rather than
-misinterpreting data. Upgrade the integration and app together when the contract
-version changes.
+The engine reports `contract_version` `3.0.0` on every response. Contract 3.0 is
+a **breaking** cutover: engine and integration must be upgraded together. An
+integration that refuses a contract mismatch is behaving correctly. Removed at
+the cutover: the legacy contract models, `/mapping` (now `/matrix`), v2 forms,
+and the legacy HA topology-confirm endpoint.
 
 ### Releasing
 
-A release is a **git tag** plus a **GitHub Release**. Home Assistant, HACS and
-the Marketplace resolve the displayed version from those two things, not from a
-file in the tree: with no tag and no Release they fall back to the branch head
-and show a raw commit SHA. That is the state this repository was in until
-`0.2.1-dev.1`, and it is why an installed integration could report `eec273d`
-while every version field correctly said `0.2.0-dev9`.
+A release is a **git tag** plus a **GitHub Release**. Home Assistant and the
+Marketplace resolve the displayed version from those, not a file in the tree;
+with neither they show a raw commit SHA. `check_release.py` verifies the machine-
+enforceable half: all five version fields agree, `RELEASE_NOTES.md` documents the
+current version, and a suffix tag is not published as stable. Run it before
+tagging:
 
-#### Channels
+```bash
+python tools/dev/check_release.py
+```
 
-| Branch | Carries | Published as | Who sees it |
-| --- | --- | --- | --- |
-| `main` | `X.Y.Z-dev.N` | prerelease | development installs only |
-| `stable` | `X.Y.Z` | latest | everyone |
+Version channels: `main` carries `X.Y.Z-dev.N` prereleases (the Marketplace
+ignores prereleases unless beta is enabled, so stable users are unaffected);
+`stable` carries plain `X.Y.Z`. The release workflow bumps the counter in all
+five version files, builds the multi-arch image, tags the commit and publishes
+the Release, and prunes old development Releases (never stable ones). Keep the
+prerelease counter a separate numeric identifier (`-dev.2`, not `-dev2`). Tags
+are immutable: to correct a release, delete and recreate it deliberately.
 
-`main` is the **development line**: every push publishes a prerelease. That is
-safe rather than trusting, because the Marketplace ignores prereleases unless
-the beta toggle is on — `show_beta` defaults to false, and the version offered
-to a stable user is only ever the newest release with `prerelease=false`.
-
-#### What a push to `main` does
-
-You do not bump the version by hand. One workflow
-(`.github/workflows/release.yaml`) does all of it, in order, in a single run:
-
-1. **Bumps** the counter (`X.Y.Z-dev.N` → `X.Y.Z-dev.(N+1)`) in all five files
-   and commits it with `[wm-auto-version]` in the message.
-2. **Builds** `ghcr.io/asxzy/wattmosaic-engine:<version>` as a multi-arch
-   manifest list.
-3. **Tags** that commit and publishes the GitHub Release.
-4. **Prunes** old development Releases, keeping the newest 10.
-
-All four stages are one workflow on purpose. A push made with the automatic
-`GITHUB_TOKEN` does not trigger another workflow, so splitting them into chained
-push-triggered workflows would build the image from the *pre-bump* tree and tag
-a version no artifact carries.
-
-The bump is committed because the Supervisor offers an App update only when
-`addon/config.yaml`'s `version:` **string** changes — it compares versions, never
-commits. Without the commit the image would be published and never offered.
-
-Pruning exists because the Marketplace reads a single unpaginated page of 30
-Releases. If prereleases filled it, the newest stable Release would fall out,
-the offered version would become a commit SHA, and the installer would fall back
-to the default branch — offering a stable user the development line. Stable
-Releases are never pruned.
-
-#### What a push to `stable` does
-
-The committed version **is** the release: no counter is incremented. Use this
-for a deliberate stable release. The five fields are still checked for
-agreement, and `RELEASE_NOTES.md` must already document the version.
-
-| File | Field |
-| --- | --- |
-| `custom_components/wattmosaic/manifest.json` | `version` (canonical — what Home Assistant reads) |
-| `custom_components/wattmosaic/const.py` | `VERSION` |
-| `addon/config.yaml` | `version` (the App image tag) |
-| `pyproject.toml` | `version` |
-| `engine/wattmosaic_engine/__init__.py` | `__version__` |
-
-Run `python tools/dev/check_release.py`; it fails if any of the five disagree, if
-the notes do not cover the version, or if the branch carries a version of the
-wrong kind.
-
-#### Numbering
-
-Keep the counter a **separate numeric identifier**: `-dev.2`, `-dev.3`. The glued
-form (`-dev2`) is rejected by `check_release.py`. Note that the original reason
-recorded here — that SemVer compares `dev10` below `dev9` — is **wrong for this
-installer**: the Marketplace compares with AwesomeVersion, which parses `dev9`
-as SemVer and orders it numerically (`v0.2.0-dev10 > v0.2.0-dev9` is `True`).
-The dot form is kept because it is unambiguous and already published, not
-because the glued form is broken here.
-
-A human may still move the core version (for example `0.2.2-dev.1`); CI honours
-a version that is not already tagged rather than skipping the number chosen.
-
-Tags are immutable. To correct a release, delete and recreate the tag and
-Release deliberately — never rely on a republish to change what an existing tag
-means, because users may already have pulled it.
+The five version fields: `custom_components/wattmosaic/manifest.json` (`version`,
+canonical), `custom_components/wattmosaic/const.py` (`VERSION`),
+`addon/config.yaml` (`version`), `pyproject.toml` (`version`), and
+`engine/wattmosaic_engine/__init__.py` (`__version__`).
 
 ---
 
@@ -512,11 +400,9 @@ means, because users may already have pulled it.
 1. Remove the integration: **Settings → Devices & Services → WattMosaic → Delete**.
    This removes entities and the config entry only.
 2. Stop and uninstall the app (or `docker compose down`).
-3. The data volume is intentionally preserved. Delete it explicitly if you want
-   to discard history and learned models:
-   - App: uninstall with "delete data", or remove
-     `/mnt/data/supervisor/apps/data/local_wattmosaic_engine` via SSH.
-   - Docker: `docker volume rm wattmosaic-data`.
+3. The data volume is intentionally preserved. Delete it explicitly to discard
+   history and learned models (App: uninstall with "delete data"; Docker:
+   `docker volume rm wattmosaic-data`).
 
 ---
 
@@ -524,72 +410,39 @@ means, because users may already have pulled it.
 
 | Topic | Measure |
 | --- | --- |
-| Token handling | Secrets only in App options / env. `run.sh` never echoes them (`--print-config` prints `***set(N chars)`). `EngineConfig.redacted()` keeps them out of logs, diagnostics and exports. |
+| Token handling | Secrets only in App options / env. `run.sh` never echoes them; `EngineConfig.redacted()` keeps them out of logs, diagnostics and exports. |
 | API exposure | Engine API on `127.0.0.1:8788`, token-protected. Only `8787` is reachable, and only the gateway. |
-| Ingress | Home Assistant authenticates the user; `panel_admin: true` limits the sidebar panel to admins. Ingress requests are trusted **only** from `WM_GATEWAY_TRUSTED_INGRESS_IPS` *and* only when the Supervisor's `X-Remote-User-Id` header is present. |
-| Panel assets | `index.html`, `app.css`, `app.js` and `mark.svg` ship inside the image and are served only to ingress peers, from a fixed allowlist (no path traversal, direct clients get `401`). The CSP is `script-src 'self'` with no inline script; `style-src` allows inline attributes only for meter widths and dial geometry. All engine-provided strings are inserted as text, never markup. |
-| `api_token` | Compared with `hmac.compare_digest`. Empty is warned about at start. Generate with `secrets.token_urlsafe(32)`. |
-| `SUPERVISOR_TOKEN` | Administrator-grade for the Core proxy. Prefer a dedicated read-only user token in `ha_token` when policy allows. |
+| Ingress | Home Assistant authenticates the user; ingress is trusted only from `WM_GATEWAY_TRUSTED_INGRESS_IPS` and only with the Supervisor's `X-Remote-User-Id` header. |
+| Panel assets | A fixed allowlist of static files, served only to ingress peers (no path traversal, no external origin, no inline script). All engine-provided strings are inserted as text. |
+| `api_token` | Compared with `hmac.compare_digest`; generate with `secrets.token_urlsafe(32)`. |
 | Least privilege | All capabilities dropped, `no_new_privs`, engine runs as UID 10001, read-only root filesystem in compose. |
 | No actuation | The engine has no service-call code path; it can only read states and registries. |
-| Logs | Access logs disabled for the gateway and engine (`access_log=None`) to avoid leaking query strings. |
-| Network | Never publish `8787` on `0.0.0.0` without TLS and a token; prefer a VPN or reverse proxy. |
+| Network | Never publish `8787` on `0.0.0.0` without TLS and a token. |
 
 ---
 
 ## 11. Troubleshooting
 
-| Symptom | Likely cause | Fix |
-| --- | --- | --- |
-| Container exits immediately, log: `no Home Assistant token` | `ha_token` empty and no `SUPERVISOR_TOKEN` | Set `ha_token`, or keep it empty with `homeassistant_api: true` in App mode. |
-| `no Home Assistant URL` | Standalone run without `WM_HA_URL`/`HA_URL`/`HA_HOST` | Set one in `.env`. |
-| `failed to parse /data/options.json` | Corrupt options file | Re-save the app configuration; the Supervisor rewrites it. |
-| `WM_STALE_AFTER_S must be numeric` | Non-numeric option | Fix the App option in the UI. |
-| `database directory … is not writable` | Volume owned by a different UID | Remove/recreate the volume, or set `WM_DROP_PRIVILEGES=false`. |
-| `setpriv not found` | Image tampered with | Rebuild; `setpriv` ships in `python:3.12-slim-bookworm`. |
-| Healthcheck fails with `401` | `WM_API_TOKEN` mismatch between container and caller | Make the integration's token match. |
-| Watchdog restarts the app repeatedly | `/healthz` returns 503: engine not answering | Check engine logs; `/healthz` only turns 200 when `/api/v1/health` answers. |
-| Ingress panel is blank | CSP blocked an asset, or the gateway/image is missing `ui/` | Check the browser console; the panel loads `/ui/app.css` and `/ui/app.js` as separate files, so a `404` or a CSP `script-src` violation points at a stale image. The API is unaffected — `curl -H "X-API-Token: …" …/api/v1/health` still answers. |
-| Integration gets 401 | Token not set or wrong | Set `api_token` and enter the same value in the integration. |
-| Integration cannot connect | Wrong URL | Use `http://<hostname>:8787` — copy **Hostname** from the app's info tab, not `localhost` or a hand-computed hash. |
-| `status: degraded`, `ha_connected: false` | HA unreachable or bad token | Check `ha_url`, token validity, and the log for `HA connection error`. |
-| `inference backend not installed` in `details` | Engine build predates the inference modules | Rebuild from a complete checkout. |
-| Database grows unexpectedly | Raw retention too high | Lower `WM_RETENTION_DAYS_RAW`; pruning runs hourly. |
-| `integrity_check` fails at start | Corrupt database or bad restore | Restore a backup; do not delete data before copying it aside. |
-
-### Collecting a diagnostic bundle
-
-```bash
-docker exec app_local_wattmosaic_engine python -c "import sqlite3,json;\
-c=sqlite3.connect('/data/wattmosaic.db');print(c.execute('PRAGMA integrity_check').fetchone())"
-curl -s -H "X-API-Token: $WM_API_TOKEN" localhost:8787/healthz
-curl -s -H "X-API-Token: $WM_API_TOKEN" localhost:8787/api/v1/health | jq
-curl -s -H "X-API-Token: $WM_API_TOKEN" localhost:8787/api/v1/diagnostics | jq > diagnostics.json
-docker logs --tail 200 app_local_wattmosaic_engine 2>&1 | tail -200
-```
-
-Diagnostics never include tokens; verify before sharing.
+See [`docs/troubleshooting.md`](troubleshooting.md) for a symptom-first guide.
+Common deployment failures: missing HA token/URL, `WM_API_TOKEN` mismatch (401),
+watchdog restarts (`/healthz` 503), corrupt database after a bad restore, and a
+contract mismatch between engine and integration.
 
 ---
 
 ## 12. Reproducible builds
 
-- Base image: `python:3.12-slim-bookworm`. Pin a digest
-  (`python:3.12-slim-bookworm@sha256:…`) via `--build-arg PYTHON_IMAGE=…` (or
-  `build.yaml`) for a byte-reproducible base.
-- Dependencies: `addon/constraints.txt`, a full `==` pin set generated from
-  `pyproject.toml` (see the header comment for the exact command). Builds use
-  `--only-binary=:all:`, so an accidental source distribution fails the build
-  instead of silently needing a compiler.
-- Build tooling is pinned in the builder stage (`pip`, `setuptools`, `wheel`) and
-  never reaches the runtime image.
-- The runtime image contains no package manager cache, no compiler and no build
+- Base image: `python:3.12-slim-bookworm` (pin a digest via `--build-arg` for a
+  byte-reproducible base).
+- Dependencies: `addon/constraints.txt`, a full `==` pin set from `pyproject.toml`;
+  builds use `--only-binary=:all:` so an accidental source distribution fails
+  rather than needing a compiler.
+- Build tooling is pinned in the builder stage and never reaches the runtime
+  image. The runtime image has no package manager cache, compiler or build
   headers; `pip check` runs at build time.
-- `scripts/validate_addon.sh` rebuilds the image and asserts the entrypoint,
-  healthcheck, dependencies, service user and the staged `ui/` panel. Its static
-  stage runs `tools/dev/check_panel.py`, which proves the panel has no external
-  origin, no inline script/style, no `on*` handler and no missing or `eval`-based
-  code, so a broken shell fails before the image is built.
+- `scripts/validate_addon.sh --no-build` runs the static checks, including
+  `tools/dev/check_panel.py` (no external origin, no inline script/style, no
+  `on*` handler, no `eval`), before a real image is built.
 
 ```bash
 scripts/validate_addon.sh            # static checks + real docker build
@@ -600,50 +453,41 @@ scripts/validate_addon.sh --no-build  # static checks only (CI lint stage)
 
 ## 13. Unified workflow (build → migrate → smoke → observe)
 
-A single command drives the full post-change verification path:
-
 ```bash
-scripts/run_workflow.sh [BASE_URL]     # BASE_URL defaults to http://127.0.0.1:8787
+scripts/run_workflow.sh [BASE_URL]     # defaults to http://127.0.0.1:8787
 ```
 
-It runs these stages in order, stopping at the first failure:
+Stages, stopping at the first failure:
 
 | Stage | What it does |
 | --- | --- |
-| **build** | Stages a self-contained App with `scripts/package_addon.sh --check` (no image push). Skip with `WM_SKIP_BUILD=1`. |
-| **migrate** | Applies pending forward-only migrations to `WM_DATABASE_PATH` (default `/data/wattmosaic.db`) with the venv python and asserts `schema_version == LATEST_VERSION`. Skip for a remote DB with `WM_SKIP_MIGRATE=1`. |
-| **smoke** | Runs `scripts/smoke_test.sh BASE_URL` (below). Any failed check exits non-zero and stops the workflow. |
-| **observe** | Polls `/api/v1/health` `WM_OBSERVE_COUNT` times (default 5) every `WM_OBSERVE_INTERVAL` seconds (default 5); fails if the engine leaves `ok`/`degraded` or becomes unreachable. |
-
-`WM_API_TOKEN`, when set, is sent as `X-API-Token` on every API call in the
-smoke and observe stages.
+| **build** | Stages a self-contained App with `scripts/package_addon.sh --check`. Skip with `WM_SKIP_BUILD=1`. |
+| **migrate** | Applies pending forward-only migrations (with automatic backup) and asserts schema `>=` the latest. Skip with `WM_SKIP_MIGRATE=1`. |
+| **smoke** | Runs `scripts/smoke_test.sh BASE_URL`; any failed check exits non-zero. |
+| **observe** | Polls `/api/v1/health` `WM_OBSERVE_COUNT` times; fails if the engine leaves `ok`/`degraded`. |
 
 ### Post-deploy smoke test
 
-`scripts/smoke_test.sh` is the standalone smoke gate. It is **distinct from the
-App watchdog probe** (`addon/healthcheck.py`, which only polls `/healthz`): the
-smoke test exercises the whole post-deploy surface and exits NON-ZERO if **any**
-check fails. Every check runs even after a failure, so one invocation reports
-all problems.
+`scripts/smoke_test.sh` is distinct from the App watchdog probe (which only polls
+`/healthz`): it exercises the whole post-deploy surface and exits NON-ZERO if any
+check fails. Every check runs even after a failure, so one invocation reports all
+problems.
 
 ```bash
 scripts/smoke_test.sh [BASE_URL]
 ```
-
-Registered checks:
 
 | Check | Endpoint / source | Pass condition |
 | --- | --- | --- |
 | `health` | `/api/v1/health` | `status` is `ok` or `degraded` |
 | `status` | `/api/v1/status` | JSON with a `status` field |
 | `panel` | `/` (gateway ingress) | index looks like the WattMosaic panel |
-| `migrations` | `PRAGMA user_version` vs `LATEST_VERSION` (fallback: `/api/v1/diagnostics` `database.schema_current`) | local DB is at the latest schema |
+| `migrations` | `PRAGMA user_version` vs latest (fallback `/api/v1/diagnostics`) | local DB is at the latest schema |
 | `residuals` | `/api/v1/residuals` | reachable, JSON object |
-| `mapping` | `/api/v1/mapping` | reachable, JSON object |
-| `topology` | `/api/v1/topology/tree` | reachable, panel device data responds |
+| `matrix` | `/api/v1/matrix` | reachable, JSON object (replaced the old `/mapping`) |
+| `topology` | `/api/v1/topology/v3` | reachable, JSON object |
 | `devices` | `/api/v1/devices` | reachable, JSON list/object |
 | `metrics` | `/api/v1/metrics` | scrape contains `wattmosaic_` series |
 
-The script needs only `curl` and the repo venv's python — no new runtime
-dependency. A `curl` HTTP error (>= 400) counts as a FAIL rather than a silent
-success.
+The script needs only `curl` and the repo venv's python. A `curl` HTTP error
+(≥ 400) counts as a FAIL, never a silent success.

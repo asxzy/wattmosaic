@@ -1,816 +1,113 @@
-# Testing Strategy
+# Testing Strategy (contract 3.0)
 
-Owner: Agent I (Test & QA).
-Code: `tools/simulator/`, `tests/simulation/`, `tests/end_to_end/`,
-`tests/conftest.py`.
+Owner: Agent J (docs). Code: `tests/`, `tools/simulator/`. The mandatory
+acceptance criteria are HB §21 in the
+[technical handbook](../docs/specs/realtime-topology-disaggregation/handbook.md);
+the test inventory and closing tasks are in the
+[spec's traceability](../docs/specs/realtime-topology-disaggregation/traceability.md).
 
-This document describes what the test layers prove, how to run them, and — most
-importantly — what they *cannot* prove. Measured results live in
-[`docs/acceptance_report.md`](acceptance_report.md); this file is about method.
+This document describes what the test layers prove and — most importantly —
+what they *cannot* prove. Accuracy figures derived from simulated ground truth
+live in [`docs/acceptance_report.md`](acceptance_report.md); this file is about
+method.
 
 ---
 
 ## 1. The problem the tests have to solve
 
-WattMosaic infers per-device power from a small number of circuit-level CTs in a
-real house. Accuracy claims are easy to fake: you can always produce numbers
+WattMosaic infers per-device power from a small number of endpoint measurements
+in a real house. Accuracy claims are easy to fake: you can always produce numbers
 that look good if you grade yourself against your own output, or if you report
 one aggregate "score" that hides the devices the system cannot see.
 
-The QA deliverables therefore have three jobs:
+QA therefore has three jobs:
 
-1. **Generate truth that is not derived from the measurements.** A simulator
-   whose ground truth came from the same pipeline it scores would prove nothing.
-2. **Grade against truth, stratified.** Accuracy is reported per source tier,
-   per device type, per concurrency level, per data-quality level and per
-   individual device. There is deliberately no single aggregate number.
-3. **Check safety invariants separately from accuracy.** "Unknown load stays
-   unknown" and "no device is credited with power it did not draw" are
-   correctness properties, not error statistics, and are asserted directly.
-
----
+1. **Generate truth that is not derived from the measurements.** The simulator's
+   ground truth comes from its own seeded clock, not the measurement pipeline it
+   scores.
+2. **Grade against truth, stratified** — by estimate status, device type,
+   concurrency, data quality and individual device. There is deliberately no
+   single aggregate number.
+3. **Check safety invariants separately from accuracy.** "Unknown stays
+   unknown", "a non-identifiable member gets no number" and "no device is
+   credited with power it did not draw" are correctness properties, asserted
+   directly.
 
 ## 2. Layers
 
 | Layer | Location | What it proves |
 | --- | --- | --- |
-| Simulator unit | `tests/simulation/test_simulator.py` | The synthetic house, its impairments, determinism and CLI contract |
-| Harness unit | `tests/simulation/test_metrics.py` | The grading code itself is correct, and known-bad predictors are caught |
-| Accuracy regression | `tests/simulation/test_accuracy.py` | The real engine's measured accuracy, pinned so regressions fail |
-| Energy / leg-split / state-lag | `tests/simulation/test_{energy_integral,leg_split_asymmetric,state_lag}.py` | The metrics and the measurement model on the failure modes that a mean hides |
-| Replay tool | `tests/simulation/test_replay_capture.py` | `tools/audit/replay_capture.py` is correct, using a simulator run as truth |
-| Real-data gates | `tests/simulation/test_real_topology.py` | The captured installation itself; skips cleanly without a capture |
-| Validation tooling | `tests/simulation/test_validation_tools.py` | The two documented reproduction commands actually run |
-| Storage E2E | `tests/end_to_end/test_storage_e2e.py` | Schema, migrations, persistence, restart recovery, retention |
-| API E2E | `tests/end_to_end/test_api_e2e.py` | A real HTTP server, real engine facade, real SQLite, real simulator |
-| Pipeline E2E | `tests/end_to_end/test_pipeline_e2e.py` | Aligner → quality → disaggregation → learning-sample rejection |
+| Unit | `tests/unit/` | contracts, null policy, config validation, vocabulary gates, release checks |
+| Acceptance | `tests/acceptance/test_at01…at20.py` | the 20 HB §21 mandatory requirements against the §17 reference house |
+| Simulator | `tests/simulation/` | the synthetic house, impairments, determinism and CLI contract |
+| Evaluation harness | `tests/simulation/metrics.py` | grading is correct; known-bad predictors are caught |
+| End-to-end | `tests/end_to_end/` | ingestion → runtime → storage → HTTP on real components |
+| Integration | `tests/integration/` | device history, HA boundary behaviour |
+| Validation tooling | `tests/simulation/test_validation_tools.py` | the documented offline reproduction commands actually run |
 
-### 2.1 Simulator (`tools/simulator/`)
+### 2.1 The 20 acceptance tests (HB §21)
 
-A deterministic synthetic household that reproduces the *shape* of a real
-multi-panel CT install. It describes no real building; the fixture is generated
-by `tools/dev/make_reference_house.py` into
-`data/examples/reference_house/` and rendered as `docs/ha_environment_audit.md`
-and `docs/ct_update_profile.md`:
+`tests/acceptance/` holds exactly one file per mandatory requirement AT-01…AT-20.
+Each file is in one of two states: **open** (one strict
+`@pytest.mark.xfail(strict=True, reason="closed by <TASK>")`) or **closed** (no
+xfail, a `CLOSED_BY` constant). A strict xfail means an accidental pass fails CI,
+so progress stays visible. `test_closing_task_ids.py` enforces that contract and
+checks each closing task id against the plan. The tests cover nested no-double-
+count, parent residuals, response delays, joint inference, non-fabricated groups,
+plug anchors, covariance, plug relocation, reader reconciliation, missing-not-zero,
+late-event revision, replay, matrix cells and UI explanation.
 
-* Two energy-monitor panels, **18 channels each**, synthetic entity IDs
-  (`sensor.panel_a_ct1_power`, `sensor.panel_b_water_heater_ct1_power`, …).
-* The sub panel is **nested inside** the main panel. Summing both panels' mains
-  double counts the sub-feed — a real hazard the simulator reproduces so the
-  tests can detect it.
-* Double-pole 240 V loads (water heater, dishwasher, deck heater, upper plug)
-  are split across two leg CTs, each carrying half the device power.
-* **Median CT cadence 15.7 s**, measured from the synthetic profile in
-  `data/examples/reference_house/ct_update_profile.json`.
-* All required device classes: binary, standby, dimmable, variable_speed, HVAC,
-  refrigerator, washing machine, dishwasher, dryer, double-pole, and unmetered
-  ("unknown") loads.
+### 2.2 Simulator (`tools/simulator/`)
 
-**Ground truth is independent of the measurements.** Device power profiles are
-evaluated from their own seeded RNG and a simulation clock. The measurement
-pipeline then *impairs* channel values; the truth fields are never read back
-from the sensor path. `test_ground_truth_is_independent_of_measurements`
-asserts this by comparing runs at different quality presets: truth is
-byte-identical, measurements are not.
+A deterministic synthetic household reproduces the shape of a real
+multi-panel install but describes no real building. It models nested panels,
+double-pole 240 V loads, a measured ~15.7 s median CT cadence (not the old 2 s
+assumption), all required device classes, and ordered impairments
+(gain/drift/polarity → noise → quantisation → delivery delay →
+staleness/repeats → dropouts). Three timestamps per sample are kept distinct:
+`observed_at`, `received_at` and an optional hardware `physical_timestamp`.
 
-**Impairments** are applied as an ordered post-truth pipeline
-(`tools/simulator/sensors.py`): gain/drift/polarity → noise → quantisation →
-delivery delay → staleness/repeats → dropouts/outages. Each stage is
-individually testable and individually inspectable in the output.
+Ground truth is evaluated from the simulator's own clock and RNG; the
+measurement path only *impairs* it and never reads truth back.
+`test_ground_truth_is_independent_of_measurements` asserts truth is byte-identical
+across quality presets while measurements are not.
 
-**Three timestamps per measurement**, as required:
+### 2.3 Evaluation harness
 
-| Field | Meaning |
+`evaluate(records, predictor, ...)` grades any predictor against truth and
+returns a stratified report: per device, per estimate status
+(`MEASURED`/`ESTIMATED`/`ALLOCATED`/`UNKNOWN`), per device type, per concurrency,
+per quality axis, reconciliation and coverage. Nothing in the report is a single
+scalar — `test_no_single_aggregate_score_is_exposed` fails if `accuracy`, `score`
+or `overall` ever appears at the top level.
+
+Safety invariants are asserted directly, including:
+
+| Invariant | Meaning |
 | --- | --- |
-| `state_timestamp` | when Home Assistant says the state changed |
-| `received_at` | when the engine/collector received it |
-| `physical_timestamp` | optional, when the underlying physical sample was taken |
+| `forced_attribution_count` | power claimed for a device genuinely OFF — the unambiguous fabrication test; must be 0 |
+| residual preservation | under-attributing leaves a larger residual (legitimate); over-attributing shrinks it below truth (not) |
+| over-attribution | attributed total exceeds main beyond tolerance |
+| nested double count | the claimed main reproduces `root + sub` structurally |
+| null publication | non-identifiable/unknown estimates publish `None`, never a fabricated 0 W |
 
-Delivery is modelled honestly: a sample is only visible once
-`received_at <= tick end`, and late samples carry into the next tick rather
-than being silently dropped. Records are **as-of tick-end snapshots**:
-`timestamp` is `t_next`, ground truth is evaluated at `t_next`, and the
-measurements are those received in `(t, t_next]`.
+## 3. What the tests cannot prove
 
-**CLI** (`python -m tools.simulator.cli`):
+- No real-house accuracy exists: all numbers come from the synthetic household.
+- A passing invariant test proves a property did not fire on captured cases; it
+  is not a proof of absence for every possible wiring.
+- Confidence components are *not* calibrated: no test asserts a component of
+  0.9 is right 90 % of the time.
 
-```bash
-python -m tools.simulator.cli --seed 202 --minutes 60 --interval 15 --out /tmp/sim
-python -m tools.simulator.cli --seed 202 --minutes 10 --interval 15 --format json
-python -m tools.simulator.cli --print-topology
-```
-
-It writes `household.jsonl` (or `household.json`), `samples.jsonl` (one
-Measurement-shaped row per observation) and `manifest.json` (config, counts and
-SHA-256 hashes). Flags exist for every impairment (`--quality`, `--invert-ct`,
-`--drift-ct`, `--outage`, `--no-unknown-loads`), so impaired datasets can be
-generated from the shell without writing Python.
-
-**Python API**:
-
-```python
-from tools.simulator import HouseholdScenario, SimulatorConfig
-
-scenario = HouseholdScenario(SimulatorConfig(seed=202, minutes=60, interval=15))
-for record in scenario.records():
-    record["ground_truth"]["devices"]      # true device power
-    record["latest_measurements"]          # as-of view the engine sees
-    record["measurements"]                 # samples delivered this tick
-```
-
-### 2.2 Evaluation harness (`tests/simulation/metrics.py`)
-
-`evaluate(records, predictor, panel_channels=...)` runs any callable
-`predictor(record) -> {device_id: {power_w, source, confidence}}` over the
-record stream and returns an `EvaluationReport` containing:
-
-* `per_device`, `per_device_detection`
-* `per_source`, `per_source_detection` (`direct_measured` / `inferred` /
-  `model_estimated` / `unknown`)
-* `per_device_type`
-* `per_concurrency`
-* `per_quality` (worst supporting channel per device)
-* `reconciliation` (residual preservation, forced attribution, over-attribution)
-* `coverage` (attribution coverage, unknown-load share, false-attribution rate)
-* `invariants` (see below)
-
-Nothing in the report is a single scalar. `test_no_single_aggregate_score_is_exposed`
-fails if an `accuracy` / `score` / `overall` key ever appears at the top level.
-
-**Scoring instant.** Predictions are compared with ground truth at the *record
-timestamp* (`t_next`), not at the sample's `state_timestamp`. This is the
-conservative choice: a reading just delivered describes an instant up to one CT
-cadence earlier, and the engine is not credited for information that had not
-arrived. It also makes the oracle self-check exact.
-
-**Safety invariants**, and why each is defined the way it is:
-
-| Invariant | Definition | Rationale |
-| --- | --- | --- |
-| `residual_preserved_ratio` | fraction of records with `residual >= unmetered_truth − tolerance` | Under-attributing leaves a *larger* residual, which is legitimate; over-attributing shrinks it below truth and is not |
-| `forced_attribution_count` | records where **inferred/model** power is claimed for a device genuinely OFF at that instant | The only unambiguous fabrication test; direct CT readings of a device that just switched are not fabrication |
-| `forced_attribution_from_stale_input_records` | as above, but all of the device's supporting CTs were `repeated`/`stale`/`missing`/`bad` | An input-corruption fault, reported on the quality axis so it is not confused with model fabrication |
-| `negative_residual_records` | records with `accounted > main` | Usually a sample-vintage artefact, not fabrication; counted separately |
-| `over_attribution_count` | attributable total exceeds main by >5% + 10 W | Magnitude-based fabrication check |
-| `headroom_violation_records` | inferred power exceeds the predictor's own `main − direct` | Soft signal: can legitimately break when samples are stale |
-| `direct_exceeds_main_records` | direct readings exceed physical whole-home draw | Sample-vintage skew indicator |
-| `nested_double_count_records` | only when `panel_channels` is supplied and the claimed main reproduces `root + sub` | A main that is merely noisy is not flagged; only one that is *structurally* the nested sum |
-| `nested_check_records` | how many records were actually checkable | Makes a zero meaningful rather than vacuous |
-| `stale_learning_violations` | accepted learning samples whose evidence was stale | Learning must not train on expired data |
-
-`panel_channel_map(topology)` derives root vs sub feeds structurally (root =
-`main` CT with no parent; sub = a feed under another feed, including a nested
-`main`), so it works for both the simulator topology and the exported contract
-topology. When the topology declares **no** parents at all — the commonest real
-shape before the wiring is confirmed — the split is derived from measurements
-instead: a main that is contained by another main almost always, while the
-reverse holds rarely, is fed by it. That fallback is what keeps
-`nested_double_count_records` meaningful on exactly the topology that needs it
-most; without it the guard would only ever run on a topology that had already
-been fixed.
-
-**Energy is integrated, not averaged.** `ErrorStats` reports two energy numbers
-and they are not interchangeable:
-
-| Field | Definition | Exact when |
-| --- | --- | --- |
-| `energy_error_kwh` | `mean(pred − truth) × duration` | the error is constant over the window |
-| `energy_error_kwh_integral` | `trapezoid(pred) − trapezoid(truth)` | always, for a piecewise-linear signal |
-
-The first is kept for continuity; the second is the one to trust on a cycling
-load. A 6 kW water heater sampled every two minutes can be scored as *zero*
-energy error by the mean formula while being materially wrong on kWh, and
-`test_zero_mean_error_can_still_be_wrong_energy` fails if the integral ever
-degenerates into the mean. `trapezoid_energy_kwh` is exposed separately so a
-test can pin it against hand-computed values on a non-uniform time grid rather
-than against "the oracle is near zero" (which a broken zero-returning
-implementation also satisfies).
-
-**The leg split is a declared coefficient, not an inference.** A 240 V load
-measured by two CTs is summed: the asymmetry between the legs is irrelevant and
-the declared `phase_split_l1` must not perturb that sum. A load measured by one
-CT is solved as `row = split × P_device`, so the reported total is
-`measured_leg / split`; declaring a wrong split is a large systematic error in a
-predictable direction. Both behaviours are pinned in
-`test_leg_split_asymmetric.py`, including the wrong-split cases, because either
-design choice is defensible and the engine must not silently switch.
-
-**State-stream lag is not measurement lag.** `SimulatorConfig.state_lag_s`
-delays only the Home Assistant state path (`last_updated` and the reported
-value), never the CT samples, which is what a cloud-polled integration looks
-like. `test_state_lag.py` asserts the knob is surgical (ground truth and
-measurements byte-identical), that transitions are detected `lag / cadence`
-ticks later without being back-dated, and that a device whose own CT shows 6 kW
-is never reported as 0 W merely because its state entity has not caught up.
-
-**Self-check predictors.** The harness ships predictors whose expected
-behaviour is known in advance, and the unit tests assert the harness catches
-them:
-
-| Predictor | Expected |
-| --- | --- |
-| `oracle_predictor` | Perfect: MAE 0, coverage 1.0, every invariant clean |
-| `naive_sum_wrong_predictor` | Claims every device at full main power: coverage ≫ 1, high false attribution, over-attribution on every record |
-| `flat_zero_predictor` | Coverage 0.0, no fabrication |
-| `main_channel_only_predictor` | Honest but blind: coverage ≈ engine, reconciliation MAE ≈ whole-home draw |
-
-If the oracle ever fails, the harness is broken — not the engine. That check
-guards every other number in the report.
-
-### 2.3 Storage end-to-end (`tests/end_to_end/test_storage_e2e.py`)
-
-Runs against the real `Database` and real SQLite, not mocks:
-
-* schema version and `PRAGMA integrity_check`
-* migrations idempotent on re-open, and a simulated v1 database upgrading in place
-* topology round-trip (36 channels / 37 attributable devices) with per-field
-  equality, and topology versioning
-* all three timestamps persisted and filterable by `ct_samples_between`
-* inference and reconciliation rows persist and read back
-* WAL mode survives process-style close/reopen
-* energy aggregation persists buckets
-* restart recovery reproduces the same energy total, idempotently across three
-  replays
-* retention pruning removes old raw rows only (never aggregates or topology)
-
-### 2.4 API end-to-end (`tests/end_to_end/test_api_e2e.py`)
-
-Starts a **real `aiohttp` server** on an ephemeral loopback port, wired to the
-real `EngineCore` facade, real SQLite and the real backend, then drives it with
-simulated data through aligner → engine → SQLite → HTTP. It checks health and
-contract headers, auth (401), 404 for unknown devices, Prometheus text metrics,
-topology PUT round-trip and validation, that inference results for
-single-device circuits reach the API, that the residual is never redistributed, and that
-energy aggregation works over a full inference history.
-
-Two tests are **strict xfails** for engine defects found by this suite (see
-`docs/acceptance_report.md` §6). Strict means: once the engine is fixed, the
-tests fail, so the marker cannot be forgotten.
-
-### 2.5 Pipeline end-to-end (`tests/end_to_end/test_pipeline_e2e.py`)
-
-Exercises the data path between simulator and engine with production contract
-objects: simulator record → `Measurement` → `SampleAligner` → `AlignedWindow`
-→ `DataQualityEngine` / `DisaggregationEngine` / `SampleFilter`.
-
-It verifies that repeated samples are not treated as fresh, stale samples are
-marked stale, quality scoring penalises staleness, the disaggregation engine
-runs on a real aligned window without double counting nested panels, and that
-low-quality learning samples are rejected before they can train a model.
-
-### 2.6 App gateway and ingress panel
-
-The panel is static files (`addon/ui/`) served by `addon/gateway.py`. Two layers
-cover it, neither needing a browser:
-
-- `tests/unit/test_panel.py` drives the real aiohttp app: the shell is returned
-  for a trusted ingress peer, direct peers get a JSON descriptor at `/` and
-  `401` for `/ui/*`, each asset has the right content type, unknown assets
-  `404`, traversal cannot escape the allowlist, and a missing `ui/` directory
-  returns `503` instead of a blank page. It also asserts the CSP and the
-  `no-store` cache policy, and negative-verifies the static checker below against
-  a mutated copy of the panel.
-- `tools/dev/check_panel.py` is static: no external origin, no inline script or
-  style block, no `on*` attribute, no missing asset, and no
-  `eval`/`new Function`/`document.write`. It runs inside
-  `scripts/validate_addon.sh`, so the deployment gate fails on a broken shell
-  without building the image.
-
-The panel's *visual* behaviour (layout at 390/900/1440 px, no console errors) was
-verified against a stub engine with headless Chromium. That check is a
-screenshot review, not a committed test, because it needs a browser download.
-
----
-
-## 3. Real-data replay and regression gates
-
-The simulator proves the engine behaves correctly on a house with the *shape* of
-the reference installation. It cannot prove anything about the installation
-itself, because the simulated measurements are synthetic. Two things bridge that
-gap: a replay tool, and a small set of gates that read the captured database.
-
-### 3.1 `tools/audit/replay_capture.py`
-
-Replays a captured stream through the **production** path —
-`Measurement` → `SampleAligner` → `DisaggregationEngine` — and emits a report
-shaped like `EvaluationReport`. Input is either the engine's `ct_samples` table
-or a `ct_events.jsonl` written by `collect_samples.py`; the database is opened
-`mode=ro`.
+## 4. Running the suite
 
 ```bash
-# The shipped topology, as stored
-.venv/bin/python tools/audit/replay_capture.py --db data/wattmosaic.db --minutes 60
-
-# Same capture, with the panel tree declared (a hypothesis under test)
-.venv/bin/python tools/audit/replay_capture.py --minutes 60 --topology-nested
-
-# Offline JSONL capture, machine-readable output
-.venv/bin/python tools/audit/replay_capture.py \
-    --jsonl data/raw/ct_events.jsonl --topology-nested --out /tmp/replay.json
+.venv/bin/ruff check engine tools tests
+.venv/bin/python -m pytest -q -p no:cacheprovider
+python tools/dev/render_validation_docs.py --check   # rendered docs are current
+python tools/dev/check_release.py                    # release contract is clean
 ```
 
-Four design decisions matter when reading its output:
-
-* **It ticks on a cadence, not per sample.** The engine is called once per
-  audited CT interval (`--minutes` worth of `15.7 s` ticks), because the aligner
-  is a point-in-time view: consecutive samples of one channel add nothing, and
-  per-sample inference on a day-long capture takes hours rather than seconds.
-  Measured: the nested variant replays 120 minutes (13 681 samples, 459 windows)
-  in ~9.5 s.
-* **There is no ground truth, so `per_device` and the error strata are empty.**
-  The report says why in `notes`. What *is* computable from measurements alone is
-  reported: whole-home power, the reconciliation balance, per-device attribution
-  and the nested-double-count invariants. Grading the engine against its own
-  output would be the failure mode §1 describes.
-* **A refused total is missing, not `0 W`.** When the engine declines to state a
-  whole-home total for an instant — `main_power.usable is False`, for example an
-  undecidable same-leg feed relation — the reconciliation is
-  `quality_status=MISSING`. The replay counts that window in
-  `n_unavailable_windows` and **excludes it from every mean**; it never appends
-  `0.0`. `docs/electrical_model.md` §5 states the rule for a single reading
-  ("a missing main is `missing_channels`; it is **not** treated as `0 W`") and it
-  applies just as much to an aggregate over a replay. Because the two topology
-  variants refuse different instants, the shipped-vs-nested comparison is also
-  **paired per shared instant** (`_paired_comparison`), not two means over
-  different window sets.
-* **Every run has a hard deadline.** `SIGALRM` raises `ReplayTimeout`, and a
-  watchdog thread calls `os._exit(124)` if the solver swallows it inside a C
-  loop. A wedged solver must not wedge CI. The default deadline is 120 s, and
-  the comparison run gets its own 20 s budget.
-
-`tests/simulation/test_replay_capture.py` exercises the tool against a simulator
-run, where truth exists: the replay must reproduce the simulated whole-home
-power within 5 %. That is the positive control. The real-data gates below can
-only show a *difference* between two topologies; this one shows the tool is
-right at all, and it runs unconditionally.
-
-### 3.2 Regression gates against the real capture
-
-`tests/simulation/test_real_topology.py` reads `data/wattmosaic.db` and skips
-cleanly when it is absent (the file is git-ignored — it identifies a household).
-It opens read-only and never writes.
-
-```bash
-# With the capture in place
-.venv/bin/python -m pytest tests/simulation/test_real_topology.py -q
-
-# From a worktree, pointing at another checkout's capture
-WATTMOSAIC_REAL_DB=/path/to/wattmosaic.db \
-    .venv/bin/python -m pytest tests/simulation/test_real_topology.py -q
-
-# No capture: the gates skip, nothing else changes
-.venv/bin/python -m pytest tests/simulation -q
-```
-
-| Test | Asserts |
-| --- | --- |
-| `test_shipped_topology_declares_nested_parents` | As shipped, all six mains are independent and the panel split is empty; the nested variant is a real tree (sub feeds have a root parent) |
-| `test_nested_check_is_not_vacuous` | `nested_check_records > 0` for the nested tree, so `nested_double_count_records == 0` means something |
-| `test_parentless_topology_double_count_is_caught` | With every parent stripped, the measurement-derived split still finds the sub feed and still flags "sum every main" |
-| `test_nested_replay_terminates_and_balances` | The declared tree terminates, reports positive main power, conserves power, and is not flagged |
-| `test_real_replay_reports_whole_home_once` | Shipped and nested replays agree within 5 % on the instants **both** produced a total (paired, E2-1 fixed) |
-| `test_real_replay_excludes_refused_totals_from_the_mean` | A window where the engine refuses a total is counted as unavailable and excluded from every mean, never averaged in as `0 W` |
-| `test_shipped_replay_terminates` | The shipped topology finishes inside the deadline (E2-2 fixed) |
-| `test_shipped_replay_does_not_double_count` | The inverse of the old defect gate: shipped / nested paired ratio is within 5 % |
-| `test_the_real_install_reports_no_direct_measurement` | C1, inverted after the path was deleted: the real replay produces **no** `direct_measured` source at all, and devices are still attributed by the solver (so "no direct rows" cannot quietly mean "nothing was inferred") |
-
-The gates are plain assertions now. Both were `xfail`s naming E2-1/E2-2 while
-the engine was broken; they flipped to passes when the fixes landed, and a
-future regression fails the test instead of silently XPASSing.
-
-**Two guards added with the C1 decision.** `main_power_w` now forces
-`complete=False` and names the channel (`feed_group_unmeasured`) when a feed
-inside a same-leg conflict group has no reading — it used to be dropped from the
-group silently, publishing part of the service as the whole-home total. And a
-0 W direct count carries a verdict (`direct_availability`), so "every circuit is
-a branch" (legitimate, ADR-0026) is distinguishable from "the Level-1 path is
-dead" (a defect). Both are negative-verified: reverting the engine change makes
-the new unit tests fail on exactly the silent behaviour described.
-
-**What was fixed, and why the gate is not a simulator test.** The shipped
-topology declares the load manager, the main panel and the sub panel as six
-parallel mains. Physically there is one service feed, one main panel and one sub
-panel, so naively summing them counts most of the house two to three times;
-measuring that on the 120-minute window gave `main_power_w` **3943 W** as
-shipped against **1600 W** with the tree declared — ratio **2.46** — plus a
-non-terminating solve.
-
-The engine cannot re-parent a stored topology, so the fixes are behavioural:
-
-* `electrical/main_power.py` groups the six feeds into measurement nodes, finds
-  that the load-manager pair measures the same two legs as the main-panel pair
-  and the sub-panel pair, and resolves which is outermost **from the
-  measurements**. The excluded feeds and the reason are named in
-  `MainPower.notes` (`undeclared_feed_relation_resolved_by_measurement`); it
-  refuses (`parallel_mains_without_declared_relation`) only when containment
-  cannot be decided.
-* `electrical/solver.py` preconditions duplicate rows and bounds the iteration
-  count, so the ill-conditioned system converges instead of hanging.
-
-Measured on the shipped gate window (`REPLAY_MINUTES=120`, `REPLAY_TICK_S=15.7`,
-459 windows / 13 681 samples):
-
-```text
-as-shipped   main 1568.9 W   accounted 1033.8 W   residual 535.2 W   11.5 s
-             24/459 windows refused (no whole-home total; excluded from the mean)
-nested       main 1599.1 W   accounted 1082.9 W   residual 516.2 W    9.9 s
-paired on 435 shared instants: shipped 1568.9 W vs nested 1555.0 W   ratio 1.009
-```
-
-The window is 120 minutes, not 5, because the defect this gate now also covers
-is *invisible* on a five-minute tail. The shipped topology's six independent
-mains are usually separable by measurement — the load-manager pair contains the
-others — but on 24 of 459 instants the three panel feeds sit inside the 30 W /
-2 % containment tolerance of each other and `main_power_w` correctly refuses
-(`parallel_mains_without_declared_relation`, `quality_status=MISSING`). The
-replay harness used to append `rec.main_power_w` (i.e. `0.0`) for those windows
-and average them in, which pulled the shipped mean **7 %** below the nested one
-and failed the ratio gate for a reason that had nothing to do with double
-counting: the engine was right and the aggregation invented a collapse to no
-load. `docs/electrical_model.md` §5 already forbids exactly that ("a missing
-main is `missing_channels`; it is **not** treated as `0 W`"), so the fix is in
-the harness: refused windows are counted (`n_unavailable_windows`) and excluded
-from every mean, and the two variants are compared **per shared instant** rather
-than as two means over different window sets.
-
-Neither number can be produced by the simulator, whose topology always declares
-its tree. The failing mode that used to be invisible — a hung solve — is still
-guarded by the fixture's hard deadline, so a regression fails in 60 s rather
-than hanging CI.
-
-### 3.3 The two documented validation commands
-
-`docs/real_ha_validation.md` advertises an offline reproduction path. Both
-halves are now real, and `tests/simulation/test_validation_tools.py` compares
-their output byte-for-byte against the committed artifacts:
-
-```bash
-.venv/bin/python tools/dev/make_reference_house.py --passive-validation
-.venv/bin/python tools/audit/passive_validation.py \
-    --from data/examples/reference_house/passive_validation.json
-```
-
-`--passive-validation` runs the real passive-analysis code over a deterministic
-simulator capture and writes
-`data/examples/reference_house/passive_validation.json`. `--from` renders the
-report from such a file with no network, no Home Assistant and no credentials;
-it accepts either the shape that tool writes (`states` + computed `result`) or a
-raw `analyse()` dump (`series`), recomputing the statistics when they are
-missing. A file that is not a capture is rejected with a non-zero exit rather
-than rendered as an empty table.
-
----
-
-## 4. Running the tests
-
-```bash
-# The QA deliverable, as required by the acceptance criteria
-.venv/bin/python -m pytest tests/simulation tests/end_to_end -q
-
-# One layer
-.venv/bin/python -m pytest tests/simulation -q
-.venv/bin/python -m pytest tests/end_to_end/test_storage_e2e.py -q
-.venv/bin/python -m pytest tests/end_to_end/test_api_e2e.py -q
-.venv/bin/python -m pytest tests/end_to_end/test_pipeline_e2e.py -q
-
-# Show measured numbers while running
-.venv/bin/python -m pytest tests/simulation/test_accuracy.py -q -s
-
-# Whole repository (includes other agents' unit/integration suites)
-.venv/bin/python -m pytest -q
-```
-
-The suite needs no network access, no Home Assistant instance and no
-credentials. The API tests bind to `127.0.0.1` on an OS-assigned port.
-
-### 4.1 Why some tests can be skipped
-
-Skips are only allowed when a component genuinely does not exist. The engine
-adapter tests (`test_metrics.py`, `test_accuracy.py`) skip with the reason
-`real engine unavailable: <status>` if the engine cannot be imported. Every
-end-to-end test — matrix, database, simulator, pipeline — is unconditional: the
-components exist, so skipping would hide a failure, and none are skipped today.
-
-The one new skip class is the real-data gates in `test_real_topology.py`. They
-skip only when `data/wattmosaic.db` is absent, and the reason string says how to
-produce one or how to point `WATTMOSAIC_REAL_DB` at an existing capture. That is
-a genuine absence (the file is deliberately git-ignored), not a hidden failure:
-everything the gates assert about the *harness* — the panel split, the vacuity
-check, the measurement-derived fallback — is also covered unconditionally in
-`test_replay_capture.py` and `test_metrics.py`.
-
----
-
-## 5. Reproducibility
-
-The simulator is a pure function of its configuration. `SimulatorConfig(seed=S,
-minutes=M, interval=I, quality=Q)` always produces identical bytes; the CLI
-writes the SHA-256 of each output file into `manifest.json`.
-
-To reproduce the pinned accuracy numbers: seed 202, 60 simulated minutes,
-15 s records, quality `good`, audited topology.
-
-A real replay is *not* bit-reproducible in the same sense — it reads a capture —
-but it is deterministic given one: the same database, window and `--topology-*`
-flag produce the same report. The tool prints `elapsed_s`, which is the only
-output that varies between runs, and it is reported separately from the watts.
-
----
-
-## 6. What this suite does *not* prove
-
-Being explicit matters more than being reassuring:
-
-* **Not real-house accuracy.** The simulator mirrors the audited topology,
-  cadence and impairment classes, but the device power profiles are synthetic.
-  Results show the engine behaves correctly on a house with these
-  characteristics; they do not measure accuracy on the physical installation.
-  The replay tool reports no per-device error at all, for the same reason: there
-  is no ground truth for a real house, and grading the engine against its own
-  output would prove nothing.
-* **The real-data gates prove a difference, not an absolute.** `test_real_topology`
-  can show that the shipped topology disagrees with the nested one and that the
-  shipped one does not terminate. It cannot say which wattage was physically
-  correct — only that the two cannot both be.
-* **No hardware, transport or Home Assistant runtime coverage.** The
-  WebSocket/reconnect path, the HA event loop and the add-on container are
-  other agents' scope (`tests/integration/test_ha_integration.py`).
-* **No long-horizon drift.** Runs are minutes, not months; seasonal effects and
-  model retraining over weeks are not exercised.
-* **The 0.79 coverage ceiling is real.** Shared-branch devices cannot be
-  separated by this hardware, and the engine correctly declines to invent them.
-  Higher coverage would require more CTs, not a better algorithm. See the
-  acceptance report for the exact list.
-* **A passing test proves the assertion held on the measured run**, not that
-  the underlying thresholds are physically optimal. Thresholds are documented
-  where they are pinned.
-
----
-
-## 7. Reusable synthetic fixtures (WP2)
-
-The simulator originally described one household in one way: 36 CTs, a fixed
-device set, no factor concept. Every new behaviour therefore needed its own
-hand-built topology inside the test that wanted it, and the Refoss ×2 case could
-not be generated at all — the simulator had no way to publish a whole-load value
-from a single-leg clamp, so Group B of the scenario matrix was untestable
-end-to-end.
-
-This section documents the builder layer that replaced that. It is **additive**:
-`HouseholdScenario` and every existing test are unchanged.
-
-### 7.1 The seam: observations vs ground truth
-
-The single rule the fixtures enforce is that an algorithm may only ever be given
-observations. `tools/simulator/frames.py` splits a simulator record into two
-disjoint frames:
-
-| Frame | Contains | Given to |
-| --- | --- | --- |
-| `observation_view(record)` | delivered values, the three timestamps, quality/repeat flags, declared factor metadata, HA states, declared events, scenario seed/cadence | the engine |
-| `truth_view(record)` | per-device watts, true CT aggregation, panel totals, unmetered power, integrated energy | assertions only |
-
-`find_ground_truth_keys(view)` walks the observation frame **recursively** and
-returns the dotted path of every key that names truth
-(`measurements.ct_main_l1.true_channel_power_w`,
-`ha_states[...].attributable`, …). `assert_no_ground_truth_keys` raises naming
-all of them. The detector is structural — key names, not values — because a leak
-that happens to look plausible is exactly the leak that survives review.
-
-Two deliberate decisions:
-
-* **`attributable` is stripped.** Whether a load *can* be attributed is a
-  property of the household, not of the state message; leaving it in would hand
-  the engine the answer for every unknown load.
-* **Declared factor metadata survives.** "The user says this CT is ×2" is
-  configuration an integration legitimately reads back. What must not leak is
-  the *physical* conductor/appliance split behind it.
-
-`tests/unit/test_simulator_fixtures.py` asserts the seam three ways: every
-stratum, every Hot Tub variant, and the raw record (proving the fixture still
-holds truth, so the test is not passing because the oracle is empty).
-
-### 7.2 Refoss factor semantics
-
-A Refoss monitor clamps **one leg** of a 240 V appliance, so the conductor
-reading is roughly half the appliance's power. The monitor — or the user — may
-apply a ×2 factor so the published number becomes an *estimate of the whole
-load*. `tools/simulator/factors.py` models that as three separate quantities:
-
-| Quantity | Meaning | Source |
-| --- | --- | --- |
-| `conductor_w` | what the clamp physically sees on its one leg | physics (ground truth) |
-| `reported_w` | `conductor_w ×` the multiplier already published | observation |
-| `appliance_total_truth_w` | the true two-leg appliance power | fixture spec, never derived |
-
-`FactorEpoch` is a claim with a **validity interval**, an owner
-(`monitor` / `user` / `none`) and a `published` flag. `FactorTimeline` is the
-history of claims, resolved per sample: the epoch covering a reading's timestamp
-decides the factor, so a change at *t* never rescales readings from before *t*.
-A gap in the timeline means *no metadata*, which is deliberately distinct from a
-declared ×1 — `estimated_appliance_total_w` returns `None` in that case instead
-of inventing a basis.
-
-`published=True` marks a value the monitor already multiplied. Multiplying it
-again is expressible (`double_applied`) precisely so tests can prove it is
-refused: the guard is only testable if the wrong state can be represented.
-
-### 7.3 The mandatory Hot Tub fixture
-
-`tools/simulator/hot_tub.py` ships the brief's dataset as a permanent fixture:
-
-| Observation | Before | After | Delta |
-| --- | ---: | ---: | ---: |
-| Hot Tub HA power | 0 W | 500 W | +500 W |
-| CT1 (L1 conductor) | 1000 W | 1250 W | +250 W |
-| CT2 (L2 conductor) | 900 W | 1150 W | +250 W |
-
-Each variant is a `HotTubFixture` exposing `observations()`,
-`ground_truth_view()` and an `ExpectedInterpretation`. Ten variants build by name
-(`hot_tub("factor_two")`; short shorthands like `"factor_two"` resolve through
-`HOT_TUB_VARIANTS`):
-
-| Variant | What it proves | Expected |
-| --- | --- | --- |
-| `factor_one` | baseline: two genuine legs, sum is the appliance | `ct_measured`, sum |
-| `factor_two` | **the regression**: ×2 on one leg claims the whole 500 W | `factor_adjusted`, no sum |
-| `monitor_published` | monitor already multiplied; must not multiply again | `monitor_reported` |
-| `factor_changes_midhistory` | ×1 before the step, ×2 after; per-sample resolution | `factor_adjusted` |
-| `factor_missing` | no metadata: 250 W could be a leg or a load | `unknown`, refuse |
-| `factor_incorrect_metadata` | user ×2 *and* monitor-published: self-contradictory | `unknown`, conflict |
-| `multiple_factor_cts` | two ×2 CTs on one appliance are an overlap | `factor_adjusted`, no sum |
-| `independent_physical_cts` | identical numbers, but summing is correct | `ct_measured`, sum |
-| `noisy_unbalanced_legs` | observed asymmetry ≠ physical asymmetry | `ct_measured`, sum |
-| `inconsistent_ha_vs_ct` | power entity says 500 W, state entity says `off` | `unknown`, conflict |
-
-The variants that must **not** be explainable are the interesting half. In
-`factor_missing` the arithmetic still sums to exactly 500 W — which is why the
-test asserts the *basis* refuses, not that the numbers differ. A fixture set
-that only contained the pass cases could be satisfied by "add every CT", which is
-the 250 W double count the brief exists to prevent.
-
-### 7.4 Scenario strata
-
-`tools/simulator/labhouse.py` exposes `build_scenario(name, seed, minutes=…,
-interval=…) -> LabHouse`. A `LabHouse` carries the scenario plus
-`observations()`, `ground_truth()`, `flags()`, `channel_counts()` and
-`signature()` (SHA-256 of the observation stream).
-
-Twenty-one strata are buildable, all on the same realistic shape — main panel plus
-nested sub-panel, 18 CTs per panel (CT1/CT2 mains + 16 branches),
-L1/L2 split-phase, 120 V and 240 V loads, dedicated and shared circuits, standby
-and unmetered loads:
-
-`dedicated`, `shared`, `standby`, `unknown_load`, `dynamic`, `factor2`,
-`noisy_legs`, `unbalanced`, `automation_burst`, `ambiguous_pair`,
-`hvac_modulation`, `ev_rate_change`, `fridge_cycling`, `motor_startup`,
-`delayed_ct`, `irregular_sampling`, `missing_intervals`, `spikes`,
-`main_subpanel_overlap`, `reversed_orientation`, `negative_ct`.
-
-Each stratum declares a `StratumPlan` naming the devices, channels and behaviour
-flags it promises; `validate_strata()` builds every one and raises if a promise
-is unmet, so a builder that silently stops producing its defining feature fails
-instead of passing vacuously. `tests/fixtures/labhouse.py` maps matrix rows A1–I8
-onto strata and `assert_matrix_coverage()` fails in both directions: an
-unbuildable row, and a builder no row exercises.
-
-Four controls were added to the simulator to make strata possible:
-`missing_windows` (a channel produces *no* sample — silence, not a stale
-repeat), `spike_windows` (measurement-only impulses that leave truth untouched),
-`polarity_flips` (a mid-run re-clamp whose declared polarity stays normal) and
-`channel_delay_s` (extra delivery latency on one poller).
-New profiles: `MOTOR` (inrush decaying to a steady load), `STEP` (explicit step
-schedule, used for EV rate changes) and `HotTubProfile` (explicit cycles).
-
-### 7.5 Determinism
-
-Every builder takes a seed and is a pure function of it. `LabHouse.signature()`
-hashes the observation stream, and `tests/unit/test_simulator_fixtures.py`
-asserts equal seeds produce equal digests for all 21 strata and all 10 Hot Tub
-variants, and that different seeds differ. `SimulatorConfig.as_metadata()` now
-records every new control (`factor_channels`, `missing_windows`, `spike_windows`,
-`polarity_flips`, `channel_delay_s`) so a manifest fully describes a capture.
-
-### 7.6 Using the fixtures
-
-```python
-from tests.fixtures import build_scenario, hot_tub
-
-house = build_scenario("factor2", seed=42)
-house.observations()      # -> engine
-house.ground_truth()      # -> assertions
-
-tub = hot_tub("factor_two")
-tub.table()               # the before/after/delta table
-tub.expected              # ExpectedInterpretation (may be "refuse")
-```
-
-Pytest wrappers exist as `lab_house`, `lab_houses` and `hot_tub_fixture` in
-`tests/conftest.py`. They are thin over the plain functions, so the same builders
-can be used inside a `parametrize` list or a script.
-
-The same strata are reachable from the shell, which keeps the CLI useful for
-manual investigations:
-
-```bash
-python -m tools.simulator.cli --list-strata
-python -m tools.simulator.cli --stratum factor2 --seed 42 --minutes 60 --out /tmp/f2
-```
-
-`--stratum` emits the *unchanged* record shape, so no consumer needs new code.
-Impairment flags (`--invert-ct`, `--drift-ct`, `--outage`, `--quality`,
-`--no-unknown-loads`) are **refused** alongside `--stratum` rather than applied:
-a stratum already fixes its quality and wiring, and honouring a conflicting flag
-would silently produce something that is not the stratum that was asked for. The
-default invocation is byte-identical to before this work.
-
-**What this does not prove.** The fixtures make the *inputs* correct and
-reproducible; they say nothing about whether the engine interprets them
-correctly. That is WP3's job (`electrical/factors.py`), and the fixtures are
-shaped so its tests can consume them unchanged.
-
----
-
-## 8. The v2 analysis-layer suites
-
-§7 documents the *input* side (fixtures and strata). This section documents the
-*layers added in v2* and what each one is allowed to prove. Every count below
-was measured with
-`python -m pytest <file> --collect-only -q -p no:cacheprovider`.
-
-### 8.1 Measured suite state
-
-```
-python -m pytest tests -p no:cacheprovider
-2725 passed, 9 skipped, 23 warnings in 198.96s
-```
-
-The nine skips are all `tests/simulation/test_real_topology.py`, gated on the
-local-only capture (`test_real_topology.py:61`). See
-`docs/limitations_v2.md` §3.
-
-### 8.2 Layer by layer
-
-| File | Tests | Layer | What it pins |
-| --- | --- | --- | --- |
-| `tests/unit/test_factors.py` | 59 | electrical | `_derive` decision table, `resolve` as-of-timestamp lookups, interval overlap rejection, the Refoss ×2 double-apply, `resolve_factor_ownership` |
-| `tests/unit/test_event_isolation.py` | 47 | isolation | three statuses, two windows, physical-device collapse, load-evidence filtering, config layering |
-| `tests/unit/test_association.py` | 52 | association | evidence gates, refusal codes, verdicts, confidence formula, orientation |
-| `tests/unit/test_circuits.py` | 34 | circuits | `dedicated`/`shared`/`partially_understood`/`unknown`, unattributed-load requirement, candidate status |
-| `tests/unit/test_hierarchy.py` | 34 | hierarchy | evidence bar, 11 refusal reasons, overlap-before-parenthood, cycle rejection, declared-wins |
-| `tests/unit/test_residual_power.py` | 70 | residual | sign preservation, `ZERO_TOL_W` behaviour, basis compatibility, duplicate/enclosure removal, `resolved` semantics |
-| `tests/unit/test_inference_records.py` | 15 | audit storage | migration 9/10 idempotence, round-trip of every field, append-only insert, `prune` exemption |
-| `tests/unit/test_simulator_fixtures.py` | 140 | fixtures | 21 strata coverage, determinism per seed, Hot Tub variants, CLI parity |
-| `tests/end_to_end/test_audit_api_e2e.py` | 10 | API | five routes, empty-database honesty, `400`, `503`, contract header |
-
-The unit counts deliberately exceed the "one test per rule" minimum: each
-refusal code and each confidence term has at least one test that fails if it is
-removed.
-
-### 8.3 What the v2 suites prove, and what they do not
-
-**They prove** (behavioural, on synthetic inputs):
-
-- every refusal path returns its documented reason code rather than a plausible
-  number;
-- every confidence term is recomputable from published evidence;
-- the audit pass writes byte-identical records for identical inputs and a
-  `previous_record_id` chain that strictly increases;
-- `prune` deletes raw samples and leaves all seven `AUDIT_TABLES` untouched
-  (`test_inference_records.py:350`);
-- the five read routes answer `503` without a facade and never fabricate an
-  all-clear from an empty database.
-
-**They do not prove:**
-
-- that the thresholds are physically optimal — only that the code honours them;
-- that the artifacts are *correct* on a real house (no ground truth);
-- that the audit pass populates `topology`/`residual` confidence (it does not —
-  `docs/confidence_model.md` §2);
-- that the hierarchy gates pass on a real capture (those nine tests skip).
-
-### 8.4 Determinism assertions
-
-Three properties are asserted rather than assumed:
-
-1. **Record identity.** Same `(device, algorithm_version, timestamp, revision)`
-   → same `record_id` (`record_id_for`, `audit.py:415`).
-2. **Ordering.** A device's chain comes back `(timestamp, revision)` ascending,
-   so a replay is a plain loop (`database.py:671`).
-3. **No clock in a decision.** Every analysis function takes `now` from the
-   caller; `AssociationFinder` and the hierarchy fall back to `valid_from` or the
-   wall clock only when building an assertion's timestamp, never while deciding
-   (`association.py:194`).
-
-### 8.5 What a new feature should add here
-
-The pattern the existing suites follow, and the one new work should extend:
-
-- a new **rule** → a unit test that fails if the rule is deleted (not merely one
-  that exercises the happy path);
-- a new **refusal** → assert the exact reason code string, because codes are the
-  machine interface;
-- a new **artifact** → an end-to-end test asserting the empty-database payload
-  and the `503` path alongside the populated one;
-- a new **persistence field** → a round-trip test plus a `prune` observation, so
-  "stored" and "retained" are separate claims.
+`tools/dev/verify.py` is the orchestrator-owned gate (spec status, schema sync,
+Z1 no-legacy-symbol check); it rewrites tracked report files and is run by the
+orchestrator, not by builders.
