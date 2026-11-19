@@ -49,7 +49,7 @@ from ..contracts import (
     measurement_event_id,
 )
 from .reader_state import ReaderStateStore, WindowSample
-from .step_detection import confirm_streaming_step
+from .step_detection import confirm_streaming_step, median
 
 __all__ = [
     "DETECTOR_VERSION",
@@ -65,6 +65,12 @@ __all__ = [
 DETECTOR_VERSION = "3.0.0"
 
 DetectionSink = Callable[[MeasurementEvent], None]
+
+#: Short window for the robust settled-level estimate during SETTLING.  Keeping
+#: it just above ``confirm_samples`` makes the median follow a brief plateau
+#: change (an inrush decaying to its running level) within a couple of samples,
+#: while a single settling swing cannot move it.
+_SETTLING_MEDIAN_WINDOW = 3
 
 
 # --------------------------------------------------------------------------- #
@@ -99,6 +105,14 @@ class DetectorConfig:
     confirm_s: float = 20.0
     settle_s: float = 120.0
     transient_sigma: float = 2.0
+    # Z10b: a settling reversal is an OFF only when confirmed samples return to
+    # the pre-step level.  ``return_frac`` is the fraction of the step's span
+    # (|post_level - pre_level|) that may remain while still counting as a
+    # return; 0.2 means within 20 % of the pre-step level.  It is combined with
+    # the noise-aware ``enter_z * sigma`` floor (whichever is larger) so noisy
+    # readers are not forced to land exactly on the pre-level.  The settled
+    # level is used as the reference, never a transient inrush peak.
+    return_frac: float = 0.2
 
     # Drift (a drift is not a step event).
     drift_s: float = 3600.0
@@ -132,6 +146,8 @@ class DetectorConfig:
             raise ValueError("CUSUM constants must be non-negative / positive")
         if self.confirm_samples < 1 or self.min_transient_samples < 1:
             raise ValueError("sample counts must be >= 1")
+        if not 0.0 <= self.return_frac <= 1.0:
+            raise ValueError("return_frac must be in [0, 1]")
         if self.periodic_min_steps < 2:
             raise ValueError("periodic_min_steps must be >= 2")
         if not 0.0 <= self.timestamp_penalty <= 1.0:
@@ -206,6 +222,15 @@ class _ReaderSM:
     reversal_start: datetime | None = None
     reversal_last_pre: datetime | None = None
     reversal_count: int = 0
+    # Z10b: robust running estimate of the *settled* post-step level during
+    # SETTLING.  A step can confirm on a transient inrush peak (0 -> 1500 W)
+    # then decay to a lower running level (300 W); the reversal reference must
+    # be that settled level, not the peak.  The median of the recent post-step
+    # samples is the robust settled estimate (the same statistic the offline
+    # confirm helper uses).  Reset at every new SETTLING seed.
+    settling_values: deque[float] = field(
+        default_factory=lambda: deque(maxlen=_SETTLING_MEDIAN_WINDOW)
+    )
     step_history: deque[tuple[datetime, float, float]] = field(
         default_factory=lambda: deque(maxlen=64)
     )
@@ -625,12 +650,39 @@ class ChangeDetector:
         if sigma is not None:
             sm.last_deviation = value - baseline
 
+        # Z10b: keep a robust estimate of the settled post-step level.  A step
+        # can confirm on a transient inrush peak (0 -> 1500 W) and then decay to
+        # a lower running level (300 W); the reversal reference must be that
+        # settled level, not the peak.  The median of the recent post-step
+        # samples is exactly the robust statistic the confirm helper uses, and
+        # ignores both the brief inrush spike and any single settling swing.
+        # Seed once at confirmation (below); thereafter append every sample.
+        sm.settling_values.append(value)
+        if len(sm.settling_values) >= self.config.confirm_samples:
+            settled = median(sm.settling_values)
+            if sm.post_step_baseline is not None and sm.settling_origin is not None:
+                # Never adopt a settled estimate that is back at the pre-step
+                # level: that is a genuine OFF (the reversal detector handles
+                # it), not settling decay toward a lower running level.  A brief
+                # inrush peak can make ``return_frac * span`` large enough to
+                # swallow the lower running level, so decide "back at pre" from
+                # the noise scale alone here (a couple of sigma): a genuine
+                # return lands within noise of the (robust) pre level, while a
+                # settled running level sits far above it.
+                at_pre = 2.0 * max(
+                    self.config.enter_z * (sigma or self.config.sigma_min_w),
+                    self.config.min_delta_w,
+                )
+                if abs(settled - sm.settling_origin) > at_pre:
+                    sm.post_step_baseline = settled
+                    sm.suppression_level = settled
+
         # Z10: a step can reverse while its predecessor is still settling (a
         # short ON pulse whose OFF lands inside the 120 s window).  Detect the
         # reversal here, promptly, instead of waiting for SETTLING to expire and
         # dating the onset from the settling window.  The reference is the held
-        # post-step level; a reversal must move past it by the same noise-aware
-        # enter threshold used to open SUSPECT, toward the pre-step baseline.
+        # *settled* post-step level; a reversal must return to the pre-step
+        # baseline, not merely move part of the way toward it.
         if self._detect_settling_reversal(reader, sm, value, sample_at, at, staleness):
             return
 
@@ -647,14 +699,20 @@ class ChangeDetector:
         at: datetime,
         staleness: float,
     ) -> bool:
-        """Emit a prompt OFF step when a settled step reverses mid-window.
+        """Emit a prompt OFF step when a settled step returns to its pre-level.
 
         Returns ``True`` when the reversal was confirmed and emitted (the state
         machine has been re-seeded into SETTLING for the new level), otherwise
-        ``False``.  A reversal is a value beyond ``k * sigma`` from the held
-        post-step level in the direction of the pre-step baseline, confirmed by
-        ``confirm_samples`` consecutive such samples.  The onset is dated from
-        the last ON-level sample to the first fall sample, i.e. the real fall.
+        ``False``.  A reversal is a confirmed move that brings the value back to
+        the *pre-step* level::
+
+            |value - pre_level| <= max(enter_z * sigma, return_frac * |post - pre|)
+
+        held for ``confirm_samples`` consecutive samples.  A partial move toward
+        the pre-level (a motor's inrush decaying to a lower running level, or a
+        dimmed load oscillating during settling) is absorbed and stays inside
+        settling, as before Z10.  The onset is dated from the last ON-level
+        sample to the first return sample, i.e. the real fall.
         """
         post_level = sm.post_step_baseline
         pre_level = sm.settling_origin
@@ -662,17 +720,17 @@ class ChangeDetector:
         if post_level is None or pre_level is None or sigma is None or pre_level == post_level:
             return False
 
-        # Use the noise-aware k*sigma threshold only: the store's resolution is
-        # derived from the smallest innovation and is inflated by the step that
-        # produced the post level (a 113 W step makes a 3*resolution floor huge).
-        # sigma is the quiet-period estimate, so k*sigma is the right scale.
-        threshold = max(self.config.enter_z * sigma, self.config.min_delta_w)
-        fall = pre_level < post_level  # the settled step raised the level
-        is_reversal = (
-            (value < post_level - threshold)
-            if fall
-            else (value > post_level + threshold)
-        )
+        # The fall must also be a real departure from the held (settled) post
+        # level, and the value must actually RETURN to the pre-step baseline:
+        # |value - pre| <= max(enter_z*sigma, return_frac*|post - pre|).
+        # A partial move toward pre (motor inrush decay, dimmed-load swing) is
+        # far from pre and is absorbed, as before Z10.
+        direction = 1.0 if post_level > pre_level else -1.0
+        departure = max(self.config.enter_z * sigma, self.config.min_delta_w)
+        departed = (post_level - value) * direction >= departure
+        span = abs(post_level - pre_level)
+        tolerance = max(departure, self.config.return_frac * span)
+        is_reversal = departed and abs(value - pre_level) <= tolerance
 
         if not is_reversal:
             # Track this as a sample still at the post-step level; it becomes
@@ -738,6 +796,8 @@ class ChangeDetector:
         sm.settling_origin = post_level
         sm.settling_sigma = sigma
         sm.post_step_baseline = value
+        sm.settling_values.clear()
+        sm.settling_values.append(value)
         sm.first_post = None
         sm.onset_lo = None
         sm.post_count = 0
@@ -765,6 +825,7 @@ class ChangeDetector:
         sm.reversal_start = None
         sm.reversal_last_pre = None
         sm.reversal_count = 0
+        sm.settling_values.clear()
 
     # -- confirmation / emission -------------------------------------------- #
 
@@ -795,12 +856,29 @@ class ChangeDetector:
         if abs(delta_w) < self.config.min_delta_w:
             self._finish_event(reader, sm, StepClass.TRANSIENT, value, sample_at, at, staleness)
             return
+        # Use the confirm helper's robust pre/post levels (medians of the
+        # pre/post windows) as the settling references.  P2's EWMA baseline can
+        # lag after a reversal, so the raw ``baseline`` is not a reliable pre
+        # level for the *next* step's reversal check (Z10b).
+        pre_level = step.before_w if step is not None else baseline
+        post_level = step.after_w if step is not None else value
         step_class = (
             StepClass.PERIODIC
             if self._is_periodic(reader, sm, sm.onset_lo, delta_w)
             else StepClass.SUSTAINED
         )
-        self._emit_step(reader, sm, delta_w, step_class, value, sample_at, at, staleness)
+        self._emit_step(
+            reader,
+            sm,
+            delta_w,
+            step_class,
+            value,
+            sample_at,
+            at,
+            staleness,
+            pre_level=pre_level,
+            post_level=post_level,
+        )
 
     def _emit_step(
         self,
@@ -812,6 +890,9 @@ class ChangeDetector:
         sample_at: datetime,
         at: datetime,
         staleness: float,
+        *,
+        pre_level: float | None = None,
+        post_level: float | None = None,
     ) -> None:
         baseline = sm.baseline_at_suspect
         sigma = sm.sigma_at_suspect
@@ -853,9 +934,14 @@ class ChangeDetector:
         sm.last_level_at = sample_at
         sm.last_level = value
         sm.suppression_level = value
-        sm.settling_origin = baseline
+        # Z10b: the reversal reference is the robust settled pre/post level
+        # from the confirm helper, not the lagging EWMA baseline or a transient
+        # inrush peak.
+        sm.settling_origin = pre_level if pre_level is not None else baseline
         sm.settling_sigma = sigma
-        sm.post_step_baseline = value
+        sm.post_step_baseline = post_level if post_level is not None else value
+        sm.settling_values.clear()
+        sm.settling_values.append(value)
         # Suppress further step signals only until the post-step level has
         # produced a couple of samples; after that the detector's own baseline
         # (post_step_baseline) keeps the reference correct until P2 catches up.
@@ -1013,6 +1099,7 @@ class ChangeDetector:
         sm.reversal_start = None
         sm.reversal_last_pre = None
         sm.reversal_count = 0
+        sm.settling_values.clear()
         self._reset_cusum(sm)
         self.store.unfreeze_baseline(reader)
         if settling:
