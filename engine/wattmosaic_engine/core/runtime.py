@@ -2344,6 +2344,43 @@ class RuntimeMixin:
                 except Exception:  # noqa: BLE001 - table may not exist yet
                     log.debug("ct_samples evidence prune skipped", exc_info=True)
 
+    def _prune_derived(self, *, budget: Any | None = None) -> None:
+        """Background job: age-prune the derived tables (Z11, DEC-30/DEC-37).
+
+        The five previously-unbounded tables (snapshots, inference records,
+        HA events, groups + members, residual series) are pruned on independent
+        horizons via the shared :func:`apply_derived_retention` decision layer,
+        which protects rows still cited by the current snapshot, a non-finalized
+        group, or an active version/record.  ``budget`` is the DEC-37 CPU cap
+        injected by :class:`BackgroundExecutor`; the layer stops after a bounded
+        chunk when it is spent, so this job never exceeds ~2 s of CPU and a
+        later maintenance pass resumes.  Runs off the event loop, like
+        :meth:`_prune_evidence`.
+        """
+        from ..storage.tiers import (  # noqa: PLC0415 - local to keep runtime import light
+            apply_derived_retention,
+        )
+
+        cfg = self.config
+        horizons = {
+            "inference_snapshots": cfg.retention_days_snapshots,
+            "event_inference_records": cfg.retention_days_records,
+            "ha_events_v3": cfg.retention_days_ha_events,
+            "event_groups": cfg.retention_days_groups,
+            "event_group_members": cfg.retention_days_groups,
+            "reader_residual_series": cfg.retention_days_residual_series,
+        }
+        with self.db._lock:  # noqa: SLF001 - single-writer storage seam
+            try:
+                apply_derived_retention(
+                    self.db._conn,
+                    now=self._clock(),
+                    horizons=horizons,
+                    budget=budget,
+                )
+            except Exception:  # noqa: BLE001 - table may not exist yet
+                log.debug("derived retention prune skipped", exc_info=True)
+
     async def _self_heal_loop(self) -> None:
         """T7 detectors on the background executor every 15 minutes."""
         interval = max(1.0, 15.0 * 60.0)
@@ -2363,8 +2400,9 @@ class RuntimeMixin:
             try:
                 self.aligner.prune()
                 self.db.prune(self.config.retention_days_raw, self.config.retention_days_aggregates)
-                # Evidence/raw retention runs off the event loop (DEC-37).
+                # Evidence/raw + derived retention run off the event loop (DEC-37).
                 self.submit_background(self._prune_evidence)
+                self.submit_background(self._prune_derived)
             except Exception:  # noqa: BLE001
                 log.exception("maintenance cycle failed")
             try:

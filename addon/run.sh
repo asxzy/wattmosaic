@@ -48,7 +48,7 @@ inference_interval_s|WM_INFERENCE_INTERVAL_S|5
 log_level|WM_LOG_LEVEL|INFO
 log_json|WM_LOG_JSON|true
 database_path|WM_DATABASE_PATH|/data/wattmosaic.db
-retention_days_raw|WM_RETENTION_DAYS_RAW|30
+retention_days_raw|WM_RETENTION_DAYS_RAW|7
 retention_days_aggregates|WM_RETENTION_DAYS_AGGREGATES|730
 retention_days_evidence|WM_RETENTION_DAYS_EVIDENCE|
 retention_days_versions|WM_RETENTION_DAYS_VERSIONS|

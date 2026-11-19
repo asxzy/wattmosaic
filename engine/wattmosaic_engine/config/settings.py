@@ -41,12 +41,19 @@ ISOLATION_TIMING_KEYS: tuple[str, ...] = (
 
 #: Accepted range for the L1 raw-sample horizon, in days.  ``REQ-STORAGE-002``
 #: states a 7-14 d band; ``OD-31`` (13-open-decisions-and-assumptions.md §3)
-#: keeps the shipped 30 d default and requires the validator to be a **superset**
-#: of ``{7, 14, 30}``.  This is that superset: the documented band is accepted,
-#: so is the shipped default, and anything outside 1-90 is refused at startup.
-#: The requirement text is referred back for rewording rather than narrowing
-#: the validator, which would refuse the configuration the engine ships with.
+#: requires the validator to be a **superset** of ``{7, 14, 30}``.  This is that
+#: superset: the documented band is accepted, so is the old 30 d default, and
+#: anything outside 1-90 is refused at startup.  The add-on schema's
+#: ``retention_days_raw`` bound is pinned to this range by a parity test.  The
+#: shipped default is now 7 d (the V2 DB-growth finding: raw samples are ~88 %
+#: of growth, ~21-28 GB at 30 d on a Pi-class host).
 RETENTION_DAYS_RAW_RANGE: tuple[int, int] = (1, 90)
+
+#: Accepted range for every derived-table retention horizon, in days.  The
+#: add-on does not expose these (they are engine/env settings), but the same
+#: 1-3650 band is used so an operator cannot disable pruning with a nonsense
+#: value or request an unbounded horizon the prune layer cannot honour.
+RETENTION_DAYS_DERIVED_RANGE: tuple[int, int] = (1, 3650)
 
 #: Accepted range for the L3 aggregate horizon, in days.
 RETENTION_DAYS_AGGREGATES_RANGE: tuple[int, int] = (30, 36500)
@@ -176,12 +183,13 @@ class EngineConfig:
 
     # Storage
     database_path: str = "data/wattmosaic.db"
-    #: L1 raw-sample horizon, in days.  The shipped default stays 30 (spec §2.1,
-    #: ``OD-67``).  ``REQ-STORAGE-002`` asks for a 7-14 d band and ``OD-31``
-    #: requires the validator to be a superset of ``{7, 14, 30}``, so the
-    #: accepted range is 1-90 rather than the literal 7-14; see
-    #: :data:`RETENTION_DAYS_RAW_RANGE`.
-    retention_days_raw: int = 30
+    #: L1 raw-sample horizon, in days.  Reduced from 30 to **7** by the V2
+    #: DB-growth finding: raw samples are ~88 % of growth (≈ 710 MB/day at
+    #: 30 samples/s), so 30 d meant a 21-28 GB steady state on Pi-class hosts.
+    #: ``REQ-STORAGE-002`` asks for a 7-14 d band and ``OD-31`` requires the
+    #: validator to be a superset of ``{7, 14, 30}``, so the accepted range is
+    #: 1-90 rather than the literal 7-14; see :data:`RETENTION_DAYS_RAW_RANGE`.
+    retention_days_raw: int = 7
     #: L3 aggregate horizon, in days.
     retention_days_aggregates: int = 730
     #: L2 event-evidence horizon.  ``None`` means disabled: evidence is
@@ -225,6 +233,24 @@ class EngineConfig:
     #: Raw evidence retention horizon in days; raw samples expire sooner than
     #: the derived evidence that cites them.
     evidence_raw_retention_days: int = 30
+
+    # -- V2 derived-table age retention (Z11) ------------------------------ #
+    # These tables were previously never age-pruned (~25 GB/year).  All are
+    # bounded by an age key and, crucially, by provenance: a row still cited by
+    # the live snapshot, a non-finalized group/evidence row, or an active
+    # version is never deleted.  See ``apply_derived_retention`` in
+    # ``wattmosaic_engine.storage.tiers`` and docs/configuration.md.
+    #: `inference_snapshots` horizon in days (≈ 51-52 MB/day).
+    retention_days_snapshots: int = 90
+    #: `event_inference_records` horizon in days.
+    retention_days_records: int = 90
+    #: `ha_events_v3` horizon in days.
+    retention_days_ha_events: int = 90
+    #: `event_groups` / `event_group_members` horizon in days.
+    retention_days_groups: int = 90
+    #: `reader_residual_series` horizon in days (cheap change-point series).
+    retention_days_residual_series: int = 30
+
     #: Discover a candidate topology from Home Assistant at startup when the
     #: database has none.  Disabling it leaves a fresh install with nothing to
     #: infer, which ``/health`` now reports instead of failing silently.
@@ -330,7 +356,10 @@ class EngineConfig:
         cfg.api_port = int(get("WM_API_PORT", default=str(cfg.api_port)) or cfg.api_port)
         cfg.api_token = get("WM_API_TOKEN", default="") or ""
         cfg.database_path = get("WM_DATABASE_PATH", default=cfg.database_path) or cfg.database_path
-        cfg.retention_days_raw = int(get("WM_RETENTION_DAYS_RAW", default=str(cfg.retention_days_raw)) or 30)
+        cfg.retention_days_raw = int(
+            get("WM_RETENTION_DAYS_RAW", default=str(cfg.retention_days_raw))
+            or cfg.retention_days_raw
+        )
         cfg.retention_days_aggregates = int(
             get("WM_RETENTION_DAYS_AGGREGATES", default=str(cfg.retention_days_aggregates)) or 730
         )
@@ -376,6 +405,31 @@ class EngineConfig:
         cfg.evidence_raw_retention_days = int(
             get("WM_EVIDENCE_RAW_RETENTION_DAYS", default=str(cfg.evidence_raw_retention_days))
             or cfg.evidence_raw_retention_days
+        )
+        # V2 derived-table horizons (Z11).  Each defaults to the shipped value
+        # and is validated against RETENTION_DAYS_DERIVED_RANGE by validate().
+        cfg.retention_days_snapshots = int(
+            get("WM_RETENTION_DAYS_SNAPSHOTS", default=str(cfg.retention_days_snapshots))
+            or cfg.retention_days_snapshots
+        )
+        cfg.retention_days_records = int(
+            get("WM_RETENTION_DAYS_RECORDS", default=str(cfg.retention_days_records))
+            or cfg.retention_days_records
+        )
+        cfg.retention_days_ha_events = int(
+            get("WM_RETENTION_DAYS_HA_EVENTS", default=str(cfg.retention_days_ha_events))
+            or cfg.retention_days_ha_events
+        )
+        cfg.retention_days_groups = int(
+            get("WM_RETENTION_DAYS_GROUPS", default=str(cfg.retention_days_groups))
+            or cfg.retention_days_groups
+        )
+        cfg.retention_days_residual_series = int(
+            get(
+                "WM_RETENTION_DAYS_RESIDUAL_SERIES",
+                default=str(cfg.retention_days_residual_series),
+            )
+            or cfg.retention_days_residual_series
         )
         cfg.topology_bootstrap = _bool(
             get("WM_TOPOLOGY_BOOTSTRAP", default="true"), True
@@ -480,6 +534,18 @@ class EngineConfig:
                 f"retention_days_aggregates must be in {agg_low}-{agg_high} "
                 f"(got {self.retention_days_aggregates})"
             )
+        derived_low, derived_high = RETENTION_DAYS_DERIVED_RANGE
+        for name, horizon in (
+            ("retention_days_snapshots", self.retention_days_snapshots),
+            ("retention_days_records", self.retention_days_records),
+            ("retention_days_ha_events", self.retention_days_ha_events),
+            ("retention_days_groups", self.retention_days_groups),
+            ("retention_days_residual_series", self.retention_days_residual_series),
+        ):
+            if not derived_low <= horizon <= derived_high:
+                problems.append(
+                    f"{name} must be in {derived_low}-{derived_high} (got {horizon})"
+                )
         for name, horizon in (
             ("retention_days_evidence", self.retention_days_evidence),
             ("retention_days_versions", self.retention_days_versions),
@@ -597,6 +663,11 @@ class EngineConfig:
             "unknown_penalty_scale": self.unknown_penalty_scale,
             "evidence_retention_days": self.evidence_retention_days,
             "evidence_raw_retention_days": self.evidence_raw_retention_days,
+            "retention_days_snapshots": self.retention_days_snapshots,
+            "retention_days_records": self.retention_days_records,
+            "retention_days_ha_events": self.retention_days_ha_events,
+            "retention_days_groups": self.retention_days_groups,
+            "retention_days_residual_series": self.retention_days_residual_series,
             "log_level": self.log_level,
             "history_lookback_s": self.history_lookback_s,
             "audit_enabled": self.audit_enabled,

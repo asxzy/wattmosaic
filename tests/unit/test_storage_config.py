@@ -290,7 +290,8 @@ def test_raw_retention_range_is_enforced() -> None:
 def test_retention_defaults_and_env_overrides() -> None:
     """Defaults are the shipped values; every per-tier horizon is configurable."""
     cfg = _config()
-    assert cfg.retention_days_raw == 30
+    # Z11: raw default reduced from 30 to 7 (V2 DB-growth finding).
+    assert cfg.retention_days_raw == 7
     assert cfg.retention_days_aggregates == 730
     assert cfg.retention_days_evidence is None
     assert cfg.retention_days_versions is None
@@ -315,13 +316,14 @@ def test_retention_defaults_and_env_overrides() -> None:
 
 def test_an_explicit_horizon_may_not_be_shorter_than_the_raw_window() -> None:
     """Evidence that does not outlive the raw window it explains cannot be audited."""
-    problems = _config(WM_RETENTION_DAYS_EVIDENCE="7").validate()
+    # Z11: the raw default is now 7, so a shorter horizon is anything below it.
+    problems = _config(WM_RETENTION_DAYS_EVIDENCE="6").validate()
     assert any("retention_days_evidence" in p for p in problems)
-    problems = _config(WM_RETENTION_DAYS_VERSIONS="7").validate()
+    problems = _config(WM_RETENTION_DAYS_VERSIONS="6").validate()
     assert any("retention_days_versions" in p for p in problems)
     # Equal is fine; unset is fine.
     assert not [
-        p for p in _config(WM_RETENTION_DAYS_EVIDENCE="30").validate()
+        p for p in _config(WM_RETENTION_DAYS_EVIDENCE="7").validate()
         if "retention_days_evidence" in p
     ]
 
