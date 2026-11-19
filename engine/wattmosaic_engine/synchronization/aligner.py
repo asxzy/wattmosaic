@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from ..contracts import Measurement, QualityStatus, utcnow
+from ..contracts import QualityStatus, utcnow
 from ..electrical.window import DEFAULT_CADENCE_S, clamp_cadence
 
 DEFAULT_MAX_AGE_S = 180.0
@@ -563,7 +563,7 @@ class SampleAligner:
         self.energy_added_count = 0
 
     # -- ingestion -------------------------------------------------------- #
-    def add(self, measurement: Measurement) -> None:
+    def add(self, measurement: Any) -> None:
         """Route a measurement into the power or energy domain.
 
         Power (``W``/``kW``) goes to the power buffers used by the solver.
@@ -609,7 +609,7 @@ class SampleAligner:
     def _add_energy(
         self,
         channel: str,
-        measurement: Measurement,
+        measurement: Any,
         value_kwh: float,
         received: datetime,
         state_ts: datetime,

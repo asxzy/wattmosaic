@@ -5,7 +5,7 @@ snake_case.  Every method may return either a value or a coroutine; the server
 awaits the result, so synchronous backends work too.
 
 The return types are the authoritative contract models wherever one exists
-(``HealthResponse``, ``SnapshotResponse``, ``Topology``, ...).  Methods without a
+(``HealthResponse``, ``SnapshotResponse``, ``_legacy.Topology``, ...).  Methods without a
 contract model return plain JSON-safe dicts/lists.
 
 ``NullFacade`` answers every call with :class:`FacadeUnavailable`, which the
@@ -24,9 +24,14 @@ from ..contracts import (
     CONTRACT_VERSION,
     ServiceCommand,
     ServiceResult,
-    Topology,
     TopologyRelation,
 )
+
+# ZI: the legacy _legacy.Topology shape is still the read-time input of the mapping
+# projection (owned jointly by the topology area) and of the stub display tree.
+# It is reached through the legacy module namespace so this area binds no legacy
+# name; ZC removes the shared model at the final cutover.
+from ..contracts import legacy as _legacy
 from ..models.view import resolve_model
 from .protocols import (
     DiagnosticsProvider,
@@ -119,7 +124,7 @@ def _relation_from_raw(raw: Any) -> TopologyRelation | None:
 
 
 async def _real_device_sources(
-    facade: EngineFacade, topology: Topology
+    facade: EngineFacade, topology: _legacy.Topology
 ) -> list[list[dict[str, Any]]]:
     """Collect real-device records for the matrix row axis, additively.
 
@@ -205,12 +210,12 @@ async def derive_mapping_matrix(facade: EngineFacade) -> dict[str, Any]:
     from ..disaggregation.mapping import MappingEvidence, build_mapping_matrix
 
     topology_obj = await maybe_await(facade.topology())
-    if not isinstance(topology_obj, Topology):
+    if not isinstance(topology_obj, _legacy.Topology):
         try:
-            topology_obj = Topology.model_validate(topology_obj)
+            topology_obj = _legacy.Topology.model_validate(topology_obj)
         except Exception:  # noqa: BLE001
-            topology_obj = Topology()
-    topology: Topology = topology_obj
+            topology_obj = _legacy.Topology()
+    topology: _legacy.Topology = topology_obj
 
     associations: list[TopologyRelation] = []
     relations_reader = getattr(facade, "relations", None)
@@ -503,10 +508,10 @@ class StubFacade(NullFacade):
 
     def panel_tree(self, *, include_nesting: bool = False) -> dict[str, Any]:
         """Build the tree from the stub topology (no engine, no history)."""
-        from ..contracts import Topology
+        from ..contracts import legacy as _legacy
         from ..mapping.display_tree import build_display_tree
 
-        return build_display_tree(Topology.model_validate(self._topology))
+        return build_display_tree(_legacy.Topology.model_validate(self._topology))
 
     def nesting_candidates(self, *, hours: float = 12.0) -> dict[str, Any]:
         return {"candidates": [], "reason": "stub facade has no stored history"}

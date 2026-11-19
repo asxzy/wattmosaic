@@ -60,7 +60,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from wattmosaic_engine.contracts import CTChannel, Topology
+from wattmosaic_engine.contracts import MeasurementEndpoint
 
 #: A row must move by at least this multiple of its own quiet-period noise to
 #: count as having responded to a switch.
@@ -257,9 +257,10 @@ class CorrelationReport:
 class ReaderDeclaration:
     """What one reader declares about itself, and nothing else.
 
-    These are **declared constants**, not measurements: they come from
-    :class:`~wattmosaic_engine.contracts.CTChannel` and are never derived from
-    a sample (``03-measurement-and-electrical-domain.md`` §10.2).  Publishing
+    These are **declared constants**, not measurements: they come from a v3
+    :class:`~wattmosaic_engine.contracts.MeasurementEndpoint` (and its config
+    revision) and are never derived from a sample
+    (``03-measurement-and-electrical-domain.md`` §10.2).  Publishing
     them together is the point -- a consumer that knows a reader's resolution
     and reliability can interpret its watts, and one that does not must not
     pretend to.
@@ -319,50 +320,42 @@ class ReaderDeclaration:
         }
 
 
-def publish_reader_declarations(topology: Topology) -> list[ReaderDeclaration]:
-    """One :class:`ReaderDeclaration` per **enabled** reader, in topology order.
+def publish_reader_declarations(endpoints: Iterable[MeasurementEndpoint]) -> list[ReaderDeclaration]:
+    """One :class:`ReaderDeclaration` per **enabled** v3 endpoint.
 
-    Pure and read-only: it walks ``topology.channels`` and returns a value
-    object per channel, in the order the topology lists them.  Order is
-    deterministic because the topology's channel order is the declared order;
-    no sorting is imposed, so a consumer sees the configuration exactly as it
-    was written.
+    Pure and read-only: it walks the canonical measurement endpoints (S13) and
+    returns a value object per enabled endpoint, in the order supplied.  Order
+    is deterministic because callers pass the repository's stable order; no
+    sorting is imposed, so a consumer sees the configuration exactly as it was
+    written.
 
-    A channel that is ``enabled=False`` yields no declaration at all.  This is
-    the same rule the engine uses for rows: a disabled reader is not part of
-    the measurement system, so publishing it would present a reader the engine
-    will not read.
-
-    A channel missing one of the three declared fields is still published, with
-    that field ``None``.  The declaration surface is a *report*; filling in a
-    missing resolution would invent one, and a consumer that cannot tell
-    "declared" from "invented" cannot honour either.
+    A disabled endpoint yields no declaration at all: a disabled reader is not
+    part of the measurement system, so publishing it would present a reader the
+    engine will not read.  Declared fields come from the endpoint's latest
+    config revision; a missing field stays ``None`` (a *report* never invents
+    one).
     """
     out: list[ReaderDeclaration] = []
-    for channel in topology.channels:
-        if not channel.enabled:
+    for endpoint in endpoints:
+        if not endpoint.enabled:
             continue
-        out.append(_declaration_from_channel(channel))
+        out.append(_declaration_from_endpoint(endpoint))
     return out
 
 
-def _declaration_from_channel(channel: CTChannel) -> ReaderDeclaration:
-    """Project one ``CTChannel`` onto the declaration surface.
-
-    ``reliability`` has a contract default (``1.0``), so ``getattr`` with a
-    ``None`` default would turn a channel that legitimately carries ``None``
-    into ``1.0``.  Reading the attribute directly keeps an absent declaration
-    absent; the contract default is the topology's business, not this
-    projection's.
-    """
+def _declaration_from_endpoint(endpoint: MeasurementEndpoint) -> ReaderDeclaration:
+    """Project one v3 ``MeasurementEndpoint`` onto the declaration surface."""
+    revision = endpoint.latest_revision
     return ReaderDeclaration(
-        ct_id=channel.ct_id,
-        resolution_w=channel.resolution_w,
-        reliability=getattr(channel, "reliability", None),
-        expected_interval_s=channel.expected_interval_s,
-        phase=str(channel.phase),
-        polarity=str(channel.polarity),
-        enabled=bool(channel.enabled),
+        ct_id=endpoint.endpoint_id,
+        resolution_w=getattr(revision, "resolution_w", None),
+        # A v3 revision has no reliability field; absence stays None rather
+        # than being invented (HB §18).
+        reliability=None,
+        expected_interval_s=getattr(revision, "expected_interval_s", None),
+        phase=getattr(revision, "phase", "unknown") or "unknown",
+        polarity=getattr(revision, "polarity", "normal") or "normal",
+        enabled=bool(endpoint.enabled),
     )
 
 

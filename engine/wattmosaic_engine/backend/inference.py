@@ -19,7 +19,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
-from ..contracts import InferenceResult, QualityStatus, Reconciliation, Source, Topology
+from ..contracts import DeviceEstimate, ReconciliationV3
 from ..device_links import STATE_OVERRIDES_KEY, ambiguous_entities, entity_links
 from .batch import BackendBatch
 
@@ -76,7 +76,7 @@ class InferenceMixin:
         window: Any,
         *,
         device_states: Any,
-        topology: Topology,
+        topology: Any = None,
         models: Any = None,
         events: Iterable[Any] | None = None,
     ) -> BackendBatch:
@@ -85,14 +85,13 @@ class InferenceMixin:
         # ``infer_group``/``infer_steady`` directly.  This compatibility shim
         # keeps the backend constructible for diagnostics and old callers but
         # never fabricates a per-device watt value.
+        #
+        # ZI: the legacy InferenceResult/Reconciliation contracts are removed.
+        # The backend's neutral handoff now uses the v3 DeviceEstimate list and
+        # nullable ReconciliationV3, so no v2-only shape is constructed here.
         return BackendBatch(
             results=[],
-            reconciliation=Reconciliation(
-                timestamp=self._clock(),
-                topology_version=getattr(topology, "version", 0),
-                quality_status="good",
-                explanation=["legacy_inference_removed_use_three_loop_runtime"],
-            ),
+            reconciliation=ReconciliationV3(),
             diagnostics={"legacy_path_removed": True},
         )
 
@@ -101,7 +100,7 @@ class InferenceMixin:
         window: Any,
         *,
         device_states: Any,
-        topology: Topology,
+        topology: Any = None,
         models: Any = None,
         events: Iterable[Any] | None = None,
     ) -> BackendBatch:
@@ -125,11 +124,11 @@ class InferenceMixin:
         # the three-loop runtime for inference.
         return BackendBatch(
             results=results,
-            reconciliation=Reconciliation(timestamp=self._clock()),
+            reconciliation=ReconciliationV3(),
             diagnostics=diagnostics,
         )
 
-    def _refresh_links(self, topology: Topology) -> None:
+    def _refresh_links(self, topology: Any) -> None:
         """Recompute entity ambiguity only when the topology actually changed."""
         signature = (int(getattr(topology, "version", 0) or 0), len(topology.devices))
         if signature == self._topology_signature:
@@ -144,7 +143,7 @@ class InferenceMixin:
             )
         self._apply_state_overrides(topology)
 
-    def _apply_state_overrides(self, topology: Topology) -> None:
+    def _apply_state_overrides(self, topology: Any) -> None:
         """Push per-device state-label corrections into the sample filter.
 
         The disaggregation engine reads these straight from the topology; the
@@ -173,40 +172,14 @@ class InferenceMixin:
         except Exception as exc:  # noqa: BLE001 - learning must not break inference
             log.warning("failed to apply state overrides: %s", exc)
 
-    def _update_energy(self, results: Sequence[InferenceResult]) -> None:
-        """Feed results to the aggregator and publish a cumulative total.
+    def _update_energy(self, results: Sequence[DeviceEstimate]) -> None:
+        """Feed v3 device estimates to the aggregator (a no-op shim).
 
-        ``InferenceResult.energy_kwh`` is what the HA ``total_increasing``
-        sensor publishes, so it is the running lifetime total for the device —
-        not a per-cycle delta.  Bucket rows in ``energy_aggregates`` remain the
-        authoritative per-interval series.
-
-        Each result carries the age of the measurement it was derived from in
-        ``measurement_age_seconds``.  It is handed to the aggregator so a value
-        that went stale inside the window (a CT that stopped updating keeps
-        being aligned for up to the staleness limit) cannot integrate frozen
-        watts into kWh.
+        ZI: the legacy ``InferenceResult.energy_kwh`` handoff is removed.  A v3
+        :class:`~wattmosaic_engine.contracts.DeviceEstimate` carries ``point_w``,
+        not a device energy total, so the three-loop runtime owns energy; this
+        backend compatibility shim never fabricates a watt or kWh value.
         """
-        aggregator = self.aggregator
-        if aggregator is None:
-            return
-        for result in results:
-            try:
-                aggregator.add_result(
-                    result, measurement_age_s=_measurement_age(result)
-                )
-                total = aggregator.current_total_kwh(result.device_id)
-            except Exception as exc:  # noqa: BLE001 - never kill inference
-                self.last_error = f"aggregation: {type(exc).__name__}: {exc}"
-                log.warning("energy aggregation failed for %s: %s", result.device_id, exc)
-                continue
-            if total is None:
-                continue
-            result.energy_kwh = round(max(0.0, float(total)), 6)
-            self.energy_updates += 1
-        self._cycles_since_flush += 1
-        if self._cycles_since_flush >= self.flush_every_cycles:
-            self.flush_energy()
 
     def flush_energy(self, now: datetime | None = None) -> list[Any]:
         """Persist open buckets and close idle device runs."""
@@ -234,36 +207,21 @@ class InferenceMixin:
 
     @staticmethod
     def _explain_measurement_gaps(
-        reconciliation: Reconciliation, gaps: Mapping[str, Any]
+        reconciliation: ReconciliationV3, gaps: Mapping[str, Any]
     ) -> None:
-        """Append the measurement-gap explanation to ``Reconciliation.explanation``.
+        """Explain measurement gaps on the v3 nullable reconciliation.
 
-        Idempotent: the same sentence is never added twice, so a pinned
-        reconciliation object cannot accumulate duplicates.
+        ``ReconciliationV3`` has no mutable ``explanation`` list (absence is a
+        first-class ``None`` on every term), so this compatibility shim reduces
+        the explanation to a read-only dict returned by
+        :meth:`_measurement_gap_summary` and keeps no hidden state.  The v3
+        surface never fabricates a 0 W to stand in for a missing reading.
         """
-        explanation = reconciliation.explanation
-        missing = int(gaps.get("missing_direct_count") or 0)
-        stale = int(gaps.get("no_fresh_measurement_count") or 0)
-        if missing:
-            reason_counts: dict[str, int] = {}
-            for reason in (gaps.get("missing_direct") or {}).values():
-                key = str(reason).split(":", 1)[0]
-                reason_counts[key] = reason_counts.get(key, 0) + 1
-            detail = ",".join(
-                f"{key}×{count}" for key, count in sorted(reason_counts.items())
-            )
-            note = f"no_direct_measurement:{missing} device(s) ({detail})"
-            if note not in explanation:
-                explanation.append(note)
-        if stale:
-            note = f"no_fresh_measurement:{stale} device(s)"
-            if note not in explanation:
-                explanation.append(note)
 
     def _measurement_gap_summary(
         self,
-        topology: Topology,
-        results: Sequence[InferenceResult],
+        topology: Any,
+        results: Sequence[DeviceEstimate],
         engine_diagnostics: Mapping[str, Any],
     ) -> dict[str, Any]:
         """Explain a device-level 0 W that is not a real zero.
@@ -291,7 +249,7 @@ class InferenceMixin:
             and reading.get("usable")
             and reading.get("power_w") is not None
         )
-        by_device = {r.device_id: r for r in results}
+        by_device = {r.subject_id: r for r in results}
 
         graph = None  # legacy topology graph removed in Z2
 
@@ -373,7 +331,7 @@ class InferenceMixin:
             "no_fresh_measurement_count": len(no_fresh),
         }
 
-    def _associations(self, topology: Topology) -> dict[str, tuple[str, tuple[str, ...]]]:
+    def _associations(self, topology: Any) -> dict[str, tuple[str, tuple[str, ...]]]:
         """``entity_id -> (device_id, ct_ids)`` derived only from the topology."""
         return entity_links(topology)
 
@@ -411,9 +369,14 @@ class InferenceMixin:
         self.flush_energy()
 
 
-def _measurement_age(result: InferenceResult) -> float | None:
-    """Age of the measurement behind ``result``, or ``None`` if not stated."""
-    raw = getattr(result, "measurement_age_seconds", None)
+def _measurement_age(result: DeviceEstimate) -> float | None:
+    """Age of the measurement behind a v3 estimate, or ``None`` if not stated.
+
+    A v3 ``DeviceEstimate`` has no measurement-age field; its provenance lives
+    in ``evidence_refs``.  An absent age is honest ``None`` — never a fabricated
+    ``0`` — and the estimator degrades to "no age stated".
+    """
+    raw = getattr(result, "measurement_age_s", None)
     if raw is None:
         return None
     try:
@@ -423,42 +386,21 @@ def _measurement_age(result: InferenceResult) -> float | None:
     return value if math.isfinite(value) and value >= 0.0 else None
 
 
-def _quality_text(result: InferenceResult) -> str:
-    quality = result.quality_status
-    return quality.value if hasattr(quality, "value") else str(quality)
+def _has_fresh_measurement(result: DeviceEstimate, max_age_s: float) -> bool:
+    """Whether a v3 estimate describes a current, usable observation of a load.
 
-
-def _source_text(result: InferenceResult) -> str:
-    source = result.source
-    return source.value if hasattr(source, "value") else str(source)
-
-
-def _has_fresh_measurement(result: InferenceResult, max_age_s: float) -> bool:
-    """Whether this result is a current, usable observation of the load.
-
-    ``Source.UNKNOWN`` and placeholder values never count: they are the exact
-    readings a "no fresh measurement" count exists to reveal.
+    A non-identifiable / UNKNOWN estimate has ``point_w is None`` and contributes
+    no observation (HB §18), so it is never counted as a fresh measurement.
     """
-    if _source_text(result) == Source.UNKNOWN.value:
-        return False
-    provenance = result.provenance
-    if isinstance(provenance, Mapping) and provenance.get("power_w_is_placeholder"):
-        return False
-    if _quality_text(result) in (QualityStatus.BAD.value, QualityStatus.MISSING.value):
+    if getattr(result, "point_w", None) is None:
         return False
     age = _measurement_age(result)
     return not (age is not None and age > max_age_s)
 
 
-def _stale_reason(result: InferenceResult, max_age_s: float) -> str:
-    if _source_text(result) == Source.UNKNOWN.value:
-        return "source_unknown"
-    provenance = result.provenance
-    if isinstance(provenance, Mapping) and provenance.get("power_w_is_placeholder"):
-        return "power_w_is_placeholder"
-    quality = _quality_text(result)
-    if quality in (QualityStatus.BAD.value, QualityStatus.MISSING.value):
-        return f"quality_{quality}"
+def _stale_reason(result: DeviceEstimate, max_age_s: float) -> str:
+    if getattr(result, "point_w", None) is None:
+        return "estimate_unknown"
     age = _measurement_age(result)
     if age is not None and age > max_age_s:
         return f"measurement_age_{age:.0f}s_exceeds_{max_age_s:.0f}s"

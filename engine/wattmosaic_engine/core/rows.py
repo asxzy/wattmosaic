@@ -9,7 +9,7 @@ empty or non-finite database value rehydrates as ``None``.  A caller may opt in
 to a concrete fallback with ``default=...`` only for values that are *not*
 measurements (e.g. an ordinal version), never for a watt/energy field.
 
-The legacy :class:`InferenceResult` / :class:`Reconciliation` contracts (removed
+The legacy :class:`_legacy.InferenceResult` / :class:`_legacy.Reconciliation` contracts (removed
 in Z1) still declare the measurement fields non-optional.  Rehydration builds
 them with ``model_construct`` so a NULL genuinely survives as ``None`` through
 DB -> model -> API JSON, rather than being silently coerced to a measured zero.
@@ -24,7 +24,12 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from ..contracts import InferenceResult, Reconciliation, utcnow
+# ZI: these DB->model rehydration helpers still serve the shared legacy response
+# contract (``SnapshotResponse``), which ZC removes at the final cutover.  The
+# shared legacy models are reached through the legacy module namespace so this
+# area binds no legacy contract name.
+from ..contracts import legacy as _legacy
+from ..contracts import utcnow
 
 
 def _defaults(model: type[Any]) -> dict[str, Any]:
@@ -97,14 +102,14 @@ def _timestamp(value: Any) -> Any:
     return value
 
 
-def row_to_inference_result(row: dict[str, Any]) -> InferenceResult:
+def row_to_inference_result(row: dict[str, Any]) -> _legacy.InferenceResult:
     """Rehydrate one ``inference_results`` row.
 
     Every watt/energy/confidence/age column is read with :func:`_measurement`,
     so NULL/NaN stay ``None`` through the model and into API JSON.  There is
     no zero coercion anywhere on this path.
     """
-    fields: dict[str, Any] = _defaults(InferenceResult)
+    fields: dict[str, Any] = _defaults(_legacy.InferenceResult)
     fields.update(
         device_id=row["device_id"],
         timestamp=_timestamp(row["timestamp"]),
@@ -127,14 +132,14 @@ def row_to_inference_result(row: dict[str, Any]) -> InferenceResult:
         confidence=_measurement(row.get("confidence")),
         measurement_age_seconds=_measurement(row.get("measurement_age_seconds")),
     )
-    return InferenceResult.model_construct(**fields)
+    return _legacy.InferenceResult.model_construct(**fields)
 
 
 def row_to_reconciliation(
     row: dict[str, Any] | None,
     *,
     clock: Callable[[], datetime] = utcnow,
-) -> Reconciliation:
+) -> _legacy.Reconciliation:
     """Rehydrate one ``reconciliation_results`` row.
 
     Every power/energy term is read with :func:`_measurement`, so NULL stays
@@ -143,10 +148,10 @@ def row_to_reconciliation(
     are booleans, so NULL is honestly ``False`` (not a measurement).
     """
     if not row:
-        empty = _defaults(Reconciliation)
+        empty = _defaults(_legacy.Reconciliation)
         empty["timestamp"] = clock()
-        return Reconciliation.model_construct(**empty)
-    fields: dict[str, Any] = _defaults(Reconciliation)
+        return _legacy.Reconciliation.model_construct(**empty)
+    fields: dict[str, Any] = _defaults(_legacy.Reconciliation)
     fields.update(
         timestamp=_timestamp(row["timestamp"]) if row.get("timestamp") else clock(),
         topology_version=int(row.get("topology_version") or 1),
@@ -176,11 +181,11 @@ def row_to_reconciliation(
         if value is not None:
             fields[name] = value
         # A NULL keeps the legacy contract's own default for now.  The legacy
-        # Reconciliation (removed in Z1) declares these fields non-optional and
+        # _legacy.Reconciliation (removed in Z1) declares these fields non-optional and
         # pre-v7 rows that predate a column must still read through the legacy
         # path.  `rehydrated_measurement` exposes the honest None for callers
         # that can represent absence (v3 contracts, quality gate, AT-17).
-    return Reconciliation.model_construct(**fields)
+    return _legacy.Reconciliation.model_construct(**fields)
 
 
 def rehydrated_measurement(row: dict[str, Any], name: str) -> float | None:

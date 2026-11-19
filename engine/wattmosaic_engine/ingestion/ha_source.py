@@ -6,9 +6,9 @@ Design constraints (must remain true):
   ``config/*_registry/list`` and ``subscribe_events``.  There is deliberately no
   code path that can actuate a device.
 * ``last_updated`` is a state-update timestamp, not proof of a physical
-  measurement.  Every emitted ``Measurement`` carries ``state_timestamp`` and
-  ``received_at`` separately, and identical numeric values are flagged
-  ``repeated=True`` instead of being treated as fresh data.
+  measurement.  Every emitted canonical ``ReaderMeasurement`` carries a separate
+  ``observed_at`` and ``received_at``, and its ``quality_flags`` preserve the
+  provenance of a repeated or primed state instead of treating it as fresh data.
 * A malformed payload is logged and skipped; it can never break the event loop.
 * Reconnection uses jittered exponential backoff from 1 s to 60 s, forever.
 
@@ -1101,8 +1101,7 @@ class HASource:
         is_energy = unit in ("kWh", "Wh") or device_class == "energy"
         if numeric is not None and (is_power or (is_energy and self.include_energy)):
             # Z2: only the canonical P1 ReaderMeasurement is emitted.  The
-            # legacy Measurement / DeviceEvent streams fed the removed 5 s
-            # solver and no longer exist.
+            # removed 5 s solver's per-device event stream no longer exists.
             await self._emit_reading(
                 entity_id, raw_value, unit, new_state, fired_at, initial=initial
             )

@@ -9,7 +9,6 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
-from ..contracts import Topology
 from ..device_links import device_for_entity
 from ..learning.reporting import build_learning_status
 from ..models.protocols import window_time as _window_time
@@ -95,7 +94,7 @@ class LearningMixin:
             topology_quality=self._topology_quality_seen,
         )
 
-    def _learn(self, window: Any, topology: Topology) -> None:
+    def _learn(self, window: Any, topology: Any) -> None:
         """Collect samples once their post-event window has actually elapsed.
 
         ``SampleCollector.build`` needs readings *after* the transition (it
@@ -147,7 +146,7 @@ class LearningMixin:
             return
         self._maybe_train(topology)
 
-    def _maybe_train(self, topology: Topology) -> None:
+    def _maybe_train(self, topology: Any) -> None:
         """Realtime, event-driven training on matured samples.
 
         There is no wall-clock throttle.  A device is trained as soon as a *new*
@@ -211,11 +210,11 @@ class LearningMixin:
         if trained_any:
             self.last_train_at = now
 
-    def _bridge_event(self, event: Any, topology: Topology) -> dict[str, Any]:
-        """Attach the topology's device + CT association to an HA event.
+    def _bridge_event(self, event: Any, topology: Any) -> dict[str, Any]:
+        """Attach the topology's device + reader association to an HA event.
 
-        The HA event carries ``entity_id``; WattMosaic keys everything by its own
-        ``DeviceTopology.device_id``.  The link is declared in the topology
+        The HA event carries ``entity_id``; WattMosaic keys everything by its
+        physical-device id.  The link is declared in the topology
         (``device_links``): a device owns its CT entities and any state entities
         listed in ``metadata["state_entity_ids"]``.  Names are never compared and
         the HA device registry is never consulted, because a guessed association
@@ -248,7 +247,7 @@ class LearningMixin:
         }
 
     @staticmethod
-    def _topology_quality(topology: Topology) -> str:
+    def _topology_quality(topology: Any) -> str:
         status = getattr(topology, "status", None)
         value = getattr(status, "value", status)
         return "confirmed" if str(value) == "confirmed" else "candidate"

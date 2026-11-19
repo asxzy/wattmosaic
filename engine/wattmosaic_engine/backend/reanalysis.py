@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from ..contracts import InferenceResult, Topology
+from ..contracts import DeviceEstimate
 
 log = logging.getLogger("wattmosaic.integration")
 
@@ -43,7 +43,7 @@ class ReanalysisMixin:
         return newest
 
     def _maybe_reanalyze(
-        self, results: Sequence[InferenceResult], topology: Topology
+        self, results: Sequence[DeviceEstimate], topology: Any
     ) -> None:
         """Realtime, event-driven re-derivation from stored raw history.
 

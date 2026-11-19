@@ -26,13 +26,16 @@ from ..contracts import (
     EventGroup,
     HAEvent,
     JointInferenceResult,
-    Measurement,
     MeasurementEvent,
     ReaderMeasurement,
-    Reconciliation,
-    Topology,
+    ReconciliationV3,
     VersionTriple,
 )
+
+# ZI: the legacy read view (``_active_topology`` / ``on_sample``) still consumes
+# the shared legacy Topology/Measurement values until ZC removes them.  They are
+# reached through the legacy namespace so this area binds no legacy name.
+from ..contracts import legacy as _legacy
 from ..device_links import device_for_entity, state_entity_for_device
 from ..electrical.operator import build_observation_operator
 from ..inference.matching import MatchStore
@@ -210,7 +213,7 @@ class RuntimeMixin:
             self._persist_batch(batch)
             await asyncio.sleep(0)
 
-    async def on_sample(self, measurement: Measurement) -> None:
+    async def on_sample(self, measurement: Any) -> None:
         self.samples_ingested += 1
         self.aligner.add(measurement)
         self.persist_queue.put_nowait(("sample", measurement))
@@ -382,7 +385,7 @@ class RuntimeMixin:
             )
             self.events_persisted += 1
 
-    def _active_topology(self) -> Topology | None:
+    def _active_topology(self) -> _legacy.Topology | None:
         if self.topology_cache is None:
             self.topology_cache = self.db.load_topology()
         return self.topology_cache
@@ -403,7 +406,7 @@ class RuntimeMixin:
         ct_id = str(getattr(channel, "ct_id", "") or "")
         return ct_id.endswith(("_energy", "_return_energy"))
 
-    def _power_window(self, topology: Topology) -> AlignedWindow:
+    def _power_window(self, topology: _legacy.Topology) -> AlignedWindow:
         """Aligned power window keyed by topology ``ct_id``.
 
         The aligner buffers are keyed by the Home Assistant entity id without its
@@ -433,7 +436,7 @@ class RuntimeMixin:
             channels[ct_id] = replace(channel, channel=ct_id)
         return AlignedWindow(at=raw.at, max_age_s=raw.max_age_s, channels=channels)
 
-    def _channel_health_for(self, topology: Topology) -> dict[str, ChannelHealth]:
+    def _channel_health_for(self, topology: _legacy.Topology) -> dict[str, ChannelHealth]:
         """Channel health keyed by topology ``ct_id`` (aligner uses entity names)."""
         health = self.aligner.channel_health()
         out: dict[str, ChannelHealth] = {}
@@ -480,7 +483,7 @@ class RuntimeMixin:
         return floors
 
     def _energy_window_for(
-        self, topology: Topology | None, max_age_s: float
+        self, topology: _legacy.Topology | None, max_age_s: float
     ) -> EnergyWindow:
         """Energy window keyed by topology ``ct_id`` where a channel is known.
 
@@ -633,11 +636,18 @@ class RuntimeMixin:
         if reconciliation is None and isinstance(batch, dict):
             reconciliation = batch.get("reconciliation")
         if results:
-            self.latest_results.update({r.device_id: r for r in results})
+            # v3 DeviceEstimate keys by ``subject_id``; the shared legacy result
+            # keyed by ``device_id``.  Support both without naming either model.
+            self.latest_results.update(
+                {
+                    str(getattr(r, "subject_id", None) or getattr(r, "device_id", "")): r
+                    for r in results
+                }
+            )
             self.db.insert_inference_results(results)
         if reconciliation is not None:
             if isinstance(reconciliation, dict):
-                reconciliation = Reconciliation.model_validate(reconciliation)
+                reconciliation = ReconciliationV3.model_validate(reconciliation)
             self.latest_reconciliation = reconciliation
             self.db.insert_reconciliation(reconciliation)
         # Track what the backend actually did so ``learning_active`` never

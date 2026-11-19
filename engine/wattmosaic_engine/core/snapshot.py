@@ -24,7 +24,6 @@ from ..contracts import (
     DeviceEstimate,
     DeviceGroupEstimate,
     EstimateStatus,
-    InferenceResult,
     InferenceSnapshot,
     JointInferenceResult,
     MeasurementBasis,
@@ -35,9 +34,13 @@ from ..contracts import (
     ReconciliationV3,
     SnapshotId,
     SnapshotResponse,
-    Topology,
     VersionTriple,
 )
+
+# ZI: the legacy read view (``SnapshotMixin``) still serves the shared legacy
+# response contract and legacy topology until ZC removes them.  Both are reached
+# through the legacy module namespace so this area binds no legacy name.
+from ..contracts import legacy as _legacy
 from ..mapping.display_tree import TREE_VERSION, build_display_tree
 from .rows import row_to_inference_result, row_to_reconciliation
 
@@ -591,7 +594,7 @@ class SnapshotMixin:
         merged.update(self.latest_results)
         return merged
 
-    def _latest_result_from_db(self, device_id: str) -> InferenceResult | None:
+    def _latest_result_from_db(self, device_id: str) -> _legacy.InferenceResult | None:
         try:
             rows = self.db.latest_inference_results()
         except Exception:  # noqa: BLE001
@@ -605,7 +608,7 @@ class SnapshotMixin:
         return None
 
     def _effective_configurations(
-        self, topology: Topology | None
+        self, topology: _legacy.Topology | None
     ) -> dict[str, Any]:
         """Resolve every device's effective configuration once per call.
 
@@ -664,7 +667,7 @@ class SnapshotMixin:
         }
 
     @staticmethod
-    def _tier_text(result: InferenceResult | None) -> str | None:
+    def _tier_text(result: _legacy.InferenceResult | None) -> str | None:
         if result is None:
             return None
         tier = getattr(result, "confidence_tier", None)

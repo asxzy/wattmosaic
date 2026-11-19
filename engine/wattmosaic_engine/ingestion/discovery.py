@@ -17,7 +17,7 @@ documented behaviour ("WattMosaic discovers CT channels and proposes device
 mappings", ``docs/installation.md`` §5) did not exist: the function below was
 reachable only from its own unit tests.
 
-The result is always ``TopologyStatus.CANDIDATE``.  Nothing here is committed as
+The result is always ``_legacy.TopologyStatus.CANDIDATE``.  Nothing here is committed as
 fact; the integration's confirmation flow (or ``POST /topology/confirm``) is what
 turns a candidate into a confirmed topology.
 
@@ -73,22 +73,22 @@ from datetime import datetime
 from typing import Any
 
 from ..contracts import (
-    CTChannel,
-    CTType,
-    DeviceTopology,
     EndpointKind,
     EndpointScope,
     HaEntityLink,
     HaEntityRole,
     MeasurementEndpoint,
-    Phase,
     PhysicalDevice,
-    Polarity,
     ScopeStatus,
-    Topology,
-    TopologyStatus,
     utcnow,
 )
+
+# ZI: the legacy _legacy.Topology/_legacy.CTChannel/_legacy.DeviceTopology contracts are still produced
+# by the startup-discovery seam because the shared TopologyApiMixin, the display
+# tree and the storage facade (owned by other areas) still consume them.  They
+# are reached through the legacy module namespace so this area binds no legacy
+# contract name; ZC removes the shared models at the final cutover.
+from ..contracts import legacy as _legacy
 from .normalize import canonical_unit, entity_allowed, is_own_entity
 
 #: A hardware device must expose at least this many power entities before it can
@@ -119,12 +119,12 @@ def _panel_prefix(panel: str) -> str:
     return cleaned or "panel"
 
 
-def _phase_for_leg(leg: int) -> Phase:
+def _phase_for_leg(leg: int) -> _legacy.Phase:
     if leg == 1:
-        return Phase.L1
+        return _legacy.Phase.L1
     if leg == 2:
-        return Phase.L2
-    return Phase.UNKNOWN
+        return _legacy.Phase.L2
+    return _legacy.Phase.UNKNOWN
 
 
 def _is_aggregate(object_id: str) -> bool:
@@ -473,8 +473,8 @@ def discover_candidate_topology(
     allow_entities: Iterable[str] | None = None,
     deny_entities: Iterable[str] | None = None,
     enabled: bool = True,
-) -> Topology:
-    """Build a candidate ``Topology`` from Home Assistant states.
+) -> _legacy.Topology:
+    """Build a candidate ``_legacy.Topology`` from Home Assistant states.
 
     Only power entities published by a multi-channel monitor become channels, and
     devices are emitted for every load channel so the result passes the API's
@@ -507,8 +507,8 @@ def discover_candidate_topology(
 
     grouped = _power_entities_by_device(state_list, entities)
 
-    channels: list[CTChannel] = []
-    devices: list[DeviceTopology] = []
+    channels: list[_legacy.CTChannel] = []
+    devices: list[_legacy.DeviceTopology] = []
 
     for hardware_id in sorted(grouped):
         power = sorted(grouped[hardware_id])
@@ -563,7 +563,7 @@ def discover_candidate_topology(
                 channels.append(
                     _channel(
                         entity_id,
-                        ct_type=CTType.MAIN,
+                        ct_type=_legacy.CTType.MAIN,
                         ct_id=ct_ids[leg],
                         phase=_phase_for_leg(leg),
                         paired_ct_id=ct_ids[2] if leg == 1 else ct_ids[1],
@@ -597,9 +597,9 @@ def discover_candidate_topology(
                     [
                         _channel(
                             entity_id if leg == 1 else mate,
-                            ct_type=CTType.BRANCH,
+                            ct_type=_legacy.CTType.BRANCH,
                             ct_id=ct_l1,
-                            phase=Phase.L1,
+                            phase=_legacy.Phase.L1,
                             paired_ct_id=ct_l2,
                             enabled=enabled,
                             panel=panel,
@@ -610,9 +610,9 @@ def discover_candidate_topology(
                         ),
                         _channel(
                             mate if leg == 1 else entity_id,
-                            ct_type=CTType.BRANCH,
+                            ct_type=_legacy.CTType.BRANCH,
                             ct_id=ct_l2,
-                            phase=Phase.L2,
+                            phase=_legacy.Phase.L2,
                             paired_ct_id=ct_l1,
                             enabled=enabled,
                             panel=panel,
@@ -624,7 +624,7 @@ def discover_candidate_topology(
                     ]
                 )
                 devices.append(
-                    DeviceTopology(
+                    _legacy.DeviceTopology(
                         # DEC-04: discovery no longer mints ``dev_<ct>`` devices.
                         # These are HA/stem-derived Physical Device ids; legacy
                         # ``dev_*`` rows are preserved verbatim by S13 and offered
@@ -632,9 +632,9 @@ def discover_candidate_topology(
                         device_id=f"pd_{base}",
                         name=_display_name(stem, slug) or panel,
                         branch_ct_ids=[ct_l1, ct_l2],
-                        phase=Phase.BOTH,
+                        phase=_legacy.Phase.BOTH,
                         double_pole=True,
-                        topology_status=TopologyStatus.CANDIDATE,
+                        topology_status=_legacy.TopologyStatus.CANDIDATE,
                         metadata={
                             "note": "two-pole load; combined power is the sum of both legs",
                             "ct_group": [ct_l1, ct_l2],
@@ -678,7 +678,7 @@ def discover_candidate_topology(
             channels.append(
                 _channel(
                     entity_id,
-                    ct_type=CTType.BRANCH,
+                    ct_type=_legacy.CTType.BRANCH,
                     ct_id=ct_id,
                     phase=_phase_for_leg(leg),
                     enabled=enabled,
@@ -691,12 +691,12 @@ def discover_candidate_topology(
                 )
             )
             devices.append(
-                DeviceTopology(
+                _legacy.DeviceTopology(
                     device_id=device_id,
                     name=_display_name(local_stem, slug),
                     branch_ct_ids=[ct_id],
                     phase=_phase_for_leg(leg),
-                    topology_status=TopologyStatus.CANDIDATE,
+                    topology_status=_legacy.TopologyStatus.CANDIDATE,
                     metadata={
                         "note": (
                             "single CT on one conductor; the circuit may feed "
@@ -716,10 +716,10 @@ def discover_candidate_topology(
         "Double-pole pairs derived from *_ct1/*_ct2 naming only.",
         "A device's state entity is not guessed; link it in the integration wizard.",
     ]
-    return Topology(
+    return _legacy.Topology(
         version=1,
         created_at=utcnow(),
-        status=TopologyStatus.CANDIDATE,
+        status=_legacy.TopologyStatus.CANDIDATE,
         channels=channels,
         devices=devices,
         notes=notes,
@@ -747,16 +747,16 @@ def _is_genuine_pair(stem: str, legs: Mapping[str, Mapping[int, str]]) -> bool:
 def _channel(
     entity_id: str,
     *,
-    ct_type: CTType,
+    ct_type: _legacy.CTType,
     ct_id: str,
-    phase: Phase,
+    phase: _legacy.Phase,
     enabled: bool,
     panel: str,
     evidence: list[str],
     paired_ct_id: str | None = None,
     device_id: str | None = None,
     attributes: Mapping[str, Any] | None = None,
-) -> CTChannel:
+) -> _legacy.CTChannel:
     polarity, polarity_evidence = _polarity_from_reading(attributes)
     metadata: dict[str, Any] = {
         "evidence": [*evidence, f"entity={entity_id}", f"panel={panel}"],
@@ -764,7 +764,7 @@ def _channel(
     }
     if polarity_evidence is not None:
         metadata["polarity_evidence"] = polarity_evidence
-    return CTChannel(
+    return _legacy.CTChannel(
         ct_id=ct_id,
         entity_id=entity_id,
         name=_display_name(ct_id, _panel_prefix(panel)),
@@ -774,7 +774,7 @@ def _channel(
         paired_ct_id=paired_ct_id,
         device_id=device_id,
         enabled=bool(enabled),
-        topology_status=TopologyStatus.CANDIDATE,
+        topology_status=_legacy.TopologyStatus.CANDIDATE,
         metadata=metadata,
         panel_id=_panel_prefix(panel),
         panel_name=panel,
@@ -783,7 +783,7 @@ def _channel(
 
 def _polarity_from_reading(
     attributes: Mapping[str, Any] | None,
-) -> tuple[Polarity, str | None]:
+) -> tuple[_legacy.Polarity, str | None]:
     """Derive polarity from the observed sign, never from a guess.
 
     A CT installed backwards reports a negative wattage.  With the default
@@ -799,17 +799,17 @@ def _polarity_from_reading(
     the reason is written into ``metadata`` so the decision is auditable.
     """
     if not attributes:
-        return Polarity.NORMAL, None
+        return _legacy.Polarity.NORMAL, None
     raw = attributes.get("_reading_w")
     if not isinstance(raw, (int, float)):
-        return Polarity.NORMAL, None
+        return _legacy.Polarity.NORMAL, None
     if raw < 0:
         return (
-            Polarity.INVERTED,
+            _legacy.Polarity.INVERTED,
             f"observed reading {raw:.1f} W is negative; treated as reversed CT "
             "(single snapshot — confirm before relying on it)",
         )
-    return Polarity.NORMAL, None
+    return _legacy.Polarity.NORMAL, None
 
 
 def _display_name(stem: str, slug: str) -> str:
