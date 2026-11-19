@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
@@ -289,6 +289,8 @@ class VersionService:
     reads the wall clock.  ``model_set_id`` is the L1 registry's model-set id
     for the current model versions; it is injected here and copied verbatim into
     every assembled triple (the model lifecycle is not owned by this service).
+    :meth:`bind_model_set` replaces the injected constant with a live source
+    (the registry), so a model activation is reported by :meth:`current`.
     """
 
     def __init__(
@@ -304,6 +306,7 @@ class VersionService:
         self._map = mapping_repo
         self._clock = clock
         self._model_set_id = model_set_id
+        self._model_set_source: Callable[[], str] | None = None
         self._matrix_store = matrix_store
         self._topo_views: dict[str, _FrozenTopologyView] = {}
         self._map_views: dict[str, _FrozenMappingView] = {}
@@ -333,6 +336,24 @@ class VersionService:
 
     # -- triple assembly ---------------------------------------------------- #
 
+    def bind_model_set(self, source: Callable[[], str] | None) -> None:
+        """Read the model-set id from ``source`` (L1's registry) from now on.
+
+        The model lifecycle stays L1's: this service only *reports* the id the
+        registry derives from its persisted active set (content-derived, so it
+        is deterministic and identical after a restart).  ``None`` unbinds and
+        falls back to the injected constant.
+        """
+        self._model_set_source = source
+        if source is not None:
+            self._model_set_id = str(source())
+
+    def _current_model_set_id(self) -> str:
+        source = self._model_set_source
+        if source is not None:
+            self._model_set_id = str(source())
+        return self._model_set_id
+
     def current(self) -> VersionTriple:
         topo = self._topo.active_version()
         topology_id = str(topo["version_id"]) if topo is not None else "topo-1"
@@ -340,7 +361,7 @@ class VersionService:
         return VersionTriple(
             topology_version_id=topology_id,
             mapping_version_id=mapping_id,
-            model_set_id=self._model_set_id,
+            model_set_id=self._current_model_set_id(),
         )
 
     def as_of(self, at: datetime | str) -> VersionTriple:
@@ -356,7 +377,7 @@ class VersionService:
         time (using the injected clock); pre-existing (backfilled) versions are
         seeded from their ``created_at``.  Ties break on the monotone version
         number, so the answer is deterministic.  The model-set id is not
-        versioned here, so the injected value is used.
+        versioned here, so the current (bound or injected) value is used.
         """
         if isinstance(at, str):
             # A version-id lookup: honour the prior version explicitly rather
@@ -371,14 +392,14 @@ class VersionService:
                 mapping_version_id=self._as_of_version(
                     self._mapping_versions(), self._map_activated, stamp, "map-1"
                 ),
-                model_set_id=self._model_set_id,
+                model_set_id=self._current_model_set_id(),
             )
         topo_id = self._as_of_version(self._topo.versions(), self._topo_activated, at, "topo-1")
         map_id = self._as_of_version(self._mapping_versions(), self._map_activated, at, "map-1")
         return VersionTriple(
             topology_version_id=topo_id,
             mapping_version_id=map_id,
-            model_set_id=self._model_set_id,
+            model_set_id=self._current_model_set_id(),
         )
 
     @staticmethod
@@ -412,7 +433,7 @@ class VersionService:
         model version; the id is a set id from L1's registry, so the same value
         is returned for every subject.  No power-model write API is touched.
         """
-        return self._model_set_id
+        return self._current_model_set_id()
 
     # -- views ------------------------------------------------------------- #
 

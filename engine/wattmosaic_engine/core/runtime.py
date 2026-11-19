@@ -28,6 +28,7 @@ from ..contracts import (
     JointInferenceResult,
     MeasurementEvent,
     ReaderMeasurement,
+    ReaderResidualPoint,
     VersionTriple,
 )
 from ..electrical.operator import build_observation_operator
@@ -49,7 +50,7 @@ from ..realtime.detection import ChangeDetector
 from ..realtime.grouping import GroupingEngine
 from ..realtime.reader_state import ReaderStateStore
 from ..realtime.windows import WindowCollector
-from ..residual.reader_residual import UnknownPriorModel
+from ..residual.reader_residual import ReaderResidualEngine, UnknownPriorModel
 from ..versioning.service import VersionService
 from .discovery_api import TOPOLOGY_BOOTSTRAP_WAIT_S
 from .executors import BackgroundExecutor
@@ -359,6 +360,9 @@ class RuntimeMixin:
         #: group's sum from its reader (DEC-22 established structure).
         self._established_groups: dict[str, tuple[str, ...]] = {}
         self._group_off_level: dict[str, float] = {}
+        #: Latest T3 residual point per reader (steady and event publishes).
+        self._latest_residuals: dict[str, ReaderResidualPoint] = {}
+        self.last_model_set_change: dict[str, Any] | None = None
         self._last_heartbeat_wall = time.monotonic()
 
     def _wire_v3_services(self) -> None:
@@ -376,7 +380,13 @@ class RuntimeMixin:
             DatabaseModelRepository(db), clock=self._clock
         )
         self.model_registry_v3.refresh()
-        self.version_service._model_set_id = str(self.model_registry_v3.model_set_id)
+        # The triple's model set is the registry's live, content-derived id
+        # (persisted through the append-only model event log, so a restart on
+        # the same DB reports the same id).  An activation, rollback or L6
+        # promotion advances it for every later snapshot, record and matrix cell.
+        registry = self.model_registry_v3
+        self.version_service.bind_model_set(lambda: str(registry.model_set_id))
+        registry.add_listener(self._on_model_set_changed)
         self.matrix_updater = MatrixUpdater(
             store=self._live_matrix_store(),
             versions=self.version_service,
@@ -729,6 +739,94 @@ class RuntimeMixin:
             return ()
         return topology_root_readers(view)
 
+    def _reader_residual_points(
+        self, result: JointInferenceResult, held: Mapping[str, Any], at: datetime
+    ) -> list[ReaderResidualPoint]:
+        """The latest per-reader residual points for the snapshot (T3, HB §12.1).
+
+        ``R_r = Y_r − Σ_c β·Y_c − Σ_i H_ri·P̂_i`` for every reader of the
+        result's topology (roots, parents and leaves alike), computed by the T3
+        :class:`ReaderResidualEngine` over the full observation operator and
+        the estimates the snapshot is about to publish (the published ones,
+        overwritten by this result's).  Steady and event results both land
+        here, so the points always reflect the latest publish.
+
+        Only a ``held`` reading that passed the D3 quality gate is a value; a
+        stale, missing or excluded reader has ``residual_w=None`` (HB §18), and
+        so does any parent whose own reading is absent.
+        """
+        service = self.version_service
+        versions = result.versions
+        if service is None:
+            return []
+        try:
+            topo_view = service.topology_view(versions.topology_version_id)
+            map_view = service.mapping_view(versions.mapping_version_id)
+        except Exception:  # noqa: BLE001 - unknown version: no residual claim
+            return []
+        readers: set[str] = {str(r) for r in held}
+        for edge in topo_view.edges():
+            readers.add(str(edge.source_endpoint_id))
+            readers.add(str(edge.target_endpoint_id))
+        reader_ids = tuple(sorted(readers))
+        subjects: set[tuple[str, str]] = set()
+        for reader in reader_ids:
+            subjects.update((str(k), str(s)) for k, s in map_view.subjects_on(reader))
+        operator = build_observation_operator(
+            topo_view, map_view, None, reader_ids, tuple(sorted(subjects)), at
+        )
+        excluded = set(excluded_readers(self.latest_quality))
+        usable = {
+            str(reader): reading
+            for reader, reading in held.items()
+            if str(reader) not in excluded
+            and str(getattr(reading, "state", "held")) == "held"
+            and getattr(reading, "value", None) is not None
+        }
+        # The estimates the snapshot will publish: prior published ones, then
+        # this result's overwrite the subjects/groups it names (D4's merge).
+        base = self.snapshot_assembler.current if self.snapshot_assembler else None
+        devices = {e.subject_id: e for e in (base.device_estimates if base else ())}
+        devices.update({e.subject_id: e for e in result.device_estimates})
+        groups = {g.group_id: g for g in (base.group_estimates if base else ())}
+        groups.update({g.group_id: g for g in result.group_estimates})
+        merged = result.model_copy(
+            update={
+                "device_estimates": [devices[k] for k in sorted(devices)],
+                "group_estimates": [groups[k] for k in sorted(groups)],
+            }
+        )
+        sigma = {reader: self.reader_state.sigma(reader) for reader in reader_ids}
+        topology_version_id = str(versions.topology_version_id)
+        points = [
+            # Stamp the D1 topology version (the operator's id is a cache hash).
+            point.model_copy(update={"topology_version_id": topology_version_id})
+            for point in ReaderResidualEngine(noise_sigma_w=sigma).update(
+                merged, usable, operator
+            )
+        ]
+        # Keep the latest point per reader under the current topology version;
+        # a point computed under a superseded topology is no longer current.
+        latest = {
+            reader: point
+            for reader, point in self._latest_residuals.items()
+            if point.topology_version_id == topology_version_id
+        }
+        latest.update({point.reader_id: point for point in points})
+        self._latest_residuals = latest
+        return [latest[reader] for reader in sorted(latest)]
+
+    def _on_model_set_changed(self, model_set_id: str) -> None:
+        """L1 registry hook: an activation/rollback/promotion changed the set.
+
+        The version service already reads the registry's id live; event groups
+        formed from now on must carry the new triple too (they are stamped by
+        the grouping engine), so records and matrix writes cite the new set.
+        """
+        self.last_model_set_change = {"model_set_id": model_set_id, "at": self._clock()}
+        if self.grouping_engine is not None and self.version_service is not None:
+            self.grouping_engine.versions = self.version_service.current()
+
     def _parent_readers(self) -> frozenset[str]:
         """Readers that are CONTAINS parents in the declared topology."""
         versions = self.version_service
@@ -901,6 +999,11 @@ class RuntimeMixin:
         if self.snapshot_assembler is not None:
             try:
                 held = self.reader_state.held_all(at)
+                try:
+                    residual_points = self._reader_residual_points(result, held, at)
+                except Exception:  # noqa: BLE001 - no residual claim, never a fake one
+                    log.exception("reader residual computation failed")
+                    residual_points = []
                 self.snapshot_assembler.on_result(
                     result,
                     held,
@@ -909,6 +1012,7 @@ class RuntimeMixin:
                         result=result,
                         held_readings=held,
                         quality=self.latest_quality,
+                        residual_points=residual_points,
                         stale_sources=stale_sources_from_quality(self.latest_quality),
                         root_reader_ids=self._root_readers(result.versions),
                     ),

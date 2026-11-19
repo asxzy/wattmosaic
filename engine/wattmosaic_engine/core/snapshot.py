@@ -340,7 +340,12 @@ class SnapshotAssembler:
         # a distinct id (S17's table has a UNIQUE constraint on snapshot_id) and
         # an unchanged state gets the same id — which ``put_snapshot`` then
         # deduplicates by content hash.
+        # The version triple and the residual points are content too: a new model
+        # set (or residual) with otherwise identical estimates is a changed
+        # snapshot, and S17 hashes both, so reusing the old id would collide.
         payload = {
+            "versions": versions.model_dump(mode="json"),
+            "residuals": [r.model_dump(mode="json") for r in residuals],
             "devices": [
                 devices[key].model_dump(mode="json") for key in sorted(devices)
             ],

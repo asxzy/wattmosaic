@@ -19,7 +19,11 @@ class ModelsApiMixin:
         The event loop owns ``model_registry_v3``; this builds a read-side
         registry lazily so the HTTP read path works on a fresh ``EngineCore``.
         """
-        registry = getattr(self, "_model_registry_v3", None)
+        # Prefer the runtime's registry: it is the one bound to the version
+        # service, so a lifecycle change made here advances the live model set.
+        registry = getattr(self, "model_registry_v3", None)
+        if registry is None:
+            registry = getattr(self, "_model_registry_v3", None)
         if registry is not None:
             return registry
         try:

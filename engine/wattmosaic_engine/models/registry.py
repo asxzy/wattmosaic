@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -122,6 +122,31 @@ class Registry(ModelSetView):
         self._cache: OrderedDict[tuple[str, str], PowerPrediction] = OrderedDict()
         self._lock = threading.RLock()
         self._active_set = ActiveSet(model_set_id=make_model_set_id([]))
+        self._listeners: list[Callable[[ModelSetId], None]] = []
+
+    # -- model-set change notification ------------------------------------- #
+    def add_listener(self, callback: Callable[[ModelSetId], None]) -> None:
+        """Call ``callback(new_model_set_id)`` whenever the active set changes.
+
+        The id is content-derived (``mset-<sha256[:12]>`` of the sorted active
+        version ids), so it is deterministic and survives a restart: a fresh
+        registry on the same database derives the same id from the persisted
+        append-only event log.
+        """
+        with self._lock:
+            self._listeners.append(callback)
+
+    def _active_set_changed(self) -> None:
+        """Rebuild the active set after a lifecycle append; notify on a change."""
+        with self._lock:
+            before = self._active_set.model_set_id
+            after = self.refresh()
+            listeners = tuple(self._listeners) if after != before else ()
+        for callback in listeners:
+            try:
+                callback(after)
+            except Exception:  # noqa: BLE001 - a listener must not undo the activation
+                _LOGGER.exception("model-set listener failed")
 
     # -- helpers ----------------------------------------------------------- #
     def _row_to_version(self, row: Any) -> PowerModelVersion | None:
@@ -196,6 +221,7 @@ class Registry(ModelSetView):
             )
         )
         self.invalidate(version.subject_id)
+        self._active_set_changed()
 
     def reject(self, version_id: str, *, reason: str = "rejected") -> None:
         """Append a ``rejected`` event (a terminal state)."""
@@ -207,6 +233,7 @@ class Registry(ModelSetView):
                 at=self._now(),
             )
         )
+        self._active_set_changed()
 
     def rollback(self, subject_id: str, *, reason: str = "rollback") -> str | None:
         """Reactivate the last version whose log shows ``activated``.
@@ -259,6 +286,7 @@ class Registry(ModelSetView):
             )
         )
         self.invalidate(subject_id)
+        self._active_set_changed()
         return target
 
     def mark_polarity_defect(
@@ -292,6 +320,7 @@ class Registry(ModelSetView):
             marked.append(version.version_id)
         if marked:
             self.invalidate(subject_id)
+            self._active_set_changed()
         return marked
 
     def freeze(self, subject_id: str, *, reason: str = "frozen") -> None:

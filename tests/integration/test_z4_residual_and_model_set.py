@@ -1,0 +1,296 @@
+"""Z4: live reader residuals reach the snapshot; model activation advances the set.
+
+* After a steady pass the published snapshot carries the T3 per-reader residual
+  points, and ``reconciliation.residual_w`` is the topology root's residual
+  (HB §12.1).  A missing root residual publishes ``None``, never 0 W (HB §18).
+* An event-path publish refreshes the same points against the event estimates.
+* Activating a power model advances ``VersionTriple.model_set_id`` (HB §13) for
+  the next snapshot and for event groups formed afterwards, and a restart on the
+  same database reports the same, content-derived id.
+
+Reader and subject names are deliberately unlike the HB §17 house.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
+from wattmosaic_engine.config.settings import EngineConfig
+from wattmosaic_engine.contracts import (
+    Bounds,
+    ConfidenceVectorV3,
+    ConfigurationEvent,
+    DataQualityReport,
+    DeviceEstimate,
+    EdgeEvidence,
+    EdgeLifecycleV3,
+    EstimateStatus,
+    EventGroup,
+    EventGroupStatus,
+    EvidenceRef,
+    FixedSpec,
+    IdentifiabilityStatus,
+    InferenceMethod,
+    JointInferenceResult,
+    LevelStat,
+    MappingEdge,
+    MeasurementBasis,
+    MeasurementType,
+    ModelBasis,
+    ModelClass,
+    Observability,
+    PowerLevelV3,
+    PowerModelVersion,
+    ReaderMeasurement,
+    ReaderResidualPoint,
+    RelationType,
+    TopologyEdgeV3,
+    VersionTriple,
+)
+from wattmosaic_engine.contracts import model_set_id as make_model_set_id
+from wattmosaic_engine.core.snapshot import AssembleInputs, SnapshotAssembler
+from wattmosaic_engine.main import EngineCore
+from wattmosaic_engine.storage.database import Database
+
+T0 = datetime(2026, 3, 1, tzinfo=UTC)
+FEED = "feed_l1"
+FEED_2 = "feed_l2"
+KITCHEN = "kitchen_ckt"
+DISHWASHER = "dishwasher"
+
+
+def _topo_edge(edge_id: str, parent: str, child: str) -> TopologyEdgeV3:
+    return TopologyEdgeV3(
+        edge_id=edge_id, relation=RelationType.CONTAINS, source_endpoint_id=parent,
+        target_endpoint_id=child, lifecycle=EdgeLifecycleV3.CONFIRMED, declared_by="user",
+        beta=1.0, beta_basis="unity", evidence=EdgeEvidence(support=8, independent_causes=2),
+        valid_from=T0, pinned=True,
+    )
+
+
+def _map_edge(edge_id: str, subject: str, endpoint: str) -> MappingEdge:
+    return MappingEdge(
+        mapping_edge_id=edge_id, subject_kind="device", subject_id=subject, endpoint_id=endpoint,
+        observability=Observability.DIRECT, lifecycle=EdgeLifecycleV3.CONFIRMED,
+        declared_by="migration", evidence=EdgeEvidence(support=8, independent_causes=2),
+        valid_from=T0,
+    )
+
+
+def _reading(reader: str, value: float, at: datetime, seq: int) -> ReaderMeasurement:
+    return ReaderMeasurement(
+        reader_id=reader, observed_at=at, received_at=at, active_power_w=value, phase="l1",
+        leg=None, voltage_reference_v=None, measurement_type=MeasurementType.INSTANTANEOUS,
+        measurement_window_ms=1000, calibration_version="t@1", measurement_basis="instantaneous",
+        quality_flags=[], sequence=seq,
+    )
+
+
+def _core(path: Path, now: list[datetime]) -> EngineCore:
+    db = Database(path)
+    core = EngineCore(EngineConfig(database_path=str(path), ha_token="x"), db, clock=lambda: now[0])
+    core._wire_v3_services()
+    return core
+
+
+def _declare(core: EngineCore, roots: tuple[str, ...]) -> None:
+    """Promote a topology (each root contains the kitchen circuit) and a mapping."""
+    versions = core.version_service
+    event = versions.record_configuration_event(
+        ConfigurationEvent(
+            event_id="evt-z4", kind="smart_plug_relocation", detection="declared",
+            status="confirmed", affected_endpoint_ids=[], affected_edge_ids=[],
+            affected_mapping_edge_ids=[], created_at=T0,
+        )
+    )
+    edges = [_topo_edge(f"te-{i}", root, KITCHEN) for i, root in enumerate(roots[:1])]
+    edges += [_topo_edge(f"te-x{i}", root, f"{root}_spare") for i, root in enumerate(roots[1:])]
+    versions.promote_topology(versions.propose_topology(edges, event), "declared")
+    versions.promote_mapping(
+        versions.propose_mapping([_map_edge("me-1", DISHWASHER, KITCHEN)], event), "declared"
+    )
+
+
+def _feed(core: EngineCore, now: list[datetime], levels: dict[str, list[float]]) -> None:
+    """Report every reader each 15 s, continuing from the current instant."""
+    start = now[0]
+    ticks = len(next(iter(levels.values())))
+    for tick in range(ticks):
+        now[0] = start + timedelta(seconds=15 * (tick + 1))
+        for offset, (reader, values) in enumerate(sorted(levels.items())):
+            seq = 100_000 * offset + int((now[0] - T0).total_seconds())
+            asyncio.run(core.on_reading(_reading(reader, values[tick], now[0], seq)))
+
+
+def _stepped(before: float, after: float) -> list[float]:
+    return [before] * 19 + [after] * 10
+
+
+def _model_version(subject: str, number: int) -> PowerModelVersion:
+    return PowerModelVersion(
+        version_id=f"mdl-{subject}-{number}", subject_kind="device", subject_id=subject,
+        number=number, model_class=ModelClass.FIXED, basis=ModelBasis.DELTA,
+        spec=FixedSpec(levels={PowerLevelV3.ACTIVE: LevelStat(median_w=1800.0, n=5)}),
+        evidence_refs=[EvidenceRef(kind="event_group", id=f"grp-{number}")],
+        trainer_version="test", created_at=T0,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Residuals.
+# --------------------------------------------------------------------------- #
+
+
+def test_steady_pass_publishes_the_root_residual_and_per_reader_points(tmp_path: Path) -> None:
+    now = [T0]
+    core = _core(tmp_path / "z4.db", now)
+    _declare(core, (FEED,))
+    _feed(core, now, {FEED: _stepped(600.0, 2400.0), KITCHEN: _stepped(400.0, 2150.0)})
+    core._steady_pass()
+
+    snapshot = core.snapshot_v3()
+    assert snapshot is not None
+    points = {p.reader_id: p for p in snapshot.residual_estimates}
+    assert set(points) == {FEED, KITCHEN}
+    # R_root = Y_root - beta*Y_child (no subject is mapped directly on the feed).
+    assert points[FEED].residual_w == pytest.approx(2400.0 - 2150.0)
+    # Nothing explains the kitchen circuit yet: its whole level is residual.
+    assert points[KITCHEN].residual_w == pytest.approx(2150.0)
+    triple = core.version_service.current()
+    assert {p.topology_version_id for p in points.values()} == {triple.topology_version_id}
+    assert snapshot.reconciliation.residual_w == pytest.approx(points[FEED].residual_w)
+    assert snapshot.reconciliation.main_w == pytest.approx(2400.0)
+
+
+def test_event_publish_refreshes_residuals_against_the_event_estimates(tmp_path: Path) -> None:
+    now = [T0]
+    core = _core(tmp_path / "z4.db", now)
+    _declare(core, (FEED,))
+    _feed(core, now, {FEED: _stepped(600.0, 2400.0), KITCHEN: _stepped(400.0, 2150.0)})
+    core._steady_pass()
+
+    triple = core.version_service.current()
+    estimate = DeviceEstimate(
+        subject_kind="device", subject_id=DISHWASHER, point_w=1750.0,
+        bounds=Bounds(lower_w=1700.0, upper_w=1800.0), status=EstimateStatus.ESTIMATED,
+        identifiability=IdentifiabilityStatus.IDENTIFIABLE, method=InferenceMethod.JOINT_DELTA,
+        confidence=ConfidenceVectorV3(), source_reader_ids=[KITCHEN], evidence_refs=[],
+        versions=triple, updated_at=now[0],
+    )
+    result = JointInferenceResult(
+        event_group_id="grp-z4", event_group_revision=1, status=EventGroupStatus.CONFIRMED,
+        device_estimates=[estimate], group_estimates=[], unknown_estimates=[], candidates=[],
+        matches={}, residual_w_by_reader={KITCHEN: 0.0}, versions=triple, computed_at=now[0],
+    )
+    group = EventGroup(
+        group_id="grp-z4", revision=1, status=EventGroupStatus.CONFIRMED, opened_at=now[0],
+        versions=triple,
+    )
+    core._publish_group_result(group, result, {"operator": None})
+
+    snapshot = core.snapshot_v3()
+    points = {p.reader_id: p.residual_w for p in snapshot.residual_estimates}
+    assert points[KITCHEN] == pytest.approx(2150.0 - 1750.0)
+    assert points[FEED] == pytest.approx(2400.0 - 2150.0)
+    assert snapshot.reconciliation.residual_w == pytest.approx(250.0)
+    assert snapshot.reconciliation.identified_w == pytest.approx(1750.0)
+
+
+def test_a_missing_root_residual_publishes_none(tmp_path: Path) -> None:
+    now = [T0]
+    core = _core(tmp_path / "z4.db", now)
+    _declare(core, (FEED, FEED_2))  # two roots; the second never reports
+    _feed(core, now, {FEED: _stepped(600.0, 2400.0), KITCHEN: _stepped(400.0, 2150.0)})
+    core._steady_pass()
+
+    snapshot = core.snapshot_v3()
+    points = {p.reader_id: p.residual_w for p in snapshot.residual_estimates}
+    assert points[FEED] == pytest.approx(250.0)
+    assert points[FEED_2] is None  # no reading: unknown, never 0 W
+    assert snapshot.reconciliation.residual_w is None
+    assert snapshot.reconciliation.main_w is None
+
+
+def test_balance_error_is_computable_once_every_term_exists() -> None:
+    versions = VersionTriple(topology_version_id="topo-9", mapping_version_id="map-9", model_set_id="mset-z")
+    result = JointInferenceResult(
+        device_estimates=[], group_estimates=[], unknown_estimates=[], candidates=[], matches={},
+        residual_w_by_reader={}, versions=versions, computed_at=T0, status=EventGroupStatus.CONFIRMED,
+    )
+    assembler = SnapshotAssembler(type("S", (), {"put_snapshot": lambda self, s: True})(), lambda: T0)
+    point = ReaderResidualPoint(
+        reader_id=FEED, at=T0, residual_w=250.0, topology_version_id="topo-9",
+        basis=MeasurementBasis.UNKNOWN,
+    )
+    snapshot = assembler.on_result(
+        result,
+        inputs=AssembleInputs(
+            result=result, held_readings={FEED: {"value": 2400.0}},
+            quality=DataQualityReport(timestamp=T0), residual_points=[point],
+            root_reader_ids=(FEED,),
+        ),
+    )
+    recon = snapshot.reconciliation
+    assert recon.residual_w == pytest.approx(250.0)
+    assert recon.balance_error_w is None  # identified/group/unknown absent (HB §18)
+    complete = recon.model_copy(update={"identified_w": 1750.0, "group_w": 0.0, "unknown_w": 0.0})
+    assert complete.balance_error_w == pytest.approx(2400.0 - 1750.0 - 250.0)
+
+
+# --------------------------------------------------------------------------- #
+# Model set.
+# --------------------------------------------------------------------------- #
+
+
+def test_activation_advances_the_model_set_and_survives_a_restart(tmp_path: Path) -> None:
+    now = [T0]
+    path = tmp_path / "z4.db"
+    core = _core(path, now)
+    _declare(core, (FEED,))
+    _feed(core, now, {FEED: _stepped(600.0, 2400.0), KITCHEN: _stepped(400.0, 2150.0)})
+    core._steady_pass()
+    before = core.snapshot_v3().versions.model_set_id
+    assert before == make_model_set_id([])
+
+    registry = core.model_registry_v3
+    version = registry.propose(_model_version(DISHWASHER, 1))
+    registry.activate(version.version_id)
+    expected = make_model_set_id([version.version_id])
+    assert core.version_service.current().model_set_id == expected
+    # Groups formed from now on (event records, matrix writes) carry it too.
+    assert core.grouping_engine.versions.model_set_id == expected
+
+    # The next snapshot reports the new set.
+    _feed(core, now, {FEED: [3000.0] * 8, KITCHEN: [2700.0] * 8})
+    core._steady_pass()
+    snapshot = core.snapshot_v3()
+    assert snapshot.versions.model_set_id == expected != before
+    assert snapshot.reconciliation.main_w == pytest.approx(3000.0)
+    assert snapshot.reconciliation.residual_w == pytest.approx(300.0)
+    stored = core.db.repos.inference.latest_snapshot()
+    assert stored is not None and stored["model_set_id"] == expected
+
+    # A restart on the same DB derives the same id from the persisted log.
+    restarted = _core(path, now)
+    assert restarted.version_service.current().model_set_id == expected
+    assert restarted.version_service.model_version_id(DISHWASHER) == expected
+
+
+def test_rollback_restores_the_earlier_model_set(tmp_path: Path) -> None:
+    now = [T0]
+    core = _core(tmp_path / "z4.db", now)
+    registry = core.model_registry_v3
+    first = registry.propose(_model_version(DISHWASHER, 1))
+    registry.activate(first.version_id)
+    one = core.version_service.current().model_set_id
+    now[0] = T0 + timedelta(minutes=1)
+    second = registry.propose(_model_version(DISHWASHER, 2))
+    registry.activate(second.version_id)
+    two = core.version_service.current().model_set_id
+    assert two == make_model_set_id([second.version_id]) != one
+    now[0] = T0 + timedelta(minutes=2)
+    assert registry.rollback(DISHWASHER) == first.version_id
+    assert core.version_service.current().model_set_id == one
