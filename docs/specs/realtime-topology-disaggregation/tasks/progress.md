@@ -109,3 +109,4 @@
 | Z5 | ? | VERIFIED | | | gates pass on orchestrator run: fast p99 0.086ms, healthz p99 84.97ms, event p95 1.5s; DB growth 3.5GB/day -> Z8 |
 | Z6 | ? | VERIFIED | | | unconstrained unknown None, unknown_w rule, shared bounds repair; gate green |
 | Z7 | ? | VERIFIED | | | phantom OFF re-emission fixed; groups close on promotion; no negative consumer power; gate green at 4aa4aa0 |
+| Z8 | ? | VERIFIED | | | one live evidence row per (event,reader), finalize on close, v026; evidence ~30MB/day; total ~806MB/day dominated by raw ct_samples |
