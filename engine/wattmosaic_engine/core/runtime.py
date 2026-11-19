@@ -7,20 +7,47 @@ site changes."""
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from ..api.facade import maybe_await
 from ..backend.loader import InferenceBackendUnavailable, load_inference_backend
-from ..contracts import DataQualityReport, Measurement, Reconciliation, Topology
+from ..contracts import (
+    ChangeStatus,
+    DataQualityReport,
+    EventGroup,
+    HAEvent,
+    JointInferenceResult,
+    Measurement,
+    MeasurementEvent,
+    ReaderMeasurement,
+    Reconciliation,
+    Topology,
+    VersionTriple,
+)
 from ..device_links import device_for_entity, state_entity_for_device
+from ..electrical.operator import build_observation_operator
+from ..inference.matching import MatchStore
+from ..inference.orchestrator import infer_group, infer_steady
+from ..inference.records import EventRecordStore
 from ..ingestion.correlation import level_from_attributes
+from ..ingestion.queue import BoundedQueue
+from ..mapping.updater import MatrixUpdater
+from ..models.registry import DatabaseModelRepository, Registry
 from ..quality.engine import excluded_readers
+from ..realtime.candidate_ring import CandidateRing
+from ..realtime.detection import ChangeDetector
+from ..realtime.grouping import GroupingEngine
+from ..realtime.reader_state import ReaderStateStore
+from ..realtime.windows import WindowCollector
+from ..residual.reader_residual import UnknownPriorModel
 from ..synchronization.aligner import (
     AlignedChannel,
     AlignedWindow,
@@ -28,7 +55,10 @@ from ..synchronization.aligner import (
     EnergyChannel,
     EnergyWindow,
 )
+from ..versioning.service import VersionService
 from .discovery_api import TOPOLOGY_BOOTSTRAP_WAIT_S
+from .executors import BackgroundExecutor
+from .snapshot import AssembleInputs, SnapshotAssembler
 
 log = logging.getLogger("wattmosaic.main")
 
@@ -97,7 +127,16 @@ class RuntimeMixin:
             self.learning_active = False
             log.warning("running in degraded mode: %s", exc)
 
-        await self.hasource.start(on_sample=self.on_sample, on_event=self.on_event)
+        # The three-loop runtime is the default.  Wire its services once so the
+        # fast-loop callbacks and the event loop have typed providers, even when
+        # the supervisor (not ``start``) owns the loop tasks.
+        self._wire_v3_services()
+        await self.hasource.start(
+            on_sample=self.on_sample,
+            on_event=self.on_event,
+            on_reading=self.on_reading,
+            on_ha_event=self.on_ha_event,
+        )
         # The first state snapshot arrives asynchronously from ``_prime()``;
         # waiting a bounded time here is what makes discovery see real entities
         # instead of an empty cache on a genuine fresh install.
@@ -106,9 +145,14 @@ class RuntimeMixin:
             self._tasks = [
                 asyncio.create_task(self._writer_loop(), name="wm-writer"),
                 asyncio.create_task(self._quality_loop(), name="wm-quality"),
-                asyncio.create_task(self._inference_loop(), name="wm-inference"),
+                asyncio.create_task(self._event_loop(), name="wm-event"),
+                asyncio.create_task(self._steady_loop(), name="wm-steady"),
                 asyncio.create_task(self._maintenance_loop(), name="wm-maintenance"),
             ]
+            if not self.three_loop_enabled:
+                self._tasks.append(
+                    asyncio.create_task(self._inference_loop(), name="wm-inference")
+                )
 
     async def stop(self) -> None:
         self._stopping = True
@@ -293,9 +337,13 @@ class RuntimeMixin:
 
     def _persist_batch(self, batch: list[tuple[str, Any]]) -> None:
         sample_rows: list[dict[str, Any]] = []
+        v3_readings: list[ReaderMeasurement] = []
         events: list[Any] = []
         for kind, payload in batch:
-            if kind == "sample":
+            if kind == "reading":
+                # P1 canonical reading; persist every HB §2.1 field (v2 schema).
+                v3_readings.append(payload)
+            elif kind == "sample":
                 sample_rows.append(
                     {
                         "ct_id": payload.ct_id,
@@ -315,6 +363,11 @@ class RuntimeMixin:
                 events.append(payload)
         if sample_rows:
             self.samples_persisted += self.db.insert_ct_samples(sample_rows)
+        if v3_readings:
+            try:
+                self.samples_persisted += self.db.repos.samples.insert_readings(v3_readings)
+            except Exception:  # noqa: BLE001 - an optional v2 table may not exist
+                log.debug("failed to persist canonical readings", exc_info=True)
         for event in events:
             self.db.insert_device_event(
                 {
@@ -621,11 +674,603 @@ class RuntimeMixin:
         active = getattr(backend, "learning", None) is not None
         self.learning_active = bool(active and getattr(backend, "learning_active", True))
 
+    # ------------------------------------------------------------------ #
+    # Three-loop runtime (P6, HB §5).  The default runtime is the three
+    # loop one; the legacy 5 s full solve stays available behind a flag
+    # until Z2 deletes it.
+    # ------------------------------------------------------------------ #
+
+    def init_three_loop_state(self) -> None:
+        """Allocate the v3 runtime state once, on :class:`EngineCore`.
+
+        Called from ``EngineCore.__init__`` so every mixin shares it.  No here
+        reads a clock or a database; the version service, snapshot assembler
+        and executors are created lazily in :meth:`_wire_v3_services` when the
+        engine actually starts (so a transport-only core stays cheap).
+        """
+        cfg = self.config
+        self.three_loop_enabled = True
+        self.groups_ready: BoundedQueue[EventGroup] = BoundedQueue(cfg.event_queue_max)
+        self.reader_state = ReaderStateStore(
+            stale_after_s=cfg.stale_after_s,
+            missing_after_s=max(cfg.stale_after_s * 5.0, 600.0),
+            clock=self._clock,
+        )
+        self.candidate_ring = CandidateRing()
+        self.change_detector = ChangeDetector(self.reader_state, self._on_reading_event)
+        self.window_collector = WindowCollector(
+            self.reader_state,
+            topology_version_id="topo-0",
+            sink=self._persist_evidence_batch,
+        )
+        self.unknown_prior = UnknownPriorModel(penalty_scale=cfg.unknown_penalty_scale)
+        self.match_store = MatchStore()
+        self.record_store = EventRecordStore()
+        # Facade providers / lazily built v3 services (T2/T3/D1/L1/M2/D4).
+        self.version_service: VersionService | None = None
+        self.model_registry_v3: Registry | None = None
+        self.matrix_updater: MatrixUpdater | None = None
+        self.snapshot_assembler: SnapshotAssembler | None = None
+        self.background_executor: BackgroundExecutor | None = None
+        self.inference_executor: ThreadPoolExecutor | None = None
+        self.learning_worker: Any | None = None
+        self.grouping_engine: GroupingEngine | None = None
+        # Metrics (observable, never guessed).
+        self.loop_lag_s: dict[str, float] = {"fast": 0.0, "event": 0.0, "background": 0.0}
+        self.stage_latency_s: dict[str, float] = {}
+        self.groups_dropped = 0
+        self.infer_group_calls = 0
+        self.infer_steady_calls = 0
+        self.heartbeats = 0
+        self._last_steady_at: dict[str, datetime] = {}
+        self._last_heartbeat_wall = time.monotonic()
+
+    def _wire_v3_services(self) -> None:
+        """Build the real v3 services from the injected DB/clock (idempotent)."""
+        if self.version_service is not None:
+            return
+        db = self.db
+        self.version_service = VersionService(
+            topology_repo=db.repos.topology_v3,
+            mapping_repo=db.repos.mapping,
+            clock=self._clock,
+            model_set_id="mset-live",
+        )
+        self.model_registry_v3 = Registry(
+            DatabaseModelRepository(db), clock=self._clock
+        )
+        self.model_registry_v3.refresh()
+        self.version_service._model_set_id = str(self.model_registry_v3.model_set_id)
+        self.matrix_updater = MatrixUpdater(
+            store=self._live_matrix_store(),
+            versions=self.version_service,
+            clock=self._clock,
+        )
+        self.snapshot_assembler = SnapshotAssembler(db.repos.inference, self._clock)
+        self.background_executor = BackgroundExecutor(
+            max_chunk_s=2.0, now=time.monotonic
+        )
+        self.inference_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="wm-inference"
+        )
+        # L6 learner on the one background executor (DEC-37); re-derives its
+        # dirty set from S18 on start so a restart loses no confirmed evidence.
+        from ..learning.worker import LearningWorker
+
+        self.learning_worker = LearningWorker(
+            db.repos.learning,
+            registry=self.model_registry_v3,
+            executor=self.background_executor,
+            clock=self._clock,
+        )
+        self.learning_worker.start()
+
+        # Match/history/evidence sinks are the S16 repositories.
+        evidence = db.repos.evidence
+        self.grouping_engine = GroupingEngine(
+            versions=self.version_service.current(),
+            repository=evidence,
+            topology=self.version_service.topology_view(
+                self.version_service.current().topology_version_id
+            ),
+            ring=self.candidate_ring,
+            persist_ha_event=self._persist_ha_event,
+            on_ready=self.on_group_ready,
+            on_revised=self.on_group_ready,
+        )
+
+    def _live_matrix_store(self) -> Any:
+        """MatrixStore bound to the S15 mapping repository for durable cells."""
+        from ..mapping.store import MatrixStore
+
+        try:
+            return MatrixStore(repo=self.db.repos.mapping, clock=self._clock)
+        except Exception:  # noqa: BLE001 - a stub DB has no mapping repository
+            return MatrixStore(clock=self._clock)
+
+    def _persist_evidence_batch(self, batch: Sequence[Any]) -> None:
+        """P4 → S16 sink: persist immutable event evidence through the DB seam."""
+        repository = self.db.repos.evidence
+        for item in batch:
+            evidence = getattr(item, "evidence", item)
+            try:
+                repository.put_evidence(evidence)
+            except Exception:  # noqa: BLE001 - duplicate revisions are benign
+                log.debug("evidence write skipped", exc_info=True)
+
+    def _persist_ha_event(self, event: HAEvent) -> None:
+        """S16 sink for ring-held unlinked HA events that join a group (DEC-17).
+
+        Writes directly to ``ha_events_v3`` through the single-writer DB seam;
+        the P5 callback fires on the event loop but these are rare (only events
+        that *become* evidence), so the short transaction is acceptable.
+        """
+        db = self.db
+        try:
+            with db._lock:  # noqa: SLF001 - storage seam, single writer
+                db._conn.execute(  # noqa: SLF001 - storage seam
+                    """INSERT OR IGNORE INTO ha_events_v3(
+                        event_id, entity_id, observed_at, received_at, from_state, to_state,
+                        attributes_delta_json, context_id, context_parent_id, context_user_id,
+                        linked)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        event.event_id,
+                        event.entity_id,
+                        event.observed_at.isoformat(),
+                        event.received_at.isoformat(),
+                        event.from_state,
+                        event.to_state,
+                        json.dumps(event.attributes_delta, default=str),
+                        event.context_id,
+                        event.context_parent_id,
+                        event.context_user_id,
+                        int(event.linked),
+                    ),
+                )
+        except Exception:  # noqa: BLE001 - an evidence write must not kill ingestion
+            log.exception("failed to persist a group-member HA event")
+
+    # -- fast loop --------------------------------------------------------- #
+
+    def _on_reading_event(self, event: MeasurementEvent) -> None:
+        """P3 step callback (inline, O(1)): feed P4 windows and P5 groups."""
+        at = self._clock()
+        self._time_stage("detect", at)
+        try:
+            self.window_collector.on_detected(event, at=at)
+        except Exception:  # noqa: BLE001 - never let bookkeeping break ingestion
+            log.exception("event window open failed")
+        if self.grouping_engine is not None:
+            try:
+                self.grouping_engine.on_reader_step(event, now=at)
+            except Exception:  # noqa: BLE001
+                log.exception("event group formation failed")
+
+    async def on_reading(self, reading: ReaderMeasurement) -> None:
+        """Fast-loop entry for a canonical P1 reading (P1 → P2 → P3 → P4/P5).
+
+        No DB reads here: the persist queue owns the write.  The whole path is
+        O(1) per sample so ~30 HA events/s cannot starve ``/healthz``.
+        """
+        started = time.monotonic()
+        try:
+            self.reader_state.add(reading)
+            self.persist_queue.put_nowait(("reading", reading))
+            at = reading.observed_at
+            self.change_detector.process(reading.reader_id, at)
+            # The first post-sample makes an open window PROVISIONAL and a
+            # matching group ready for inference.
+            evidence = self.window_collector.on_sample(
+                reading.reader_id, at, reading.active_power_w
+            )
+            if evidence is not None and self.grouping_engine is not None:
+                self.grouping_engine.on_provisional(evidence)
+        except Exception:  # noqa: BLE001 - fast loop must never propagate
+            log.exception("fast-loop sample handling failed")
+        finally:
+            self._record_latency("fast", (time.monotonic() - started) * 1000.0)
+
+    def on_group_ready(self, group: EventGroup) -> None:
+        """P5 ready/revised callback: enqueue for the event loop (drop-oldest)."""
+        if not self.groups_ready.put_nowait(group):
+            self.groups_dropped += 1
+            log.warning("event group queue full; dropped the oldest group")
+
+    async def on_ha_event(self, event: HAEvent) -> None:
+        """Fast-loop entry for a device-free HA event (P1 → P5).
+
+        A linked event also feeds the legacy per-device transition buffer so
+        the still-available 5 s loop and learning intake keep working until Z2.
+        """
+        try:
+            if self.grouping_engine is not None:
+                self.grouping_engine.on_ha_event(event, now=event.observed_at)
+            if event.linked:
+                pending = getattr(self, "_pending_backend_events", None)
+                if pending is None:
+                    pending = self._pending_backend_events = deque(maxlen=512)
+                if len(pending) >= (pending.maxlen or 0):
+                    self.events_evicted_before_maturity += 1
+                pending.append(event)
+        except Exception:  # noqa: BLE001 - fast loop must never propagate
+            log.exception("fast-loop HA event handling failed")
+
+    # -- event loop -------------------------------------------------------- #
+
+    def _build_input_bundle(self, group: EventGroup) -> dict[str, Any] | None:
+        """Assemble the immutable input bundle for one group, off the loop.
+
+        Everything here is a read from the injected services; no wall clock and
+        no async I/O.  The bundle is handed to ``infer_group`` in the single
+        inference executor.
+        """
+        if self.version_service is None:
+            return None
+        versions: VersionTriple = group.versions or self.version_service.current()
+        at = group.opened_at
+        topo_view = self.version_service.topology_view(versions.topology_version_id)
+        map_view = self.version_service.mapping_view(versions.mapping_version_id)
+        reader_ids = tuple(sorted({d.reader_id for d in group.reader_deltas}))
+        # D3 quality gate: a bad/stale/missing reader never reaches inference.
+        # The reason is already surfaced in ``stale_sources``; here the reader
+        # is removed from the operator's rows so it contributes no estimate.
+        excluded = excluded_readers(self.latest_quality)
+        if excluded:
+            reader_ids = tuple(r for r in reader_ids if r not in excluded)
+        subject_set: set[tuple[str, str]] = set()
+        for reader in reader_ids:
+            subject_set.update(map_view.subjects_on(reader))
+        subjects = tuple(sorted(subject_set))
+        operator = build_observation_operator(
+            topo_view, map_view, None, reader_ids, subjects, at
+        )
+        return {
+            "group": group,
+            "operator": operator,
+            "models": self.model_registry_v3,
+            "residual": self.unknown_prior,
+            "history": self.db.repos.evidence,
+            "matches": self.match_store,
+            "versions": versions,
+            "clock": self._clock,
+        }
+
+    def _run_infer_group(self, bundle: dict[str, Any]) -> JointInferenceResult:
+        """Run the pure I7 entry point on the inference executor thread."""
+        self.infer_group_calls += 1
+        return infer_group(
+            bundle["group"],
+            bundle["operator"],
+            bundle["models"],
+            bundle["residual"],
+            bundle["history"],
+            bundle["matches"],
+            bundle["versions"],
+            bundle["clock"],
+        )
+
+    async def _event_loop(self) -> None:
+        """Drain ready groups: infer → persist → matrix → snapshot → learning."""
+        while not self._stopping:
+            group = await self.groups_ready.get()
+            if group is None:
+                return
+            started = time.monotonic()
+            try:
+                bundle = await asyncio.to_thread(self._build_input_bundle, group)
+                if bundle is None:
+                    continue
+                result = await asyncio.to_thread(self._run_infer_group, bundle)
+                await asyncio.to_thread(self._publish_group_result, group, result, bundle)
+            except Exception:  # noqa: BLE001 - one bad group must not kill the loop
+                log.exception("event-loop inference failed for group %s", group.group_id)
+            finally:
+                self._record_latency("event", (time.monotonic() - started) * 1000.0)
+
+    def _publish_group_result(
+        self,
+        group: EventGroup,
+        result: JointInferenceResult,
+        bundle: dict[str, Any],
+    ) -> None:
+        """Persist → apply matrix → swap snapshot → enqueue learning (in order)."""
+        at = result.computed_at
+        evidence = self.db.repos.evidence
+        # 1. Persist the versioned record (I6/S16).
+        try:
+            record = self.record_store.open_provisional(
+                tuple(d.reader_id for d in group.reader_deltas),
+                at=at,
+                versions=result.versions,
+                group_id=group.group_id,
+            )
+            record.result = result  # publish the full inferred result, not a stub
+            evidence.put_record(record)
+        except Exception:  # noqa: BLE001
+            log.exception("failed to persist an inference record")
+        # 2. Matrix update (M2).
+        if self.matrix_updater is not None:
+            try:
+                self.matrix_updater.apply(result, bundle["operator"])
+            except Exception:  # noqa: BLE001
+                log.exception("matrix update failed")
+        # 3. Snapshot assembly and copy-on-write publish (D4).
+        if self.snapshot_assembler is not None:
+            try:
+                held = self.reader_state.held_all(at)
+                self.snapshot_assembler.on_result(
+                    result,
+                    held,
+                    self.latest_quality,
+                    inputs=AssembleInputs(
+                        result=result,
+                        held_readings=held,
+                        quality=self.latest_quality,
+                        stale_sources=stale_sources_from_quality(self.latest_quality),
+                    ),
+                )
+                self._publish_v3_snapshot()
+            except Exception:  # noqa: BLE001
+                log.exception("snapshot publish failed")
+        # 4. Learning job only for CONFIRMED groups (L4/L6 gate).
+        if str(getattr(result.status, "value", result.status)) == "confirmed" and self.learning_worker is not None:
+            try:
+                self.learning_worker.submit_observations(
+                    self._learning_observations(result)
+                )
+                self.learning_worker.schedule()
+            except Exception:  # noqa: BLE001
+                log.exception("learning submit failed")
+
+    def _learning_observations(self, result: JointInferenceResult) -> list[Any]:
+        """Derive valid L4 observations from a CONFIRMED result.
+
+        A device with no point (UNKNOWN / non-identifiable) contributes no
+        observation: a fabricated 0 W would poison learning (HB §18).
+        """
+        from ..contracts import EvidenceRef, LearningObservation, ModelBasis
+
+        observations: list[Any] = []
+        for estimate in result.device_estimates:
+            point = getattr(estimate, "point_w", None)
+            if point is None:
+                continue
+            sources = list(getattr(estimate, "source_reader_ids", []) or [])
+            endpoint = sources[0] if sources else ""
+            observations.append(
+                LearningObservation(
+                    observation_id=f"obs::{result.result_id}::{estimate.subject_id}",
+                    subject_kind="device",
+                    subject_id=str(estimate.subject_id),
+                    endpoint_id=endpoint,
+                    event_group_ref=EvidenceRef(
+                        kind="event_group", id=str(result.event_group_id or result.result_id)
+                    ),
+                    transition="on",
+                    attributes={},
+                    delta_w=float(point),
+                    level_w=None,
+                    status="confirmed",
+                    identifiability=getattr(
+                        estimate, "identifiability", "identifiable"
+                    ),
+                    basis=ModelBasis.DELTA,
+                    created_at=result.computed_at,
+                )
+            )
+        return observations
+
+    def _publish_v3_snapshot(self) -> None:
+        """Expose the current D4 snapshot copy-on-write for facade readers."""
+        if self.snapshot_assembler is None:
+            return
+        snapshot = self.snapshot_assembler.current
+        if snapshot is not None:
+            self._v3_snapshot = snapshot
+
+    # -- steady loop / heartbeat ------------------------------------------ #
+
+    async def _steady_loop(self) -> None:
+        """Debounced >3σ steady reads + a 60 s staleness-only heartbeat."""
+        while not self._stopping:
+            try:
+                await asyncio.wait_for(
+                    self._stop_event.wait(), max(1.0, self.config.steady_heartbeat_s)
+                )
+                return
+            except TimeoutError:
+                pass
+            started = time.monotonic()
+            try:
+                self._steady_pass()
+            except Exception:  # noqa: BLE001
+                log.exception("steady pass failed")
+            finally:
+                self._record_latency("background", (time.monotonic() - started) * 1000.0)
+
+    def _steady_pass(self) -> None:
+        """Run one steady pass: >3σ level changes, then a heartbeat."""
+        now = self._clock()
+        if self.version_service is None:
+            return
+        versions = self.version_service.current()
+        topo_view = self.version_service.topology_view(versions.topology_version_id)
+        map_view = self.version_service.mapping_view(versions.mapping_version_id)
+        for reader in self.reader_state.readers():
+            reading = self.reader_state.held(reader, now)
+            sigma = self.reader_state.sigma(reader)
+            baseline = self.reader_state.baseline(reader)
+            if reading.value is None or sigma is None or baseline is None:
+                continue
+            if abs(reading.value - baseline) <= 3.0 * sigma:
+                continue
+            last = self._last_steady_at.get(reader)
+            if last is not None and (now - last).total_seconds() < self.config.steady_heartbeat_s:
+                continue
+            self._last_steady_at[reader] = now
+            operator = build_observation_operator(
+                topo_view, map_view, None, (reader,), (), now
+            )
+            held = {reader: reading}
+            established = _StaticEstablished()
+            result = infer_steady(
+                held, operator, self.model_registry_v3, self.unknown_prior,
+                established, versions, self._clock,
+            )
+            self.infer_steady_calls += 1
+            self._publish_group_result(_steady_group(result, now), result, {"operator": operator})
+
+        # Heartbeat publishes staleness only (DEC-14); no full solve.
+        self.heartbeats += 1
+        self._stale_sources = stale_sources_from_quality(self.latest_quality)
+
+    # -- background jobs --------------------------------------------------- #
+
+    def submit_background(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
+        """Submit one chunked job to the single background executor."""
+        if self.background_executor is None:
+            return None
+        return self.background_executor.submit(fn, *args, **kwargs)
+
+    def _record_latency(self, stage: str, millis: float) -> None:
+        self.stage_latency_s[stage] = round(millis / 1000.0, 6)
+
+    def runtime_metrics(self) -> dict[str, Any]:
+        """Loop lag, per-stage latency, queue depths and dropped groups."""
+        return {
+            "loop_lag_s": dict(self.loop_lag_s),
+            "stage_latency_ms": {k: round(v * 1000.0, 3) for k, v in self.stage_latency_s.items()},
+            "event_queue": self.groups_ready.stats(),
+            "persist_queue": self.persist_queue.stats(),
+            "groups_dropped": self.groups_dropped,
+            "infer_group_calls": self.infer_group_calls,
+            "infer_steady_calls": self.infer_steady_calls,
+            "heartbeats": self.heartbeats,
+            "background": (
+                self.background_executor.stats() if self.background_executor is not None else {}
+            ),
+        }
+
+    # -- facade providers (stubbed until P6) -------------------------------- #
+
+    def now(self) -> datetime:
+        """The injected clock, exposed for v3 route adapters (no wall clock)."""
+        return self._clock()
+
+    def v3_configuration_events(self, status: ChangeStatus | None = None) -> list[Any]:
+        """T7: the configuration-event ledger, filtered by status when asked."""
+        from ..contracts import ConfigurationEvent
+
+        wanted = status.value if isinstance(status, ChangeStatus) else (
+            str(status) if status is not None else None
+        )
+        rows = self.db.repos.topology_v3.events(wanted)
+        events: list[Any] = []
+        for row in rows:
+            if isinstance(row, ConfigurationEvent):
+                events.append(row)
+            else:
+                try:
+                    events.append(ConfigurationEvent.model_validate(dict(row)))
+                except Exception:  # noqa: BLE001 - one malformed row never fails the read
+                    continue
+        return events
+
+    def reader_residual_points(self, reader_id: str) -> list[Any]:
+        """T3: per-reader residual points from the S19 series (nulls preserved)."""
+        rows = self.db.repos.residual.series(reader_id)
+        points: list[Any] = []
+        for row in rows:
+            from ..contracts import ReaderResidualPoint
+
+            data = dict(row)
+            data.pop("id", None)
+            if data.get("residual_w") is not None:
+                data["residual_w"] = float(data["residual_w"])
+            points.append(ReaderResidualPoint(**data))
+        return points
+
+    def residual_model(self) -> Any:
+        """T3: the live ``ResidualModelView`` used by inference."""
+        return self.unknown_prior
+
+    def unknown_profiles(self, scope: str | None = None) -> list[Any]:
+        """T6: persistent unknown-load profiles from the S19 repository."""
+        return self.db.repos.residual.profiles(scope)
+
+    def promote_unknown_profile(self, profile_id: str) -> dict[str, Any]:
+        """T6: a user-driven promotion never auto-confirms a device.
+
+        The device is created through D2's service (``origin`` recorded) and the
+        PROVISIONAL mapping edge through D1's version service.  No power model is
+        touched (AT-15: a mapping change never changes a model).
+        """
+        from ..contracts import UnknownLoadProfileV3
+        from ..devices.service import DeviceService
+        from ..residual.unknown_profiles import promote_profile
+
+        rows = self.db.repos.residual.profiles()
+        raw = next((p for p in rows if str(p.get("profile_id")) == profile_id), None)
+        if raw is None:
+            return {"ok": False, "reason": "profile not found", "profile_id": profile_id}
+        profile = raw if isinstance(raw, UnknownLoadProfileV3) else UnknownLoadProfileV3(**raw)
+        devices = DeviceService(self.db)
+        try:
+            promotion = promote_profile(
+                profile,
+                devices=devices,
+                mapping_edges=self.version_service,
+                profiles=self.db.repos.residual,
+                clock=self._clock,
+            )
+        except Exception as exc:  # noqa: BLE001 - promotion is a user action
+            return {"ok": False, "reason": f"{type(exc).__name__}: {exc}", "profile_id": profile_id}
+        if promotion is None:
+            return {"ok": False, "reason": "profile is not promotable", "profile_id": profile_id}
+        return {
+            "ok": True,
+            "profile_id": profile_id,
+            "device_id": promotion.device.device_id,
+            "mapping_edge_id": promotion.mapping_edge.mapping_edge_id,
+            "lifecycle": str(promotion.profile.lifecycle),
+        }
+
+    def _time_stage(self, _name: str, _at: datetime) -> None:
+        """Hook kept for stage-boundary instrumentation (no-op by default)."""
+
+    def _prune_evidence(self) -> None:
+        """Background job: bound the new L2 evidence/L1 raw tables (DEC-30).
+
+        Runs on the single background executor, never the event loop.  Absent
+        horizons mean "keep everything" — an explicit operator action bounds
+        evidence, never a fabricated default.
+        """
+        db = self.db
+        cfg = self.config
+        cutoff_days = cfg.evidence_retention_days
+        raw_days = cfg.evidence_raw_retention_days
+        with db._lock:  # noqa: SLF001 - single-writer storage seam
+            for table, days in (("event_evidence", cutoff_days), ("ha_events_v3", raw_days)):
+                if days is None:
+                    continue
+                cutoff = (self._clock() - timedelta(days=days)).isoformat()
+                try:
+                    db._conn.execute(  # noqa: SLF001 - storage seam
+                        f"DELETE FROM {table} WHERE window_start < ?" if table == "event_evidence"
+                        else f"DELETE FROM {table} WHERE observed_at < ?",
+                        (cutoff,),
+                    )
+                except Exception:  # noqa: BLE001 - table may not exist yet
+                    log.debug("evidence prune skipped for %s", table, exc_info=True)
+
     async def _maintenance_loop(self) -> None:
         while not self._stopping:
             try:
                 self.aligner.prune()
                 self.db.prune(self.config.retention_days_raw, self.config.retention_days_aggregates)
+                # Evidence/raw retention runs off the event loop (DEC-37).
+                self.submit_background(self._prune_evidence)
             except Exception:  # noqa: BLE001
                 log.exception("maintenance cycle failed")
             try:
@@ -633,6 +1278,26 @@ class RuntimeMixin:
                 return
             except TimeoutError:
                 continue
+
+
+class _StaticEstablished:
+    """An empty ``EstablishedStructure`` for the first steady pass (DEC-22)."""
+
+    def groups(self) -> Mapping[str, tuple[str, ...]]:
+        return {}
+
+    def identities(self) -> Mapping[tuple[str, str], float]:
+        return {}
+
+
+def _steady_group(result: JointInferenceResult, at: datetime) -> EventGroup:
+    """A lightweight synthetic group for a steady-pass result."""
+    return EventGroup(
+        group_id=f"steady-{result.result_id}",
+        revision=1,
+        status=result.status,
+        opened_at=at,
+    )
 
 
 def _event_time(event: Any) -> datetime | None:

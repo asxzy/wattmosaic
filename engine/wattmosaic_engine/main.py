@@ -345,6 +345,10 @@ class EngineCore(
         self.persistence_errors = 0
         self.cycles = 0
 
+        # Three-loop runtime state (P6).  The default runtime is the three-loop
+        # one; the legacy 5 s loop remains available until Z2 deletes it.
+        self.init_three_loop_state()
+
 
 # --------------------------------------------------------------------------- #
 # Supervisor
@@ -469,7 +473,12 @@ async def _run_engine(config: EngineConfig) -> int:
         supervisor.start("ha_source", core.hasource.run_supervised)
         supervisor.start("writer", core._writer_loop)
         supervisor.start("quality", core._quality_loop)
-        supervisor.start("inference", core._inference_loop)
+        supervisor.start("event", core._event_loop)
+        supervisor.start("steady", core._steady_loop)
+        # The legacy 5 s full recompute remains available behind a flag until
+        # Z2 removes it; the three loops above are the default runtime.
+        if not core.three_loop_enabled:
+            supervisor.start("inference", core._inference_loop)
         supervisor.start("maintenance", core._maintenance_loop)
         await stop_event.wait()
     finally:

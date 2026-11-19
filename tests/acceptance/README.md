@@ -50,7 +50,7 @@ directory), so collection always succeeds and the test xfails strictly.
 | `test_at14_physical_load_counted_once.py` | One physical load counted once | I5 | closed |
 | `test_at15_plug_relocation.py` | Plug relocation changes mapping, not power model | T7 | **closed** (CLOSED_BY = "T7") |
 | `test_at16_reader_reconciliation.py` | Reader/calibration change triggers reconciliation | T7 | **closed** (CLOSED_BY = "T7") |
-| `test_at17_missing_not_zero.py` | Missing data does not become zero | D3 | open |
+| `test_at17_missing_not_zero.py` | Missing data does not become zero | P6 | **closed** (CLOSED_BY = "P6") |
 | `test_at18_late_event_revision.py` | Late events revise provisional results | I6 | closed |
 | `test_at19_replay_newer_model.py` | Historical replay with a newer model | L7 | **closed** (CLOSED_BY = "L7") |
 | `test_at20_ui_explains_estimates.py` | UI explains source and uncertainty | U2 | **closed** (CLOSED_BY = "U2") |
@@ -60,5 +60,6 @@ shipped `matrix-cell.js` header renderer under node) were folded into
 `test_at12_columns_multi_level.py`, which now carries `CLOSED_BY = "U1"` and no
 xfail marker. The duplicate module `test_at12_multilevel_columns.py` was removed.
 
-Closing tasks: M1, T5, L2, T6, I2, I3, I4, I1, M2, U1, I5, T7, D3, I6, L7, U2
-(each an `implementation-plan.md` §3 task id).
+Closing tasks: M1, T5, L2, T6, I2, I3, I4, I1, M2, U1, I5, T7, P6, I6, L7, U2
+(each an `implementation-plan.md` §3 task id). AT-17's null semantics were laid
+down by D3/H1 but the end-to-end pipeline that closes it is wired by P6.

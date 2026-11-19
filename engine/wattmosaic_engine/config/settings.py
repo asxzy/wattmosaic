@@ -7,6 +7,7 @@ Secrets are read from the environment (or a .env file) and are never logged.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 from collections.abc import Mapping
@@ -16,6 +17,16 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 DEFAULT_HA_PORT = 8123
+
+log = logging.getLogger("wattmosaic.config")
+
+#: DEC-03: the old timer-driven full-recompute interval is accepted (for one
+#: release, so add-on config validation keeps working) but ignored.  The three
+#: loops in :mod:`wattmosaic_engine.core.runtime` decide when work happens.
+DEPRECATED_INFERENCE_INTERVAL_NOTE = (
+    "WM_INFERENCE_INTERVAL_S is deprecated and ignored: the three-loop runtime "
+    "runs inference per event group, not on a fixed timer"
+)
 
 #: The only timing keys an isolation override may set.  Declared here (and
 #: mirrored by ``learning.thresholds.ISOLATION_TIMING_KEYS``) so a typo in one
@@ -191,6 +202,24 @@ class EngineConfig:
     stale_after_s: float = 120.0
     inference_interval_s: float = 5.0
     queue_max_size: int = 5000
+
+    # -- three-loop runtime (P6, HB §5) ----------------------------------- #
+    #: Maximum number of ready/revised event groups held for the event loop.
+    #: Overflow drops the oldest group and counts it in ``groups_dropped``.
+    event_queue_max: int = 1000
+    #: Seconds between staleness-only heartbeats (DEC-14).  A heartbeat
+    #: publishes ``stale_sources``/aging; it never runs a full solve.
+    steady_heartbeat_s: float = 60.0
+    #: Multiplier on the unknown-load penalty (DEC-23).  1.0 is the neutral
+    #: operating point; it is never a measurement and never 0 by default for a
+    #: missing value.
+    unknown_penalty_scale: float = 1.0
+    #: Evidence retention horizon in days (DEC-30).  Evidence is long-term and
+    #: only an explicit operator action bounds it.
+    evidence_retention_days: int = 400
+    #: Raw evidence retention horizon in days; raw samples expire sooner than
+    #: the derived evidence that cites them.
+    evidence_raw_retention_days: int = 30
     #: Discover a candidate topology from Home Assistant at startup when the
     #: database has none.  Disabling it leaves a fresh install with nothing to
     #: infer, which ``/health`` now reports instead of failing silently.
@@ -316,11 +345,33 @@ class EngineConfig:
             or cfg.default_sample_interval_s
         )
         cfg.stale_after_s = float(get("WM_STALE_AFTER_S", default=str(cfg.stale_after_s)) or 120)
-        cfg.inference_interval_s = float(
-            get("WM_INFERENCE_INTERVAL_S", default=str(cfg.inference_interval_s)) or 5
-        )
+        raw_interval = get("WM_INFERENCE_INTERVAL_S", default=str(cfg.inference_interval_s))
+        cfg.inference_interval_s = float(raw_interval or 5)
         cfg.inference_interval_s = max(1.0, cfg.inference_interval_s)
+        if get("WM_INFERENCE_INTERVAL_S") is not None:
+            # DEC-03: accepted, ignored, logged once at startup/load.  The value
+            # is still parsed so a typo cannot hide, but it never drives a loop.
+            log.warning(DEPRECATED_INFERENCE_INTERVAL_NOTE)
         cfg.queue_max_size = int(get("WM_QUEUE_MAX_SIZE", default=str(cfg.queue_max_size)) or 5000)
+        cfg.event_queue_max = int(
+            get("WM_EVENT_QUEUE_MAX", default=str(cfg.event_queue_max)) or cfg.event_queue_max
+        )
+        cfg.steady_heartbeat_s = float(
+            get("WM_STEADY_HEARTBEAT_S", default=str(cfg.steady_heartbeat_s))
+            or cfg.steady_heartbeat_s
+        )
+        cfg.unknown_penalty_scale = float(
+            get("WM_UNKNOWN_PENALTY_SCALE", default=str(cfg.unknown_penalty_scale))
+            or cfg.unknown_penalty_scale
+        )
+        cfg.evidence_retention_days = int(
+            get("WM_EVIDENCE_RETENTION_DAYS", default=str(cfg.evidence_retention_days))
+            or cfg.evidence_retention_days
+        )
+        cfg.evidence_raw_retention_days = int(
+            get("WM_EVIDENCE_RAW_RETENTION_DAYS", default=str(cfg.evidence_raw_retention_days))
+            or cfg.evidence_raw_retention_days
+        )
         cfg.topology_bootstrap = _bool(
             get("WM_TOPOLOGY_BOOTSTRAP", default="true"), True
         )
@@ -402,6 +453,16 @@ class EngineConfig:
             problems.append("default_sample_interval_s must be positive")
         if self.queue_max_size < 100:
             problems.append("queue_max_size too small")
+        if self.event_queue_max < 1:
+            problems.append("event_queue_max must be positive")
+        if self.steady_heartbeat_s <= 0:
+            problems.append("steady_heartbeat_s must be positive")
+        if not math.isfinite(self.unknown_penalty_scale) or self.unknown_penalty_scale < 0:
+            problems.append("unknown_penalty_scale must be finite and non-negative")
+        if self.evidence_retention_days < 1:
+            problems.append("evidence_retention_days must be positive")
+        if self.evidence_raw_retention_days < 1:
+            problems.append("evidence_raw_retention_days must be positive")
         raw_low, raw_high = RETENTION_DAYS_RAW_RANGE
         if not raw_low <= self.retention_days_raw <= raw_high:
             problems.append(
@@ -526,6 +587,11 @@ class EngineConfig:
             "stale_after_s": self.stale_after_s,
             "default_sample_interval_s": self.default_sample_interval_s,
             "inference_interval_s": self.inference_interval_s,
+            "event_queue_max": self.event_queue_max,
+            "steady_heartbeat_s": self.steady_heartbeat_s,
+            "unknown_penalty_scale": self.unknown_penalty_scale,
+            "evidence_retention_days": self.evidence_retention_days,
+            "evidence_raw_retention_days": self.evidence_raw_retention_days,
             "log_level": self.log_level,
             "history_lookback_s": self.history_lookback_s,
             "audit_enabled": self.audit_enabled,
