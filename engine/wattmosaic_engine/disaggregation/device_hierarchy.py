@@ -305,15 +305,21 @@ def _infer_device(
     ]
     if not qualities:
         qualities = [QualityStatus.MISSING]
-    if not ages:
-        ages = [float("inf")]
-    stale = any(a > max_measurement_age_s for a in ages)
+    # An unrecorded age is unknown, not zero (HB §18).  Treat "unknown" as the
+    # conservative stale/UNKNOWN path rather than as a fresh measurement.
+    known_ages = [a for a in ages if a is not None]
+    if not known_ages:
+        stale = True
+        worst_age = float("inf")
+    else:
+        stale = any(a > max_measurement_age_s for a in known_ages)
+        worst_age = max(known_ages)
     repeated = any(
         window.readings[cid].repeated
         for cid in supporting
         if cid in window.readings
     )
-    quality = _quality_from_age(max(ages), _worst(qualities))
+    quality = _quality_from_age(worst_age, _worst(qualities))
     isolation = event_isolation_score(
         own_event=own_event,
         concurrent_events=concurrent_events,

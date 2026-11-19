@@ -85,7 +85,14 @@ def _exclude_partial_legs(
         if not reasons:
             a = window.readings[cid].age_s
             b = window.readings[partner].age_s
-            if math.isfinite(a) and math.isfinite(b) and abs(a - b) > max_leg_skew_s:
+            # An unrecorded age is unknown (None), not zero: there is no basis
+            # to claim the two legs disagree, so leave the pair identifiability
+            # alone rather than treating "unknown" as a measured skew.
+            if (
+                a is not None and b is not None
+                and math.isfinite(a) and math.isfinite(b)
+                and abs(a - b) > max_leg_skew_s
+            ):
                 reasons.append(
                     f"leg_skew_exceeded:{cid}:{partner}:"
                     f"{abs(a - b):.1f}s>{max_leg_skew_s:.1f}s"
@@ -148,7 +155,9 @@ def _solve_system(
             continue
         if not reading.is_usable(max_measurement_age_s):
             mask[i] = False
-            if reading.age_s > max_measurement_age_s:
+            if reading.age_s is None:
+                excluded.setdefault(cid, "unknown_age")
+            elif reading.age_s > max_measurement_age_s:
                 excluded.setdefault(cid, "stale_measurement")
             elif reading.quality in (QualityStatus.MISSING, QualityStatus.BAD):
                 excluded.setdefault(cid, f"quality_{reading.quality}")

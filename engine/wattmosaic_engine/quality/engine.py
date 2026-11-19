@@ -880,12 +880,68 @@ class DataQualityEngine:
             return QualityStatus.BAD
 
 
+#: Statuses whose readings must not be handed to the solver.  ``bad`` is
+#: unusable, ``degraded`` reduces confidence too far to learn from, ``stale``
+#: describes a value that may be displayed but must not drive inference, and
+#: ``missing`` has no reading at all.  See the module docstring's status table
+#: and HB §6.1 ("invalid measurements must not silently enter inference").
+EXCLUDED_QUALITY_STATUSES: frozenset[str] = frozenset(
+    {QualityStatus.BAD.value, QualityStatus.DEGRADED.value, QualityStatus.STALE.value,
+     QualityStatus.MISSING.value}
+)
+
+
+def _reason_for(entry: dict[str, Any]) -> str:
+    """A short, human-readable reason for excluding one reader.
+
+    Prefer the quality engine's own ``issues`` (they carry the concrete code and
+    detail, e.g. ``ct: stale_sample (age=600.0s)``); fall back to the status and
+    the score so an entry with no issues still explains itself.
+    """
+    issues = entry.get("issues")
+    if isinstance(issues, (list, tuple)):
+        for issue in issues:
+            if isinstance(issue, str) and issue.strip():
+                return issue.strip()
+    status = entry.get("status", "unknown")
+    score = entry.get("score")
+    if score is not None:
+        return f"quality_status={status} score={score}"
+    return f"quality_status={status}"
+
+
+def excluded_readers(report: DataQualityReport | None) -> dict[str, str]:
+    """Readers whose latest reading must not enter inference, with reasons.
+
+    Pure: takes a :class:`DataQualityReport` and returns a mapping of
+    ``reader -> reason``.  A reader is excluded when its status is one of
+    :data:`EXCLUDED_QUALITY_STATUSES` (``bad``, ``degraded``, ``stale`` or
+    ``missing``).  The reason is the first quality issue recorded for the
+    channel, so a consumer (P2/P6 or the legacy runtime hook) can both drop the
+    reading and surface *why* it was dropped in ``stale_sources``.
+
+    Absent values stay absent: there is no zero or default reading here.
+    """
+    if report is None:
+        return {}
+    excluded: dict[str, str] = {}
+    for name, entry in report.channels.items():
+        if not isinstance(entry, dict):
+            continue
+        status = entry.get("status")
+        if status in EXCLUDED_QUALITY_STATUSES:
+            excluded[name] = _reason_for(entry)
+    return excluded
+
+
 __all__ = [
     "DataQualityEngine",
     "DUPLICATE_ENTITY_EXPLANATION",
+    "EXCLUDED_QUALITY_STATUSES",
     "OVERLAP_EXPLANATION",
     "OverlapCluster",
     "QUALITY_THRESHOLDS",
     "QualityThresholds",
+    "excluded_readers",
     "score_to_status",
 ]

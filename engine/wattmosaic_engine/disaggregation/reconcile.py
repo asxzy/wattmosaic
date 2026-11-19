@@ -99,7 +99,9 @@ def _bound_configured_priors_by_row(
                 usable = False
                 break
             # A stale row says nothing about what the circuit carries *now*.
-            if reading.age_s > max_measurement_age_s:
+            # An unrecorded age (None) is unknown, not fresh: take the explicit
+            # unknown path and decline to use the row as capacity evidence.
+            if reading.age_s is None or reading.age_s > max_measurement_age_s:
                 usable = False
                 break
             value = reading.signed_w()

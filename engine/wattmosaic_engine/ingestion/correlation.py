@@ -474,7 +474,7 @@ def _specificity_z(
     target_steps: Sequence[float],
     other_steps: Sequence[float],
     *,
-    row_noise_w: float = 0.0,
+    row_noise_w: float | None = None,
 ) -> float:
     """How many times larger the winning row's step is than any other row's.
 
@@ -503,7 +503,7 @@ def _specificity_z(
     target = _median(target_steps)
     denominator = max(
         _median(other_steps),
-        float(max(row_noise_w, 0.0)),
+        0.0 if row_noise_w is None else float(max(row_noise_w, 0.0)),
         _MIN_SPECIFICITY_DENOM_W,
     )
     return target / denominator
@@ -526,7 +526,7 @@ def _step(before: Mapping[str, float], after: Mapping[str, float], ct_id: str) -
 
 def estimate_row_noise(
     row_readings: Mapping[str, Sequence[tuple[datetime, float]]],
-) -> dict[str, float]:
+) -> dict[str, float | None]:
     """Robust per-row jitter, in watts.
 
     Measured from the median absolute *successive difference* of the raw series.
@@ -534,14 +534,18 @@ def estimate_row_noise(
     ignores it; a median absolute deviation of the values themselves would not,
     because a lamp that is on half the time makes the "typical" value sit between
     the on and off levels and inflates the estimate to the size of the load.
+
+    A row with fewer than three successive differences has *insufficient data*
+    to estimate noise: its value is ``None`` (unknown), never ``0.0`` (which
+    would falsely claim a noiseless channel, HB §18 / AT-17).
     """
-    out: dict[str, float] = {}
+    out: dict[str, float | None] = {}
     for ct_id, readings in row_readings.items():
         ordered = sorted(readings, key=lambda item: item[0])
         values = [float(value) for _, value in ordered]
         diffs = [abs(b - a) for a, b in zip(values, values[1:], strict=False)]
         if len(diffs) < 3:
-            out[ct_id] = 0.0
+            out[ct_id] = None
             continue
         # 1.4826 * MAD is the normal-consistent scale of the median absolute
         # deviation; the constant only sets how a "sigma" reads, and every
@@ -723,8 +727,10 @@ def correlate(
             if ct_id in measured:
                 target_steps.append(measured[ct_id])
             other_steps.extend(value for other, value in measured.items() if other != ct_id)
+        # An unestimated noise is None (unknown), not zero: the specificity floor
+        # then falls back to its tiny absolute floor rather than a fabricated 0 W.
         specificity_z = _specificity_z(
-            target_steps, other_steps, row_noise_w=noise.get(ct_id, 0.0)
+            target_steps, other_steps, row_noise_w=noise.get(ct_id)
         )
         if specificity_z < min_specificity_z:
             unresolved[entity_id] = "not_specific"

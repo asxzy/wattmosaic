@@ -56,7 +56,13 @@ class ChannelReading:
 
     channel_id: str
     value_w: float | None
-    age_s: float = 0.0
+    #: ``None`` when the source did not record an age — an unknown age is not
+    #: a fresh, zero-second-old sample (HB §18, AT-17).  A caller that builds a
+    #: reading directly (``from_values``, hand-built in tests) supplies an
+    #: explicit age — 0.0 for a fresh measurement — so the default here stays
+    #: simple; the raw-source coercion in ``_to_reading`` is where an absent age
+    #: is genuinely unknown and becomes None.
+    age_s: float | None = 0.0
     quality: QualityStatus = QualityStatus.GOOD
     repeated: bool = False
     polarization: Polarity = Polarity.NORMAL
@@ -69,7 +75,11 @@ class ChannelReading:
             return False
         if self.quality in (QualityStatus.MISSING, QualityStatus.BAD):
             return False
-        return not (max_age_s is not None and self.age_s > max_age_s)
+        # An unknown age cannot be shown to be fresh; when a freshness cap is
+        # required, treat it as unknown/unusable rather than assuming zero age.
+        if max_age_s is not None:
+            return self.age_s is not None and self.age_s <= max_age_s
+        return True
 
     def signed_w(self) -> float | None:
         """Polarity-corrected value; sign is preserved (negative = export)."""
@@ -130,6 +140,10 @@ class ObservationWindow:
             cid: ChannelReading(
                 channel_id=cid,
                 value_w=value,
+                # ``from_values`` builds an explicit fresh window: a caller that
+                # supplies no ages is describing zero-second-old measurements,
+                # not an unknown age.  Absence from the *raw* source is handled
+                # by ``_to_reading`` (where None means genuinely unknown).
                 age_s=float(ages.get(cid, 0.0)),
                 quality=qualities.get(cid, QualityStatus.GOOD),
                 repeated=bool(repeated.get(cid, False)),
@@ -240,6 +254,22 @@ def observed_cadence_s(window: object, *, default: float = DEFAULT_CADENCE_S) ->
     return clamp_cadence(default)
 
 
+def _coerce_age(raw: object) -> float | None:
+    """Normalise an optional age to a float, preserving ``None`` as unknown.
+
+    An explicit ``0.0`` stays ``0.0`` (a genuinely fresh sample); only an absent
+    or non-numeric age becomes ``None``.  Never coerce an unknown age to zero —
+    a zero-second-old sample is a positive claim about freshness (HB §18).
+    """
+    if raw is None:
+        return None
+    try:
+        value = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
 def _to_reading(channel_id: str, raw: object, at: datetime) -> ChannelReading:
     if isinstance(raw, ChannelReading):
         return raw
@@ -264,7 +294,7 @@ def _to_reading(channel_id: str, raw: object, at: datetime) -> ChannelReading:
         return ChannelReading(
             channel_id=channel_id,
             value_w=None if value is None else float(value),
-            age_s=float(raw.get("age_s", raw.get("age_seconds", 0.0)) or 0.0),
+            age_s=_coerce_age(raw.get("age_s", raw.get("age_seconds"))),
             quality=QualityStatus(str(raw.get("quality", "good"))),
             repeated=bool(raw.get("repeated", False)),
             polarization=Polarity(str(raw.get("polarization", raw.get("polarity", "normal")))),
@@ -290,7 +320,7 @@ def _to_reading(channel_id: str, raw: object, at: datetime) -> ChannelReading:
     return ChannelReading(
         channel_id=channel_id,
         value_w=None if value is None else float(value),
-        age_s=float(getattr(raw, "age_s", getattr(raw, "age_seconds", 0.0)) or 0.0),
+        age_s=_coerce_age(getattr(raw, "age_s", getattr(raw, "age_seconds", None))),
         quality=quality,
         repeated=bool(getattr(raw, "repeated", getattr(raw, "is_repeat", False))),
         polarization=pol,

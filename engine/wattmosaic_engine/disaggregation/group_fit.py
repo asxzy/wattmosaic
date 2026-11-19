@@ -1168,7 +1168,10 @@ def fit_shared_rows(
         row_max_w = float(np.nanmax(watts)) if np.isfinite(watts).any() else 0.0
         if row_max_w <= 0.0 or float(coefficient.max(initial=0.0)) > row_max_w:
             continue
-        floor_w = max(MIN_RESPONSE_W, float(row_noise_w.get(ct_id, 0.0)))
+        # An unestimated noise is None (unknown): use only the absolute floor,
+        # never a fabricated 0 W that would claim a noiseless row.
+        _row_noise = row_noise_w.get(ct_id)
+        floor_w = max(MIN_RESPONSE_W, 0.0 if _row_noise is None else float(_row_noise))
         for column, group in enumerate(groups):
             if not identifiable_column[column]:
                 # No unique coefficient exists for this column on this row, so
