@@ -52,14 +52,14 @@
 | S18 | 2 | VERIFIED |  |  |  |
 | S19 | 2 | VERIFIED |  |  |  |
 | P1 | 3 | VERIFIED |  |  | new path applies polarity once; legacy-path DEF-01 unproven (removed in Z2) |
-| P2 | 3 | NOT_STARTED | | | |
+| P2 | 3 | IN_PROGRESS |  |  |  |
 | P3 | 3 | NOT_STARTED | | | |
 | P4 | 3 | NOT_STARTED | | | |
 | P5 | 3 | NOT_STARTED | | | |
-| T1 | 3 | IN_PROGRESS |  |  |  |
-| T2 | 3 | NOT_STARTED | | | |
-| T3 | 3 | NOT_STARTED | | | |
-| T4 | 3 | NOT_STARTED | | | |
+| T1 | 3 | VERIFIED |  |  | primary_display_tree matches M1 build_columns |
+| T2 | 3 | VERIFIED |  |  |  |
+| T3 | 3 | IN_PROGRESS |  |  |  |
+| T4 | 3 | IN_PROGRESS |  |  |  |
 | I1 | 3 | VERIFIED |  | AT-10 | AT-10 property test in unit tests; marker flip pending |
 | I2 | 3 | VERIFIED |  | AT-05 | AT-05 scenario in unit tests; marker flip pending K07 |
 | I3 | 3 | VERIFIED |  | AT-06, 08, 09 | AT-06/08/09 closed; dropped verify.py side-effect files from merge |
@@ -68,24 +68,24 @@
 | L1 | 3 | IN_PROGRESS |  |  |  |
 | L2 | 3 | NOT_STARTED | | AT-03 | |
 | L3 | 3 | NOT_STARTED | | | |
-| D1 | 3 | IN_PROGRESS |  |  |  |
-| D2 | 3 | IN_PROGRESS |  |  |  |
-| D3 | 3 | NOT_STARTED | | AT-17 | |
+| D1 | 3 | VERIFIED |  |  | uses repo private _conn/_lock for mapping writes (tidy later) |
+| D2 | 3 | VERIFIED |  |  |  |
+| D3 | 3 | VERIFIED |  | AT-17 | None-guards in legacy solver for nullable age; AT-17 closes with D4/H1 |
 | U1 | 3 | VERIFIED |  | AT-12 |  |
-| I5 | 4 | NOT_STARTED | | AT-14 | |
+| I5 | 4 | IN_PROGRESS |  | AT-14 |  |
 | I6 | 4 | NOT_STARTED | | AT-18 | |
 | I7 | 4 | NOT_STARTED | | | |
 | T5 | 4 | NOT_STARTED | | AT-02 | |
 | T6 | 4 | NOT_STARTED | | AT-04 | |
 | T7 | 4 | NOT_STARTED | | AT-15, 16 | |
-| M2 | 4 | NOT_STARTED | | AT-11 | |
+| M2 | 4 | IN_PROGRESS |  | AT-11 |  |
 | M3 | 4 | NOT_STARTED | | | |
 | L4 | 4 | NOT_STARTED | | | |
 | L5 | 4 | NOT_STARTED | | | |
 | L6 | 4 | NOT_STARTED | | | |
 | D4 | 4 | NOT_STARTED | | | |
 | H1 | 4 | NOT_STARTED | | | |
-| H2 | 4 | NOT_STARTED | | | |
+| H2 | 4 | IN_PROGRESS |  |  |  |
 | U2 | 4 | NOT_STARTED | | AT-20 | |
 | P6 | 4 | NOT_STARTED | | | |
 | Z2 | 5 | NOT_STARTED | | | |
