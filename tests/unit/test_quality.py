@@ -95,9 +95,7 @@ def _evaluate(
 ):
     engine = DataQualityEngine(database=db, stale_after_s=120)
     now = T0 + timedelta(seconds=at_offset)
-    window = aligner.window(
-        at=now, channels=[c for c in aligner.channels()], max_age_s=120
-    )
+    window = aligner.window(at=now, channels=[c for c in aligner.channels()], max_age_s=120)
     health = aligner.channel_health(now=now)
     energy_window = aligner.energy_window(at=now, max_age_s=120) if energy else None
     energy_health = aligner.energy_health(now=now) if energy else None
@@ -277,9 +275,7 @@ def test_a_main_row_may_report_negative_power_without_a_polarity_penalty() -> No
         )
     }
     _, report = _evaluate(aligner, channels=channels, at_offset=30)
-    assert not any(
-        "polarity_inconsistent" in i for i in report.channels["main"]["issues"]
-    )
+    assert not any("polarity_inconsistent" in i for i in report.channels["main"]["issues"])
 
 
 def test_an_inverted_load_row_with_a_negative_value_is_not_flagged() -> None:
@@ -294,9 +290,7 @@ def test_an_inverted_load_row_with_a_negative_value_is_not_flagged() -> None:
         )
     }
     _, report = _evaluate(aligner, channels=channels, at_offset=30)
-    assert not any(
-        "polarity_inconsistent" in i for i in report.channels["row"]["issues"]
-    )
+    assert not any("polarity_inconsistent" in i for i in report.channels["row"]["issues"])
 
 
 def test_channel_config_is_derived_from_v3_endpoints_and_latest_revision() -> None:
@@ -417,10 +411,7 @@ def test_energy_stale_is_flagged_in_kwh_terms() -> None:
 
 
 def test_overlap_cluster_is_one_grouped_issue() -> None:
-    rooms = [
-        f"room_{name}_power"
-        for name in ("a", "b", "c", "d", "e", "f", "g", "h", "i", "j")
-    ]
+    rooms = [f"room_{name}_power" for name in ("a", "b", "c", "d", "e", "f", "g", "h", "i", "j")]
     aligner = SampleAligner(max_age_s=10_000, stale_after_s=120)
     for name in rooms:
         aligner.add(_m(name, 6.42, seconds=0))
@@ -586,3 +577,24 @@ def test_non_finite_value_is_bad() -> None:
 def test_overlap_explanation_constant_present() -> None:
     assert "duplicate" in OVERLAP_EXPLANATION
     assert "direct measurements" in OVERLAP_EXPLANATION
+
+
+def test_v3_reconciliation_ratio_counts_balance_error_not_residual() -> None:
+    from wattmosaic_engine.contracts import ReconciliationV3
+    from wattmosaic_engine.quality.engine import reconciliation_ratio
+
+    balanced = ReconciliationV3(
+        main_w=1000.0, identified_w=400.0, group_w=200.0, unknown_w=100.0, residual_w=300.0
+    )
+    assert reconciliation_ratio(balanced) == 0.0
+    off = ReconciliationV3(
+        main_w=1000.0, identified_w=400.0, group_w=200.0, unknown_w=100.0, residual_w=100.0
+    )
+    assert reconciliation_ratio(off) == pytest.approx(0.2)
+    assert reconciliation_ratio(ReconciliationV3(main_w=1000.0, identified_w=400.0)) is None
+    assert (
+        reconciliation_ratio(
+            ReconciliationV3(main_w=0.0, identified_w=0.0, group_w=0.0, unknown_w=0.0, residual_w=0.0)
+        )
+        is None
+    )

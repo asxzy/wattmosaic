@@ -217,9 +217,7 @@ class _ChannelScore:
             issues.append(text)
 
 
-def _is_unavailable(
-    name: str, entity_id: str | None, cfg: Any | None, unavailable: set[str]
-) -> bool:
+def _is_unavailable(name: str, entity_id: str | None, cfg: Any | None, unavailable: set[str]) -> bool:
     """Match unavailable entities by entity id or by the derived channel name."""
     if entity_id and entity_id in unavailable:
         return True
@@ -255,8 +253,10 @@ def channel_config_from_endpoints(endpoints: Iterable[Any]) -> dict[str, Channel
     """
     out: dict[str, ChannelConfig] = {}
     for endpoint in endpoints:
-        get = endpoint.get if isinstance(endpoint, Mapping) else (
-            lambda key, default=None, _e=endpoint: getattr(_e, key, default)
+        get = (
+            endpoint.get
+            if isinstance(endpoint, Mapping)
+            else (lambda key, default=None, _e=endpoint: getattr(_e, key, default))
         )
         endpoint_id = get("endpoint_id")
         if not endpoint_id:
@@ -297,33 +297,35 @@ def reconciliation_ratio(reconciliation: Any | None) -> float | None:
 
     :class:`~wattmosaic_engine.contracts.ReconciliationV3` has no
     ``reconciliation_error_ratio`` attribute, so the old penalty never fired.
-    The ratio is the unexplained share of the main feed:
+    HB §12.1 balances ``main = identified + group + unknown + residual``; the
+    retained residual is a legitimate term, not an error, so the ratio is the
+    *balance* mismatch over the main feed:
 
-    ``abs(main_w - (identified_w + group_w + unknown_w)) / abs(main_w)``
+    ``abs(balance_error_w) / abs(main_w)``
 
-    Only those four terms participate (HB §12.1: ``main = identified + group +
-    unknown + residual``; ``residual`` is the deliberately retained unexplained
-    remainder, not part of the accounted sum).  **Any** missing term means "no
-    ratio" -- ``None`` is returned, never ``0.0`` (HB §18: absent is ``None``,
-    never a fabricated zero).  A zero main power likewise yields ``None``: a
-    ratio has no denominator.
+    Any missing term means "no ratio" -- ``None``, never ``0.0`` (HB §18).  A
+    zero main power likewise yields ``None``: a ratio has no denominator.
     """
     if reconciliation is None:
         return None
     main = getattr(reconciliation, "main_w", None)
-    identified = getattr(reconciliation, "identified_w", None)
-    group = getattr(reconciliation, "group_w", None)
-    unknown = getattr(reconciliation, "unknown_w", None)
-    if any(term is None for term in (main, identified, group, unknown)):
+    terms = (
+        main,
+        getattr(reconciliation, "identified_w", None),
+        getattr(reconciliation, "group_w", None),
+        getattr(reconciliation, "unknown_w", None),
+        getattr(reconciliation, "residual_w", None),
+    )
+    if any(term is None for term in terms):
         return None
     try:
-        main_value = float(main)
-        accounted = float(identified) + float(group) + float(unknown)
+        values = [float(term) for term in terms]
     except (TypeError, ValueError):
         return None
-    if not math.isfinite(main_value) or not math.isfinite(accounted) or main_value == 0.0:
+    if not all(math.isfinite(v) for v in values) or values[0] == 0.0:
         return None
-    return abs(main_value - accounted) / abs(main_value)
+    error = values[0] - sum(values[1:])
+    return abs(error) / abs(values[0])
 
 
 def reader_state_quality_inputs(
@@ -360,11 +362,7 @@ def reader_state_quality_inputs(
         observed_at = getattr(held, "held_since", None)
         age: float | None = None
         if observed_at is not None:
-            ref = (
-                observed_at
-                if observed_at.tzinfo is not None
-                else observed_at.replace(tzinfo=UTC)
-            )
+            ref = observed_at if observed_at.tzinfo is not None else observed_at.replace(tzinfo=UTC)
             age = max(0.0, (at_aware - ref).total_seconds())
 
         samples = tuple(store.window(reader, at - timedelta(days=1), at))
@@ -385,8 +383,7 @@ def reader_state_quality_inputs(
         cadence_s = float(cadence.seconds) if cadence is not None else None
         observed_cadence = (
             cadence_s
-            if cadence is not None
-            and getattr(cadence, "source", None) == CADENCE_SOURCE_OBSERVED
+            if cadence is not None and getattr(cadence, "source", None) == CADENCE_SOURCE_OBSERVED
             else None
         )
         sigma = store.sigma(reader)
@@ -544,9 +541,7 @@ class DataQualityEngine:
         scores: list[float] = []
         defects_to_log: list[tuple[str, str, str, str]] = []
 
-        power_channels = {
-            name: ch for name, ch in window.channels.items() if not ch.is_energy
-        }
+        power_channels = {name: ch for name, ch in window.channels.items() if not ch.is_energy}
         # Defensive: a channel in the power window carrying an energy unit is
         # routed to the energy scoring path instead of being scored as watts.
         energy_channels: dict[str, AlignedChannel] = {
@@ -595,9 +590,7 @@ class DataQualityEngine:
             }
             if ch.value_w is not None:
                 scores.append(result.score)
-            defects_to_log.extend(
-                (name, code, detail, sev) for code, sev, detail in result.defects
-            )
+            defects_to_log.extend((name, code, detail, sev) for code, sev, detail in result.defects)
 
         # -- energy domain -------------------------------------------------- #
         if energy_window is not None:
@@ -621,9 +614,7 @@ class DataQualityEngine:
                     "reliability_factor": round(result.score, 4),
                     "age_seconds": ch.age_seconds,
                     "repeated": ch.repeated,
-                    "state_timestamp": ch.state_timestamp.isoformat()
-                    if ch.state_timestamp
-                    else None,
+                    "state_timestamp": ch.state_timestamp.isoformat() if ch.state_timestamp else None,
                     "received_at": ch.received_at.isoformat() if ch.received_at else None,
                     "sample_count": eh.sample_count if eh else 0,
                     "monotonic": eh.monotonic if eh else True,
@@ -634,9 +625,7 @@ class DataQualityEngine:
                 }
                 if ch.value_kwh is not None:
                     scores.append(result.score)
-                defects_to_log.extend(
-                    (name, code, detail, sev) for code, sev, detail in result.defects
-                )
+                defects_to_log.extend((name, code, detail, sev) for code, sev, detail in result.defects)
 
         # Defensive path: energy-typed channels found inside a power window.
         for name in sorted(energy_channels):
@@ -710,9 +699,7 @@ class DataQualityEngine:
         # 1. Missing / unavailable
         if ch.value_w is None:
             code = "sensor_unavailable" if is_unavailable else "missing_sample"
-            result.penalize(
-                t.missing_penalty, code, "no sample in window", severity="warning", issues=issues
-            )
+            result.penalize(t.missing_penalty, code, "no sample in window", severity="warning", issues=issues)
             return result
         if is_unavailable:
             result.penalize(
@@ -721,9 +708,7 @@ class DataQualityEngine:
 
         # 2. Implausible value / non-finite (power only)
         if not math.isfinite(ch.value_w):
-            result.penalize(
-                1.0, "implausible_value", "non-finite value", severity="error", issues=issues
-            )
+            result.penalize(1.0, "implausible_value", "non-finite value", severity="error", issues=issues)
             return result
         if abs(ch.value_w) > t.absurd_power_w:
             result.penalize(
@@ -759,13 +744,9 @@ class DataQualityEngine:
                     issues=issues,
                 )
             elif abs(skew) > t.skew_bad_s:
-                result.penalize(
-                    t.skew_penalty, "timestamp_skew", f"skew={skew:.1f}s", issues=issues
-                )
+                result.penalize(t.skew_penalty, "timestamp_skew", f"skew={skew:.1f}s", issues=issues)
             elif abs(skew) > t.skew_warn_s:
-                result.penalize(
-                    t.skew_penalty * 0.5, "timestamp_skew", f"skew={skew:.1f}s", issues=issues
-                )
+                result.penalize(t.skew_penalty * 0.5, "timestamp_skew", f"skew={skew:.1f}s", issues=issues)
 
         # 5. Duplicate / repeated sample
         if ch.repeated:
@@ -781,8 +762,7 @@ class DataQualityEngine:
             if health.interval_median_s and health.interval_median_s > 0:
                 if (
                     health.interval_p95_s
-                    and health.interval_p95_s / health.interval_median_s
-                    > t.interval_jitter_ratio_warn
+                    and health.interval_p95_s / health.interval_median_s > t.interval_jitter_ratio_warn
                 ):
                     result.penalize(
                         t.interval_penalty,
@@ -819,7 +799,7 @@ class DataQualityEngine:
                     "coarse_resolution",
                     f"resolution={resolution:.2f}W value={ch.value_w:.2f}W",
                     issues=issues,
-                    )
+                )
 
         # 7. Polarity / phase consistency
         if cfg is not None:
@@ -841,11 +821,7 @@ class DataQualityEngine:
             #
             # A *main* row is excluded on purpose: negative power there is real
             # export / reverse flow and is reported as such, not a defect.
-            if (
-                polarity_value == "normal"
-                and cfg.role == "branch"
-                and ch.value_w < 0
-            ):
+            if polarity_value == "normal" and cfg.role == "branch" and ch.value_w < 0:
                 result.penalize(
                     t.polarity_penalty,
                     "polarity_inconsistent",
@@ -946,9 +922,7 @@ class DataQualityEngine:
                     issues=issues,
                 )
             if health.missing:
-                result.penalize(
-                    t.stale_penalty, "stale_sample", "no recent energy update", issues=issues
-                )
+                result.penalize(t.stale_penalty, "stale_sample", "no recent energy update", issues=issues)
 
         result.score = max(0.0, min(1.0, result.score))
         return result
@@ -1025,7 +999,12 @@ class DataQualityEngine:
                     ("measurement_overlap", f"cluster size {len(members)}")
                 )
                 logged.append(
-                    (name, "measurement_overlap", f"cluster_size={len(members)} value={value:.3f}W", "warning")
+                    (
+                        name,
+                        "measurement_overlap",
+                        f"cluster_size={len(members)} value={value:.3f}W",
+                        "warning",
+                    )
                 )
         return (
             {name: tuple(codes) for name, codes in per_channel.items()},
@@ -1124,8 +1103,12 @@ class DataQualityEngine:
 #: ``missing`` has no reading at all.  See the module docstring's status table
 #: and HB §6.1 ("invalid measurements must not silently enter inference").
 EXCLUDED_QUALITY_STATUSES: frozenset[str] = frozenset(
-    {QualityStatus.BAD.value, QualityStatus.DEGRADED.value, QualityStatus.STALE.value,
-     QualityStatus.MISSING.value}
+    {
+        QualityStatus.BAD.value,
+        QualityStatus.DEGRADED.value,
+        QualityStatus.STALE.value,
+        QualityStatus.MISSING.value,
+    }
 )
 
 
