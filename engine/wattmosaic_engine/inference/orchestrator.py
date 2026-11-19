@@ -517,7 +517,11 @@ def infer_group(
         device_estimates=devices,
         group_estimates=group_estimates,
         unknown_estimates=_unknown_estimates(
-            operator, scored, solve_report.unknown_scopes, solution.u
+            operator,
+            scored,
+            solve_report.unknown_scopes,
+            solution.u,
+            getattr(solve_report, "constrained_unknown_scopes", ()),
         ),
         candidates=scored,
         matches=_result_matches(matches, match_delta),
@@ -558,16 +562,32 @@ def _unknown_estimates(
     candidates: Sequence[Any],
     solved_scopes: Sequence[str],
     u: np.ndarray,
+    constrained_scopes: frozenset[str] | Collection[str] = (),
 ) -> list[UnknownEstimate]:
+    """Publish one :class:`UnknownEstimate` per scope on the operator.
+
+    HB §18: a scope that no solved row constrains carries ``delta_w=None``.  The
+    solver emits a numeric ``u`` for every declared column even when the row
+    that would constrain it had no sigma and was excluded, so that number is not
+    a measurement and must never be published (especially not as 0.0).  Only a
+    scope in ``constrained_scopes`` — those with a non-zero ΔU column on an
+    active row — gets the solver's value.
+    """
     scopes: list[str] = list(dict.fromkeys(solved_scopes))
     for candidate in candidates:
         if _name(candidate.subject_kind) == "unknown_scope":
             scopes.append(candidate.subject_id)
     for scope, _rows in operator.unknown_scopes:
         scopes.append(scope)
+    constrained = set(constrained_scopes)
+    solved_index = {scope: i for i, scope in enumerate(solved_scopes)}
     result: list[UnknownEstimate] = []
     for scope in dict.fromkeys(scopes):
-        index = list(solved_scopes).index(scope) if scope in solved_scopes else -1
+        if scope not in constrained:
+            # No solved row constrains this scope: absent, never a measured 0.
+            result.append(UnknownEstimate(scope_reader_id=scope, delta_w=None))
+            continue
+        index = solved_index.get(scope, -1)
         delta = _finite(u[index]) if 0 <= index < np.asarray(u).size else None
         result.append(UnknownEstimate(scope_reader_id=scope, delta_w=delta))
     return result
@@ -774,7 +794,11 @@ def infer_steady(
         device_estimates=devices,
         group_estimates=groups,
         unknown_estimates=_unknown_estimates(
-            operator, (), solve_report.unknown_scopes, solution.u
+            operator,
+            (),
+            solve_report.unknown_scopes,
+            solution.u,
+            getattr(solve_report, "constrained_unknown_scopes", ()),
         ),
         candidates=[],
         matches=dict(sorted(matches.items())),

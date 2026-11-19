@@ -251,9 +251,11 @@ def test_balance_error_is_computable_once_every_term_exists() -> None:
     assert recon.unknown_w == pytest.approx(150.0)
     assert recon.residual_w == pytest.approx(250.0)
     assert recon.balance_error_w == pytest.approx(2400.0 - 0.0 - 0.0 - 150.0 - 250.0)
-    # The unknown total stays "not computed" without an unknown estimate.
-    assert _assemble([]).unknown_w is None
-    assert _assemble([]).balance_error_w is None
+    # Z6/HB §18: a known, empty set of unknown estimates is a real 0 W (just
+    # like identified_w/group_w); absence of any estimate is not "unknown".
+    # Unknown is None only when an estimate itself is unconstrained.
+    assert _assemble([]).unknown_w == 0.0
+    assert _assemble([]).balance_error_w == pytest.approx(2400.0 - 0.0 - 0.0 - 0.0 - 250.0)
 
 
 # --------------------------------------------------------------------------- #

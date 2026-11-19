@@ -37,6 +37,7 @@ from ...contracts import (
     VersionTriple,
 )
 from ..repositories import Repository, as_utc, enum_value, iso
+from .inference import repair_point_bounds
 
 
 class EvidenceRepository(Repository):
@@ -314,7 +315,12 @@ class EvidenceRepository(Repository):
     @staticmethod
     def record_from_row(row: sqlite3.Row | dict[str, Any]) -> EventInferenceRecord:
         data = dict(row)
-        data["result"] = JointInferenceResult(**json.loads(data.pop("result_json") or "{}"))
+        result_payload = json.loads(data.pop("result_json") or "{}")
+        # A MEASURED/IDENTIFIABLE estimate's zero-width bounds lose their trusted
+        # flag when dumped to JSON.  Open the shared repair gate while rebuilding
+        # the contract object, exactly as the S17 snapshot reader does.
+        with repair_point_bounds(result_payload):
+            data["result"] = JointInferenceResult(**result_payload)
         data["created_at"] = as_utc(data["created_at"])
         # Rebuilding the model runs its revision-chain validator on read.
         return EventInferenceRecord(**data)
