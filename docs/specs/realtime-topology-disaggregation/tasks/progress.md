@@ -55,7 +55,7 @@
 | P2 | 3 | VERIFIED |  |  |  |
 | P3 | 3 | VERIFIED |  |  | P3b follow-up: DATA_GAP delta None |
 | P4 | 3 | VERIFIED |  |  | supersedes link not persisted (contract has no metadata) -> D5 |
-| P5 | 3 | IN_PROGRESS |  |  |  |
+| P5 | 3 | VERIFIED |  |  | unlinked HA event persistence via callback, wired in P6 |
 | T1 | 3 | VERIFIED |  |  | primary_display_tree matches M1 build_columns |
 | T2 | 3 | VERIFIED |  |  |  |
 | T3 | 3 | VERIFIED |  |  | live loop wiring deferred to P6 |
@@ -82,15 +82,15 @@
 | M3 | 4 | VERIFIED |  |  | M3b follow-up: real column/row trees in /matrix |
 | L4 | 4 | VERIFIED |  |  |  |
 | L5 | 4 | VERIFIED |  |  | DEF-03 fixed |
-| L6 | 4 | NOT_STARTED | | | |
+| L6 | 4 | VERIFIED |  |  | executor wiring in P6 |
 | D4 | 4 | VERIFIED |  |  |  |
 | H1 | 4 | VERIFIED |  |  | AT-17 HA-side helper done; AT-17 e2e closes with P6 |
 | H2 | 4 | VERIFIED |  |  | partial: async_migrate_entry hook -> H1; v2 forms removal -> Z2 |
 | U2 | 4 | VERIFIED |  | AT-20 | AT-20 closed |
-| P6 | 4 | NOT_STARTED | | | |
+| P6 | 4 | IN_PROGRESS |  |  |  |
 | Z2 | 5 | NOT_STARTED | | | |
 | Z1 | 5 | NOT_STARTED | | | |
-| L7 | 5 | NOT_STARTED | | AT-19 | |
+| L7 | 5 | IN_PROGRESS |  | AT-19 |  |
 | D5 | 5 | IN_PROGRESS |  |  |  |
 | X09 | 5 | NOT_STARTED | | | |
 | V1 | 6 | NOT_STARTED | | all 20 | |
