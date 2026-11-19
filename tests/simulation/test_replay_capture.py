@@ -278,6 +278,182 @@ def test_replay_stamps_db_derived_versions_on_the_run(tmp_path) -> None:
     assert topo_v in run.derived_run_id
 
 
+def test_replay_uses_the_stored_db_topology_not_hb17(tmp_path) -> None:
+    """A replay against a DB whose topology differs from HB §17 uses that DB.
+
+    The triple is handed to the production replay surface together with the DB
+    path, so the operator/mapping/model set are rebuilt from the stored versions
+    and the derived estimates reflect the DB's topology (not the HB §17 house).
+    """
+    from wattmosaic_engine.contracts import (
+        EdgeEvidence,
+        MappingEdge,
+        Observability,
+        RelationType,
+        TopologyEdgeV3,
+    )
+    from wattmosaic_engine.replay import replay_week
+    from wattmosaic_engine.storage.database import Database
+    from wattmosaic_engine.versioning.service import VersionService
+
+    at = datetime(2026, 1, 1, tzinfo=UTC)
+    path = tmp_path / "different_topology.db"
+    db = Database(path)
+    svc = VersionService(
+        topology_repo=db.repos.topology_v3,
+        mapping_repo=db.repos.mapping,
+        clock=lambda: at,
+        model_set_id="mset-alt",
+    )
+    # A topology that does not exist in HB §17: "Alto" contains ct_a directly.
+    topo_v = svc.propose_topology(
+        [
+            TopologyEdgeV3(
+                edge_id="e::Alto::ct_a",
+                relation=RelationType.CONTAINS,
+                source_endpoint_id="Alto",
+                target_endpoint_id="ct_a",
+                lifecycle="confirmed",
+                declared_by="user",
+                beta=1.0,
+                beta_basis="unity",
+                evidence=EdgeEvidence(),
+                valid_from=at,
+                pinned=True,
+            )
+        ],
+        None,
+    )
+    svc.promote_topology(topo_v, "alt seed")
+    map_v = svc.propose_mapping(
+        [
+            MappingEdge(
+                mapping_edge_id="m::tv->ct_a",
+                subject_kind="device",
+                subject_id="tv",
+                endpoint_id="ct_a",
+                observability=Observability.DIRECT,
+                lifecycle="confirmed",
+                declared_by="user",
+                evidence=EdgeEvidence(),
+                valid_from=at,
+            )
+        ],
+        None,
+    )
+    svc.promote_mapping(map_v, "alt seed")
+    triple = svc.current()
+    db.close()
+
+    house = build_hb17(seed=7, minutes=20, interval_s=10.0)
+    frames = house.observation_view()
+    db_run = replay_week(frames, triple=triple, db_path=path, reason="db-topology")
+    hb_run = replay_week(frames, model_set="v1", reason="hb17")
+
+    # Identity and versions come from the DB, not from the HB §17 triple.
+    assert db_run.versions.topology_version_id == triple.topology_version_id
+    assert db_run.versions.mapping_version_id == triple.mapping_version_id
+    assert db_run.versions.model_set_id == triple.model_set_id
+    assert triple.topology_version_id in db_run.derived_run_id
+    # The DB's mapping only has "tv" on ct_a; HB §17's has tv/lights/fridge and
+    # a deeper nesting.  The results must therefore differ.
+    assert [e.subject_id for e in db_run.derived_estimates] != [
+        e.subject_id for e in hb_run.derived_estimates
+    ]
+    assert {"tv"} == {e.subject_id for e in db_run.derived_estimates}
+
+
+def test_replay_capture_passes_db_derived_triple_through(tmp_path) -> None:
+    """``replay_capture.replay`` hands the DB triple to the production replay.
+
+    The resulting run's identity and estimates come from the database being
+    replayed, not from a relabelled HB §17 run.
+    """
+    module = _replay_module()
+    from wattmosaic_engine.contracts import (
+        EdgeEvidence,
+        MappingEdge,
+        Observability,
+        RelationType,
+        TopologyEdgeV3,
+    )
+    from wattmosaic_engine.storage.database import Database
+    from wattmosaic_engine.versioning.service import VersionService
+
+    at = datetime(2026, 1, 1, tzinfo=UTC)
+    path = tmp_path / "capture.db"
+    db = Database(path)
+    svc = VersionService(
+        topology_repo=db.repos.topology_v3,
+        mapping_repo=db.repos.mapping,
+        clock=lambda: at,
+        model_set_id="mset-tool",
+    )
+    topo_v = svc.propose_topology(
+        [
+            TopologyEdgeV3(
+                edge_id="e::Alto::ct_a",
+                relation=RelationType.CONTAINS,
+                source_endpoint_id="Alto",
+                target_endpoint_id="ct_a",
+                lifecycle="confirmed",
+                declared_by="user",
+                beta=1.0,
+                beta_basis="unity",
+                evidence=EdgeEvidence(),
+                valid_from=at,
+                pinned=True,
+            )
+        ],
+        None,
+    )
+    svc.promote_topology(topo_v, "seed")
+    map_v = svc.propose_mapping(
+        [
+            MappingEdge(
+                mapping_edge_id="m::tv->ct_a",
+                subject_kind="device",
+                subject_id="tv",
+                endpoint_id="ct_a",
+                observability=Observability.DIRECT,
+                lifecycle="confirmed",
+                declared_by="user",
+                evidence=EdgeEvidence(),
+                valid_from=at,
+            )
+        ],
+        None,
+    )
+    svc.promote_mapping(map_v, "seed")
+    from wattmosaic_engine.contracts import SPEC_SCHEMA_VERSION
+
+    db._conn.execute(
+        "INSERT OR IGNORE INTO power_model_versions_v3(version_id, subject_kind, "
+        "subject_id, number, model_class, basis, spec_json, schema_version, "
+        "trainer_version, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        ("mdl-tool-v1", "device", "tv", 1, "fixed", "absolute_anchor", "{}",
+         SPEC_SCHEMA_VERSION, "test", "2026-01-01T00:00:00+00:00"),
+    )
+    db._conn.execute(
+        "INSERT INTO power_model_events(version_id, event, reason, at) "
+        "VALUES('mdl-tool-v1','activated','seed','2026-01-01T00:00:00+00:00')"
+    )
+    db.close()
+
+    versions = module.read_versions_from_db(path)
+    assert versions is not None
+    house = build_hb17(seed=7, minutes=20, interval_s=10.0)
+    capture = _capture_from_house(house)
+    capture.source = str(path)  # a DB-backed capture
+    run = module.replay(capture, tick_s=10.0, versions=versions)
+
+    assert run.versions.topology_version_id == topo_v
+    assert run.versions.mapping_version_id == map_v
+    assert run.versions.model_set_id == versions["model_set_id"]
+    assert topo_v in run.derived_run_id
+    assert {e.subject_id for e in run.derived_estimates} == {"tv"}
+
+
 def test_parse_versions_override() -> None:
     """``--versions`` accepts exactly three comma-separated ids."""
     module = _replay_module()

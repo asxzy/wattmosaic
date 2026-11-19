@@ -6,17 +6,28 @@ and returns a :class:`DerivedRun`.  Raw samples and evidence frames are carried
 through unchanged (the replay never writes them), and each run is retrievable
 by its ``derived_run_id`` via :func:`get_derived_run`.
 
+A replay against a real database additionally accepts an explicit
+:class:`~wattmosaic_engine.contracts.VersionTriple` and a ``db_path``.  In that
+mode the observation operator, the subject↔reader mapping and the model set are
+all rebuilt from that triple's *stored* topology/mapping/model versions in the
+given database -- never relabelled afterwards.  The default (no ``db_path``) is
+the built-in HB §17 house and the built-in ``v1``/``v2`` model sets, so existing
+callers are unchanged.
+
 Production code here depends only on the K08 runtime Protocols and production
 value objects (``versioning.service`` frozen views, the production observation
-operator).  It never imports ``runtime.fakes``, never touches a database and
+operator).  It never imports ``runtime.fakes``, never writes a database and
 never reads the wall clock: the clock is derived from the evidence timestamps.
 It never imports a Home Assistant or HA-statistics client (DEC-35).
 """
 
 from __future__ import annotations
 
+import json
+import sqlite3
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
@@ -41,7 +52,12 @@ from wattmosaic_engine.runtime.interfaces import (
     ObservationOperator,
     ResidualModelView,
 )
-from wattmosaic_engine.versioning.service import _FrozenMappingView, _FrozenTopologyView
+from wattmosaic_engine.versioning.service import (
+    _edge_contract,
+    _FrozenMappingView,
+    _FrozenTopologyView,
+    _map_edge_contract,
+)
 
 __all__: list[str] = ["replay_week", "get_derived_run", "reset_replay_runs"]
 
@@ -71,6 +87,8 @@ _ANCESTORS: dict[str, tuple[str, ...]] = {
     "ct_a": ("Sub", "Main"),
     "ct_b": ("Sub", "Main"),
 }
+#: Triple stamped on the built-in HB §17 replay (kept for existing callers).
+_HB17_TRIPLE = ("topo-hb17", "map-hb17", "mset-hb17")
 
 
 class _ReplayModelSet:
@@ -155,10 +173,141 @@ def _build_model_set(model_set: str | ModelSetView) -> ModelSetView:
     return _ReplayModelSet(make_model_set_id(version_ids), priors)
 
 
-def _build_operator(start: datetime) -> ObservationOperator:
-    """Build H for the HB §17 house from production frozen views."""
-    from wattmosaic_engine.electrical.operator import build_observation_operator
+# --------------------------------------------------------------------------- #
+# Topology / mapping / model views from a stored database (V2b).
+# --------------------------------------------------------------------------- #
 
+
+def _open_ro(db_path: str | Path) -> sqlite3.Connection:
+    """Open a capture database read-only: a replay never writes to its input."""
+    path = Path(db_path)
+    if not path.exists():
+        raise ValueError(f"no database at {path}")
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _edge_ids(conn: sqlite3.Connection, table: str, column: str, version_id: str) -> list[str]:
+    row = conn.execute(
+        f"SELECT {column} FROM {table} WHERE version_id=?", (version_id,)
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"unknown stored version {version_id!r} in {table}")
+    raw = row[0] or "[]"
+    return list(json.loads(raw) if isinstance(raw, str) else raw)
+
+
+def _views_from_db(
+    conn: sqlite3.Connection, triple: VersionTriple
+) -> tuple[Any, Any, tuple[str, ...], tuple[tuple[str, str], ...]]:
+    """Rebuild the stored topology/mapping views for ``triple``.
+
+    The ids come from the version rows themselves, and the edge rows come from
+    the same S14/S15 tables the live engine reads, so a replay of a database
+    whose topology differs from HB §17 uses *that* topology.
+    """
+    topo_ids = _edge_ids(conn, "topology_versions_v3", "edge_ids_json", triple.topology_version_id)
+    topo_edges: list[TopologyEdgeV3] = []
+    if topo_ids:
+        placeholders = ",".join("?" for _ in topo_ids)
+        rows = conn.execute(
+            f"SELECT * FROM topology_edges WHERE edge_id IN ({placeholders}) ORDER BY edge_id",  # noqa: S608 - bound ids
+            tuple(topo_ids),
+        ).fetchall()
+        topo_edges = [_edge_contract(dict(row)) for row in rows]
+
+    map_ids = _edge_ids(conn, "mapping_versions", "mapping_edge_ids_json", triple.mapping_version_id)
+    map_edges: list[MappingEdge] = []
+    if map_ids:
+        placeholders = ",".join("?" for _ in map_ids)
+        rows = conn.execute(
+            f"SELECT * FROM mapping_edges WHERE mapping_edge_id IN ({placeholders}) ORDER BY mapping_edge_id",  # noqa: S608 - bound ids
+            tuple(map_ids),
+        ).fetchall()
+        map_edges = [_map_edge_contract(dict(row)) for row in rows]
+
+    topo_view = _FrozenTopologyView(topo_edges)
+    map_view = _FrozenMappingView(map_edges)
+    readers = tuple(
+        sorted(
+            {
+                *(e.source_endpoint_id for e in topo_edges),
+                *(e.target_endpoint_id for e in topo_edges),
+                *(e.endpoint_id for e in map_edges),
+            }
+        )
+    )
+    subjects = tuple(sorted({("device", e.subject_id) for e in map_edges}))
+    return topo_view, map_view, readers, subjects
+
+
+def _model_set_from_db(conn: sqlite3.Connection, triple: VersionTriple) -> ModelSetView:
+    """Build the model set named by ``triple`` from the stored L1 versions.
+
+    A version is active iff its last activation-relevant event is ``activated``
+    (the same rule L1's registry uses).  Fixed models contribute their stored
+    transition delta as a signed prior; unknown specs contribute no prior
+    (never a fabricated 0 W, HB §18).
+    """
+    from wattmosaic_engine.contracts import FixedSpec
+    from wattmosaic_engine.models.spec import SPEC_SCHEMA_VERSION, decode_spec
+
+    try:
+        rows = conn.execute(
+            "SELECT version_id, subject_id, spec_json, schema_version "
+            "FROM power_model_versions_v3"
+        ).fetchall()
+    except sqlite3.Error:
+        rows = []
+    try:
+        events = conn.execute(
+            "SELECT version_id, event, at, id FROM power_model_events ORDER BY at, id"
+        ).fetchall()
+    except sqlite3.Error:
+        events = []
+
+    by_version: dict[str, list[tuple[str, int]]] = {}
+    for row in events:
+        event = str(row["event"])
+        if event in ("frozen", "unfrozen"):
+            continue
+        by_version.setdefault(str(row["version_id"]), []).append((event, int(row["id"] or 0)))
+
+    priors: dict[str, DeltaPrior] = {}
+    for row in rows:
+        version_id = str(row["version_id"])
+        history = by_version.get(version_id, [])
+        if not history or history[-1][0] != "activated":
+            continue
+        try:
+            schema = int(row["schema_version"] or SPEC_SCHEMA_VERSION)
+            spec = decode_spec(row["spec_json"], schema)
+        except (TypeError, ValueError, KeyError):
+            continue
+        if not isinstance(spec, FixedSpec):
+            continue
+        mean = next(
+            (stat.median_w for stat in spec.transition_delta.values() if stat.median_w is not None),
+            None,
+        )
+        sigma = next(
+            (stat.mad_w for stat in spec.transition_delta.values() if stat.mad_w is not None),
+            None,
+        )
+        if mean is None:
+            continue
+        priors[str(row["subject_id"])] = DeltaPrior(
+            mean_w=float(mean),
+            sigma_w=float(sigma) if sigma is not None else 3.0,
+            sign="pos" if mean >= 0 else "neg",
+            model_version_id=version_id,
+        )
+    return _ReplayModelSet(triple.model_set_id, priors)
+
+
+def _hb17_views(start: datetime) -> tuple[Any, Any, tuple[str, ...], tuple[tuple[str, str], ...]]:
+    """The built-in HB §17 house views (the default replay target)."""
     tree = {
         "Main": {
             "Sub": {"ct_a": {}, "ct_b": {}},
@@ -204,27 +353,41 @@ def _build_operator(start: datetime) -> ObservationOperator:
         )
         for subject, reader in _SUBJECT_READERS.items()
     ]
-    topo_view = _FrozenTopologyView(edges)
-    map_view = _FrozenMappingView(mapping_edges)
-    readers = ("Main", "Sub", "ct_a", "ct_b", "ct_c")
-    subjects = tuple(("device", sid) for sid, _v1, _v2 in _DEFAULT_SUBJECTS)
-    return build_observation_operator(
-        topo_view,
-        map_view,
-        None,
-        readers,
-        subjects,
-        start,
+    return (
+        _FrozenTopologyView(edges),
+        _FrozenMappingView(mapping_edges),
+        ("Main", "Sub", "ct_a", "ct_b", "ct_c"),
+        tuple(("device", sid) for sid, _v1, _v2 in _DEFAULT_SUBJECTS),
     )
 
 
-def _evidence_from_frames(observation: Sequence[Mapping[str, Any]]) -> list[EventGroup]:
+def _build_operator(
+    start: datetime,
+    topo_view: Any,
+    map_view: Any,
+    readers: Sequence[str],
+    subjects: Sequence[tuple[str, str]],
+) -> ObservationOperator:
+    """Build H for one frozen (topology, mapping) view pair."""
+    from wattmosaic_engine.electrical.operator import build_observation_operator
+
+    return build_observation_operator(topo_view, map_view, None, tuple(readers), tuple(subjects), start)
+
+
+def _evidence_from_frames(
+    observation: Sequence[Mapping[str, Any]],
+    triple: VersionTriple,
+    topo_view: Any,
+    map_view: Any,
+) -> list[EventGroup]:
     """Derive immutable event groups from an HB §17 observation frame.
 
     Only observation keys are read (HA states/messages and reader samples); no
     truth key is consulted.  The deltas are content-derived (the signed level
     change around each HA on/off step), so replaying the same frame twice yields
-    byte-identical evidence.
+    byte-identical evidence.  ``triple`` and the two views decide which reader
+    a subject is mapped on and which ancestors observe it: a database whose
+    topology differs from HB §17 therefore produces different evidence.
     """
     by_reader: dict[str, list[tuple[datetime, float]]] = {}
     for record in observation:
@@ -239,7 +402,7 @@ def _evidence_from_frames(observation: Sequence[Mapping[str, Any]]) -> list[Even
             ts = _parse_time(sample.get("state_timestamp") or sample.get("received_at"))
             if ts is None:
                 continue
-            by_reader.setdefault(reader, []).append((ts, float(raw)))
+            by_reader.setdefault(str(reader), []).append((ts, float(raw)))
 
     transitions: list[tuple[datetime, str, str]] = []
     for record in observation:
@@ -258,13 +421,14 @@ def _evidence_from_frames(observation: Sequence[Mapping[str, Any]]) -> list[Even
         subject = _ENTITY_SUBJECT.get(entity)
         if subject is None:
             continue
-        reader = _SUBJECT_READERS.get(subject)
+        reader = map_view.most_specific_reader(("device", subject)) or _SUBJECT_READERS.get(subject)
         if reader is None:
             continue
         delta_w = _step_delta(by_reader.get(reader, ()), at)
         if delta_w is None:
             continue
-        readers = [reader, *_ANCESTORS.get(reader, ())]
+        ancestors = tuple(topo_view.ancestors(reader)) if hasattr(topo_view, "ancestors") else _ANCESTORS.get(reader, ())
+        readers = [reader, *ancestors]
         deltas = [
             ReaderDelta(reader_id=rid, delta_w=delta_w, sigma_w=2.0, completeness="complete")
             for rid in readers
@@ -272,20 +436,15 @@ def _evidence_from_frames(observation: Sequence[Mapping[str, Any]]) -> list[Even
         ]
         if not deltas:
             continue
-        vt = VersionTriple(
-            topology_version_id="topo-hb17",
-            mapping_version_id="map-hb17",
-            model_set_id="mset-hb17",
-        )
         groups.append(
             EventGroup(
-                group_id=f"hb17::g{index:04d}::{subject}::{state}",
+                group_id=f"replay::g{index:04d}::{subject}::{state}",
                 revision=1,
                 status=EventGroupStatus.CONFIRMED,
                 opened_at=at,
                 closed_at=at + timedelta(seconds=10),
                 reader_deltas=deltas,
-                versions=vt,
+                versions=triple,
             )
         )
     return groups
@@ -316,16 +475,52 @@ def replay_week(
     *,
     model_set: str | ModelSetView = "v1",
     reason: str = "replay",
+    triple: VersionTriple | None = None,
+    db_path: str | Path | None = None,
 ) -> DerivedRun:
-    """Replay one week of immutable evidence under ``model_set``.
+    """Replay one week of immutable evidence under an explicit version triple.
 
     ``raw_bytes`` is the HB §17 observation frame.  It is read, never written:
     the returned run carries its canonical serialisation as
     ``raw_samples_bytes``/``evidence_bytes``.  The run is registered so
     :func:`get_derived_run` can retrieve it by id.
+
+    With ``triple`` **and** ``db_path`` the operator, mapping and model set are
+    rebuilt from that triple's stored versions in the database (opened
+    read-only).  With ``triple`` alone the built-in HB §17 operator is used but
+    the run is stamped with the given triple (an explicit override against a
+    capture with no database).  Without either the built-in HB §17 house and
+    ``model_set`` are used, preserving the original L7/AT-19 behaviour.
     """
-    models = _build_model_set(model_set)
-    evidence = _evidence_from_frames(raw_bytes)
+    if db_path is not None and triple is None:
+        raise ValueError("db_path requires an explicit triple")
+
+    if db_path is not None and triple is not None:
+        conn = _open_ro(db_path)
+        try:
+            topo_view, map_view, readers, subjects = _views_from_db(conn, triple)
+            models = _model_set_from_db(conn, triple)
+        finally:
+            conn.close()
+        effective_triple = triple
+    else:
+        models = _build_model_set(model_set)
+        if triple is None:
+            # The HB §17 triple is stamped from the models actually replayed so
+            # the built-in path stays byte-identical to the pre-V2b behaviour.
+            effective_triple = VersionTriple(
+                topology_version_id=_HB17_TRIPLE[0],
+                mapping_version_id=_HB17_TRIPLE[1],
+                model_set_id=models.model_set_id,
+            )
+        else:
+            effective_triple = triple
+        topo_view, map_view, _readers, _subjects = _hb17_views(
+            datetime(2026, 1, 1, tzinfo=UTC)
+        )
+        readers, subjects = _readers, _subjects
+
+    evidence = _evidence_from_frames(raw_bytes, effective_triple, topo_view, map_view)
     if evidence:
         start = min(g.opened_at for g in evidence)
         end = max(g.closed_at or g.opened_at for g in evidence)
@@ -333,7 +528,7 @@ def replay_week(
         start = datetime(2026, 1, 1, tzinfo=UTC)
         end = start + timedelta(days=7)
 
-    operator = _build_operator(start)
+    operator = _build_operator(start, topo_view, map_view, readers, subjects)
     residual: ResidualModelView = _ZeroResidual()
     history: IdentifiabilityHistory = _EmptyHistory()
     matches: MatchStore = _EmptyMatches()
@@ -342,19 +537,14 @@ def replay_week(
 
     recon = Reconciler(
         operator=operator,
-        model_sets={models.model_set_id: models},
+        model_sets={effective_triple.model_set_id: models},
         residual=residual,
         history=history,
         matches=matches,
         clock=lambda: end,
         infer_group_fn=do_infer_group,
     )
-    triple = VersionTriple(
-        topology_version_id="topo-hb17",
-        mapping_version_id="map-hb17",
-        model_set_id=models.model_set_id,
-    )
-    run_id = recon.run((start, end), triple, reason, evidence=evidence)
+    run_id = recon.run((start, end), effective_triple, reason, evidence=evidence)
     stamped = _stamp_run(recon.get(run_id), raw_bytes)
     _RUNS[stamped.derived_run_id] = stamped
     return stamped
