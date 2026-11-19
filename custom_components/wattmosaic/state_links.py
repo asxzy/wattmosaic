@@ -541,6 +541,41 @@ def state_link_signature(resolution: LinkResolution) -> str:
     return "|".join(parts) + (f"||{problems}" if problems else "")
 
 
+def build_ha_entity_link_bodies(
+    resolution: LinkResolution,
+    *,
+    target_kind: str = "device",
+    role: str = "state",
+) -> list[dict[str, str]]:
+    """Build v3 ``ha_entity_links`` write bodies from a :class:`LinkResolution`.
+
+    DEC-08 replaces the four legacy representations of "which entity belongs to
+    which device" with one many-to-many table.  Each resolved state entity is a
+    link to its engine device with ``target_kind`` and ``role``.  The bodies are
+    plain data so they can be posted through the v3 API by the caller; this
+    helper never touches Home Assistant or the network.  One entity may link to
+    several subjects (one body per pair), which is the point of the v3 shape.
+
+    ``role`` defaults to ``"state"`` because :func:`resolve_links` only ever
+    produces runtime-state evidence, never measurement or control links.
+    """
+    if target_kind not in ("device", "component"):
+        raise ValueError("target_kind must be 'device' or 'component'")
+    bodies: list[dict[str, str]] = []
+    for device_id in sorted(resolution.state_entities):
+        for entity_id in resolution.state_entity_ids(device_id):
+            bodies.append(
+                {
+                    "entity_id": entity_id,
+                    "target_kind": target_kind,
+                    "target_id": device_id,
+                    "role": role,
+                    "declared_by": "user",
+                }
+            )
+    return bodies
+
+
 __all__ = [
     "LINK_STATE_ENTITIES_KEY",
     "LinkResolution",
@@ -550,6 +585,7 @@ __all__ = [
     "STATE_DOMAINS",
     "apply_state_entities",
     "apply_state_link_metadata",
+    "build_ha_entity_link_bodies",
     "ct_entities_by_device",
     "device_ids",
     "is_device_registry_id",

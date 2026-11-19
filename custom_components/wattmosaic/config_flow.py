@@ -84,12 +84,14 @@ from .flow_logic import (
     assignment_defaults,
     assignment_store,
     auto_placement_enabled,
+    build_endpoint_setup_plan,
     build_topology_update,
     connection_defaults,
     descendant_ids,
     device_configuration_command,
     device_link_choice,
     discovered_base_url,
+    endpoint_choices,
     energy_entity_choice,
     linked_device_id,
     mapping_summary,
@@ -97,6 +99,7 @@ from .flow_logic import (
     normalise_channels,
     normalise_device_configuration,
     normalise_device_list,
+    normalise_endpoints,
     normalise_settings,
     resolve_confirmation,
     settings_defaults,
@@ -104,6 +107,7 @@ from .flow_logic import (
     suggested_alias,
     suggested_pair,
     suggested_parent,
+    suggested_parents,
     uncertainty_summary,
     validate_assignments,
     validate_connection,
@@ -113,6 +117,18 @@ from .flow_logic import (
 from .util import normalise_base_url
 
 _LOGGER = logging.getLogger(__name__)
+
+
+async def _v3_post(client: EngineClient, path: str, body: Mapping[str, Any]) -> dict[str, Any]:
+    """POST ``body`` to a v3 path through the engine client.
+
+    ``EngineClient`` deliberately exposes only named endpoint methods, so the
+    setup flow uses its generic request primitive here.  This keeps the token
+    and contract headers (and error scrubbing) in one place and lets the flow
+    write v3 edges / scope confirmations without a new client method (which is
+    owned by a different task).
+    """
+    return await client._request("POST", path, json_body=dict(body), expect=(dict, list))
 
 
 # --------------------------------------------------------------------------- #
@@ -459,6 +475,12 @@ class _AssignmentWizard:
     _assignments: dict[str, dict[str, Any]]
     _channel_index: int
     _errors: dict[str, str]
+    #: H2 v3 state — discovered endpoints, engine-suggested parents and the
+    #: user's per-endpoint choices.  Populated only when the engine exposes the
+    #: v3 endpoints; the legacy channel wizard remains the fallback.
+    _endpoints: list[dict[str, Any]]
+    _parent_suggestions: dict[str, list[str]]
+    _endpoint_choices: dict[str, dict[str, Any]]
 
     # -- hooks ------------------------------------------------------------- #
 
@@ -467,6 +489,29 @@ class _AssignmentWizard:
 
     def _wizard_finish(self, confirmed: bool, version: Any) -> ConfigFlowResult:
         raise NotImplementedError  # pragma: no cover - abstract
+
+    async def _wizard_fetch_v3(self, client: EngineClient) -> bool:
+        """Fetch v3 endpoints + topology suggestions.  True when usable.
+
+        Both calls are best-effort: an engine that predates the v3 API simply
+        returns nothing useful, and the legacy channel wizard stays reachable.
+        """
+        endpoints: Any = None
+        topology: Any = None
+        try:
+            endpoints = await client._request("GET", "/endpoints", expect=(dict, list))
+        except Exception:  # noqa: BLE001 - v3 is optional during the transition
+            endpoints = None
+        try:
+            topology = await client.topology()
+        except Exception:  # noqa: BLE001
+            topology = None
+        self._endpoints = normalise_endpoints(endpoints)
+        self._parent_suggestions = suggested_parents(
+            topology.get("edges") or [] if isinstance(topology, Mapping) else []
+        )
+        return bool(self._endpoints)
+
 
     # -- state ------------------------------------------------------------- #
 
@@ -482,6 +527,108 @@ class _AssignmentWizard:
         self._assignments = assignments
         self._channel_index = 0
         self._errors = {}
+        self._endpoints = []
+        self._parent_suggestions = {}
+        self._endpoint_choices = {}
+
+    # -- step: endpoints (v3) ---------------------------------------------- #
+
+    async def async_step_endpoints(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """List discovered endpoints and capture user-declared structure.
+
+        For each CT the user may pick a parent; an engine PROVISIONAL parent is
+        preselected *as a suggestion* and must be left checked to be accepted as
+        a user edge.  For each candidate plug the user may say which single
+        device it measures.  Nothing is written here — the done step commits the
+        plan (DEC-13).
+        """
+        # ``user_input`` is the flat form: keys are ``parent::<id>``,
+        # ``accept::<id>`` and ``scope::<id>``.  Fold them back into the nested
+        # per-endpoint shape the pure helpers consume.
+        submitted: dict[str, dict[str, Any]] = {}
+        if user_input is not None:
+            for endpoint in self._endpoints:
+                eid = str(endpoint["endpoint_id"])
+                entry: dict[str, Any] = {}
+                if f"parent::{eid}" in user_input:
+                    entry["parent_endpoint_id"] = user_input[f"parent::{eid}"]
+                if f"accept::{eid}" in user_input:
+                    entry["parent_accepted"] = bool(user_input[f"accept::{eid}"])
+                elif f"parent::{eid}" in user_input:
+                    # A user explicitly typed a parent: that is a declaration.
+                    entry["parent_accepted"] = bool(user_input[f"parent::{eid}"])
+                if f"scope::{eid}" in user_input:
+                    entry["scope_subject_id"] = user_input[f"scope::{eid}"]
+                submitted[eid] = entry
+
+        self._endpoint_choices = endpoint_choices(
+            self._endpoints, submitted, suggestions=self._parent_suggestions
+        )
+        if user_input is not None:
+            return await self.async_step_done()
+
+        # One form for all endpoints, with a stable field per endpoint id.  A
+        # parent select carries the engine suggestion as its default so the user
+        # can leave it checked to accept it as a user edge (DEC-13); a plug gets
+        # a "which device does it measure" select, defaulted to the discovery
+        # proposal.  Neither is written until the done step builds the plan.
+        fields: dict[Any, Any] = {}
+        rows: list[str] = []
+        for endpoint in self._endpoints:
+            eid = str(endpoint["endpoint_id"])
+            choice = self._endpoint_choices.get(eid, {})
+            label = str(endpoint.get("display_name") or eid)
+            if endpoint.get("kind") in ("smart_plug", "appliance_monitor"):
+                subject = choice.get("suggested_scope_subject") or ""
+                rows.append(f"{label} [{eid}]: measures one appliance? suggested={subject or 'none'}")
+                fields[vol.Optional(f"scope::{eid}", default=str(subject))] = TextSelector()
+            elif str(choice.get("suggested_parent") or ""):
+                parent = str(choice["suggested_parent"])
+                rows.append(f"{label} [{eid}]: suggested parent {parent}")
+                fields[vol.Optional(f"accept::{eid}", default=False)] = BooleanSelector()
+                fields[vol.Optional(f"parent::{eid}", default=parent)] = TextSelector()
+            else:
+                rows.append(f"{label} [{eid}]: optional parent (none suggested)")
+                fields[vol.Optional(f"parent::{eid}", default="")] = TextSelector()
+
+        schema = vol.Schema(fields) if fields else vol.Schema({})
+        return self.async_show_form(
+            step_id="endpoints",
+            data_schema=schema,
+            errors=self._errors,
+            description_placeholders={
+                "endpoint_count": str(len(self._endpoints)),
+                "endpoint_rows": "\n".join(rows) or "None",
+            },
+        )
+
+    async def async_step_done(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Commit the v3 write plan: user edges, then scope, then links.
+
+        There is deliberately no ``POST /topology/confirm`` here: a declared
+        parent is authoritative (DEC-10) and an inferred parent is never written
+        as a declaration unless the user accepted it (DEC-13).  A plug scope is
+        confirmed only when the user selected a device.
+        """
+        plan = build_endpoint_setup_plan(self._endpoint_choices)
+        client = self._wizard_client()
+        try:
+            for item in plan:
+                await _v3_post(client, str(item["path"]), dict(item["body"]))
+        except Exception as err:  # noqa: BLE001
+            self._errors = {"base": describe_engine_error(err)}
+            _LOGGER.debug("WattMosaic v3 endpoint setup failed: %s", self._errors)
+            return self.async_show_form(
+                step_id="done",
+                data_schema=vol.Schema({}),
+                errors=self._errors,
+                description_placeholders={"write_count": str(len(plan))},
+            )
+        return self._wizard_finish(False, None)
 
     # -- step: channels ---------------------------------------------------- #
 
@@ -850,6 +997,11 @@ class WattMosaicConfigFlow(_AssignmentWizard, ConfigFlow, domain=DOMAIN):
             )
             if not errors:
                 self._settings = normalise_settings(user_input)
+                # H2: when the engine exposes v3 endpoints, the setup flow edits
+                # endpoints / user parents / plug scope.  The legacy channel
+                # wizard remains the fallback for an engine that predates D2/T4.
+                if await self._wizard_fetch_v3(self._wizard_client()):
+                    return await self.async_step_endpoints()
                 if not self._channels:
                     # No CT channels on the engine yet: nothing to assign.
                     return self._wizard_finish(False, None)
@@ -1014,6 +1166,10 @@ class WattMosaicOptionsFlow(_AssignmentWizard, OptionsFlow):
                         normalise_device_list(devices),
                         assignments,
                     )
+                    # H2: options edits endpoints and parents the same way setup
+                    # does when the engine exposes the v3 endpoints API.
+                    if await self._wizard_fetch_v3(client):
+                        return await self.async_step_endpoints()
                     if not self._channels:
                         return self._wizard_finish(False, None)
                     return await self.async_step_channels()
