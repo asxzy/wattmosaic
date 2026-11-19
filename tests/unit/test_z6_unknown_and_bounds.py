@@ -42,10 +42,11 @@ from wattmosaic_engine.contracts import (
 from wattmosaic_engine.core.snapshot import AssembleInputs, SnapshotAssembler
 from wattmosaic_engine.inference.joint import solve_joint_detailed
 from wattmosaic_engine.inference.orchestrator import _unknown_estimates
-from wattmosaic_engine.runtime.fakes import FakeMapping, FakeTopology, fake_operator
 from wattmosaic_engine.runtime.interfaces import ObservationOperator
 from wattmosaic_engine.storage.database import Database
 from wattmosaic_engine.storage.repositories.inference import repair_point_bounds
+
+from tests.support.fakes import FakeMapping, FakeTopology, fake_operator
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 VT = VersionTriple(
