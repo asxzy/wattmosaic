@@ -7,7 +7,6 @@ in-memory ``StubFacade``/``NullFacade``; the inference engine is never imported.
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 import tempfile
 from datetime import UTC, datetime, timedelta
@@ -25,8 +24,6 @@ from wattmosaic_engine.api.facade import (
 from wattmosaic_engine.api.server import APIServer, create_app
 from wattmosaic_engine.contracts import (
     CONTRACT_VERSION,
-    CTType,
-    DeviceTopology,
     ErrorResponse,
     HealthResponse,
     MeasurementBasis,
@@ -41,6 +38,52 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 TOKEN = "test-token"
 HEADERS = {"X-API-Token": TOKEN}
+
+
+class V3Facade(StubFacade):
+    """A stub that serves only v3 snapshot/device shapes (contract 3.0)."""
+
+    def snapshot_v3(self) -> dict[str, Any]:
+        return {
+            "snapshot_id": "snap-test",
+            "observed_at": "2026-01-01T00:00:00+00:00",
+            "computed_at": "2026-01-01T00:00:00+00:00",
+            "versions": {
+                "topology_version_id": "topo-1",
+                "mapping_version_id": "map-1",
+                "model_set_id": "models-1",
+            },
+            "reader_measurements": [],
+            "device_estimates": [],
+            "group_estimates": [],
+            "residual_estimates": [],
+            "reconciliation": {"main_w": 0.0},
+            "system_quality": {"timestamp": "2026-01-01T00:00:00+00:00"},
+            "stale_sources": [],
+            "unresolved_events": [],
+        }
+
+    def devices_v3(self) -> list[dict[str, Any]]:
+        return []
+
+    def groups_v3(self) -> list[dict[str, Any]]:
+        return []
+
+    def group_v3(self, group_id: str) -> dict[str, Any]:
+        from wattmosaic_engine.api.facade import NotFound
+
+        raise NotFound(f"group {group_id!r} not found")
+
+    def provenance(self, kind: str, identifier: str) -> dict[str, Any]:
+        return {"status": "unknown", "identifiability": "insufficient_evidence"}
+
+    def topology_v3(self, *, lifecycles: Any = None) -> dict[str, Any]:
+        return {"active_version": None, "edges": [], "primary_tree": None}
+
+    def device_v3(self, device_id: str) -> dict[str, Any]:
+        from wattmosaic_engine.api.facade import NotFound
+
+        raise NotFound(f"device {device_id!r} not found")
 
 
 class FailingFacade(StubFacade):
@@ -164,7 +207,7 @@ def test_status_snapshot_devices_quality_diagnostics() -> None:
                 await resp.json()
         return True
 
-    assert run(_with_server(StubFacade(), fn))
+    assert run(_with_server(V3Facade(), fn))
 
 
 def test_devices_returns_list() -> None:
@@ -174,28 +217,41 @@ def test_devices_returns_list() -> None:
             assert isinstance(await resp.json(), list)
         return True
 
-    assert run(_with_server(StubFacade(), fn))
+    assert run(_with_server(V3Facade(), fn))
+
+
+def test_devices_serve_only_the_v3_shape() -> None:
+    """``/devices`` and ``/snapshot`` never fall back to a v2 payload."""
+
+    async def fn(session, base):
+        async with session.get(f"{base}/snapshot", headers=HEADERS) as resp:
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["snapshot_id"] == "snap-test"
+            assert "device_estimates" in body
+            assert "results" not in body
+        # Even with a legacy-looking query the v3 shape is the only shape.
+        async with session.get(f"{base}/snapshot?v=2", headers=HEADERS) as resp:
+            body = await resp.json()
+            assert "device_estimates" in body
+            assert "results" not in body
+        async with session.get(f"{base}/devices?v=2", headers=HEADERS) as resp:
+            assert isinstance(await resp.json(), list)
+        return True
+
+    assert run(_with_server(V3Facade(), fn))
 
 
 def test_stub_facade_matches_contract() -> None:
-    """The stub's fixed device row must still be a ``DeviceTopology``.
+    """The v3 stub's fixed snapshot must be a valid ``InferenceSnapshot``.
 
-    ``jsonschema`` is not a dependency of this project, so conformance against
-    ``data/schemas/device_topology.json`` is asserted structurally: the payload
-    names only declared properties, carries every required one, and validates
-    as the contract model it claims to be.  The stub is the fixture every
-    ``/devices`` and ``/topology`` test reads, so a field that outlives the
-    contract there would keep the retired vocabulary alive in the test suite.
+    The stub is the fixture the ``/snapshot`` and ``/devices`` tests read, so a
+    field that outlives the contract there would keep the retired vocabulary
+    alive in the test suite.  The contract model validates the whole payload.
     """
-    schema = json.loads((REPO_ROOT / "data" / "schemas" / "device_topology.json").read_text())
-    device = StubFacade().topology()["devices"][0]
+    from wattmosaic_engine.contracts import InferenceSnapshot
 
-    assert set(device) <= set(schema["properties"]), set(device) - set(schema["properties"])
-    assert set(schema["required"]) <= set(device), set(schema["required"]) - set(device)
-    # The contract model accepts it unchanged, and defines no dedicated field.
-    assert "dedicated_ct_ids" not in DeviceTopology.model_fields
-    assert not {"dedicated_ct_ids"} & set(device)
-    DeviceTopology.model_validate(device)
+    InferenceSnapshot.model_validate(V3Facade().snapshot_v3())
 
 
 def test_unknown_device_returns_structured_404() -> None:
@@ -208,12 +264,12 @@ def test_unknown_device_returns_structured_404() -> None:
             assert resp.headers["X-WattMosaic-Contract-Version"] == CONTRACT_VERSION
         return True
 
-    assert run(_with_server(StubFacade(), fn))
+    assert run(_with_server(V3Facade(), fn))
 
 
 def test_device_returning_none_is_404_not_null() -> None:
-    class NoneFacade(StubFacade):
-        def device(self, device_id: str) -> None:
+    class NoneFacade(V3Facade):
+        def device_v3(self, device_id: str) -> None:
             return None
 
         def models(self, device_id: str) -> None:
@@ -354,200 +410,36 @@ def test_residual_history_route_is_registered_once() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_topology_get_put_confirm_roundtrip() -> None:
+def test_topology_get_route_serves_v3_shape() -> None:
+    """GET /topology remains (T4); the declared-topology write path does not."""
+
     async def fn(session, base):
         async with session.get(f"{base}/topology", headers=HEADERS) as resp:
-            topology = await resp.json()
-        assert topology["status"] == "candidate"
-        topology["notes"] = ["updated"]
-        async with session.put(f"{base}/topology", json=topology, headers=HEADERS) as resp:
-            assert resp.status == 200, await resp.text()
-            updated = await resp.json()
-        assert updated["notes"] == ["updated"]
-        async with session.post(f"{base}/topology/confirm", headers=HEADERS) as resp:
             assert resp.status == 200
-            confirmed = await resp.json()
-        assert confirmed["status"] == "confirmed"
+            await resp.json()
         return True
 
-    assert run(_with_server(StubFacade(), fn))
+    assert run(_with_server(V3Facade(), fn))
 
 
-def test_topology_put_invalid_body_is_400() -> None:
-    async def fn(session, base):
-        async with session.put(
-            f"{base}/topology", json={"channels": "not-a-list"}, headers=HEADERS
-        ) as resp:
-            assert resp.status == 400
-            body = await resp.json()
-            ErrorResponse.model_validate(body)
-            assert body["error"] == "bad_request"
-            assert body["detail"]
-        return True
-
-    assert run(_with_server(StubFacade(), fn))
-
-
-def test_topology_put_malformed_json_is_400() -> None:
-    async def fn(session, base):
-        async with session.put(
-            f"{base}/topology",
-            data="{not json",
-            headers={**HEADERS, "Content-Type": "application/json"},
-        ) as resp:
-            assert resp.status == 400
-            body = await resp.json()
-            assert body["error"] == "bad_request"
-        return True
-
-    assert run(_with_server(StubFacade(), fn))
-
-
-def test_topology_put_empty_object_is_400() -> None:
-    """An empty body must not silently replace the topology (defaults exist)."""
+def test_legacy_topology_and_mapping_routes_are_removed() -> None:
+    """Every route removed at the 3.0 cutover answers 405/404, never 200."""
 
     async def fn(session, base):
-        async with session.get(f"{base}/topology", headers=HEADERS) as resp:
-            before = await resp.json()
-        async with session.put(f"{base}/topology", json={}, headers=HEADERS) as resp:
-            assert resp.status == 400
-            body = await resp.json()
-            ErrorResponse.model_validate(body)
-            assert body["error"] == "bad_request"
-            assert body["detail"]
-        # The stored topology must be untouched.
-        async with session.get(f"{base}/topology", headers=HEADERS) as resp:
-            assert await resp.json() == before
+        checks = [
+            ("GET", "/mapping"),
+            ("PUT", "/topology"),
+            ("POST", "/topology/confirm"),
+            ("GET", "/topology/nesting"),
+            ("GET", "/relations"),
+            ("GET", "/confidence_tiers"),
+        ]
+        for method, path in checks:
+            async with session.request(method, f"{base}{path}", headers=HEADERS) as resp:
+                assert resp.status in (404, 405), (method, path, resp.status)
         return True
 
-    assert run(_with_server(StubFacade(), fn))
-
-
-def test_topology_put_empty_channels_is_400() -> None:
-    async def fn(session, base):
-        async with session.put(
-            f"{base}/topology",
-            json={"channels": [], "devices": [{"device_id": "d1"}]},
-            headers=HEADERS,
-        ) as resp:
-            assert resp.status == 400
-            body = await resp.json()
-            ErrorResponse.model_validate(body)
-            assert body["error"] == "bad_request"
-            assert "channel" in body["detail"]
-        return True
-
-    assert run(_with_server(StubFacade(), fn))
-
-
-def test_topology_put_without_main_channel_is_400() -> None:
-    payload = {
-        "channels": [
-            {"ct_id": "br1", "entity_id": "sensor.br1", "ct_type": "branch"},
-        ],
-        "devices": [{"device_id": "d1", "branch_ct_ids": ["br1"]}],
-    }
-
-    async def fn(session, base):
-        async with session.put(f"{base}/topology", json=payload, headers=HEADERS) as resp:
-            assert resp.status == 400
-            body = await resp.json()
-            assert body["error"] == "bad_request"
-            assert "main" in body["detail"]
-        return True
-
-    assert run(_with_server(StubFacade(), fn))
-
-
-def test_topology_put_without_devices_is_400() -> None:
-    payload = {
-        "channels": [{"ct_id": "main_l1", "entity_id": "sensor.m1", "ct_type": "main"}],
-        "devices": [],
-    }
-
-    async def fn(session, base):
-        async with session.put(f"{base}/topology", json=payload, headers=HEADERS) as resp:
-            assert resp.status == 400
-            body = await resp.json()
-            assert body["error"] == "bad_request"
-            assert "device" in body["detail"]
-        return True
-
-    assert run(_with_server(StubFacade(), fn))
-
-
-def test_topology_put_rejects_the_retired_dedicated_role() -> None:
-    """AC-6: no new write can reintroduce the removed role.
-
-    ``CTType.DEDICATED_DEVICE`` no longer exists, so ``ct_type`` is constrained
-    to the three surviving members.  The payload is otherwise valid, and the
-    same body with ``ct_type="branch"`` is accepted in the control below — so
-    the 400 is attributable to the role alone, not to some unrelated defect in
-    the fixture.
-    """
-
-    def payload(ct_type: str) -> dict[str, Any]:
-        return {
-            "channels": [
-                {"ct_id": "main_l1", "entity_id": "sensor.m1", "ct_type": "main",
-                 "phase": "l1"},
-                {"ct_id": "br_hot_tub", "entity_id": "sensor.tub", "phase": "l1",
-                 "parent_ct_id": "main_l1", "ct_type": ct_type},
-            ],
-            "devices": [{"device_id": "hot_tub", "branch_ct_ids": ["br_hot_tub"]}],
-        }
-
-    async def fn(session, base):
-        # Control: the identical body with a surviving role must be accepted,
-        # or the rejection below would prove nothing about the retired value.
-        async with session.put(
-            f"{base}/topology", json=payload("branch"), headers=HEADERS
-        ) as resp:
-            assert resp.status == 200, await resp.text()
-
-        async with session.put(
-            f"{base}/topology", json=payload("dedicated_device"), headers=HEADERS
-        ) as resp:
-            assert resp.status == 400, await resp.text()
-            body = await resp.json()
-            ErrorResponse.model_validate(body)
-            assert body["error"] == "bad_request"
-            assert "ct_type" in body["detail"]
-            # The detail echoes the rejected input verbatim, so the retired
-            # word appears there by design.  What must not appear is the role
-            # among the *expected* values: a message still offering it would
-            # send the user straight back to the removed concept.
-            error = next(
-                e for e in json.loads(body["detail"]) if "ct_type" in e.get("loc", ())
-            )
-            expected = error["ctx"]["expected"]
-            assert "dedicated" not in expected
-            for member in CTType:
-                assert member.value in expected
-        return True
-
-    assert run(_with_server(StubFacade(), fn))
-
-
-def test_topology_put_accepts_valid_minimal_topology() -> None:
-    payload = {
-        "channels": [
-            {"ct_id": "main_l1", "entity_id": "sensor.m1", "ct_type": "main", "phase": "l1"},
-            {"ct_id": "br_fridge", "entity_id": "sensor.br1", "ct_type": "branch",
-             "phase": "l1", "parent_ct_id": "main_l1"},
-        ],
-        "devices": [{"device_id": "dev_fridge", "branch_ct_ids": ["br_fridge"]}],
-    }
-
-    async def fn(session, base):
-        async with session.put(f"{base}/topology", json=payload, headers=HEADERS) as resp:
-            assert resp.status == 200, await resp.text()
-            stored = await resp.json()
-        assert [c["ct_id"] for c in stored["channels"]] == ["main_l1", "br_fridge"]
-        assert stored["devices"][0]["device_id"] == "dev_fridge"
-        return True
-
-    assert run(_with_server(StubFacade(), fn))
+    assert run(_with_server(V3Facade(), fn))
 
 
 # --------------------------------------------------------------------------- #
@@ -745,10 +637,9 @@ def test_create_app_is_import_safe_and_routable() -> None:
         ("GET", "/api/v1/snapshot"),
         ("GET", "/api/v1/devices"),
         ("GET", "/api/v1/devices/{device_id}"),
-        ("GET", "/api/v1/confidence_tiers"),
+        ("GET", "/api/v1/groups"),
         ("GET", "/api/v1/topology"),
-        ("PUT", "/api/v1/topology"),
-        ("POST", "/api/v1/topology/confirm"),
+        ("GET", "/api/v1/topology/v3"),
         ("GET", "/api/v1/quality"),
         ("GET", "/api/v1/diagnostics"),
         ("GET", "/api/v1/models/{device_id}"),
@@ -772,7 +663,8 @@ def test_all_documented_endpoints_reachable() -> None:
             ("GET", "quality", None),
             ("GET", "diagnostics", None),
             ("GET", "metrics", None),
-            ("POST", "topology/confirm", None),
+            ("GET", "groups", None),
+            ("GET", "topology/v3", None),
             ("POST", "commands", {"command": "run_diagnostics"}),
         ]
         for method, path, payload in checks:
@@ -782,7 +674,7 @@ def test_all_documented_endpoints_reachable() -> None:
                 assert resp.status in (200, 201), (method, path, resp.status)
         return True
 
-    assert run(_with_server(StubFacade(), fn))
+    assert run(_with_server(V3Facade(), fn))
 
 
 def test_error_responses_are_always_contract_errors() -> None:
@@ -790,7 +682,7 @@ def test_error_responses_are_always_contract_errors() -> None:
         for method, path, payload in [
             ("GET", "devices/missing", None),
             ("POST", "commands", {}),
-            ("PUT", "topology", {"channels": "not-a-list"}),
+            ("POST", "commands", {"command": "not_a_command"}),
         ]:
             async with session.request(
                 method, f"{base}/{path}", headers=HEADERS, json=payload
@@ -799,7 +691,7 @@ def test_error_responses_are_always_contract_errors() -> None:
                 ErrorResponse.model_validate(await resp.json())
         return True
 
-    assert run(_with_server(StubFacade(), fn))
+    assert run(_with_server(V3Facade(), fn))
 
 
 def test_concurrency_limit_returns_503(monkeypatch) -> None:

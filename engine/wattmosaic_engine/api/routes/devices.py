@@ -1,8 +1,15 @@
-"""Device and per-device inference-record routes."""
+"""Device and per-device inference-record routes — v3 shapes only.
+
+``GET /devices`` and ``GET /devices/{id}`` serve v3 ``DeviceEstimate`` payloads.
+The v2 shapes and the ``?v=3`` dispatch were removed at the 3.0 cutover; there is
+no legacy fallback.  :mod:`.snapshot_v3` re-exports the handler names for
+callers that imported them there before Z1c.
+"""
 
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 from aiohttp import web
 
@@ -10,14 +17,22 @@ from ..facade import FacadeUnavailable
 from ..server import _bounded_float, _facade, _ok, maybe_await
 
 
+def _method(request: web.Request, name: str) -> Any:
+    method = getattr(_facade(request), name, None)
+    if method is None:
+        raise FacadeUnavailable(f"{name} is not supported by this backend")
+    return method
+
+
 async def devices(request: web.Request) -> web.Response:
-    # The per-device latest-result lookup is a whole-table scan, so it must not
-    # run on the event loop.
-    return _ok(await maybe_await(await asyncio.to_thread(_facade(request).devices)))
+    """``GET /devices`` -> v3 ``DeviceEstimate[]``."""
+    return _ok(await maybe_await(_method(request, "devices_v3")()))
 
 
 async def device(request: web.Request) -> web.Response:
-    return _ok(await maybe_await(_facade(request).device(request.match_info["device_id"])))
+    """``GET /devices/{device_id}`` -> one v3 ``DeviceEstimate``."""
+    identifier = request.match_info.get("device_id") or request.match_info.get("id")
+    return _ok(await maybe_await(_method(request, "device_v3")(identifier)))
 
 
 async def inference_records(request: web.Request) -> web.Response:

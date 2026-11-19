@@ -6,7 +6,7 @@ The handlers are transport-only: they parse query parameters, build the ETag,
 and delegate all meaning to the facade's ``matrix_*`` methods through the
 :class:`~wattmosaic_engine.api.protocols.MappingProvider` Protocol.  Every read
 goes through the facade's reader connection; no writer lock is taken, and there
-is no N+1 (one bulk query per endpoint).  ``/mapping`` stays registered until Z1.
+is no N+1 (one bulk query per endpoint).
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ from aiohttp import web
 
 from ..facade import FacadeUnavailable, maybe_await
 from ..server import _facade, _ok
-from .mapping import mapping_matrix  # noqa: F401 - keep legacy /mapping handler importable
 
 _ETAG_HEADER = "ETag"
 _IF_NONE_MATCH = "If-None-Match"

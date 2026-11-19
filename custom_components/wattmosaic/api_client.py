@@ -333,17 +333,17 @@ class EngineClient:
         return await self._request("GET", "/status")
 
     async def snapshot(self) -> dict[str, Any]:
-        """``GET /snapshot`` -> legacy ``SnapshotResponse``."""
+        """``GET /snapshot`` -> v3 ``InferenceSnapshot``.
+
+        Contract 3.0 serves only the v3 shape; there is no ``?v=3`` parameter
+        and no v2 fallback.  The name ``snapshot`` is kept for callers that used
+        it before the cutover.
+        """
         return await self._request("GET", "/snapshot")
 
     async def snapshot_v3(self) -> dict[str, Any]:
-        """``GET /snapshot?v=3`` -> v3 ``InferenceSnapshot`` (D4).
-
-        The engine serves both shapes on the same path for the duration of the
-        integration branch; the coordinator feature-detects by payload shape so
-        a legacy engine (which ignores the query param) keeps working until Z1.
-        """
-        return await self._request("GET", "/snapshot", params={"v": "3"})
+        """``GET /snapshot`` -> v3 ``InferenceSnapshot`` (D4)."""
+        return await self._request("GET", "/snapshot")
 
     async def groups(self) -> Any:
         """``GET /groups`` -> v3 ``DeviceGroupEstimate[]``.
@@ -369,31 +369,6 @@ class EngineClient:
     async def put_topology(self, topology: Mapping[str, Any]) -> dict[str, Any]:
         """``PUT /topology``.  The engine keeps it ``candidate`` by default."""
         return await self._request("PUT", "/topology", json_body=dict(topology))
-
-    async def confirm_topology(self, version: int | None = None) -> dict[str, Any]:
-        """``POST /topology/confirm``.  Only an explicit user action confirms."""
-        body: dict[str, Any] = {}
-        if version is not None:
-            body["version"] = int(version)
-        return await self._request("POST", "/topology/confirm", json_body=body)
-
-    async def nesting_candidates(self, *, hours: float = 12.0) -> dict[str, Any]:
-        """``GET /topology/nesting`` -> candidate links, never applied.
-
-        Read-only.  Returns two independent proposal kinds, which answer
-        different questions and must not be conflated:
-
-        * ``candidate_parents`` -- "what feeds this CT?"  A panel feed that stays
-          inside a container.  Pre-selected only when unambiguous.
-        * ``candidate_aliases`` -- "is this CT the same conductor as another?"
-          A duplicate feed, offered as an alias because summing both would double
-          count.
-
-        The payload also reports ``ambiguous`` (several parents fit, none proven)
-        and ``not_inferable`` (a load, whose level measurement cannot establish),
-        so the wizard can ask the user instead of showing nothing.
-        """
-        return await self._request("GET", f"/topology/nesting?hours={float(hours):g}")
 
     async def quality(self) -> dict[str, Any]:
         """``GET /quality`` -> ``DataQualityReport``."""

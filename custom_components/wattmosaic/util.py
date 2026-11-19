@@ -508,13 +508,13 @@ def coerce_snapshot(raw: Mapping[str, Any] | None) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# Contract-3.0 snapshot coercion (D4 ``GET /snapshot?v=3`` -> entity values)
+# Contract-3.0 snapshot coercion (D4 ``GET /snapshot`` -> entity values)
 # --------------------------------------------------------------------------- #
 
 #: Ids of a v3 payload: a v3 snapshot has a ``snapshot_id`` and a ``versions``
-#: object; the legacy one has ``results``/``reconciliation.main_power_w``.  The
-#: coordinator uses payload shape only, for the duration of the integration
-#: branch (Z1 removes v2 handling).
+#: object; the removed legacy shape had ``results``/``reconciliation.main_power_w``.
+#: The coordinator no longer feature-detects (Z1 removed v2 handling); this
+#: helper remains as a pure predicate for diagnostics and tests.
 def is_v3_snapshot(raw: Any) -> bool:
     """Feature-detect a v3 snapshot by payload shape (no version header)."""
     if not isinstance(raw, Mapping):

@@ -32,45 +32,24 @@ from wattmosaic_engine.contracts import (  # noqa: E402
 
 OUT = ROOT / "data" / "schemas"
 
-# The original single-file module's export set.  Kept verbatim so the generated
-# schemas are byte-identical to those from before the contracts.py -> contracts/
-# split (X01).  New contracts are exported through each submodule's
-# ``SCHEMA_EXPORTS`` list instead of being added here.
-MODELS = {
-    "measurement": contracts.Measurement,
-    "ct_channel": contracts.CTChannel,
-    "device_topology": contracts.DeviceTopology,
-    "topology": contracts.Topology,
-    "device_configuration": contracts.DeviceConfiguration,
-    "device_configuration_set": contracts.DeviceConfigurationSet,
-    "light_configuration": contracts.LightConfiguration,
-    "controller_configuration": contracts.ControllerConfiguration,
-    "device_event": contracts.DeviceEvent,
-    "device_model_version": contracts.DeviceModelVersion,
-    "learning_sample": contracts.LearningSample,
-    "inference_result": contracts.InferenceResult,
-    "reconciliation": contracts.Reconciliation,
+# Transport envelopes still emitted by v3 routes.  Every v3 response carries an
+# ErrorResponse on failure, /health emits HealthResponse, /commands consumes
+# ServiceCommand / emits ServiceResult, and the v3 snapshot embeds a
+# DataQualityReport as its system_quality field.  These are the only legacy
+# module models that remain API payloads at contract 3.0; the rest of the old
+# ``MODELS`` set (topology, ct_channel, snapshot_response, ...) was removed with
+# the v2 surface.
+V3_TRANSPORT_MODELS = {
     "data_quality_report": contracts.DataQualityReport,
-    "topology_edge": contracts.TopologyEdge,
-    "topology_version": contracts.TopologyVersion,
-    "residual_decomposition_record": contracts.ResidualDecompositionRecord,
-    "unknown_load_profile": contracts.UnknownLoadProfile,
-    "device_reader_mapping_cell": contracts.DeviceReaderMappingCell,
-    "configuration_change_event": contracts.ConfigurationChangeEvent,
-    "event_evidence_record": contracts.EventEvidenceRecord,
-    "storage_health_report": contracts.StorageHealthReport,
-    "unknown_residual_event": contracts.UnknownResidualEvent,
-    "residual_baseline_change": contracts.ResidualBaselineChange,
     "health_response": contracts.HealthResponse,
-    "snapshot_response": contracts.SnapshotResponse,
     "error_response": contracts.ErrorResponse,
     "service_command": contracts.ServiceCommand,
     "service_result": contracts.ServiceResult,
 }
 
-# Submodules that may contribute new schemas.  Each declares ``SCHEMA_EXPORTS``
-# as a list of ``(name, model)`` pairs; tasks own their submodule's list, so no
-# task needs to edit this exporter.
+# Submodules that contribute v3 schemas.  Each declares ``SCHEMA_EXPORTS`` as a
+# list of ``(name, model)`` pairs; tasks own their submodule's list, so no task
+# needs to edit this exporter.
 SCHEMA_MODULES = (
     foundation,
     entities,
@@ -83,8 +62,8 @@ SCHEMA_MODULES = (
 
 
 def collect_models() -> dict[str, type]:
-    """Return the legacy export set plus every submodule's ``SCHEMA_EXPORTS``."""
-    collected = dict(MODELS)
+    """Return the v3 transport envelopes plus every submodule's exports."""
+    collected = dict(V3_TRANSPORT_MODELS)
     for module in SCHEMA_MODULES:
         for name, model in getattr(module, "SCHEMA_EXPORTS", ()):
             collected[name] = model
