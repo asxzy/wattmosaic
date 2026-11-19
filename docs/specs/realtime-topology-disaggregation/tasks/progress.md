@@ -74,17 +74,17 @@
 | U1 | 3 | VERIFIED |  | AT-12 |  |
 | I5 | 4 | VERIFIED |  | AT-14 | AT-14 closed (snapshot single-count); V1 must also check matrix physical total |
 | I6 | 4 | VERIFIED |  | AT-18 | AT-18 closed; record read index in-memory (persisted via S16) |
-| I7 | 4 | IN_PROGRESS |  |  |  |
+| I7 | 4 | VERIFIED |  |  |  |
 | T5 | 4 | VERIFIED |  | AT-02 | AT-02 closed; user CONFIRMED edges never auto-CONFLICTED -> fixed in T7; replay_nesting score needs operator DB (V2) |
 | T6 | 4 | IN_PROGRESS |  | AT-04 |  |
-| T7 | 4 | IN_PROGRESS |  | AT-15, 16 |  |
+| T7 | 4 | VERIFIED |  | AT-15, 16 | AT-15/16 closed; DEC-10 CONFLICTED implemented; config-events facade wiring -> P6 |
 | M2 | 4 | VERIFIED |  | AT-11 | AT-11 closed |
 | M3 | 4 | VERIFIED |  |  | M3b follow-up: real column/row trees in /matrix |
 | L4 | 4 | VERIFIED |  |  |  |
 | L5 | 4 | VERIFIED |  |  | DEF-03 fixed |
 | L6 | 4 | NOT_STARTED | | | |
 | D4 | 4 | VERIFIED |  |  |  |
-| H1 | 4 | NOT_STARTED | | | |
+| H1 | 4 | VERIFIED |  |  | AT-17 HA-side helper done; AT-17 e2e closes with P6 |
 | H2 | 4 | VERIFIED |  |  | partial: async_migrate_entry hook -> H1; v2 forms removal -> Z2 |
 | U2 | 4 | VERIFIED |  | AT-20 | AT-20 closed |
 | P6 | 4 | NOT_STARTED | | | |
