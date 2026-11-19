@@ -76,7 +76,7 @@
 | I6 | 4 | VERIFIED |  | AT-18 | AT-18 closed; record read index in-memory (persisted via S16) |
 | I7 | 4 | VERIFIED |  |  |  |
 | T5 | 4 | VERIFIED |  | AT-02 | AT-02 closed; user CONFIRMED edges never auto-CONFLICTED -> fixed in T7; replay_nesting score needs operator DB (V2) |
-| T6 | 4 | IN_PROGRESS |  | AT-04 |  |
+| T6 | 4 | VERIFIED |  | AT-04 | AT-04 closed |
 | T7 | 4 | VERIFIED |  | AT-15, 16 | AT-15/16 closed; DEC-10 CONFLICTED implemented; config-events facade wiring -> P6 |
 | M2 | 4 | VERIFIED |  | AT-11 | AT-11 closed |
 | M3 | 4 | VERIFIED |  |  | M3b follow-up: real column/row trees in /matrix |
