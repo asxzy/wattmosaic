@@ -53,7 +53,7 @@
 | S19 | 2 | VERIFIED |  |  |  |
 | P1 | 3 | VERIFIED |  |  | new path applies polarity once; legacy-path DEF-01 unproven (removed in Z2) |
 | P2 | 3 | VERIFIED |  |  |  |
-| P3 | 3 | IN_PROGRESS |  |  |  |
+| P3 | 3 | VERIFIED |  |  | DATA_GAP delta 0.0 sentinel fixed by P3b |
 | P4 | 3 | NOT_STARTED | | | |
 | P5 | 3 | NOT_STARTED | | | |
 | T1 | 3 | VERIFIED |  |  | primary_display_tree matches M1 build_columns |
@@ -66,8 +66,8 @@
 | I4 | 3 | VERIFIED |  | AT-07 | AT-07 closed; 250 W test proves legacy defect + mutation guards |
 | M1 | 3 | VERIFIED |  | AT-01, 13 | AT-01/13 scenarios in unit tests; marker flip pending; reconcile primary_display_tree with T1 |
 | L1 | 3 | VERIFIED |  |  | /models/{id} now serves v3 payload via facade; U2 must adapt device view |
-| L2 | 3 | IN_PROGRESS |  | AT-03 |  |
-| L3 | 3 | IN_PROGRESS |  |  |  |
+| L2 | 3 | VERIFIED |  | AT-03 | AT-03 closed |
+| L3 | 3 | VERIFIED |  |  | timed out without summary; verified by tests; registry expected_window wired via spec |
 | D1 | 3 | VERIFIED |  |  | uses repo private _conn/_lock for mapping writes (tidy later) |
 | D2 | 3 | VERIFIED |  |  |  |
 | D3 | 3 | VERIFIED |  | AT-17 | None-guards in legacy solver for nullable age; AT-17 closes with D4/H1 |
