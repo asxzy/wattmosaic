@@ -9,10 +9,9 @@ from __future__ import annotations
 
 import pytest
 
-pytestmark = [
-    pytest.mark.acceptance,
-    pytest.mark.xfail(strict=True, reason="closed by T7"),
-]
+CLOSED_BY = "T7"
+
+pytestmark = [pytest.mark.acceptance]
 
 
 def test_plug_move_versions_mapping_not_model(hb17) -> None:

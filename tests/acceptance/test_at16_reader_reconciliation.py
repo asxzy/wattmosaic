@@ -9,10 +9,9 @@ from __future__ import annotations
 
 import pytest
 
-pytestmark = [
-    pytest.mark.acceptance,
-    pytest.mark.xfail(strict=True, reason="closed by T7"),
-]
+CLOSED_BY = "T7"
+
+pytestmark = [pytest.mark.acceptance]
 
 
 def test_polarity_flip_reconciles_and_calibration_is_not_retroactive(hb17) -> None:

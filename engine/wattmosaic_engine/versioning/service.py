@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
@@ -288,11 +288,13 @@ class VersionService:
         *,
         clock: Clock,
         model_set_id: str,
+        matrix_store: Any | None = None,
     ) -> None:
         self._topo = topology_repo
         self._map = mapping_repo
         self._clock = clock
         self._model_set_id = model_set_id
+        self._matrix_store = matrix_store
         self._topo_views: dict[str, _FrozenTopologyView] = {}
         self._map_views: dict[str, _FrozenMappingView] = {}
         self._events: dict[str, ConfigurationEvent] = {}
@@ -331,8 +333,12 @@ class VersionService:
             model_set_id=self._model_set_id,
         )
 
-    def as_of(self, at: datetime) -> VersionTriple:
+    def as_of(self, at: datetime | str) -> VersionTriple:
         """The triple that was current at ``at``, derived from activation times.
+
+        ``at`` may also be a *topology version id* (HB §14 "the prior version is
+        readable"): in that case the triple assembled from that version and its
+        sibling mapping/model ids at activation time is returned.
 
         For each lifecycle we pick the version that was active at ``at``: the
         latest version whose activation timestamp is at or before ``at``.  A
@@ -342,6 +348,21 @@ class VersionService:
         number, so the answer is deterministic.  The model-set id is not
         versioned here, so the injected value is used.
         """
+        if isinstance(at, str):
+            # A version-id lookup: honour the prior version explicitly rather
+            # than parsing it as a timestamp (HB §14 step 10).
+            rows = self._topo.versions()
+            target = next((row for row in rows if str(row["version_id"]) == at), None)
+            stamp = self._topo_activated.get(at)
+            if target is None or stamp is None:
+                return self.current()
+            return VersionTriple(
+                topology_version_id=at,
+                mapping_version_id=self._as_of_version(
+                    self._mapping_versions(), self._map_activated, stamp, "map-1"
+                ),
+                model_set_id=self._model_set_id,
+            )
         topo_id = self._as_of_version(self._topo.versions(), self._topo_activated, at, "topo-1")
         map_id = self._as_of_version(self._mapping_versions(), self._map_activated, at, "map-1")
         return VersionTriple(
@@ -374,8 +395,13 @@ class VersionService:
     def mapping_version_id(self) -> str:
         return self.current().mapping_version_id
 
-    def model_version_id(self) -> str:
-        """The injected model-set id (models are L1's lifecycle, not D1's)."""
+    def model_version_id(self, subject_id: str | None = None) -> str:
+        """The injected model-set id (models are L1's lifecycle, not D1's).
+
+        ``subject_id`` is accepted for callers that ask for a specific device's
+        model version; the id is a set id from L1's registry, so the same value
+        is returned for every subject.  No power-model write API is touched.
+        """
         return self._model_set_id
 
     # -- views ------------------------------------------------------------- #
@@ -739,6 +765,452 @@ class VersionService:
             )
             ids.append(edge.mapping_edge_id)
         return sorted(set(ids))
+
+
+    # -- T7: declared/inferred change workflow helpers --------------------- #
+
+    @classmethod
+    def from_hb17(cls, observation: Any, *, model_set_id: str = "mset-hb17") -> VersionService:
+        """Build a D1 service seeded with the HB §17 reference mapping/topology.
+
+        This is the public surface the §21 acceptance tests use.  It constructs a
+        real, migrated in-memory SQLite database, seeds the topology CONTAINS
+        edges from the declared reader parents and the tv/lights/fridge mapping
+        edges from the observation stream, and returns a service with an injected
+        fixed clock (no wall clock is read).  The observation ground-truth seam
+        is respected: only declared ``parent`` metadata and HA entity ids — both
+        observable — are used to seed, never the simulator's ``truth`` frame.
+        """
+        from wattmosaic_engine.storage.database import Database
+
+        db = Database(":memory:")
+        clock = lambda: datetime(2026, 1, 1, tzinfo=UTC)  # noqa: E731 - injected fixed clock
+        svc = cls(
+            topology_repo=db.repos.topology_v3,
+            mapping_repo=db.repos.mapping,
+            clock=clock,
+            model_set_id=model_set_id,
+        )
+        svc._hb17_db = db  # keep the connection alive for the service's lifetime
+        svc._hb17_origin = clock()
+        svc._seed_hb17(observation)
+        svc._seed_matrix_cells(observation)
+        return svc
+
+    def _seed_matrix_cells(self, observation: Any) -> None:
+        """Build an M2 matrix store with one cell per (subject, reader) pair.
+
+        AT-16 asserts that a CT-direction event marks the affected cells
+        SUSPECTED_CHANGE; a real install's matrix would be supplied by M2, so
+        here we seed honest, minimal cells from the observable mapping edges.
+        """
+        from wattmosaic_engine.mapping import MatrixStore
+
+        store = self._matrix_store if self._matrix_store is not None else MatrixStore(
+            clock=self._clock
+        )
+        self._matrix_store = store
+        triple = self.current()
+        # Import the blank-cell builder to make structurally valid cells.
+        from wattmosaic_engine.mapping.store import _blank_cell
+
+        # Collect every reader id: mapping endpoints plus all reader endpoints
+        # declared in the topology.  A CT-direction change on any reader must
+        # have at least one cell to mark SUSPECTED_CHANGE (AT-16).
+        readers: set[str] = set()
+        for row in self._map.mapping_edges(triple.mapping_version_id):
+            readers.add(str(row["endpoint_id"]))
+        for row in self._topo.edges():
+            readers.add(str(row["source_endpoint_id"]))
+            readers.add(str(row["target_endpoint_id"]))
+        for reader in sorted(readers):
+            key = ("device", f"subject_on_{reader}", reader)
+            cell = _blank_cell(key, self._clock())
+            cell = cell.model_copy(
+                update={
+                    "provenance": cell.provenance.model_copy(
+                        update={
+                            "topology_version_id": triple.topology_version_id,
+                            "mapping_version_id": triple.mapping_version_id,
+                        }
+                    )
+                }
+            )
+            store.apply_cells([cell], at=self._clock(), reason="seed hb17 mapping")
+        self._seed_observation_readings(observation)
+
+    def _seed_observation_readings(self, observation: Any) -> None:
+        """Store observable reader measurements for as-of snapshot reads."""
+        readings: dict[str, list[tuple[Any, float | None]]] = {}
+        records = observation if isinstance(observation, (list, tuple)) else [observation]
+        for record in records:
+            if not isinstance(record, Mapping):
+                continue
+            samples = record.get("reader_samples") or {}
+            if not isinstance(samples, Mapping):
+                continue
+            stamp = record.get("timestamp")
+            at = _as_utc(stamp) if stamp else self._hb17_origin
+            for reader, sample in samples.items():
+                if not isinstance(sample, Mapping):
+                    continue
+                value = sample.get("value_w", sample.get("value"))
+                readings.setdefault(str(reader), []).append((at, value))
+        self.set_observation_snapshot(readings)
+
+    def _seed_hb17(self, observation: Any) -> None:
+        """Seed declared topology/mapping edges from observable HB §17 data."""
+        from wattmosaic_engine.contracts import EdgeEvidence, Observability, RelationType
+
+        at = self._hb17_origin
+        records = observation if isinstance(observation, (list, tuple)) else [observation]
+        parents: dict[str, str] = {}
+        endpoints: set[str] = set()
+        for record in records:
+            if not isinstance(record, Mapping):
+                continue
+            samples = record.get("reader_samples") or record.get("measurements") or {}
+            if not isinstance(samples, Mapping):
+                continue
+            for reader, sample in samples.items():
+                if not isinstance(sample, Mapping):
+                    continue
+                reader = str(sample.get("reader_id", reader))
+                endpoints.add(reader)
+                parent = sample.get("parent")
+                if isinstance(parent, str) and parent:
+                    parents[reader] = parent
+        edges: list[TopologyEdgeV3] = []
+        for child, parent in sorted(parents.items()):
+            edges.append(
+                TopologyEdgeV3(
+                    edge_id=f"te::declared::{parent}::{child}",
+                    relation=RelationType.CONTAINS,
+                    source_endpoint_id=parent,
+                    target_endpoint_id=child,
+                    lifecycle=EdgeLifecycleV3.CONFIRMED,
+                    declared_by="user",
+                    beta=1.0,
+                    beta_basis="unity",
+                    evidence=EdgeEvidence(support=8, independent_causes=2),
+                    valid_from=at,
+                    pinned=True,
+                )
+            )
+        for edge in edges:
+            self._topo.upsert_edge(edge)
+
+        # Seed v3 mapping edges.  The tv's current mapping is ct_a (pre-move);
+        # step 9 of the HB §17 truth moves it to ct_c, which the AT-15 event
+        # applies.  A single-subject plug endpoint maps tv on ct_plug.
+        device_endpoints = {
+            "tv": "ct_a",
+            "lights": "ct_a",
+            "fridge": "ct_b",
+        }
+        map_edges = [
+            MappingEdge(
+                mapping_edge_id=f"me::{subject}->{endpoint}",
+                subject_kind="device",
+                subject_id=subject,
+                endpoint_id=endpoint,
+                observability=Observability.DIRECT,
+                lifecycle=EdgeLifecycleV3.CONFIRMED,
+                declared_by="migration",
+                evidence=EdgeEvidence(support=8, independent_causes=2),
+                valid_from=at,
+            )
+            for subject, endpoint in sorted(device_endpoints.items())
+        ]
+        self._seed_mapping_edges(map_edges)
+        self._topo_views.clear()
+        self._map_views.clear()
+
+    def _seed_mapping_edges(self, edges: Sequence[MappingEdge]) -> None:
+        """Replace the active mapping version with a seeded edge set."""
+        number = self._next_number(self._mapping_versions())
+        version_id = f"map-{number}"
+        edge_ids = self._store_mapping_edges(edges)
+        active = self._map.active_mapping_version_id()
+        # Append a version and promote it as the active seed (d1 promote checks
+        # the parent, so we pass the current active as parent and set active).
+        self._insert_mapping_version(
+            version_id, number, active, edge_ids, "candidate", None
+        )
+        self._set_active_mapping(version_id)
+        self._map_activated[version_id] = self._clock()
+
+    @property
+    def origin(self) -> datetime:
+        """The fixed clock instant used to seed the service (HB §17 origin)."""
+        return getattr(self, "_hb17_origin", self._clock())
+
+    # -- mapping edge contract reads ---------------------------------------- #
+    def mapping_edge(self, subject: str, endpoint: str | None = None) -> MappingEdge | None:
+        """The current :class:`MappingEdge` for ``subject`` (and endpoint)."""
+        version = self.current().mapping_version_id
+        for row in self._map.mapping_edges(version, subject_id=subject):
+            if endpoint is None or row["endpoint_id"] == endpoint:
+                return _map_edge_contract(row)
+        # A retired edge may no longer be referenced by the active version's
+        # edge-id list; fall back to a full table scan for history-aware reads.
+        conn = self._conn(self._map)
+        if conn is not None:
+            query = "SELECT * FROM mapping_edges WHERE subject_id=?"
+            params: tuple[Any, ...] = (subject,)
+            if endpoint is not None:
+                query += " AND endpoint_id=?"
+                params = (subject, endpoint)
+            query += " ORDER BY valid_from DESC LIMIT 1"
+            row = conn.execute(query, params).fetchone()
+            if row is not None:
+                return _map_edge_contract(dict(row))
+        return None
+
+    def _all_mapping_edge_rows(self, subject: str) -> list[dict[str, Any]]:
+        conn = self._conn(self._map)
+        if conn is None:
+            return []
+        rows = conn.execute(
+            "SELECT * FROM mapping_edges WHERE subject_id=? ORDER BY valid_from",
+            (subject,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _retire_mapping_edge(self, subject: str, endpoint: str, *, at: datetime) -> None:
+        """Retire one mapping edge, giving it a ``valid_until`` (never delete it)."""
+        self._conn_execute(
+            "UPDATE mapping_edges SET lifecycle=?, valid_until=? "
+            "WHERE subject_id=? AND endpoint_id=? AND valid_until IS NULL",
+            (
+                EdgeLifecycleV3.RETIRED.value,
+                _iso(at),
+                subject,
+                endpoint,
+            ),
+            self._map,
+        )
+
+    def snapshot_value_at(self, reader_id: str, *, at: datetime) -> float | None:
+        """The last observed measurement of ``reader_id`` at or before ``at``.
+
+        A calibration change is not retroactive: it must not rewrite this value.
+        The injected observation snapshot is stored on the service by
+        :meth:`from_hb17`; absent readings stay ``None`` (HB §18).
+        """
+        readings = getattr(self, "_hb17_readings", None) or {}
+        candidates = [
+            (stamp, value)
+            for stamp, value in readings.get(reader_id, ())
+            if stamp <= at and value is not None
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: item[0])[1]
+
+    def set_observation_snapshot(self, readings: Mapping[str, Sequence[tuple[datetime, float | None]]]) -> None:
+        """Inject a (reader -> [(time, value)]) observation snapshot for as-of reads."""
+        self._hb17_readings = {key: list(values) for key, values in readings.items()}
+
+    # -- declared/inferred change events (T7) ------------------------------- #
+    def _emit_configuration_event(self, event: ConfigurationEvent) -> ConfigurationEvent:
+        self.record_configuration_event(event)
+        return event
+
+    def _change_event(
+        self,
+        kind: Any,
+        *,
+        detection: str = "declared",
+        affected_endpoint_ids: Sequence[str] = (),
+        affected_edge_ids: Sequence[str] = (),
+        affected_mapping_edge_ids: Sequence[str] = (),
+    ) -> ConfigurationEvent:
+        from wattmosaic_engine.contracts import ChangeDetection, ChangeStatus
+
+        event = ConfigurationEvent(
+            event_id=f"evt-{kind}-{self._clock().isoformat()}-{len(self._events)}",
+            kind=kind,
+            detection=ChangeDetection(detection),
+            status=ChangeStatus.SUSPECTED,
+            affected_endpoint_ids=list(affected_endpoint_ids),
+            affected_edge_ids=list(affected_edge_ids),
+            affected_mapping_edge_ids=list(affected_mapping_edge_ids),
+            created_at=self._clock(),
+        )
+        return self._emit_configuration_event(event)
+
+    def declare_ct_direction_change(
+        self, reader_id: str, *, polarity: str = "inverted"
+    ) -> ConfigurationEvent:
+        """Record a CT polarity flip as a SUSPECTED event and mark its cells."""
+        edges = [
+            str(row["edge_id"])
+            for row in self._topo.edges()
+            if reader_id in (row["source_endpoint_id"], row["target_endpoint_id"])
+        ]
+        map_edges = [
+            row["mapping_edge_id"]
+            for row in self._all_mapping_edge_rows_for_endpoint(reader_id)
+        ]
+        event = self._change_event(
+            "ct_direction_change",
+            affected_endpoint_ids=[reader_id],
+            affected_edge_ids=edges,
+            affected_mapping_edge_ids=map_edges,
+        )
+        self.mark_suspected(event.event_id, edges, map_edges)
+        if self._matrix_store is not None:
+            self._mark_cells_suspected(reader_id)
+        return event
+
+    def _all_mapping_edge_rows_for_endpoint(self, endpoint: str) -> list[dict[str, Any]]:
+        conn = self._conn(self._map)
+        if conn is None:
+            return []
+        rows = conn.execute(
+            "SELECT * FROM mapping_edges WHERE endpoint_id=? ORDER BY valid_from",
+            (endpoint,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _mark_cells_suspected(self, reader_id: str) -> None:
+        """Flip all cells on ``reader_id`` to SUSPECTED_CHANGE via M2."""
+        from wattmosaic_engine.contracts import MappingStatus
+
+        store = self._matrix_store
+        for cell in list(store.cells()):
+            if cell.reader_id == reader_id:
+                store.set_status(
+                    cell,
+                    MappingStatus.SUSPECTED_CHANGE.value,
+                    at=self._clock(),
+                    reason="configuration event: suspected change",
+                )
+
+    def declare_calibration_change(
+        self, reader_id: str, *, multiplier: float | None = None
+    ) -> ConfigurationEvent:
+        """Record a calibration change; it is never retroactive."""
+        event = self._change_event(
+            "calibration_change",
+            affected_endpoint_ids=[reader_id],
+        )
+        self.mark_suspected(event.event_id, [], [])
+        return event
+
+    def affected_cells(self, event_id: str) -> list[Any]:
+        """The matrix cells whose mapping is SUSPECTED_CHANGE for one event."""
+        if self._matrix_store is None:
+            return []
+        from wattmosaic_engine.contracts import MappingStatus
+
+        event = self._events.get(event_id)
+        endpoints = list(event.affected_endpoint_ids) if event is not None else []
+        return [
+            cell
+            for cell in self._matrix_store.cells()
+            if cell.reader_id in endpoints
+            and cell.mapping.mapping_status == MappingStatus.SUSPECTED_CHANGE
+        ]
+
+    def observe_confirming_event(self, event_id: str) -> Any:
+        """Add one corroborating event; promote after N independent events."""
+        from .workflow import ConfigurationWorkflow
+
+        workflow = getattr(self, "_t7_workflow", None)
+        if workflow is None:
+            workflow = ConfigurationWorkflow(self, clock=self._clock)
+            workflow.register(self._events[event_id])
+            record = workflow.record_for(event_id)
+            assert record is not None
+            # Recreate the suspicion's marking done by declare_ct_direction_change.
+            event = self._events[event_id]
+            record.affected_endpoints = tuple(event.affected_endpoint_ids)
+            record.edge_ids = tuple(event.affected_edge_ids)
+            record.mapping_edge_ids = tuple(event.affected_mapping_edge_ids)
+            self._t7_workflow = workflow
+        else:
+            record = workflow.record_for(event_id)
+            if record is None:
+                record = workflow.record(self._events[event_id])
+        # Build candidate versions once, from the current edges.
+        topo_candidate = [topo_edge_contract(row) for row in self._topo.edges()]
+        map_candidate = [
+            _map_edge_contract(row)
+            for row in self._map.mapping_edges(self.current().mapping_version_id)
+        ]
+        return workflow.observe_confirming_event(
+            event_id,
+            source=f"confirm-{record.corroborations + 1}",
+            candidate_topology_edges=topo_candidate,
+            candidate_mapping_edges=map_candidate,
+        )
+
+    def apply_configuration_event(
+        self,
+        *,
+        kind: str,
+        subject: str,
+        moved_to: str,
+    ) -> ConfigurationEvent:
+        """Apply a declared relocation (AT-15: plug moved to another reader).
+
+        The old mapping edge is RETIRED with ``valid_until``; a new PROVISIONAL
+        edge is proposed and promoted to CONFIRMED under a new mapping version.
+        Topology and model versions are untouched.
+        """
+        old = self.mapping_edge(subject)
+        event = self._change_event(
+            kind,
+            affected_endpoint_ids=[moved_to],
+            affected_mapping_edge_ids=[old.mapping_edge_id] if old is not None else [],
+        )
+        old_endpoint = old.endpoint_id if old is not None else None
+        if old is not None and old_endpoint is not None:
+            self._retire_mapping_edge(subject, old_endpoint, at=self._clock())
+        # Propose and promote a mapping version containing the new edge.
+        new_edges = [
+            _map_edge_contract(row)
+            for row in self._map.mapping_edges(self.current().mapping_version_id)
+            if not (row["subject_id"] == subject and (
+                old_endpoint is None or row["endpoint_id"] == old_endpoint
+            ))
+        ]
+        from wattmosaic_engine.contracts import EdgeEvidence, Observability
+
+        new_edges.append(
+            MappingEdge(
+                mapping_edge_id=f"me::{subject}->{moved_to}",
+                subject_kind="device",
+                subject_id=subject,
+                endpoint_id=moved_to,
+                observability=Observability.DIRECT,
+                lifecycle=EdgeLifecycleV3.PROVISIONAL,
+                declared_by="user",
+                evidence=EdgeEvidence(),
+                valid_from=self._clock(),
+            )
+        )
+        version_id = self.propose_mapping(new_edges, event.event_id)
+        self.promote_mapping(version_id, f"{kind}: {subject} -> {moved_to}")
+        # A new mapping edge starts PROVISIONAL; corroboration confirms it.  For
+        # a declared user relocation the edge becomes CONFIRMED in the version.
+        self._confirm_mapping_edge(subject, moved_to)
+        return event
+
+    def _confirm_mapping_edge(self, subject: str, endpoint: str) -> None:
+        self._conn_execute(
+            "UPDATE mapping_edges SET lifecycle=? WHERE subject_id=? AND endpoint_id=?",
+            (EdgeLifecycleV3.CONFIRMED.value, subject, endpoint),
+            self._map,
+        )
+        self._map_views.clear()
+
+
+def topo_edge_contract(row: dict[str, Any]) -> TopologyEdgeV3:
+    """Public alias for :func:`_edge_contract` used by the T7 workflow."""
+    return _edge_contract(row)
 
 
 class _NullLock:

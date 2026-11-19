@@ -606,11 +606,12 @@ class TopologyInferenceView:
         key = (edge.source_endpoint_id, edge.target_endpoint_id, _CONTAINS)
         n_causes = len(causes.get(key, ()))
 
-        if (
-            decisive >= MIN_EVENTS_CONFLICTED
-            and ratio > CONFLICT_RATIO_CONFLICTED
-            and not (edge.declared_by == "user" and edge.lifecycle == EdgeLifecycleV3.CONFIRMED)
-        ):
+        if decisive >= MIN_EVENTS_CONFLICTED and ratio > CONFLICT_RATIO_CONFLICTED:
+            # DEC-10 (T7): a user-declared CONFIRMED CONTAINS edge is a fact, but
+            # persistent, strong contradiction (>= 6 independent events with a
+            # conflict ratio > 0.25) must move it to CONFLICTED — never delete it.
+            # The edge row and its history are retained; only the lifecycle moves
+            # so downstream confidence is degraded while the user can re-affirm.
             return EdgeLifecycleV3.CONFLICTED
 
         parent, child = edge.source_endpoint_id, edge.target_endpoint_id

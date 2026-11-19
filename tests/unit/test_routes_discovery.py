@@ -24,6 +24,7 @@ from wattmosaic_engine.api.server import create_app
 ROUTE_SNAPSHOT: frozenset[tuple[str, str]] = frozenset(
     {
         ("GET", "/api/v1/circuits"),
+        ("GET", "/api/v1/configuration-events"),
         ("GET", "/api/v1/confidence_tiers"),
         ("GET", "/api/v1/devices"),
         ("GET", "/api/v1/devices/{device_id}"),
