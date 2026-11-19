@@ -55,7 +55,7 @@
 | P2 | 3 | VERIFIED |  |  |  |
 | P3 | 3 | VERIFIED |  |  | P3b follow-up: DATA_GAP delta None |
 | P4 | 3 | VERIFIED |  |  | supersedes link not persisted (contract has no metadata) -> D5 |
-| P5 | 3 | NOT_STARTED | | | |
+| P5 | 3 | IN_PROGRESS |  |  |  |
 | T1 | 3 | VERIFIED |  |  | primary_display_tree matches M1 build_columns |
 | T2 | 3 | VERIFIED |  |  |  |
 | T3 | 3 | VERIFIED |  |  | live loop wiring deferred to P6 |
@@ -91,7 +91,7 @@
 | Z2 | 5 | NOT_STARTED | | | |
 | Z1 | 5 | NOT_STARTED | | | |
 | L7 | 5 | NOT_STARTED | | AT-19 | |
-| D5 | 5 | NOT_STARTED | | | |
+| D5 | 5 | IN_PROGRESS |  |  |  |
 | X09 | 5 | NOT_STARTED | | | |
 | V1 | 6 | NOT_STARTED | | all 20 | |
 | V2 | 6 | NOT_STARTED | | | |
