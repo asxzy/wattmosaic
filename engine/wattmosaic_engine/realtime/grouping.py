@@ -623,6 +623,9 @@ class GroupingEngine:
         target: _Entry | None = None
         reason: str | None = None
         for entry in self._entries.values():
+            if entry.terminal:
+                # Closed by a version promotion: interpreted under its old triple.
+                continue
             for other in entry.ha_events:
                 reason = context_reason(event, other, self.config.context_max_spread_s)
                 if reason is not None:
@@ -704,7 +707,9 @@ class GroupingEngine:
                 # after ``confirm_s`` plus a few samples, which can exceed the
                 # HA group's ``quiet_s`` (design §4 late data).
                 reopenable = (
-                    entry.group.status == EventGroupStatus.UNRESOLVED and not entry.steps
+                    entry.group.status == EventGroupStatus.UNRESOLVED
+                    and not entry.steps
+                    and not entry.terminal
                 )
                 if not (self._joinable(entry) or reopenable):
                     continue
@@ -922,6 +927,48 @@ class GroupingEngine:
         if self.on_revised is not None:
             self.on_revised(revised)
         return revised
+
+    # -- version change ------------------------------------------------------ #
+    def rebind(
+        self,
+        versions: VersionTriple,
+        topology: TopologyView | None,
+        *,
+        now: datetime,
+    ) -> list[EventGroup]:
+        """Adopt a newly promoted triple; close every group formed under another.
+
+        A group is interpreted under the triple it was formed with (its operator,
+        mapping and model set).  Letting a sub-event that arrives after a
+        topology/mapping/model promotion join such a group would re-infer the new
+        physics under the superseded operator -- e.g. a relocated device's step
+        credited to the circuit it left.  So on a promotion every still-open
+        group stamped with a different triple is finalized under its *own*
+        triple -- with the status :meth:`tick` gives a quiet group: a
+        MATCHING/REVISED group with reader evidence becomes CONFIRMED, any other
+        becomes UNRESOLVED -- and becomes terminal; steps from now on
+        form new groups under ``versions``.  Closing is a lifecycle transition
+        of the same revision, so nothing immutable is rewritten.  Returns the
+        groups closed.
+        """
+        now = _aware(now)
+        self.versions = versions
+        self.topology = topology
+        closed: list[EventGroup] = []
+        for entry in self._entries.values():
+            if not self._joinable(entry) or entry.group.versions == versions:
+                continue
+            status = (
+                EventGroupStatus.CONFIRMED
+                if entry.group.reader_deltas
+                and entry.group.status in (EventGroupStatus.MATCHING, EventGroupStatus.REVISED)
+                else EventGroupStatus.UNRESOLVED
+            )
+            entry.group = entry.group.model_copy(update={"status": status, "closed_at": now})
+            entry.terminal = True
+            self._persist(entry.group)
+            closed.append(entry.group)
+        return closed
 
     # -- clock-driven lifecycle -------------------------------------------- #
     def tick(self, now: datetime) -> list[EventGroup]:

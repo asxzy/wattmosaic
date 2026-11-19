@@ -944,9 +944,13 @@ class RuntimeMixin:
     def _refresh_grouping_versions(self) -> None:
         """Re-stamp P5 with the current triple (and topology view).
 
-        Groups already open keep the triple they were formed under; groups
-        formed from now on — and so their event records and matrix writes —
-        carry the new one.
+        Groups still open under an older triple are closed under that triple
+        (Z7): a later step must not join them and be re-inferred with the
+        superseded operator.  Groups formed from now on — and so their event
+        records and matrix writes — carry the new triple.  The closed groups
+        are not re-published: their last result already stands under their own
+        triple, and every result published after the promotion cites the new
+        one.
         """
         engine = self.grouping_engine
         service = self.version_service
@@ -954,8 +958,13 @@ class RuntimeMixin:
             return
         try:
             triple = service.current()
-            engine.versions = triple
-            engine.topology = service.topology_view(triple.topology_version_id)
+            if triple == engine.versions:
+                return
+            engine.rebind(
+                triple,
+                service.topology_view(triple.topology_version_id),
+                now=self._clock(),
+            )
         except Exception:  # noqa: BLE001 - a refresh must not undo a promotion
             log.exception("grouping version refresh failed")
 
@@ -1114,6 +1123,60 @@ class RuntimeMixin:
                 finally:
                     self._record_latency("event", (time.monotonic() - started) * 1000.0)
 
+    def _publishable(self, result: JointInferenceResult) -> JointInferenceResult:
+        """The result as published *power*: no negative level for a consumer.
+
+        Event inference solves signed deltas (HB §2.3): an OFF transition is a
+        legitimate ``ΔP < 0`` and the record keeps it.  The matrix and the
+        snapshot, though, publish a subject's power, and a negative power is
+        impossible for a non-generating subject (HB §8.1 sign rules).  A
+        negative delta says the subject *decreased*; it does not identify the
+        level it decreased to, so the subject is published UNKNOWN with the
+        non-negativity bound (absent is None, never a fabricated level).  A
+        subject an exclusive reader measures is re-published from that reader
+        right after (:meth:`_refresh_measured_readers`).  A subject whose power
+        model predicts negative power (a generator) keeps its value.
+        """
+        if result.event_group_id is None:
+            return result
+        from ..contracts import Bounds, EstimateStatus, InferenceMethod
+
+        changed = False
+        estimates = []
+        for estimate in result.device_estimates:
+            point = estimate.point_w
+            if point is not None and point < 0.0 and not self._may_generate(
+                estimate.subject_id, result.computed_at
+            ):
+                estimate = estimate.model_copy(
+                    update={
+                        "point_w": None,
+                        "status": EstimateStatus.UNKNOWN,
+                        "method": InferenceMethod.NONE,
+                        "bounds": Bounds(lower_w=0.0, upper_w=None, basis="non_negativity"),
+                        "level": None,
+                    }
+                )
+                changed = True
+            estimates.append(estimate)
+        if not changed:
+            return result
+        return result.model_copy(update={"device_estimates": estimates})
+
+    def _may_generate(self, subject_id: str, at: datetime) -> bool:
+        """True when the subject's active power model predicts negative power."""
+        registry = self.model_registry_v3
+        if registry is None:
+            return False
+        from ..runtime.interfaces import PredictionContext
+
+        try:
+            prediction = registry.predict(subject_id, PredictionContext(at=at))
+        except Exception:  # noqa: BLE001 - no model: an ordinary consumer
+            return False
+        mean = getattr(prediction, "mean_w", None)
+        return mean is not None and float(mean) < 0.0
+
     def _publish_group_result(
         self,
         group: EventGroup,
@@ -1123,6 +1186,9 @@ class RuntimeMixin:
         """Persist → apply matrix → swap snapshot → enqueue learning (in order)."""
         at = result.computed_at
         evidence = self.db.repos.evidence
+        # The record and the learner keep the signed event deltas; the matrix,
+        # the snapshot and the residual publish *power* (HB sign rules).
+        published = self._publishable(result)
         # 1. Persist the versioned record (I6/S16).
         try:
             record = self.record_store.open_provisional(
@@ -1138,7 +1204,7 @@ class RuntimeMixin:
         # 2. Matrix update (M2).
         if self.matrix_updater is not None:
             try:
-                self.matrix_updater.apply(result, bundle["operator"])
+                self.matrix_updater.apply(published, bundle["operator"])
             except Exception:  # noqa: BLE001
                 log.exception("matrix update failed")
         # 3. Snapshot assembly and copy-on-write publish (D4).
@@ -1146,16 +1212,16 @@ class RuntimeMixin:
             try:
                 held = self.reader_state.held_all(at)
                 try:
-                    residual_points = self._reader_residual_points(result, held, at)
+                    residual_points = self._reader_residual_points(published, held, at)
                 except Exception:  # noqa: BLE001 - no residual claim, never a fake one
                     log.exception("reader residual computation failed")
                     residual_points = []
                 self.snapshot_assembler.on_result(
-                    result,
+                    published,
                     held,
                     self.latest_quality,
                     inputs=AssembleInputs(
-                        result=result,
+                        result=published,
                         held_readings=held,
                         quality=self.latest_quality,
                         residual_points=residual_points,
