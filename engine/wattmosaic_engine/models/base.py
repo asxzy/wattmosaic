@@ -49,7 +49,12 @@ from .protocols import (
 # --------------------------------------------------------------------------- #
 
 ON_STATES_DEFAULT = frozenset({"on", "open", "running", "active", "heating", "cooling", "true", "1"})
-OFF_STATES_DEFAULT = frozenset({"off", "closed", "idle", "standby", "sleep", "inactive", "false", "0"})
+# HB §11.5: OFF, idle and standby are *distinct* levels and none of them means
+# 0 W.  Idle/standby are removed from the legacy "off" classification so a
+# device that is merely idle is never routed to an OFF/0 W fallback (analysis
+# F2, C5).  The v3 path (models.fixed / models.adjustable) never collapses
+# these levels at all.
+OFF_STATES_DEFAULT = frozenset({"off", "closed", "false", "0"})
 
 
 def enum_text(value: Any) -> str:
@@ -111,8 +116,12 @@ def stdev(values: Iterable[float], default: float = 0.0) -> float:
     return float(statistics.pstdev(clean))
 
 
-def robust_sigma(values: Iterable[float], default: float = 0.0) -> float:
-    """1.4826 * MAD — resistant to a few bad readings."""
+def robust_sigma(values: Iterable[float], default: float | None = None) -> float | None:
+    """1.4826 * MAD — resistant to a few bad readings.
+
+    An absent sample set has an absent (``None``) variability, never 0.0
+    (HB §18).  Callers that need a non-null number must supply it explicitly.
+    """
     clean = [v for v in (finite(x) for x in values) if v is not None]
     if not clean:
         return default
