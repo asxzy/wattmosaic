@@ -48,7 +48,7 @@ directory), so collection always succeeds and the test xfails strictly.
 | `test_at15_plug_relocation.py` | Plug relocation changes mapping, not power model | T7 | open |
 | `test_at16_reader_reconciliation.py` | Reader/calibration change triggers reconciliation | T7 | open |
 | `test_at17_missing_not_zero.py` | Missing data does not become zero | D3 | open |
-| `test_at18_late_event_revision.py` | Late events revise provisional results | I6 | open |
+| `test_at18_late_event_revision.py` | Late events revise provisional results | I6 | closed |
 | `test_at19_replay_newer_model.py` | Historical replay with a newer model | L7 | open |
 | `test_at20_ui_explains_estimates.py` | UI explains source and uncertainty | U2 | open |
 
