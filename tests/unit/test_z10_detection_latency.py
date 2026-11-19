@@ -9,10 +9,12 @@ single-emission guarantee (no phantom re-emission) as the regression guard.
 
 from __future__ import annotations
 
+import math
 import random
 from datetime import timedelta
 
 from wattmosaic_engine.contracts import StepClass
+from wattmosaic_engine.realtime.detection import DetectorConfig
 
 from tests.unit.test_detection import is_class, make_detector, stream, warmup
 
@@ -135,3 +137,94 @@ def test_noisy_steady_load_emits_nothing() -> None:
     stream(store, detector, "ct", values, step_s=CADENCE)
     steps = [e for e in events if not is_class(e, StepClass.DATA_GAP)]
     assert steps == [], [(e.step_class, e.onset_lo, e.delta_w) for e in steps]
+
+
+# --------------------------------------------------------------------------- #
+# Z10b — a settling *decay* is not an OFF (Z10 tightened)
+# --------------------------------------------------------------------------- #
+
+
+def test_inrush_decay_is_not_an_off() -> None:
+    """A motor's 0 -> 1500 W inrush decaying to 300 W running is one ON.
+
+    The inrush peak is a transient above the settled running level; the fall
+    from 1500 to 300 moves toward the pre-step baseline by >1000 W but is the
+    motor settling, not an OFF.  With the robust settled level as the reference,
+    300 is far enough from the 0 W baseline that the reversal must not fire.
+    """
+    store, detector, events = make_detector()
+    last = warmup(store, detector, "motor", value=0.0, count=90, step_s=CADENCE)
+    start = last + timedelta(seconds=CADENCE)
+    # Several inrush samples, then a long run at the settled running level.
+    values = [0.0] * 20 + [1500.0] * 5 + [300.0] * 60
+    stream(store, detector, "motor", values, start=start, step_s=CADENCE, seq0=1000)
+
+    ups, downs = _ups(events), _downs(events)
+    assert len(ups) == 1, [(e.onset_lo, e.delta_w) for e in ups]
+    # The ON amplitude is either the settled +300 W or the detector's documented
+    # confirmed-step amplitude (+1500 W when the peak itself is confirmed); both
+    # are acceptable.  What matters is that the decay emits no OFF.
+    assert abs(ups[0].delta_w - 300.0) < 2.0 or abs(ups[0].delta_w - 1500.0) < 2.0
+    assert not downs, [(e.onset_lo, e.delta_w) for e in downs]
+    assert len({e.event_id for e in events}) == len(events)
+
+
+def test_inrush_peak_never_becomes_the_post_step_reference() -> None:
+    """The reversal reference is the settled level, never the inrush peak.
+
+    With ``return_frac`` small (0.01), only a return to within 1 % of the
+    pre-step level counts as an OFF.  A decay from the 1500 W inrush peak to
+    the 300 W running level is 300 W above the 0 W baseline and must stay
+    inside settling even when the whole 0->1500 transition was confirmed.
+    """
+    store, detector, events = make_detector(config=DetectorConfig(return_frac=0.01))
+    last = warmup(store, detector, "motor", value=0.0, count=90, step_s=CADENCE)
+    start = last + timedelta(seconds=CADENCE)
+    values = [0.0] * 20 + [1500.0] * 5 + [300.0] * 60
+    stream(store, detector, "motor", values, start=start, step_s=CADENCE, seq0=1000)
+
+    downs = _downs(events)
+    assert not downs, [(e.onset_lo, e.delta_w) for e in downs]
+
+
+def test_oscillating_load_during_settling_emits_no_extra_steps() -> None:
+    """A dimmed/variable load swinging +/-30 % during settling stays one ON.
+
+    Every swing is a > max(enter_z*sigma, min_delta_w) move toward the pre-step
+    level, but none returns to that level, so no swing is an OFF and Z10b emits
+    no step per swing.
+    """
+    store, detector, events = make_detector()
+    last = warmup(store, detector, "ct", value=100.0, count=90, step_s=CADENCE)
+    start = last + timedelta(seconds=CADENCE)
+    values = [100.0] * 10
+    # Keep every swing inside the 120 s SETTLING window (12 samples at 10 s).
+    for i in range(12):
+        values.append(1000.0 * (1.0 + 0.3 * math.sin(i)))
+    stream(store, detector, "ct", values, start=start, step_s=CADENCE, seq0=1000)
+
+    # No sample returns to within 20 % of the 100 W pre-step baseline, so no
+    # swing is an OFF and only the original ON is emitted.
+    steps = [e for e in events if not is_class(e, StepClass.DATA_GAP)]
+    assert len(steps) == 1, [(e.onset_lo, e.delta_w) for e in steps]
+    assert len(_downs(events)) == 0
+    assert len({e.event_id for e in events}) == len(events)
+
+
+def test_return_to_pre_level_still_emits_off_with_true_onset() -> None:
+    """A genuine OFF returns to the pre-step level and is still prompt/dated."""
+    store, detector, events = make_detector()
+    last = warmup(store, detector, "plug", value=STANDBY_W, count=90, step_s=CADENCE)
+    pulse_start = last + timedelta(seconds=CADENCE)
+    pulse = [PULSE_W] * 5
+    quiet = [STANDBY_W] * 120
+    stream(
+        store, detector, "plug", [*pulse, *quiet], start=pulse_start, step_s=CADENCE, seq0=1000
+    )
+    real_fall = pulse_start + timedelta(seconds=45.0)
+
+    ups, downs = _ups(events), _downs(events)
+    assert len(ups) == 1 and len(downs) == 1
+    off = downs[0]
+    assert off.onset_lo <= real_fall <= off.onset_hi, (off.onset_lo, real_fall, off.onset_hi)
+    assert off.detected_at - real_fall <= timedelta(seconds=(CONFIRM_SAMPLES + 1) * CADENCE)
