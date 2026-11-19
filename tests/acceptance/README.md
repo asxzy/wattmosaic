@@ -19,8 +19,8 @@ exactly **20** files, one per AT number (AT-01 … AT-20). The meta-test in
 and task id against the table below.
 
 CI picks the suite up through the normal `pytest -q` run. `pytest tests/acceptance
--q` reports one passing test per closed AT (currently **2 passed**, AT-12 and
-AT-03), **18 xfailed and 0 xpassed**, plus the passing meta-tests.
+-q` reports one passing test per closed AT (currently **3 passed**, AT-12,
+AT-03 and AT-04), **17 xfailed and 0 xpassed**, plus the passing meta-tests.
 
 Tests assert **semantics**, never merely HTTP 200 (HB §21). Where a v3 public
 surface does not exist yet, the test imports it lazily inside the test body (or
@@ -34,7 +34,7 @@ directory), so collection always succeeds and the test xfails strictly.
 | `test_at01_nested_no_double_count.py` | Nested readers, no double counting | M1 | open |
 | `test_at02_parent_residual_not_containment.py` | Parent residual ≠ child containment evidence | T5 | **closed** (CLOSED_BY = "T5") |
 | `test_at03_nonzero_standby_modeled.py` | Stable non-zero standby is modeled | L2 | **closed** (CLOSED_BY = "L2") |
-| `test_at04_unknown_without_ha.py` | Unknown devices detected without HA | T6 | open |
+| `test_at04_unknown_without_ha.py` | Unknown devices detected without HA | T6 | **closed** (CLOSED_BY = "T6") |
 | `test_at05_response_delays_matched.py` | Matching handles different response delays | I2 | open |
 | `test_at06_joint_inference.py` | Multiple simultaneous devices jointly inferred | I3 | closed |
 | `test_at07_group_not_fabricated.py` | Non-identifiable → group, no fabricated values | I4 | closed |

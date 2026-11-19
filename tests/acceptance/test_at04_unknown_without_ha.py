@@ -9,10 +9,9 @@ from __future__ import annotations
 
 import pytest
 
-pytestmark = [
-    pytest.mark.acceptance,
-    pytest.mark.xfail(strict=True, reason="closed by T6"),
-]
+CLOSED_BY = "T6"
+
+pytestmark = [pytest.mark.acceptance]
 
 
 def test_fridge_without_ha_becomes_characterised_unknown_profile(hb17) -> None:

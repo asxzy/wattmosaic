@@ -8,6 +8,11 @@ in memory only (DEC-17).
 
 from __future__ import annotations
 
+from ..residual.unknown_profiles import (
+    UnknownDetectionResult,
+    UnknownProfileView,
+    run_unknown_detection,
+)
 from .candidate_ring import CandidateRing
 from .normalize import (
     QuarantineCounter,
@@ -22,6 +27,9 @@ __all__ = [
     "QuarantineCounter",
     "QuarantineReason",
     "ReadingNormalizer",
+    "UnknownDetectionResult",
+    "UnknownProfileView",
     "compatible",
     "normalize_reading",
+    "run_unknown_detection",
 ]
