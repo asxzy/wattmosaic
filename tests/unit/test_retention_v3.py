@@ -287,7 +287,9 @@ def test_migration_21_adds_the_column_idempotently(tmp_path: Path) -> None:
     try:
         assert apply_migrations(conn) == LATEST_VERSION
         assert current_version(conn) == LATEST_VERSION
-        assert LATEST_VERSION == 21
+        # v025 (Z1) makes 21 no longer the newest schema; assert a floor instead
+        # of pinning the latest version so this test survives later migrations.
+        assert LATEST_VERSION >= 21
         assert 21 not in SPARE_VERSIONS
         assert any(m.version == 21 for m in MIGRATIONS)
         columns = {row[1] for row in conn.execute("PRAGMA table_info(event_evidence)")}

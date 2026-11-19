@@ -29,7 +29,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from .. import __version__ as ENGINE_VERSION
 
-CONTRACT_VERSION = "2.4.0"
+# The canonical constant now lives in ``foundation.py`` (Z1); it is imported
+# lazily at the bottom of this module to avoid a circular import (foundation
+# reuses this module's ``Model`` base).  The facade re-exports it from here so
+# ``from wattmosaic_engine.contracts import CONTRACT_VERSION`` keeps working.
+CONTRACT_VERSION = "3.0.0"
 
 
 def utcnow() -> datetime:

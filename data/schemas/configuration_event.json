@@ -164,5 +164,5 @@
   "title": "ConfigurationEvent",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/configuration_event.json",
-  "x-contract-version": "2.4.0"
+  "x-contract-version": "3.0.0"
 }
