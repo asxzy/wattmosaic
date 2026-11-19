@@ -439,11 +439,6 @@
       "learning_active": {
         "name": "Active learning"
       }
-    },
-    "button": {
-      "confirm_topology": {
-        "name": "Confirm topology"
-      }
     }
   }
 }

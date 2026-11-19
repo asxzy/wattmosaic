@@ -28,8 +28,6 @@ never been deployed and both changes are one logical fix to one read path.
 
 from __future__ import annotations
 
-import asyncio
-import json
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -180,43 +178,6 @@ def test_snapshot_reads_the_split_from_the_database(tmp_path: Path) -> None:
         assert recon["meter_spread_w"] == pytest.approx(LIVE_METER_DISAGREEMENT_W)
         assert recon["meter_spread_exceeds_residual"] is False
         assert recon["unknown_residual_w"] == pytest.approx(LIVE_RESIDUAL_W)
-        assert (
-            recon["unmonitored_w"] + recon["meter_disagreement_w"]
-            - recon["unknown_residual_w"]
-        ) == pytest.approx(0.0, abs=0.01)
-    finally:
-        db.close()
-
-
-def test_snapshot_endpoint_serves_a_non_zero_split(tmp_path: Path) -> None:
-    """End-to-end over HTTP: the JSON body the integration actually parses."""
-    import aiohttp
-    from wattmosaic_engine.api.server import APIServer
-    from wattmosaic_engine.config.settings import EngineConfig
-    from wattmosaic_engine.main import EngineCore
-
-    db = Database(tmp_path / "api.db")
-    try:
-        db.insert_reconciliation(_live_split())
-        config = EngineConfig(database_path=str(tmp_path / "api.db"), ha_token="not-used")
-        core = EngineCore(config, db)
-
-        async def scenario() -> dict:
-            server = APIServer(core, host="127.0.0.1", port=0, api_token="t")
-            await server.start()
-            try:
-                async with aiohttp.ClientSession(headers={"X-API-Token": "t"}) as session:
-                    url = f"http://127.0.0.1:{server.port}/api/v1/snapshot"
-                    async with session.get(url) as resp:
-                        assert resp.status == 200
-                        body = json.loads(await resp.text())
-                return body["reconciliation"]
-            finally:
-                await server.stop()
-
-        recon = asyncio.run(scenario())
-        assert recon["unmonitored_w"] != 0.0
-        assert recon["meter_disagreement_w"] != 0.0
         assert (
             recon["unmonitored_w"] + recon["meter_disagreement_w"]
             - recon["unknown_residual_w"]

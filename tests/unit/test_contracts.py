@@ -62,7 +62,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _export_schemas_module():
-    """``tools/dev/export_schemas.py`` as a module, for its ``MODELS`` map."""
+    """``tools/dev/export_schemas.py`` as a module, for its model maps."""
     path = ROOT / "tools" / "dev" / "export_schemas.py"
     spec = importlib.util.spec_from_file_location("wm_export_schemas_contracts", path)
     assert spec is not None and spec.loader is not None
@@ -84,7 +84,7 @@ def test_contract_version_is_3_0_0() -> None:
 def test_schema_files_match_contract_version() -> None:
     index = json.loads((ROOT / "data" / "schemas" / "index.json").read_text())
     assert index["contract_version"] == contracts.CONTRACT_VERSION
-    assert "inference_result" in index["schemas"]
+    assert "inference_snapshot" in index["schemas"]
 
 
 def test_the_interface_contract_doc_states_the_current_version() -> None:
@@ -121,8 +121,8 @@ def test_the_committed_schemas_are_what_the_contract_generates() -> None:
     exporter = _export_schemas_module()
     checked = 0
     # ``collect_models`` is the exporter's single source of truth: it merges the
-    # legacy ``MODELS`` set with each v3 submodule's ``SCHEMA_EXPORTS``.  New
-    # additive contracts (K00..K06) land in the latter, not in ``MODELS``.
+    # v3 transport envelopes with each v3 submodule's ``SCHEMA_EXPORTS``.  New
+    # additive contracts (K00..K06) land in the latter.
     all_models = exporter.collect_models()
     for name, filename in index["schemas"].items():
         model = all_models[name]

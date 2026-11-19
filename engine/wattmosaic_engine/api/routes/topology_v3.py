@@ -1,9 +1,10 @@
 """Event-sourced topology v3 routes (T4).
 
 Per-edge declaration, pin/reject, version history and endpoint config edits.
-These routes are additive: the legacy handlers in :mod:`.topology` stay in
-place until Z1 deletes them.  A backend that does not implement them answers
-503 through :class:`FacadeUnavailable`, matching the other optional areas.
+These are the only topology-write routes since the 3.0 cutover; the legacy
+declared-topology handlers were removed.  A backend that does not implement
+them answers 503 through :class:`FacadeUnavailable`, matching the other
+optional areas.
 """
 
 from __future__ import annotations
@@ -84,7 +85,7 @@ async def topology_endpoint_config(request: web.Request) -> web.Response:
 
 
 def register(router: web.UrlDispatcher, base: str, deps: object) -> None:
-    # Additive v3 routes, always mounted; the legacy topology routes stay until Z1.
+    # The v3 topology-write routes, always mounted unconditionally.
     router.add_get(f"{base}/topology/v3", topology_v3_get)
     router.add_post(f"{base}/topology/edges", topology_edges_post)
     router.add_post(f"{base}/topology/edges/{{edge_id}}/pin", topology_edge_pin)

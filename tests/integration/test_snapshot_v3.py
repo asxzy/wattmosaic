@@ -348,19 +348,21 @@ def test_v3_routes_serve_snapshot_devices_groups_and_provenance() -> None:
     async def scenario() -> None:
         app = create_app(V3Facade(snapshot), api_token="")
         async with TestClient(TestServer(app)) as client:
-            # /snapshot?v=3 serves the v3 shape; /snapshot stays legacy.
-            resp = await client.get("/api/v1/snapshot?v=3")
+            # The 3.0 cutover serves the v3 shape on /snapshot unconditionally.
+            resp = await client.get("/api/v1/snapshot")
             assert resp.status == 200
             body = await resp.json()
             assert body["snapshot_id"] == "snap-http"
             assert body["versions"]["topology_version_id"] == "topo-1"
+            assert "device_estimates" in body
+            assert "results" not in body
 
-            resp = await client.get("/api/v1/snapshot")
+            resp = await client.get("/api/v1/snapshot?v=3")
             assert resp.status == 200
-            legacy = await resp.json()
-            assert "results" in legacy  # legacy shape unchanged
+            body = await resp.json()
+            assert body["snapshot_id"] == "snap-http"
 
-            resp = await client.get("/api/v1/devices?v=3")
+            resp = await client.get("/api/v1/devices")
             assert resp.status == 200
             devices = await resp.json()
             assert [e["subject_id"] for e in devices] == ["lamp-a"]

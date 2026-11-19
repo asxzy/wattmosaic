@@ -403,14 +403,12 @@ class TestApiClient:
             run(client.health())
         assert "token-abc" not in str(excinfo.value)
 
-    def test_topology_methods(self) -> None:
+    def test_no_legacy_topology_confirm_or_nesting_methods(self) -> None:
+        """The 3.0 cutover removes the confirm and nesting client methods."""
         client, session = self._client(json_response({"version": 2, "channels": []}))
-        run(client.put_topology({"version": 2, "channels": []}))
-        run(client.confirm_topology(2))
-        assert session.calls[0]["method"] == "PUT"
-        assert session.calls[0]["url"].endswith("/api/v1/topology")
-        assert session.calls[1]["url"].endswith("/api/v1/topology/confirm")
-        assert session.calls[1]["json"] == {"version": 2}
+        assert not hasattr(client, "confirm_topology")
+        assert not hasattr(client, "nesting_candidates")
+        assert session.calls == []
 
     def test_export_device(self) -> None:
         client, session = self._client(json_response({"device_id": "a", "samples": []}))
@@ -3195,7 +3193,13 @@ class TestTopologyReplayAgainstTheRealClient:
         )
         return client, session
 
-    def test_replay_puts_then_confirms(self) -> None:
+    def test_legacy_confirm_route_is_not_called(self) -> None:
+        """The 3.0 client has no confirm POST; a confirming replay never issues one.
+
+        The PUT (still a valid transport call) carries the merged declaration;
+        the removed confirm step is simply unavailable on the real client, so the
+        replay records the failure honestly instead of crashing.
+        """
         updated = self._topology()
         updated["version"] = 2
         client, session = self._client(
@@ -3210,12 +3214,11 @@ class TestTopologyReplayAgainstTheRealClient:
                 observed_version=1,
             )
         )
-        assert state.pushed is True
         methods = [call["method"] for call in session.calls]
-        assert methods == ["GET", "PUT", "POST"]
+        assert methods == ["GET", "PUT"]
         assert session.calls[1]["url"].endswith("/api/v1/topology")
-        assert session.calls[2]["url"].endswith("/api/v1/topology/confirm")
-        assert session.calls[2]["json"] == {"version": 2}
+        assert all("/topology/confirm" not in call["url"] for call in session.calls)
+        assert state.error  # the removed confirm method could not be called
 
         body = session.calls[1]["json"]
         by_id = {channel["ct_id"]: channel for channel in body["channels"]}

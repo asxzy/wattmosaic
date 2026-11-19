@@ -13,7 +13,6 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .const import (
-    BUTTON_CONFIRM_TOPOLOGY_ENTITY_ID,
     CONF_API_TOKEN,
     CONF_BASE_URL,
     CONF_CT_ASSIGNMENTS,
@@ -26,7 +25,6 @@ from .const import (
 )
 from .coordinator import WattMosaicCoordinator
 from .flow_logic import normalise_channels
-from .topology_confirm import confirm_availability
 from .util import redact_config
 
 _LOGGER = logging.getLogger(__name__)
@@ -125,8 +123,8 @@ async def async_get_config_entry_diagnostics(
 
     # The honest learning accounting, straight from the engine's health
     # ``details``.  ``effective_state == "blocked"`` plus a dominant
-    # ``ambiguous_topology`` is the diagnosis a user can act on; the remedy text
-    # names the confirm button.
+    # ``ambiguous_topology`` is the diagnosis a user can act on; the remedy is
+    # to fix topology declarations through the engine's v3 edge routes.
     diagnostics["learning"] = _learning_section(
         health, config, coordinator, entry
     )
@@ -202,13 +200,13 @@ def _learning_section(
     coordinator: Any,
     entry: ConfigEntry,
 ) -> dict[str, Any]:
-    """Learning accounting plus the one fact the engine cannot know.
+    """Learning accounting plus the entry's own topology-confirmation state.
 
     The engine reports ``effective_state``/counts/remedy; the integration adds
-    whether *this entry* says the topology was confirmed and whether the confirm
-    button is currently actionable.  Those two can disagree with the engine
-    (a database reset, a failed confirm) and that disagreement is exactly what a
-    diagnostics download should reveal.
+    whether *this entry* says the topology was confirmed and whether the engine
+    agrees.  Those two can disagree (a database reset, a failed confirm) and
+    that disagreement is exactly what a diagnostics download should reveal.
+    The confirm button was removed at the 3.0 cutover.
     """
     details = health.get("details") if isinstance(health, dict) else None
     status = details.get("learning_status") if isinstance(details, dict) else None
@@ -218,20 +216,6 @@ def _learning_section(
         "summary": "The engine did not report learning accounting.",
     }
     topology = getattr(coordinator, "engine_topology", None) or {}
-    assignments = config.get(CONF_CT_ASSIGNMENTS) or {}
-    try:
-        availability = confirm_availability(
-            topology,
-            assignments,
-            engine_available=bool(getattr(coordinator, "engine_available", False)),
-        )
-        learning["confirm_button"] = {
-            **availability.as_attributes(),
-            "available": availability.available,
-            "entity_id": BUTTON_CONFIRM_TOPOLOGY_ENTITY_ID,
-        }
-    except Exception:  # noqa: BLE001 - diagnostics must never fail
-        learning["confirm_button"] = {"entity_id": BUTTON_CONFIRM_TOPOLOGY_ENTITY_ID}
     learning["entry_topology_confirmed"] = bool(
         config.get(CONF_TOPOLOGY_CONFIRMED, False)
     )

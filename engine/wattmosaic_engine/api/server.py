@@ -44,7 +44,7 @@ from typing import Any
 from aiohttp import web
 from pydantic import ValidationError
 
-from ..contracts import CONTRACT_VERSION, ErrorResponse, Topology
+from ..contracts import CONTRACT_VERSION, ErrorResponse
 from . import routes
 from .facade import (
     ENGINE_VERSION,
@@ -338,28 +338,6 @@ def _validate(model: type, payload: Any) -> Any:
         return model.model_validate(payload)
     except ValidationError as exc:
         raise InvalidRequest(exc.json(include_url=False)) from exc
-
-
-def _enum_value(value: Any) -> Any:
-    return getattr(value, "value", value)
-
-
-def _validate_topology(topology: Topology) -> Topology:
-    """Reject structurally valid but semantically empty topologies."""
-    problems: list[str] = []
-    if not topology.channels:
-        problems.append("topology must contain at least one channel")
-    elif not any(_enum_value(ch.ct_type) == "main" for ch in topology.channels):
-        problems.append("topology must contain at least one channel with ct_type='main'")
-    if not topology.devices:
-        problems.append("topology must contain at least one device")
-    if problems:
-        raise InvalidRequest("; ".join(problems))
-    return topology
-
-
-def _validate_topology_payload(payload: Any) -> Topology:
-    return _validate_topology(_validate(Topology, payload))
 
 
 def _bounded_float(

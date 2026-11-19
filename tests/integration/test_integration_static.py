@@ -337,13 +337,15 @@ def test_group_sensor_unique_id_namespace() -> None:
 
 
 def test_v3_snapshot_route_is_requested_by_the_client() -> None:
-    """The coordinator fetches the v3 snapshot, with a legacy fallback."""
+    """The coordinator fetches the v3 snapshot; there is no legacy fallback."""
     api_text = (PKG / "api_client.py").read_text()
     assert 'async def snapshot_v3' in api_text
-    assert '"/snapshot"' in api_text and '"v": "3"' in api_text
+    assert '"/snapshot"' in api_text
+    assert '"v": "3"' not in api_text
     coord = (PKG / "coordinator.py").read_text()
     assert "snapshot_v3()" in coord
-    assert "is_v3_snapshot" in coord
+    assert "is_v3_snapshot" not in coord
+    assert "coerce_snapshot" not in coord
 
 
 def test_no_actuation_in_v3_group_or_migration_code() -> None:

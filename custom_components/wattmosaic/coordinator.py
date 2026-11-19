@@ -45,11 +45,9 @@ from .state_links import (
     resolve_links,
 )
 from .util import (
-    coerce_snapshot,
     coerce_v3_snapshot,
     device_entities_available,
     is_engine_unavailable,
-    is_v3_snapshot,
     sanitize_text,
     utcnow,
 )
@@ -109,7 +107,7 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
 
     Failure semantics
     -----------------
-    * A malformed body never raises: :func:`coerce_snapshot` degrades it.
+    * A malformed body never raises: :func:`coerce_v3_snapshot` degrades it.
     * A transient network error inside ``unavailable_after`` keeps the last
       snapshot but marks it stale (entities that publish *current* values go
       ``unavailable`` while energy/status entities keep their last total).
@@ -359,10 +357,10 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
         """The engine's topology status as reported by ``/health``.
 
         Read from ``details.topology`` rather than by calling ``GET /topology``:
-        the health probe is already polled every cycle, so the confirm button
-        costs no extra request.  ``None`` means the engine did not report a
-        topology (an older engine, or one that has none configured) — callers
-        must treat that as "unknown", never as "candidate".
+        the health probe is already polled every cycle, so this costs no extra
+        request.  ``None`` means the engine did not report a topology (one that
+        has none configured) — callers must treat that as "unknown", never as
+        "candidate".
         """
         data = self.data
         health = data.health if data is not None else None
@@ -372,7 +370,7 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
             return None
         if not topology.get("configured", True):
             # A topology-less engine still reports a reason; keep the dict so
-            # the button can explain itself, but there is no status to confirm.
+            # diagnostics can explain it, but there is no status to confirm.
             return dict(topology)
         return dict(topology)
 
@@ -460,18 +458,6 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
             return_exceptions=True,
         )
 
-        # Feature-detect v3 by payload shape only, for the duration of the
-        # integration branch (Z1 removes v2 handling).  An older engine ignores
-        # ``?v=3`` and answers with the legacy snapshot; a transient error from
-        # the v3 path also falls back before we give up on this poll.
-        if isinstance(snapshot_result, Exception) or not is_v3_snapshot(snapshot_result):
-            try:
-                legacy_result = await self.client.snapshot()
-            except Exception:  # noqa: BLE001 - keep the original error below
-                pass
-            else:
-                snapshot_result = legacy_result
-
         if isinstance(health_result, Exception):
             _LOGGER.debug("WattMosaic health probe failed: %s", health_result)
         elif isinstance(health_result, dict):
@@ -515,17 +501,13 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
             _LOGGER.warning("WattMosaic snapshot poll failed (using cached data): %s", error_text)
             return self._last
 
-        if is_v3_snapshot(snapshot_raw):
-            snapshot = coerce_v3_snapshot(snapshot_raw)
-            groups = snapshot.get("groups", {})
-            # Remember when each group was last published.  A group that
-            # disappears keeps its last_seen so the sensor layer can keep the
-            # entity unavailable (not deleted) for the retention window.
-            for group_id in groups:
-                self._group_last_seen[group_id] = now
-        else:
-            snapshot = coerce_snapshot(snapshot_raw)
-            groups = {}
+        snapshot = coerce_v3_snapshot(snapshot_raw)
+        groups = snapshot.get("groups", {})
+        # Remember when each group was last published.  A group that
+        # disappears keeps its last_seen so the sensor layer can keep the
+        # entity unavailable (not deleted) for the retention window.
+        for group_id in groups:
+            self._group_last_seen[group_id] = now
 
         # Device metadata (names/areas) changes rarely; refresh it periodically
         # rather than on every poll, and never let it break an update.
