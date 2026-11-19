@@ -198,8 +198,73 @@ def entity_links(topology: Topology | None) -> dict[str, tuple[str, tuple[str, .
     return out
 
 
+def _link_target(link: Any) -> tuple[str, str]:
+    """``(target_kind, target_id)`` from a HaEntityLink model or a dict row."""
+    if isinstance(link, Mapping):
+        return str(link.get("target_kind", "device")), str(link.get("target_id", ""))
+    return str(getattr(link, "target_kind", "device")), str(getattr(link, "target_id", ""))
+
+
+def _link_entity(link: Any) -> str:
+    if isinstance(link, Mapping):
+        return str(link.get("entity_id", ""))
+    return str(getattr(link, "entity_id", ""))
+
+
+def subjects_for_entity(links: Iterable[Any]) -> dict[str, list[tuple[str, str]]]:
+    """Group HA entity links into ``entity_id -> [(target_kind, target_id), ...]``.
+
+    One entity may link to several subjects (DEC-08); this is a diagnostic
+    grouping, never a refusal.  ``HaEntityLink`` models and repository dict
+    rows are both accepted.
+    """
+    grouped: dict[str, list[tuple[str, str]]] = {}
+    for link in links:
+        entity = _link_entity(link)
+        if not entity:
+            continue
+        target = _link_target(link)
+        bucket = grouped.setdefault(entity, [])
+        if target not in bucket:
+            bucket.append(target)
+    return grouped
+
+
+def ambiguous_entities_from_links(links: Iterable[Any]) -> list[str]:
+    """Diagnostics only: entities with more than one distinct subject.
+
+    DEC-08 makes one-to-many links legal, so this is **not** a refusal and the
+    caller must not drop such entities.  Returns the list of multi-subject
+    entity ids (sorted for deterministic diagnostics).
+    """
+    grouped = subjects_for_entity(links)
+    return sorted(entity for entity, targets in grouped.items() if len(targets) > 1)
+
+
+def entity_links_from_links(
+    links: Iterable[Any],
+) -> dict[str, tuple[str, tuple[str, ...]]]:
+    """Thin adapter: legacy ``entity_links`` shape from ha_entity_links.
+
+    The legacy shape is ``entity_id -> (target_id, (supporting_ct_ids,))``.  A
+    many-to-many entity is represented by its first declared subject; the full
+    set is available from :func:`subjects_for_entity`.  Thus old callers keep
+    working while new code reads the canonical link table.
+    """
+    out: dict[str, tuple[str, tuple[str, ...]]] = {}
+    for entity, targets in subjects_for_entity(links).items():
+        if targets:
+            out[entity] = (targets[0][1], ())
+    return out
+
+
 def ambiguous_entities(topology: Topology | None) -> dict[str, list[str]]:
-    """Entities claimed by more than one device (never auto-resolved)."""
+    """Backward-compatible adapter: report entities claimed by many devices.
+
+    DEC-08 changed one-to-many from an error into a diagnostic.  The legacy
+    shape is kept for old callers (first declaration wins for lookup), but this
+    function now *reports* ambiguity without refusing to link.
+    """
     if topology is None:
         return {}
     channels = topology.channel_map()
@@ -279,13 +344,16 @@ __all__ = [
     "STATE_ENTITIES_KEY",
     "STATE_OVERRIDES_KEY",
     "ambiguous_entities",
+    "ambiguous_entities_from_links",
     "config_load_entity_ids",
     "device_for_entity",
     "entity_links",
+    "entity_links_from_links",
     "link_state_entity_ids",
     "runtime_state_entities",
     "state_entity_for_device",
     "state_entity_ids",
     "state_key",
+    "subjects_for_entity",
     "supporting_ct_ids",
 ]
