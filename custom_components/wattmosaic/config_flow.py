@@ -1,4 +1,4 @@
-"""Config and options flows for WattMosaic.
+"""Config and options flows for WattMosaic (v3 setup path).
 
 The flows are intentionally thin: all validation/merging logic lives in
 ``flow_logic.py`` (pure Python, unit-tested), and all HTTP lives in
@@ -7,17 +7,18 @@ two building blocks.
 
 Wizard order (identical for setup and options):
 
-1. ``user`` / ``init``   – engine URL + token (setup) or polling settings (options)
-2. ``settings``          – polling and freshness thresholds (setup only)
-3. ``channels``          – per-CT role / phase / polarity / pairing / device
-4. ``confirm``           – explicit confirmation before anything is committed
+1. ``user`` / ``hassio``  – engine URL + token (setup), or settings (options)
+2. ``settings``           – polling / freshness (setup only)
+3. ``endpoints``          – discovered endpoints: optional user-declared parents
+   (CTs) and single-subject scope (candidate plugs)
+4. ``done``               – commit the plan: ``POST /topology/edges`` and
+   ``POST /endpoints/{id}/scope`` only
 
-A channel's ``device_id`` is chosen on the ``channels`` form itself, so there is
-no separate device-mapping step: it would only ever re-ask a question the
-channel form already answers.
-
-Nothing is written to the engine until step 4, and uncertain assignments stay
-``candidate`` unless the user ticks the confirmation box.
+Devices are automatic (DEC-04), so there are deliberately no per-device forms
+and no per-CT channel wizard.  Engine-inferred parents are shown as *suggestions*
+and are written only when the user accepts them (DEC-13); nothing is confirmed
+silently.  No v2 topology PUT or blanket topology-confirmation POST is issued
+by this setup flow.
 """
 
 from __future__ import annotations
@@ -35,10 +36,6 @@ from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
-    SelectOptionDict,
-    SelectSelector,
-    SelectSelectorConfig,
-    SelectSelectorMode,
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
@@ -48,70 +45,29 @@ from homeassistant.helpers.service_info.hassio import HassioServiceInfo
 from .api_client import EngineClient, describe_engine_error, redact_token_for_display
 from .const import (
     CONF_API_TOKEN,
-    CONF_AUTO_PLACEMENT,
     CONF_BASE_URL,
-    CONF_CONFIGURE_DEVICE,
-    CONF_CT_ASSIGNMENTS,
-    CONF_DEVICE_LINKS,
-    CONF_ENERGY_ENTITIES,
     CONF_SCAN_INTERVAL,
     CONF_STALE_AFTER,
-    CONF_TOPOLOGY_CONFIRMED,
-    CONF_TOPOLOGY_VERSION,
     CONF_UNAVAILABLE_AFTER,
-    CONNECTIVITY_LEVELS,
-    DEVICE_TYPES,
     DOMAIN,
-    LIGHT_TYPES,
     MAX_SCAN_INTERVAL,
     MAX_STALE_AFTER,
     MAX_UNAVAILABLE_AFTER,
     MIN_SCAN_INTERVAL,
     MIN_STALE_AFTER,
     MIN_UNAVAILABLE_AFTER,
-    MONITORING_LEVELS,
     NAME,
-    POWER_BEHAVIORS,
 )
-from .entity_values import binding_device_entity_ids
 from .flow_logic import (
-    DEVICE_LINK_FIELD,
-    ENERGY_ENTITY_FIELD,
-    MAX_MULTIPLIER,
-    MIN_MULTIPLIER,
-    apply_device_link,
-    apply_nesting_candidates,
-    assignment_defaults,
-    assignment_store,
-    auto_placement_enabled,
     build_endpoint_setup_plan,
-    build_topology_update,
     connection_defaults,
-    descendant_ids,
-    device_configuration_command,
-    device_link_choice,
     discovered_base_url,
     endpoint_choices,
-    energy_entity_choice,
-    linked_device_id,
-    mapping_summary,
-    normalise_assignment,
-    normalise_channels,
-    normalise_device_configuration,
-    normalise_device_list,
     normalise_endpoints,
     normalise_settings,
-    resolve_confirmation,
     settings_defaults,
-    stored_energy_choice,
-    suggested_alias,
-    suggested_pair,
-    suggested_parent,
     suggested_parents,
-    uncertainty_summary,
-    validate_assignments,
     validate_connection,
-    validate_device_configuration,
     validate_settings,
 )
 from .util import normalise_base_url
@@ -136,45 +92,6 @@ async def _v3_post(client: EngineClient, path: str, body: Mapping[str, Any]) -> 
 # --------------------------------------------------------------------------- #
 
 
-def _role_select() -> SelectSelector:
-    return SelectSelector(
-        SelectSelectorConfig(
-            options=[
-                SelectOptionDict(value="main", label="Main incoming feed"),
-                SelectOptionDict(value="branch", label="Branch circuit"),
-                SelectOptionDict(value="unknown", label="Unknown / unassigned"),
-            ],
-            mode=SelectSelectorMode.DROPDOWN,
-        )
-    )
-
-
-def _phase_select() -> SelectSelector:
-    return SelectSelector(
-        SelectSelectorConfig(
-            options=[
-                SelectOptionDict(value="l1", label="L1 (leg 1)"),
-                SelectOptionDict(value="l2", label="L2 (leg 2)"),
-                SelectOptionDict(value="both", label="Both (double-pole 240 V)"),
-                SelectOptionDict(value="unknown", label="Unknown"),
-            ],
-            mode=SelectSelectorMode.DROPDOWN,
-        )
-    )
-
-
-def _polarity_select() -> SelectSelector:
-    return SelectSelector(
-        SelectSelectorConfig(
-            options=[
-                SelectOptionDict(value="normal", label="Normal"),
-                SelectOptionDict(value="inverted", label="Inverted"),
-            ],
-            mode=SelectSelectorMode.DROPDOWN,
-        )
-    )
-
-
 def _number_selector(low: int, high: int) -> NumberSelector:
     return NumberSelector(
         NumberSelectorConfig(
@@ -185,168 +102,6 @@ def _number_selector(low: int, high: int) -> NumberSelector:
             unit_of_measurement="s",
         )
     )
-
-
-def _watts_selector() -> NumberSelector:
-    return NumberSelector(
-        NumberSelectorConfig(
-            min=0,
-            step=1,
-            mode=NumberSelectorMode.BOX,
-            unit_of_measurement="W",
-        )
-    )
-
-
-def _count_selector() -> NumberSelector:
-    return NumberSelector(
-        NumberSelectorConfig(min=1, max=200, step=1, mode=NumberSelectorMode.BOX)
-    )
-
-
-def _enum_select(values: tuple[str, ...], labels: dict[str, str] | None = None) -> SelectSelector:
-    """Dropdown over a mirrored contract enum, with human labels where known."""
-    options = [
-        SelectOptionDict(value=value, label=(labels or {}).get(value, value.replace("_", " ")))
-        for value in values
-    ]
-    return SelectSelector(SelectSelectorConfig(options=options, mode=SelectSelectorMode.DROPDOWN))
-
-
-_DEVICE_TYPE_LABELS = {
-    "light": "Light",
-    "light_group": "Light group / fixture",
-    "fan": "Fan",
-    "pump": "Pump",
-    "hvac_heat": "Heating",
-    "hvac_cool": "Cooling",
-    "hvac_combined": "Combined HVAC",
-    "water_heater": "Water heater",
-    "appliance": "Appliance",
-    "refrigeration": "Refrigeration",
-    "ev_charger": "EV charger",
-    "electronics": "Electronics",
-    "socket": "Socket / plug",
-    "motor": "Motor",
-    "humidifier": "Humidifier",
-    "dehumidifier": "Dehumidifier",
-    "sauna": "Sauna",
-    "hot_tub": "Hot tub",
-    "other": "Other",
-    "unknown": "Unknown",
-}
-
-_CONNECTIVITY_LABELS = {
-    "connected": "Connected to Home Assistant",
-    "not_connected": "Not connected (no HA entity)",
-    "unknown": "Unknown",
-}
-
-_MONITORING_LABELS = {
-    "shared": "Shared circuit",
-    "home_total_only": "Home total only",
-    "unmonitored": "Unmonitored",
-    "unknown": "Unknown (derive from topology)",
-}
-
-_BEHAVIOR_LABELS = {
-    "fixed": "Fixed watts",
-    "variable": "Variable (dimmed/speed)",
-    "complex": "Complex controller",
-    "unknown": "Unknown",
-}
-
-_LIGHT_TYPE_LABELS = {
-    "led": "LED",
-    "incandescent": "Incandescent",
-    "halogen": "Halogen",
-    "cfl": "CFL",
-    "fluorescent": "Fluorescent",
-    "smart_bulb": "Smart bulb",
-    "unknown": "Unknown",
-}
-
-
-def _device_config_schema(
-    *, energy_default: bool = True, link_options: list[SelectOptionDict] | None = None,
-    link_default: str = "", ct_options: list[SelectOptionDict] | None = None,
-    ct_default: list[str] | None = None,
-) -> vol.Schema:
-    """Flat form for one device's configuration.
-
-    Every numeric field is optional: an absent value means "not stated", and the
-    engine must never read a blank as zero watts.
-
-    ``energy_default`` is the *stored* per-device choice.  It must be honoured:
-    the form always submits the checkbox, so showing an unconditional default of
-    ``True`` would silently re-enable an entity the user deliberately turned off
-    the moment they edited any other field on the same device.
-
-    ``link_options`` lists the Home Assistant devices this measurement may be
-    shown on.  A dropdown rather than a free-text device id because a registry id
-    is opaque; the selector value is the id, the label is the name the user knows.
-
-    ``ct_options`` lists the engine's CT channels so a device can declare which
-    circuit it sits on.  This is what makes a *shared* circuit expressible: a
-    channel carries one ``device_id``, so several lamps on one CT could not be
-    described by the channel wizard alone.  A multi-select because one row may
-    cover many loads and one load may sit under nested rows.
-    """
-    ct_field = (
-        SelectSelector(
-            SelectSelectorConfig(
-                options=list(ct_options or []),
-                mode=SelectSelectorMode.DROPDOWN,
-                multiple=True,
-                custom_value=False,
-            )
-        )
-        if ct_options is not None
-        else TextSelector()
-    )
-    ct_default_value: Any = list(ct_default or []) if ct_options is not None else ""
-    fields: dict[Any, Any] = {
-        vol.Required("device_type", default="unknown"): _enum_select(
-            DEVICE_TYPES, _DEVICE_TYPE_LABELS
-        ),
-        vol.Required("connectivity", default="unknown"): _enum_select(
-            CONNECTIVITY_LEVELS, _CONNECTIVITY_LABELS
-        ),
-        vol.Required("monitoring", default="unknown"): _enum_select(
-            MONITORING_LEVELS, _MONITORING_LABELS
-        ),
-        vol.Optional("monitored_by_ct_ids", default=ct_default_value): ct_field,
-        vol.Required("behavior", default="unknown"): _enum_select(
-            POWER_BEHAVIORS, _BEHAVIOR_LABELS
-        ),
-        vol.Optional("state_entity_ids", default=""): TextSelector(),
-        vol.Optional("mode_entity_ids", default=""): TextSelector(),
-        vol.Optional("expected_on_w"): _watts_selector(),
-        vol.Optional("expected_standby_w"): _watts_selector(),
-        # Light detail is always shown but only sent when the device type
-        # allows it; it is the strongest confidence lever for lamps.
-        vol.Optional("bulb_count"): _count_selector(),
-        vol.Optional("light_type", default="unknown"): _enum_select(
-            LIGHT_TYPES, _LIGHT_TYPE_LABELS
-        ),
-        vol.Optional("watts_per_bulb_on"): _watts_selector(),
-        vol.Optional("controller_mode_entity_id", default=""): TextSelector(),
-        vol.Optional("controller_load_entity_ids", default=""): TextSelector(),
-        # Integration-side: whether to create the kWh entity for this load.
-        # Defaults on, matching powercalc's `create_energy_sensor`.
-        vol.Optional(ENERGY_ENTITY_FIELD, default=energy_default): BooleanSelector(),
-    }
-    if link_options is not None:
-        fields[
-            vol.Optional(DEVICE_LINK_FIELD, default=link_default)
-        ] = SelectSelector(
-            SelectSelectorConfig(
-                options=link_options,
-                mode=SelectSelectorMode.DROPDOWN,
-                custom_value=False,
-            )
-        )
-    return vol.Schema(fields)
 
 
 def _settings_schema(defaults: dict[str, Any]) -> vol.Schema:
@@ -365,24 +120,6 @@ def _settings_schema(defaults: dict[str, Any]) -> vol.Schema:
     )
 
 
-def _options_schema(defaults: dict[str, Any]) -> vol.Schema:
-    """Settings, the auto-placement opt-in, and the per-device branch.
-
-    Both checkboxes default to ``False``, so an options visit that changes
-    nothing follows exactly the previous wizard -- and, more importantly, never
-    turns on a feature that writes devices.
-    """
-    fields: dict[Any, Any] = dict(_settings_schema(defaults).schema)
-    fields[
-        vol.Optional(
-            CONF_AUTO_PLACEMENT,
-            default=bool(defaults.get(CONF_AUTO_PLACEMENT, False)),
-        )
-    ] = BooleanSelector()
-    fields[vol.Optional(CONF_CONFIGURE_DEVICE, default=False)] = BooleanSelector()
-    return vol.Schema(fields)
-
-
 def _connection_schema(defaults: dict[str, Any]) -> vol.Schema:
     return vol.Schema(
         {
@@ -398,89 +135,55 @@ def _connection_schema(defaults: dict[str, Any]) -> vol.Schema:
     )
 
 
-def _device_options(devices: list[dict[str, Any]]) -> list[SelectOptionDict]:
-    options = [SelectOptionDict(value="", label="— none —")]
-    for device in devices:
-        device_id = str(device.get("device_id"))
-        label = f"{device.get('name') or device_id} ({device_id})"
-        options.append(SelectOptionDict(value=device_id, label=label))
-    return options
-
-
 async def _probe_engine(
     hass: Any,
     base_url: str,
     api_token: str | None,
-) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, str]]:
-    """Validate connectivity and fetch topology + devices.
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Validate connectivity to the engine.
 
-    Returns ``(topology, devices, errors)``.  ``errors`` uses the flow error
-    keys from ``strings.json``; the token is never included.
+    Returns ``(topology, errors)``.  ``errors`` uses the flow error keys from
+    ``strings.json``; the token is never included.  The topology read is
+    best-effort: a brand-new engine may not have a topology yet, and the v3
+    endpoints the wizard edits are fetched separately by ``_wizard_fetch_v3``.
     """
-    client = EngineClient(
-        async_get_clientsession(hass), base_url, api_token=api_token
-    )
+    client = EngineClient(async_get_clientsession(hass), base_url, api_token=api_token)
     try:
         health = await client.health()
         snapshot = await client.snapshot()
     except Exception as err:  # noqa: BLE001 - mapped to a flow error key
         key = describe_engine_error(err)
         _LOGGER.debug("WattMosaic connection probe failed: %s", key)
-        return None, [], {"base": key}
+        return {}, {"base": key}
 
     if not isinstance(health, dict) or not isinstance(snapshot, dict):
-        return None, [], {"base": "invalid_response"}
+        return {}, {"base": "invalid_response"}
 
-    # Topology/devices enrich the wizard but are not required to connect: a
-    # brand-new engine may not have a topology yet.
+    topology: Any = None
     try:
         topology = await client.topology()
-    except Exception:  # noqa: BLE001
-        topology = None
-    try:
-        devices = await client.devices()
-    except Exception:  # noqa: BLE001
-        devices = None
-
-    # Candidate nesting is a proposal, not a fact.  It is attached to the
-    # topology copy the wizard works on so the parent dropdown can pre-select an
-    # unambiguous candidate; ``parent_ct_id`` itself is never written here.
-    try:
-        nesting = await client.nesting_candidates()
     except Exception:  # noqa: BLE001 - never block connection on this
-        nesting = None
-    topology = apply_nesting_candidates(topology, nesting)
-
-    return (
-        topology if isinstance(topology, dict) else {},
-        normalise_device_list(devices),
-        {},
-    )
+        topology = None
+    return (topology if isinstance(topology, dict) else {}), {}
 
 
 # --------------------------------------------------------------------------- #
-# Shared assignment wizard
+# Shared endpoint wizard
 # --------------------------------------------------------------------------- #
 
 
-class _AssignmentWizard:
-    """Channels -> confirm, shared by setup and options.
+class _EndpointWizard:
+    """Endpoints -> done, shared by setup and options.
 
     Subclasses provide ``_wizard_client()`` and ``_wizard_finish(...)``.
+    ``_endpoints``, ``_parent_suggestions`` and ``_endpoint_choices`` are the
+    entire v3 state: there are no CT assignments or device configurations.
     """
 
-    _topology: dict[str, Any]
-    _channels: list[dict[str, Any]]
-    _devices: list[dict[str, Any]]
-    _assignments: dict[str, dict[str, Any]]
-    _channel_index: int
-    _errors: dict[str, str]
-    #: H2 v3 state — discovered endpoints, engine-suggested parents and the
-    #: user's per-endpoint choices.  Populated only when the engine exposes the
-    #: v3 endpoints; the legacy channel wizard remains the fallback.
     _endpoints: list[dict[str, Any]]
     _parent_suggestions: dict[str, list[str]]
     _endpoint_choices: dict[str, dict[str, Any]]
+    _errors: dict[str, str]
 
     # -- hooks ------------------------------------------------------------- #
 
@@ -493,14 +196,14 @@ class _AssignmentWizard:
     async def _wizard_fetch_v3(self, client: EngineClient) -> bool:
         """Fetch v3 endpoints + topology suggestions.  True when usable.
 
-        Both calls are best-effort: an engine that predates the v3 API simply
-        returns nothing useful, and the legacy channel wizard stays reachable.
+        The endpoint read is required for the v3 flow; topology edges are
+        best-effort and only feed the parent *suggestions* the user may accept.
         """
         endpoints: Any = None
         topology: Any = None
         try:
             endpoints = await client._request("GET", "/endpoints", expect=(dict, list))
-        except Exception:  # noqa: BLE001 - v3 is optional during the transition
+        except Exception:  # noqa: BLE001 - no endpoints means nothing to edit
             endpoints = None
         try:
             topology = await client.topology()
@@ -510,28 +213,18 @@ class _AssignmentWizard:
         self._parent_suggestions = suggested_parents(
             topology.get("edges") or [] if isinstance(topology, Mapping) else []
         )
+        self._endpoint_choices = {}
         return bool(self._endpoints)
-
 
     # -- state ------------------------------------------------------------- #
 
-    def _init_wizard(
-        self,
-        topology: dict[str, Any],
-        devices: list[dict[str, Any]],
-        assignments: dict[str, dict[str, Any]],
-    ) -> None:
-        self._topology = topology or {}
-        self._channels = normalise_channels(self._topology)
-        self._devices = devices or []
-        self._assignments = assignments
-        self._channel_index = 0
-        self._errors = {}
+    def _init_wizard(self) -> None:
         self._endpoints = []
         self._parent_suggestions = {}
         self._endpoint_choices = {}
+        self._errors = {}
 
-    # -- step: endpoints (v3) ---------------------------------------------- #
+    # -- step: endpoints --------------------------------------------------- #
 
     async def async_step_endpoints(
         self, user_input: dict[str, Any] | None = None
@@ -607,12 +300,14 @@ class _AssignmentWizard:
     async def async_step_done(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Commit the v3 write plan: user edges, then scope, then links.
+        """Commit the v3 write plan: user edges, scope, then entity links.
 
-        There is deliberately no ``POST /topology/confirm`` here: a declared
-        parent is authoritative (DEC-10) and an inferred parent is never written
-        as a declaration unless the user accepted it (DEC-13).  A plug scope is
-        confirmed only when the user selected a device.
+        Only user-declared CONTAINS edges and accepted plug scopes are written.
+        There is deliberately no v2 topology PUT and no blanket
+        topology-confirmation POST here: a declared parent is authoritative
+        (DEC-10) and an inferred parent is never written as a declaration unless
+        the user accepted it (DEC-13).  A plug scope is confirmed only when the
+        user selected a device.
         """
         plan = build_endpoint_setup_plan(self._endpoint_choices)
         client = self._wizard_client()
@@ -630,200 +325,16 @@ class _AssignmentWizard:
             )
         return self._wizard_finish(False, None)
 
-    # -- step: channels ---------------------------------------------------- #
-
-    def _current_channel(self) -> dict[str, Any] | None:
-        if 0 <= self._channel_index < len(self._channels):
-            return self._channels[self._channel_index]
-        return None
-
-    async def async_step_channels(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        channel = self._current_channel()
-        if channel is None:
-            return await self.async_step_confirm()
-
-        ct_id = str(channel["ct_id"])
-
-        if user_input is not None:
-            merged = {
-                **assignment_defaults(channel, self._assignments.get(ct_id)),
-                **{
-                    key: user_input[key]
-                    for key in (
-                        "role",
-                        "phase",
-                        "polarity",
-                        "paired_ct_id",
-                        "parent_ct_id",
-                        "alias_of_ct_id",
-                        "measurement_multiplier",
-                        "device_id",
-                        "enabled",
-                    )
-                    if key in user_input
-                },
-            }
-            self._assignments[ct_id] = normalise_assignment(merged, channel)
-            self._channel_index += 1
-            next_channel = self._current_channel()
-            if next_channel is None:
-                # All channels assigned: move on to confirmation.
-                return await self.async_step_confirm()
-            channel = next_channel
-            ct_id = str(channel["ct_id"])
-
-        defaults = assignment_defaults(channel, self._assignments.get(ct_id))
-        pair_suggestion = suggested_pair(channel, self._channels) or ""
-        parent_suggestion = suggested_parent(channel, self._channels) or ""
-        alias_suggestion = suggested_alias(channel, self._channels) or ""
-
-        pair_options = [SelectOptionDict(value="", label="— none —")]
-        for other in self._channels:
-            other_id = str(other.get("ct_id"))
-            if other_id == ct_id:
-                continue
-            pair_options.append(
-                SelectOptionDict(
-                    value=other_id,
-                    label=f"{other.get('name') or other_id} ({other_id})",
-                )
-            )
-
-        parent_options = [SelectOptionDict(value="", label="— none (top level) —")]
-        alias_options = [SelectOptionDict(value="", label="— no (independent CT) —")]
-        for other in self._channels:
-            other_id = str(other.get("ct_id"))
-            if other_id == ct_id:
-                continue
-            label = f"{other.get('name') or other_id} ({other_id})"
-            # Only a container can be a parent: a device CT has nothing behind it.
-            if other_id not in descendant_ids(ct_id, self._channels):
-                parent_options.append(SelectOptionDict(value=other_id, label=label))
-            alias_options.append(SelectOptionDict(value=other_id, label=label))
-
-        schema = vol.Schema(
-            {
-                vol.Required("role", default=defaults["role"]): _role_select(),
-                vol.Required("phase", default=defaults["phase"]): _phase_select(),
-                vol.Required("polarity", default=defaults["polarity"]): _polarity_select(),
-                vol.Optional(
-                    "parent_ct_id", default=defaults["parent_ct_id"] or parent_suggestion
-                ): SelectSelector(
-                    SelectSelectorConfig(options=parent_options, mode=SelectSelectorMode.DROPDOWN)
-                ),
-                vol.Optional(
-                    "measurement_multiplier", default=defaults["measurement_multiplier"]
-                ): NumberSelector(
-                    NumberSelectorConfig(
-                        min=MIN_MULTIPLIER,
-                        max=MAX_MULTIPLIER,
-                        step=0.5,
-                        mode=NumberSelectorMode.BOX,
-                    )
-                ),
-                vol.Optional(
-                    "paired_ct_id", default=defaults["paired_ct_id"] or pair_suggestion
-                ): SelectSelector(
-                    SelectSelectorConfig(options=pair_options, mode=SelectSelectorMode.DROPDOWN)
-                ),
-                vol.Optional(
-                    "alias_of_ct_id", default=defaults["alias_of_ct_id"] or alias_suggestion
-                ): SelectSelector(
-                    SelectSelectorConfig(options=alias_options, mode=SelectSelectorMode.DROPDOWN)
-                ),
-                vol.Optional("device_id", default=defaults["device_id"] or ""): SelectSelector(
-                    SelectSelectorConfig(
-                        options=_device_options(self._devices), mode=SelectSelectorMode.DROPDOWN
-                    )
-                ),
-                vol.Optional("enabled", default=defaults["enabled"]): BooleanSelector(),
-            }
-        )
-
-        return self.async_show_form(
-            step_id="channels",
-            data_schema=schema,
-            errors=self._errors,
-            description_placeholders={
-                "channel_name": str(channel.get("name") or ct_id),
-                "channel_id": ct_id,
-                "position": f"{self._channel_index + 1} / {len(self._channels)}",
-                "entity_id": str(channel.get("entity_id") or ""),
-                "pair_suggestion": pair_suggestion or "none",
-                "parent_suggestion": parent_suggestion or "none",
-                "alias_suggestion": alias_suggestion or "none",
-            },
-        )
-
-    # -- step: confirm ----------------------------------------------------- #
-
-    async def async_step_confirm(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        errors = validate_assignments(self._assignments, self._channels)
-        uncertain = uncertainty_summary(self._assignments)
-
-        if user_input is not None:
-            confirmed, error_key = resolve_confirmation(
-                errors, uncertain, bool(user_input.get("confirm_uncertain"))
-            )
-            if error_key is not None:
-                self._errors = {"base": error_key}
-            elif confirmed is not None:
-                version: Any = None
-                try:
-                    updated = build_topology_update(
-                        self._topology,
-                        self._assignments,
-                        confirmed=confirmed,
-                        notes=[
-                            "Updated from the Home Assistant integration "
-                            "configuration wizard."
-                        ],
-                    )
-                    client = self._wizard_client()
-                    await client.put_topology(updated)
-                    if confirmed:
-                        await client.confirm_topology(updated.get("version"))
-                    version = updated.get("version")
-                except Exception as err:  # noqa: BLE001
-                    self._errors = {"base": describe_engine_error(err)}
-                    _LOGGER.debug("WattMosaic topology update failed: %s", self._errors)
-                else:
-                    return self._wizard_finish(confirmed, version)
-
-        schema = vol.Schema(
-            {
-                vol.Optional(
-                    "summary",
-                    default="\n".join(mapping_summary(self._channels, self._assignments)),
-                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True)),
-                vol.Optional("confirm_uncertain", default=False): BooleanSelector(),
-            }
-        )
-        return self.async_show_form(
-            step_id="confirm",
-            data_schema=schema,
-            errors=self._errors,
-            description_placeholders={
-                "uncertain_count": str(len(uncertain)),
-                "uncertain_list": "\n".join(uncertain) or "None",
-                "validation_errors": ", ".join(errors) or "None",
-            },
-        )
-
 
 # --------------------------------------------------------------------------- #
 # Config flow
 # --------------------------------------------------------------------------- #
 
 
-class WattMosaicConfigFlow(_AssignmentWizard, ConfigFlow, domain=DOMAIN):
-    """Full setup: connection, polling settings, CT assignment, confirmation."""
+class WattMosaicConfigFlow(_EndpointWizard, ConfigFlow, domain=DOMAIN):
+    """Full setup: connection, polling settings, endpoints, done."""
 
-    VERSION = 2
+    VERSION = 3
 
     @staticmethod
     @callback
@@ -834,11 +345,7 @@ class WattMosaicConfigFlow(_AssignmentWizard, ConfigFlow, domain=DOMAIN):
         ``OptionsFlowManager.async_create_flow`` calls
         ``handler.async_get_options_flow(entry)`` on the registered handler and
         ``ConfigFlow.async_supports_options_flow`` decides ``supports_options``
-        by comparing ``cls.async_get_options_flow`` with the base method.  A
-        module-level factory is invisible to both, so the entry reports
-        ``supports_options: false`` and HA rejects every ``options/flow``
-        request with ``Invalid handler specified`` -- leaving a user unable to
-        edit CT assignments or energy toggles after install.
+        by comparing ``cls.async_get_options_flow`` with the base method.
         """
         return WattMosaicOptionsFlow(config_entry)
 
@@ -846,8 +353,7 @@ class WattMosaicConfigFlow(_AssignmentWizard, ConfigFlow, domain=DOMAIN):
         self._base_url: str = ""
         self._api_token: str | None = None
         self._settings: dict[str, int] = settings_defaults(None)
-        self._auto_placement: bool = False
-        self._init_wizard({}, [], {})
+        self._init_wizard()
 
     # -- wizard hooks ------------------------------------------------------ #
 
@@ -861,9 +367,6 @@ class WattMosaicConfigFlow(_AssignmentWizard, ConfigFlow, domain=DOMAIN):
             CONF_BASE_URL: self._base_url,
             CONF_API_TOKEN: self._api_token,
             **self._settings,
-            CONF_CT_ASSIGNMENTS: assignment_store(self._assignments),
-            CONF_TOPOLOGY_CONFIRMED: confirmed,
-            CONF_TOPOLOGY_VERSION: version,
         }
         return self.async_create_entry(title=f"{NAME} ({self._base_url})", data=data)
 
@@ -874,44 +377,34 @@ class WattMosaicConfigFlow(_AssignmentWizard, ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Handle App-install discovery from the Supervisor.
 
-        The App lists ``wattmosaic`` under ``discovery:`` in its ``config.yaml``
-        and POSTs its own host and port to the Supervisor.  Home Assistant then
-        starts this flow with the app's name, slug and the announced config,
-        which lets the user add the integration by confirming one screen —
-        nothing to look up, nothing to type.
-
-        The announced host is only a hint.  It is never trusted: the engine is
-        actually probed before an entry is created, so a stale message (the app
-        was uninstalled, or the Supervisor restarted while the engine was down)
-        produces the normal ``cannot_connect`` error instead of a broken entry.
+        The announced host is only a hint: the engine is probed before an entry
+        is created, so a stale message produces the normal connection error
+        instead of a broken entry.
         """
         config = discovery_info.config if isinstance(discovery_info.config, dict) else {}
         base_url = discovered_base_url(config)
         if base_url is None:
-            # The announcement carried no usable host. It is useless, but the
-            # manual path still works, so hand over to it instead of dead-ending
-            # the user in an abort with nothing to do.
+            # The announcement carried no usable host; hand over to the manual
+            # path instead of dead-ending the user in an abort.
             return await self.async_step_user()
 
-        # One entry per engine URL.  The user step uses the same key, so a
-        # discovery arriving after a manual setup aborts instead of duplicating.
+        # One entry per engine URL.  The user step uses the same key.
         await self.async_set_unique_id(base_url)
         self._abort_if_unique_id_configured()
 
         self._base_url = base_url
         self._api_token = None
         self._settings = settings_defaults(None)
-        self._init_wizard({}, [], {})
+        self._init_wizard()
         self.context["title_placeholders"] = {
             "name": discovery_info.name or NAME,
             "url": base_url,
         }
         # Probe now: the confirmation step must state whether the engine actually
         # answered, not merely that an app announced itself.
-        topology, devices, probe_errors = await _probe_engine(self.hass, base_url, None)
+        topology, probe_errors = await _probe_engine(self.hass, base_url, None)
         self._probe_errors = probe_errors
-        if not probe_errors:
-            self._init_wizard(topology or {}, devices, {})
+        self._probe_channels = len((topology or {}).get("channels") or [])
         return await self.async_step_hassio_confirm()
 
     async def async_step_hassio_confirm(
@@ -921,18 +414,12 @@ class WattMosaicConfigFlow(_AssignmentWizard, ConfigFlow, domain=DOMAIN):
         errors = getattr(self, "_probe_errors", {})
         if user_input is not None:
             if not errors:
-                # Nothing to assign means the engine has no topology yet; the
-                # rest of the wizard is skipped exactly like the manual path.
-                if not self._channels:
-                    return self._wizard_finish(False, None)
                 return await self.async_step_settings()
             # Let the user retry the probe without leaving the discovery flow.
-            topology, devices, errors = await _probe_engine(
-                self.hass, self._base_url, None
-            )
+            topology, errors = await _probe_engine(self.hass, self._base_url, None)
             self._probe_errors = errors
+            self._probe_channels = len((topology or {}).get("channels") or [])
             if not errors:
-                self._init_wizard(topology or {}, devices, {})
                 return await self.async_step_hassio_confirm()
 
         return self.async_show_form(
@@ -942,7 +429,7 @@ class WattMosaicConfigFlow(_AssignmentWizard, ConfigFlow, domain=DOMAIN):
             description_placeholders={
                 "url": self._base_url,
                 "app_name": str(self.context.get("title_placeholders", {}).get("name") or NAME),
-                "channel_count": str(len(self._channels)),
+                "channel_count": str(getattr(self, "_probe_channels", 0)),
             },
         )
 
@@ -963,15 +450,13 @@ class WattMosaicConfigFlow(_AssignmentWizard, ConfigFlow, domain=DOMAIN):
                 self._abort_if_unique_id_configured()
 
                 token = (user_input.get(CONF_API_TOKEN) or "").strip() or None
-                topology, devices, probe_errors = await _probe_engine(
-                    self.hass, base_url, token
-                )
+                _, probe_errors = await _probe_engine(self.hass, base_url, token)
                 if probe_errors:
                     errors = probe_errors
                 else:
                     self._base_url = base_url
                     self._api_token = token
-                    self._init_wizard(topology or {}, devices, {})
+                    self._init_wizard()
                     return await self.async_step_settings()
 
         return self.async_show_form(
@@ -997,21 +482,17 @@ class WattMosaicConfigFlow(_AssignmentWizard, ConfigFlow, domain=DOMAIN):
             )
             if not errors:
                 self._settings = normalise_settings(user_input)
-                # H2: when the engine exposes v3 endpoints, the setup flow edits
-                # endpoints / user parents / plug scope.  The legacy channel
-                # wizard remains the fallback for an engine that predates D2/T4.
-                if await self._wizard_fetch_v3(self._wizard_client()):
-                    return await self.async_step_endpoints()
-                if not self._channels:
-                    # No CT channels on the engine yet: nothing to assign.
+                await self._wizard_fetch_v3(self._wizard_client())
+                if not self._endpoints:
+                    # No endpoints to edit: nothing to write.
                     return self._wizard_finish(False, None)
-                return await self.async_step_channels()
+                return await self.async_step_endpoints()
 
         return self.async_show_form(
             step_id="settings",
             data_schema=_settings_schema(self._settings),
             errors=errors,
-            description_placeholders={"channel_count": str(len(self._channels))},
+            description_placeholders={"endpoint_count": str(len(self._endpoints))},
         )
 
     # -- reconfigure ------------------------------------------------------- #
@@ -1034,7 +515,7 @@ class WattMosaicConfigFlow(_AssignmentWizard, ConfigFlow, domain=DOMAIN):
                 token = (user_input.get(CONF_API_TOKEN) or "").strip() or current.get(
                     CONF_API_TOKEN
                 )
-                _, _, probe_errors = await _probe_engine(self.hass, base_url, token)
+                _, probe_errors = await _probe_engine(self.hass, base_url, token)
                 if probe_errors:
                     errors = probe_errors
                 else:
@@ -1071,17 +552,19 @@ class WattMosaicConfigFlow(_AssignmentWizard, ConfigFlow, domain=DOMAIN):
 # --------------------------------------------------------------------------- #
 
 
-class WattMosaicOptionsFlow(_AssignmentWizard, OptionsFlow):
-    """Reconfigure polling and CT assignments without re-adding the entry."""
+class WattMosaicOptionsFlow(_EndpointWizard, OptionsFlow):
+    """Edit polling settings and the endpoint/parent declarations only.
+
+    Devices are automatic (DEC-04); there is no per-device configuration step
+    and no per-CT channel wizard.  Every key the endpoint editor does not own is
+    preserved in ``options`` byte for byte, because Home Assistant replaces the
+    whole options mapping on save.
+    """
 
     def __init__(self, config_entry: ConfigEntry | None = None) -> None:
         self._entry_arg = config_entry
         self._settings: dict[str, int] = settings_defaults(None)
-        self._auto_placement: bool = False
-        self._device_config_device_id: str = ""
-        self._energy_entities: dict[str, bool] = {}
-        self._device_links: dict[str, str] = {}
-        self._init_wizard({}, [], {})
+        self._init_wizard()
 
     # -- hooks ------------------------------------------------------------- #
 
@@ -1105,37 +588,20 @@ class WattMosaicOptionsFlow(_AssignmentWizard, OptionsFlow):
         )
 
     def _wizard_finish(self, confirmed: bool, version: Any) -> ConfigFlowResult:
-        return self.async_create_entry(
-            title="",
-            data={
-                **self._settings,
-                CONF_AUTO_PLACEMENT: self._auto_placement,
-                CONF_CT_ASSIGNMENTS: assignment_store(self._assignments),
-                CONF_TOPOLOGY_CONFIRMED: confirmed,
-                CONF_TOPOLOGY_VERSION: version,
-                CONF_ENERGY_ENTITIES: self._merged_energy_choices(),
-                CONF_DEVICE_LINKS: self._merged_device_links(),
-            },
-        )
+        # Preserve every unrelated option (energy choices, device links, the
+        # migration's v3 endpoint plan, ...) rather than dropping them: HA
+        # replaces options wholesale, so omission would silently delete them.
+        config = self._config()
+        return self.async_create_entry(title="", data={**config, **self._settings})
 
-    # -- step: settings ---------------------------------------------------- #
+    # -- step: settings + endpoints ---------------------------------------- #
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         config = self._config()
-        stored = config.get(CONF_CT_ASSIGNMENTS) or {}
-        assignments = {
-            str(ct_id): normalise_assignment(raw)
-            for ct_id, raw in stored.items()
-            if isinstance(raw, dict)
-        }
         self._settings = settings_defaults(config)
-        self._auto_placement = auto_placement_enabled(config)
-        self._errors = {}
-        # Keep the stored assignments available to the optional device step so
-        # finishing that branch cannot silently drop an existing CT mapping.
-        self._assignments = assignments
+        self._init_wizard()
 
         if user_input is not None:
             errors = validate_settings(
@@ -1147,380 +613,18 @@ class WattMosaicOptionsFlow(_AssignmentWizard, OptionsFlow):
                 self._errors = errors
             else:
                 self._settings = normalise_settings(user_input)
-                self._auto_placement = bool(user_input.get(CONF_AUTO_PLACEMENT))
-                if user_input.get(CONF_CONFIGURE_DEVICE):
-                    # Optional branch: configure one device, then finish.
-                    return await self.async_step_device_config()
-                client = self._wizard_client()
                 try:
-                    topology = await client.topology()
-                except Exception as err:  # noqa: BLE001
+                    await self._wizard_fetch_v3(self._wizard_client())
+                except Exception as err:  # noqa: BLE001 - report, never crash
                     self._errors = {"base": describe_engine_error(err)}
                 else:
-                    try:
-                        devices = await client.devices()
-                    except Exception:  # noqa: BLE001
-                        devices = []
-                    self._init_wizard(
-                        topology if isinstance(topology, dict) else {},
-                        normalise_device_list(devices),
-                        assignments,
-                    )
-                    # H2: options edits endpoints and parents the same way setup
-                    # does when the engine exposes the v3 endpoints API.
-                    if await self._wizard_fetch_v3(client):
-                        return await self.async_step_endpoints()
-                    if not self._channels:
+                    if not self._endpoints:
                         return self._wizard_finish(False, None)
-                    return await self.async_step_channels()
+                    return await self.async_step_endpoints()
 
         return self.async_show_form(
             step_id="init",
-            data_schema=_options_schema(self._settings),
+            data_schema=_settings_schema(self._settings),
             errors=self._errors,
-            description_placeholders={"channel_count": str(len(self._channels))},
-        )
-
-    # -- step: per-device configuration ------------------------------------ #
-
-    async def async_step_device_config(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Pick the one device to configure.
-
-        A dropdown of engine device ids plus a free-text id, because a device can
-        exist in the engine before it appears in the list (or the list endpoint
-        may be unavailable while the engine is otherwise healthy).
-        """
-        errors: dict[str, str] = {}
-
-        # Fetch before branching: the detail step needs each device's reported
-        # configuration to decide which Home Assistant devices may host it, and
-        # submitting the picker goes straight there.  Fetching only on render
-        # meant the very first visit to the detail step had no candidates.
-        devices: list[dict[str, Any]] = []
-        try:
-            devices = normalise_device_list(await self._wizard_client().devices())
-        except Exception as err:  # noqa: BLE001 - the free-text id still works
-            _LOGGER.debug("WattMosaic device list unavailable: %s", describe_engine_error(err))
-        self._devices = devices
-
-        # The detail step also offers the CT channels, so a device can declare
-        # the circuit it sits on.  The channel wizard has already normalised
-        # them when this branch is reached from ``init``; a direct visit (for
-        # example after a reload) has not, so load them here as well.
-        if not self._channels:
-            try:
-                topology = await self._wizard_client().topology()
-            except Exception as err:  # noqa: BLE001 - the free-text CT field works
-                _LOGGER.debug("WattMosaic topology unavailable: %s", describe_engine_error(err))
-            else:
-                if isinstance(topology, dict):
-                    self._topology = topology
-                    self._channels = normalise_channels(topology)
-
-        if user_input is not None:
-            chosen = str(user_input.get("device_id") or "").strip() or str(
-                user_input.get("custom_device_id") or ""
-            ).strip()
-            if not chosen:
-                errors["base"] = "device_required"
-            else:
-                self._device_config_device_id = chosen
-                return await self.async_step_device_config_details()
-
-        schema = vol.Schema(
-            {
-                vol.Optional("device_id", default=""): SelectSelector(
-                    SelectSelectorConfig(
-                        options=_device_options(devices), mode=SelectSelectorMode.DROPDOWN
-                    )
-                ),
-                vol.Optional("custom_device_id", default=""): TextSelector(),
-            }
-        )
-        return self.async_show_form(
-            step_id="device_config",
-            data_schema=schema,
-            errors=errors,
-            description_placeholders={
-                "device_count": str(len(devices)),
-                "device_ids": ", ".join(d["device_id"] for d in devices) or "none reported",
-            },
-        )
-
-    async def async_step_device_config_details(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Edit one flat configuration form and send it as a command."""
-        errors: dict[str, str] = {}
-
-        if user_input is not None:
-            errors = validate_device_configuration(
-                user_input, stored_cts=self._stored_monitored_cts()
-            )
-            if not errors:
-                parameters = normalise_device_configuration(
-                    user_input, stored_cts=self._stored_monitored_cts()
-                )
-                choice = energy_entity_choice(user_input)
-                if choice is not None:
-                    self._energy_entities[self._device_config_device_id] = choice
-                link = device_link_choice(user_input)
-                has_link_opinion = link is not None
-                if not parameters and not has_link_opinion:
-                    # The form expressed no engine-side knowledge and no link, so
-                    # there is nothing to save or send.
-                    return self._device_config_finish()
-                if not parameters:
-                    # Only the local decisions changed: store them and finish.
-                    self._device_links = apply_device_link(
-                        self._stored_device_links(), self._device_config_device_id, link
-                    )
-                    return self._device_config_finish()
-                command_body = device_configuration_command(
-                    self._device_config_device_id, parameters
-                )
-                try:
-                    result = await self._wizard_client().command(
-                        command_body["command"],
-                        device_id=command_body["device_id"],
-                        parameters=command_body["parameters"],
-                    )
-                except Exception as err:  # noqa: BLE001
-                    errors = {"base": describe_engine_error(err)}
-                else:
-                    if isinstance(result, dict) and result.get("ok") is False:
-                        # The engine refused the command; surface it, never
-                        # pretend the configuration was stored.
-                        self._errors = {
-                            "base": "engine_rejected",
-                        }
-                        errors = self._errors
-                    else:
-                        if has_link_opinion:
-                            self._device_links = apply_device_link(
-                                self._stored_device_links(),
-                                self._device_config_device_id,
-                                link,
-                            )
-                        return self._device_config_finish()
-
-        link_options, suggested = self._link_candidates()
-        ct_options = self._ct_options()
-        return self.async_show_form(
-            step_id="device_config_details",
-            data_schema=_device_config_schema(
-                energy_default=self._stored_energy_choice(),
-                link_options=link_options,
-                link_default=suggested,
-                ct_options=ct_options,
-                ct_default=self._stored_monitored_cts(),
-            ),
-            errors=errors,
-            description_placeholders={
-                "device_id": self._device_config_device_id,
-                "link_count": str(max(len(link_options) - 1, 0)),
-                "ct_count": str(len(ct_options)),
-            },
-        )
-
-    def _stored_device_links(self) -> dict[str, str]:
-        """The link map already saved for this entry."""
-        raw = {**self._entry.data, **self._entry.options}.get(CONF_DEVICE_LINKS)
-        return apply_device_link(raw, "", None)
-
-    def _engine_device_configuration(self) -> dict[str, Any] | None:
-        """The engine's configuration for the device being edited, if known.
-
-        Read from the coordinator's cached ``/devices`` payload rather than
-        issuing a request inside the form-render path: the options flow runs
-        between polls and must not block on a network round trip that could
-        delay the form.
-        """
-        for device in self._devices:
-            if str(device.get("device_id")) != self._device_config_device_id:
-                continue
-            configuration = device.get("configuration")
-            if isinstance(configuration, Mapping):
-                return dict(configuration)
-        return None
-
-    def _ct_options(self) -> list[SelectOptionDict]:
-        """Every CT channel the engine knows, as selectable rows.
-
-        Only CTs that could actually meter a load are offered: a main feed is
-        not a load row, and offering it would invite a declaration the engine
-        drops silently.  Branch and unclassified channels are both legitimate
-        rows for a shared circuit.
-        """
-        options: list[SelectOptionDict] = []
-        for channel in self._channels:
-            ct_id = str(channel.get("ct_id") or "")
-            if not ct_id:
-                continue
-            role = str(channel.get("ct_type") or "unknown")
-            if role == "main":
-                continue
-            label = ct_id
-            entity_id = channel.get("entity_id")
-            if isinstance(entity_id, str) and entity_id.strip():
-                label = f"{ct_id} ({entity_id.strip()})"
-            options.append(SelectOptionDict(value=ct_id, label=label))
-        return options
-
-    def _stored_monitored_cts(self) -> list[str]:
-        """CTs already declared for the device being edited.
-
-        Filtered to the channels actually offered.  A stored id that is not in
-        the picker (a main feed, or a channel since removed) would otherwise be
-        invisible yet still submitted as "unchanged", and a multi-select silently
-        drops values it has no option for.
-        """
-        configuration = self._engine_device_configuration() or {}
-        raw = configuration.get("monitored_by_ct_ids")
-        if not isinstance(raw, (list, tuple)):
-            return []
-        offered = {option["value"] for option in self._ct_options()}
-        return [str(item) for item in raw if str(item) in offered]
-
-    def _link_candidates(self) -> tuple[list[SelectOptionDict], str]:
-        """Home Assistant devices this measurement may be attached to.
-
-        Two groups, in this order:
-
-        1. Devices that already own an entity the user declared as evidence for
-           *this* engine device.  These are the likely hosts, so they come first
-           and are what the form pre-selects.
-        2. Every other real Home Assistant device.
-
-        The second group is needed because the most common case has no declared
-        state entity at all: a hot tub on its own CT may have no switch, yet the
-        user still wants its power on the hot tub's device page.  Restricting the
-        list to declared entities made linking impossible there.
-
-        Devices owned by this integration are never offered: they are the
-        synthetic inferred-load devices, and a measurement must not be shown on
-        the host that exists only to describe it.
-
-        This is a suggestion list, never an automatic choice: nothing is linked
-        until the user selects a device and submits.
-        """
-        options = [SelectOptionDict(value="", label="— keep on the WattMosaic device —")]
-        from homeassistant.helpers import device_registry as dr
-        from homeassistant.helpers import entity_registry as er
-
-        entity_reg = er.async_get(self.hass)
-        device_reg = dr.async_get(self.hass)
-        current = linked_device_id(
-            self._stored_device_links(), self._device_config_device_id
-        )
-
-        def _owns_us(device_entry: Any) -> bool:
-            return any(identifier[0] == DOMAIN for identifier in device_entry.identifiers)
-
-        def _label(device_entry: Any, fallback: str) -> str:
-            name = device_entry.name_by_user or device_entry.name or fallback
-            if device_entry.manufacturer:
-                return f"{name} ({device_entry.manufacturer})"
-            return name
-
-        # Group 1: hosts of the entities this device already declares.
-        preferred: list[str] = []
-        configuration = self._engine_device_configuration()
-        for entity_id in binding_device_entity_ids(configuration):
-            registry_entry = entity_reg.async_get(entity_id)
-            if registry_entry is None or registry_entry.device_id is None:
-                continue
-            device_id = registry_entry.device_id
-            if device_id in preferred:
-                continue
-            device_entry = device_reg.async_get(device_id)
-            if device_entry is None or _owns_us(device_entry):
-                continue
-            preferred.append(device_id)
-            options.append(
-                SelectOptionDict(value=device_id, label=_label(device_entry, device_id))
-            )
-
-        # Group 2: every other real device, so a load with no switch can still be
-        # attached to the appliance it measures.  ``registry.devices`` is
-        # *iterated* rather than used as a mapping: Home Assistant deprecates the
-        # mapping-style view for custom integrations, and iteration is the
-        # supported form on both the minimum and current versions (see
-        # ``__init__.py``).
-        others: list[tuple[str, str, str]] = []
-        for device_entry in device_reg.devices:
-            if device_entry.id in preferred or _owns_us(device_entry):
-                continue
-            label = _label(device_entry, device_entry.id)
-            others.append((label.lower(), device_entry.id, label))
-        for _, device_id, label in sorted(others):
-            options.append(SelectOptionDict(value=device_id, label=label))
-
-        suggestion = current if current in {o["value"] for o in options} else ""
-        if current and not suggestion:
-            # The stored link is still valid even when the device registry no
-            # longer lists it at render time.  Show it so saving another field
-            # cannot silently drop the link.
-            device_entry = device_reg.async_get(current)
-            if device_entry is not None:
-                options.append(
-                    SelectOptionDict(value=current, label=_label(device_entry, current))
-                )
-                suggestion = current
-        return options, suggestion
-
-    def _device_config_finish(self) -> ConfigFlowResult:
-        """Persist options without disturbing the stored topology bookkeeping."""
-        config = self._config()
-        return self.async_create_entry(
-            title="",
-            data={
-                **self._settings,
-                CONF_AUTO_PLACEMENT: self._auto_placement,
-                CONF_CT_ASSIGNMENTS: assignment_store(self._assignments),
-                CONF_TOPOLOGY_CONFIRMED: config.get(CONF_TOPOLOGY_CONFIRMED, False),
-                CONF_TOPOLOGY_VERSION: config.get(CONF_TOPOLOGY_VERSION),
-                CONF_ENERGY_ENTITIES: self._merged_energy_choices(),
-                CONF_DEVICE_LINKS: self._merged_device_links(),
-            },
-        )
-
-    def _merged_device_links(self) -> dict[str, str]:
-        """The full link map, for ``async_create_entry``.
-
-        Same wholesale-replacement rule as the energy choices: Home Assistant
-        replaces ``options`` entirely, so a path that omits this key would delete
-        every link the user had declared for every device.
-        """
-        stored = self._stored_device_links()
-        stored.update(self._device_links)
-        return stored
-
-    def _merged_energy_choices(self) -> dict[str, bool]:
-        """The full opt-in map, for ``async_create_entry``.
-
-        Home Assistant replaces an entry's ``options`` wholesale
-        (``OptionsFlowManager.async_finish_flow`` calls
-        ``async_update_entry(options=result["data"])``), so anything missing
-        from the submitted data is destroyed.  Every completion path must
-        therefore rebuild the whole map: the stored choices, coerced through the
-        shared rule, with this flow's edits applied.
-
-        Dropping this from either path would make an unrelated save — say, a new
-        scan interval — silently re-enable every energy entity a user turned off.
-        """
-        stored = self._config().get(CONF_ENERGY_ENTITIES)
-        merged = {
-            str(device_id): stored_energy_choice(stored, str(device_id))
-            for device_id in (stored if isinstance(stored, Mapping) else {})
-        }
-        merged.update(self._energy_entities)
-        return merged
-
-    def _stored_energy_choice(self) -> bool:
-        """The already-stored energy decision for the device being edited."""
-        return stored_energy_choice(
-            self._config().get(CONF_ENERGY_ENTITIES), self._device_config_device_id
+            description_placeholders={"endpoint_count": str(len(self._endpoints))},
         )

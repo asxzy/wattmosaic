@@ -25,7 +25,6 @@ import asyncio
 import importlib
 import importlib.util
 import json
-import re
 import sys
 import types
 from datetime import UTC, datetime, timedelta
@@ -2646,18 +2645,18 @@ class TestPackaging:
 
     def test_config_steps_have_strings(self) -> None:
         en = json.loads(FILES["en"].read_text())
+        # Z2d: the flow is connection -> endpoints -> done, with no v2 form steps.
         assert set(en["config"]["step"]) >= {
             "user",
             "settings",
-            "channels",
-            "confirm",
+            "endpoints",
+            "done",
             "reconfigure",
         }
-        assert set(en["options"]["step"]) >= {"init", "channels", "confirm"}
-        # The device-mapping step went with the retired role: a channel names its
-        # device on the channels form, so a separate step would re-ask it.
-        assert "mapping" not in en["config"]["step"]
-        assert "mapping" not in en["options"]["step"]
+        assert set(en["options"]["step"]) >= {"init", "endpoints", "done"}
+        for removed in ("channels", "confirm", "device_config", "device_config_details", "mapping"):
+            assert removed not in en["config"]["step"], removed
+            assert removed not in en["options"]["step"], removed
 
 
 # --------------------------------------------------------------------------- #
@@ -2854,23 +2853,20 @@ class TestEnergyWiring:
         assert "merge_energy_choice(" in source
         assert "bool(stored" not in source
 
-    def test_saving_settings_does_not_discard_energy_choices(self) -> None:
-        """HA replaces ``options`` wholesale, so every branch must carry them.
+    def test_saving_settings_does_not_discard_other_options(self) -> None:
+        """HA replaces ``options`` wholesale, so the v3 options flow must not drop keys.
 
-        ``OptionsFlowManager.async_finish_flow`` calls
-        ``async_update_entry(options=result["data"])``.  The settings wizard is a
-        different entry point from the per-device form, so if it does not repeat
-        the stored map, changing the scan interval would re-enable every energy
-        entity the user had turned off.
+        The per-device form is gone (devices are automatic, DEC-04), but energy
+        choices, device links and the migration's v3 endpoint plan still live in
+        ``options``.  The v3 options flow therefore rebuilds save data from the
+        whole stored config and overlays only the settings it owns.
         """
         source = (PACKAGE_DIR / "config_flow.py").read_text()
         options_flow = source.index("class WattMosaicOptionsFlow")
         page = source[options_flow:]
-        # Both completion paths in the options flow must persist the map, and
-        # both must do it through the single helper that rebuilds it in full.
-        assert page.count("CONF_ENERGY_ENTITIES: self._merged_energy_choices()") == 2, (
-            "every options-flow completion path must persist energy_entities"
-        )
+        # The single completion path rebuilds from the full stored config rather
+        # than emitting only the settings it edited.
+        assert "data={**config, **self._settings}" in page
 
 
 class TestOptionsFlowRegistration:
@@ -2916,85 +2912,64 @@ class TestOptionsFlowRegistration:
 
 
 class TestRetiredAssignmentVocabulary:
-    """The retired role and monitoring level must not reappear in the flow.
+    """The v2 per-channel assignment vocabulary must not reappear in the flow.
 
-    ``homeassistant`` is not installed here, so the selectors cannot be
-    constructed.  These tests therefore assert the *source* that builds them,
-    against the enumerations the contract now defines: a selector offering a
-    value the engine rejects would be a form the user cannot submit.
+    Z2d removed the v2 per-CT channel wizard and its nine-field device forms.
+    The setup flow is now connection -> endpoints -> done.  The retired role
+    constants remain only so a legacy config entry can be migrated (H1); no
+    selector or form offers them to a user any more.
     """
 
     def _source(self) -> str:
         return (PACKAGE_DIR / "config_flow.py").read_text()
-
-    def _block(self, header: str) -> str:
-        """Source from ``header`` up to the next top-level definition."""
-        source = self._source()
-        start = source.index(header)
-        rest = source[start:]
-        end = len(rest)
-        for marker in ("\ndef ", "\n_"):
-            found = rest.find(marker, len(header))
-            if found != -1:
-                end = min(end, found + 1)
-        return rest[:end]
-
-    def _selector_values(self, body: str) -> list[str]:
-        return re.findall(r'SelectOptionDict\(value="([^"]*)"', body)
-
-    def test_role_options_exclude_dedicated(self) -> None:
-        """The rendered role selector offers exactly main / branch / unknown."""
-        values = self._selector_values(self._block("def _role_select("))
-        assert values == ["main", "branch", "unknown"]
-        assert set(values) == set(const.CT_ROLES)
-        assert "dedicated_device" not in values
-
-    def test_monitoring_options_exclude_dedicated(self) -> None:
-        """The monitoring select is built from ``MONITORING_LEVELS`` only."""
-        assert "dedicated" not in const.MONITORING_LEVELS
-        assert set(const.MONITORING_LEVELS) == {
-            "shared",
-            "home_total_only",
-            "unmonitored",
-            "unknown",
-        }
-        labels = self._block("_MONITORING_LABELS = {")
-        assert '"dedicated"' not in labels
-        # The label map must cover exactly the surviving levels, or a legitimate
-        # choice renders without a label.
-        assert set(const.MONITORING_LEVELS) <= set(
-            re.findall(r'^\s*"([^"]+)":', labels, re.MULTILINE)
-        )
 
     def test_role_constants_have_no_retired_member(self) -> None:
         assert const.CT_ROLES == ("main", "branch", "unknown")
         assert not hasattr(const, "CT_ROLE_DEDICATED")
         assert "dedicated_device" not in const.CT_ROLES
 
-    def test_mapping_step_and_its_helpers_are_gone(self) -> None:
-        """The dead step went with the role; the channel form asks for the device.
+    def test_monitoring_levels_have_no_retired_member(self) -> None:
+        """A retired monitoring level must not be offered by any form."""
+        assert "dedicated" not in const.MONITORING_LEVELS
 
-        Grepping for the step name is deliberate: a leftover ``async_step_mapping``
-        would be unreachable *and* would keep an untranslated step reachable via
-        Home Assistant's URL-based flow routing.
+    def test_mapping_and_channel_form_steps_are_gone(self) -> None:
+        """No v2 mapping, channel, confirm or per-device step stays reachable.
+
+        A leftover step would be unreachable *and* would keep an untranslated
+        step reachable via Home Assistant's URL-based flow routing.
         """
         source = self._source()
-        for name in (
+        # The v3 endpoint steps are present.
+        for name in ("async_step_endpoints", "async_step_done"):
+            assert f"async def {name}(" in source, name
+        # The v2 mapping, channel, confirm and per-device steps are gone.
+        for removed in (
             "async_step_mapping",
+            "async_step_channels",
+            "async_step_confirm",
+            "async_step_device_config",
+            "async_step_device_config_details",
             "_unmapped_channels",
             "_mapping_schema",
             "_mapping_placeholders",
             "_candidate_choices",
+            "_role_select(",
+            "_phase_select(",
+            "_polarity_select(",
+            "_device_config_schema(",
+            "_device_options(",
         ):
-            assert name not in source, name
+            assert removed not in source, removed
         assert 'step_id="mapping"' not in source
-        assert "async_step_confirm()" in source
+        assert 'step_id="channels"' not in source
+        assert 'step_id="confirm"' not in source
 
-    def test_channel_form_still_offers_the_device_dropdown(self) -> None:
-        """Removing the step loses no capability: the channel form owns ``device_id``."""
+    def test_v3_wizard_writes_only_edges_and_scope(self) -> None:
+        """The v3 done step posts user edges and plug scopes, never a v2 PUT."""
         source = self._source()
-        assert 'vol.Optional("device_id"' in source
-        assert "_device_options(" in source
+        assert "build_endpoint_setup_plan(" in source
+        assert "/topology/confirm" not in source
+        assert '"PUT"' not in source
 
 
 # --------------------------------------------------------------------------- #

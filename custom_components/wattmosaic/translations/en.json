@@ -16,11 +16,11 @@
       },
       "hassio_confirm": {
         "title": "WattMosaic App found",
-        "description": "{app_name} announced itself to Home Assistant, so the connection details are already filled in.\n\nEngine URL: {url}\nCT channels reported: {channel_count}\n\nNothing is written to the engine until you confirm the topology. If the engine is not reachable, the usual connection error is shown and you can retry."
+        "description": "{app_name} announced itself to Home Assistant, so the connection details are already filled in.\n\nEngine URL: {url}\nCT channels reported: {channel_count}\n\nNothing is written to the engine until you confirm the connection. If the engine is not reachable, the usual connection error is shown and you can retry."
       },
       "settings": {
         "title": "Polling and freshness",
-        "description": "How often the integration polls the engine, and when data is considered stale or unavailable. The engine currently reports {channel_count} CT channel(s).",
+        "description": "How often the integration polls the engine, and when data is considered stale or unavailable. The engine currently reports {endpoint_count} endpoint(s).",
         "data": {
           "scan_interval": "Scan interval (seconds)",
           "stale_after": "Stale after (seconds)",
@@ -32,35 +32,15 @@
           "unavailable_after": "The engine is treated as offline after this long without a successful poll. Default 120 s."
         }
       },
-      "channels": {
-        "title": "CT channel assignment",
-        "description": "Channel {position}: {channel_name} ({channel_id})\nEntity: {entity_id}\nSuggested double-pole pair: {pair_suggestion}\nSuggested parent feed: {parent_suggestion}\nSuggested duplicate (same conductor): {alias_suggestion}\n\nAssign a role and phase. Values from the engine are suggestions only until you confirm them at the end of the wizard.",
-        "data": {
-          "role": "Role",
-          "phase": "Phase",
-          "polarity": "Polarity",
-          "paired_ct_id": "Paired CT (double-pole)",
-          "device_id": "Device",
-          "enabled": "Enabled"
-        },
-        "data_description": {
-          "channel": "Which CT to configure.",
-          "role": "main = utility feed, branch = circuit, unknown = not assigned.",
-          "phase": "l1, l2, both (double-pole) or unknown.",
-          "paired_ct_id": "The other leg of a double-pole load, if any.",
-          "device_id": "The device this CT measures, if any. Suggestions are never applied automatically."
-        }
+      "endpoints": {
+        "title": "Declare measurement endpoints",
+        "description": "Discovered endpoints: {endpoint_count}.\n\n{endpoint_rows}\n\nFor a CT you may name a parent circuit; an inferred parent is shown as a suggestion and is written only when you leave it accepted. For a plug that measures exactly one appliance, name the device it measures. Devices are created automatically.",
+        "data": {}
       },
-      "confirm": {
-        "title": "Confirm topology",
-        "description": "Review the assignment before it is sent to the engine.\n\nUncertain entries ({uncertain_count}):\n{uncertain_list}\n\nValidation problems: {validation_errors}\n\nNothing is committed until you submit this step. Submitting stores these assignments and leaves the topology candidate; tick the box only if you have verified the uncertain rows and want them confirmed.",
-        "data": {
-          "summary": "Summary",
-          "confirm_uncertain": "Confirm uncertain assignments"
-        },
-        "data_description": {
-          "confirm_uncertain": "Marks the topology confirmed in the engine. Leave unticked to keep it candidate, which is the normal choice when some rows are still assumptions."
-        }
+      "done": {
+        "title": "Save endpoint declarations",
+        "description": "Writing {write_count} user declaration(s) to the engine.",
+        "data": {}
       },
       "reconfigure": {
         "title": "Reconfigure WattMosaic",
@@ -105,83 +85,22 @@
     "step": {
       "init": {
         "title": "WattMosaic options",
-        "description": "Adjust polling and freshness thresholds. The engine currently reports {channel_count} CT channel(s).\n\nTick \"Configure one device\" to state what the engine cannot infer by itself (device type, monitoring, expected watts).",
+        "description": "Adjust polling and freshness thresholds. The engine currently reports {endpoint_count} endpoint(s).",
         "data": {
           "scan_interval": "Scan interval (seconds)",
           "stale_after": "Stale after (seconds)",
-          "unavailable_after": "Unavailable after (seconds)",
-          "configure_device": "Configure one device",
-          "auto_placement": "Automatically create devices"
-        },
-        "data_description": {
-          "auto_placement": "Watch recorded history for switches that repeatedly, unambiguously track one CT row, and create a device for the fixture. Off by default. Rows measured as a single device, and devices you configured yourself, are never changed."
+          "unavailable_after": "Unavailable after (seconds)"
         }
       },
-      "device_config": {
-        "title": "Configure a device",
-        "description": "Choose the device to describe. The engine reports {device_count} device(s): {device_ids}.\n\nPick one from the list or type its device id. One device is configured per visit; nothing else in the topology changes.",
-        "data": {
-          "device_id": "Device",
-          "custom_device_id": "Device id (if not listed)"
-        },
-        "data_description": {
-          "device_id": "Devices the engine already knows about.",
-          "custom_device_id": "Type an id to configure a device the engine did not list."
-        }
+      "endpoints": {
+        "title": "Declare measurement endpoints",
+        "description": "Discovered endpoints: {endpoint_count}.\n\n{endpoint_rows}\n\nFor a CT you may name a parent circuit; an inferred parent is shown as a suggestion and is written only when you leave it accepted. For a plug that measures exactly one appliance, name the device it measures. Devices are created automatically.",
+        "data": {}
       },
-      "device_config_details": {
-        "title": "Device configuration",
-        "description": "Describe device {device_id}. Every field is optional knowledge: a blank value means \"not stated\", never zero watts.\n\nState entities are comma-separated entity ids that prove the device is running. Mode entities are context only and never count as proof of load.\n\nCT channels name the circuit this device sits on. Select several when other loads share the same circuit: the engine then reports the row as inferred and never pretends the CT measured this device alone.\n\nDevice link shows this load's power and energy under an existing Home Assistant device instead of a WattMosaic one. {link_count} device(s) can be linked from the entities this device already declares.",
-        "data": {
-          "device_type": "Device type",
-          "connectivity": "Home Assistant connectivity",
-          "monitoring": "Monitoring level",
-          "monitored_by_ct_ids": "CT channels that meter this device",
-          "behavior": "Power behaviour",
-          "state_entity_ids": "State entity ids (comma separated)",
-          "mode_entity_ids": "Mode entity ids (comma separated)",
-          "expected_on_w": "Expected running power (W)",
-          "expected_standby_w": "Expected standby power (W)",
-          "bulb_count": "Number of bulbs",
-          "light_type": "Lamp type",
-          "watts_per_bulb_on": "Watts per bulb at full output (W)",
-          "controller_mode_entity_id": "Controller mode entity",
-          "controller_load_entity_ids": "Controller load entities (comma separated)",
-          "create_energy_sensor": "Create an energy (kWh) entity",
-          "ha_device_id": "Home Assistant device"
-        },
-        "data_description": {
-          "connectivity": "connected = HA holds an entity for it; not_connected = non-smart device.",
-          "monitoring": "shared = a circuit with other loads; home_total_only = only visible in the total; unmonitored = no CT at all.",
-          "monitored_by_ct_ids": "The CT rows that carry this load. Choose more than one only when they really are separate rows; several loads on one row is the shared-circuit case, settled by the switch states.",
-          "behavior": "fixed = constant watts; variable = follows a dimmer/speed; complex = multi-state controller.",
-          "bulb_count": "A five-bulb fixture at 9 W per bulb is 45 W, not 9 W.",
-          "watts_per_bulb_on": "Per bulb, not per fixture.",
-          "controller_mode_entity_id": "Context only: it never proves the appliance draws power.",
-          "controller_load_entity_ids": "Entities that do prove runtime when active.",
-          "create_energy_sensor": "Adds a total-increasing energy sensor for this load, attached to the linked device (or to the device its state entity belongs to when no link is chosen). Turn this off for loads you do not want in the Energy Dashboard.",
-          "ha_device_id": "The device whose page should show this load's power and energy. Choose the top entry to keep the measurement on its own WattMosaic device. Only devices that own one of the declared state entities are offered."
-        }
-      },
-      "channels": {
-        "title": "CT channel assignment",
-        "description": "Channel {position}: {channel_name} ({channel_id})\nEntity: {entity_id}\nSuggested double-pole pair: {pair_suggestion}\nSuggested parent feed: {parent_suggestion}\nSuggested duplicate (same conductor): {alias_suggestion}\n\nAssign a role and phase. Unconfirmed values stay candidates.",
-        "data": {
-          "role": "Role",
-          "phase": "Phase",
-          "polarity": "Polarity",
-          "paired_ct_id": "Paired CT (double-pole)",
-          "device_id": "Device",
-          "enabled": "Enabled"
-        }
-      },
-      "confirm": {
-        "title": "Confirm topology",
-        "description": "Review the assignment before it is sent to the engine.\n\nUncertain entries ({uncertain_count}):\n{uncertain_list}\n\nValidation problems: {validation_errors}\n\nNothing is committed until you submit this step. Submitting stores these assignments and leaves the topology candidate; tick the box only if you have verified the uncertain rows and want them confirmed.",
-        "data": {
-          "summary": "Summary",
-          "confirm_uncertain": "Confirm uncertain assignments"
-        }
+      "done": {
+        "title": "Save endpoint declarations",
+        "description": "Writing {write_count} user declaration(s) to the engine.",
+        "data": {}
       }
     },
     "error": {

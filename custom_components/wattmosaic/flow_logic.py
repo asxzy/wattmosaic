@@ -1267,7 +1267,7 @@ class TopologyPushState:
     #: action that unblocks learning.  The confirmation is a different request,
     #: so it must be allowed to re-examine the engine even at the same version.
     verified_confirmed_request: bool = False
-    #: A ``PUT`` landed but ``POST /topology/confirm`` did not.  Retrying the
+    #: A topology write landed but its confirmation did not.  Retrying the
     #: confirm alone avoids a second topology revision for the same declaration.
     pending_confirm: int | None = None
     #: Fingerprint of the declaration the last push wrote, and how many times it
@@ -1339,8 +1339,8 @@ async def async_replay_topology(
       even when no CT assignment changed.
     * In sync -> nothing happens; ``pushed`` stays truthful from the last run.
     * Declaration differs, or the engine is behind the stored version, or the
-      user confirmed but the engine reports ``candidate`` -> one ``PUT`` and,
-      when the entry is confirmed, one ``POST /topology/confirm``.
+      user confirmed but the engine reports ``candidate`` -> one topology write
+      followed by its explicit confirmation.
     * The engine reports a *newer* topology that already matches the
       declaration -> never downgrade it, never write.
     * A rewrite of a topology the engine already reports as *confirmed* stays
@@ -2201,8 +2201,8 @@ def device_configuration_command(
 #     ``declared_by=user`` CONTAINS edge only when its ``user_accepted`` flag is
 #     true.  Inferred (PROVISIONAL) edges are suggestions: they are never posted
 #     unless the user leaves them checked.
-#   * There is no ``POST /topology/confirm``.  A user declaration is authoritative
-#     (DEC-10), so the engine promotes it when it records the edge.
+#   * There is no blanket topology confirmation.  A user declaration is
+#     authoritative (DEC-10), so the engine promotes it when it records the edge.
 #   * A plug scope is confirmed only when the user selected a device.
 #   * Absent values are ``None``, never 0.0.
 
@@ -2463,8 +2463,8 @@ def build_user_edge_plan(choices: Mapping[str, Mapping[str, Any]]) -> list[dict[
     ``parent_endpoint_id`` produces an edge.  Every edge is
     ``relation=CONTAINS``, ``declared_by=user`` — a user declaration is a
     CONFIRMED, authoritative edge (DEC-10), and an inferred parent becomes a
-    declaration only when the user accepted it (DEC-13).  There is never a
-    ``POST /topology/confirm`` in this plan.
+    declaration only when the user accepted it (DEC-13).  No blanket topology
+    confirmation is ever part of this plan.
     """
     plan: list[dict[str, Any]] = []
     for child, choice in sorted(choices.items()):
@@ -2563,8 +2563,8 @@ def build_endpoint_setup_plan(
     """The complete, ordered v3 write plan for a setup submission.
 
     Order matters for the request log: user edges first (T4), then scope
-    confirmations (D2), then entity links (DEC-08).  No plan item is ever a
-    ``POST /topology/confirm``.
+    confirmations (D2), then entity links (DEC-08).  No plan item is a blanket
+    topology confirmation.
     """
     return [
         *build_user_edge_plan(choices),

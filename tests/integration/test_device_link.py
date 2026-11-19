@@ -222,15 +222,18 @@ class TestLinkPersistence:
         assert "explicit_device_link(" in coordinator
         assert "CONF_DEVICE_LINKS" in coordinator
 
-    def test_every_options_completion_path_persists_the_link_map(self) -> None:
-        page = self._options_flow_source()
-        assert page.count("CONF_DEVICE_LINKS: self._merged_device_links()") == 2, (
-            "both options-flow completion paths must rebuild the whole map"
-        )
+    def test_the_v3_options_flow_preserves_all_stored_options(self) -> None:
+        """HA replaces ``options`` wholesale; the v3 flow keeps every map.
 
-    def test_the_merge_helper_exists_exactly_once(self) -> None:
+        The per-device editor that used to rebuild the link map is gone (devices
+        are automatic, DEC-04).  The single v3 completion path now rebuilds save
+        data from the whole stored config, so ``device_links`` survives a settings
+        save just as the energy choices do.
+        """
         page = self._options_flow_source()
-        assert page.count("def _merged_device_links(") == 1
+        assert "data={**config, **self._settings}" in page
+        # The removed helper must not linger: there is no per-device form left.
+        assert "def _merged_device_links(" not in page
 
     def test_the_link_is_never_sent_to_the_engine(self) -> None:
         """An HA device id is a display decision, not electrical knowledge."""
@@ -292,46 +295,43 @@ class TestBindingPrecedenceInSource:
 
 
 class TestLinkCandidatesAreReachable:
-    """A device with no switch entity must still be linkable.
+    """Device links are now written through the v3 entity-link API.
 
-    A hot tub on its own CT commonly has no state entity at all -- the CT *is*
-    how it is observed.  Restricting the picker to devices that own an entity the
-    user declared made linking impossible in exactly the case the feature exists
-    for, so the picker must also offer the rest of the registry.
+    Z2d removed the v2 ``_link_candidates`` picker (and the whole per-device
+    form that hosted it).  A plug's single-subject scope is captured on the v3
+    endpoints step and its state entities are written as ``ha_entity_links``
+    with ``declared_by=user`` (DEC-08).  The pure link rules remain testable
+    without Home Assistant.
     """
 
-    def _body(self) -> str:
+    def test_v3_form_has_no_removed_link_picker(self) -> None:
         source = (PACKAGE_DIR / "config_flow.py").read_text()
-        start = source.index("def _link_candidates(")
-        end = source.index("def _device_config_finish(", start)
-        return source[start:end]
+        for removed in (
+            "def _link_candidates(",
+            "def _device_config_finish(",
+            "async_step_device_config_details",
+        ):
+            assert removed not in source, removed
 
-    def test_the_registry_is_enumerated_beyond_declared_entities(self) -> None:
-        body = self._body()
-        assert "binding_device_entity_ids(" in body
-        assert "for device_entry in device_reg.devices:" in body
+    def test_v3_entity_links_declare_the_user_as_source(self) -> None:
+        sl = importlib.import_module(f"{PACKAGE_NAME}.state_links")
+        resolution = sl.LinkResolution(state_entities={"dev_kettle": ("switch.kettle",)})
+        bodies = sl.build_ha_entity_link_bodies(resolution)
+        assert bodies == [
+            {
+                "entity_id": "switch.kettle",
+                "target_kind": "device",
+                "target_id": "dev_kettle",
+                "role": "state",
+                "declared_by": "user",
+            }
+        ]
 
-    def test_the_registry_view_is_iterated_not_used_as_a_mapping(self) -> None:
-        """The mapping-style view is deprecated for custom integrations."""
-        body = self._body()
-        assert "device_reg.devices.values()" not in body
-        assert "device_reg.devices.get(" not in body
-
-    def test_our_own_devices_are_never_offered(self) -> None:
-        """A measurement must not be shown on the host that describes it."""
-        body = self._body()
-        assert "_owns_us(" in body
-        assert "DOMAIN" in body
-
-    def test_the_no_link_choice_comes_first(self) -> None:
-        body = self._body()
-        first = body.index("SelectOptionDict(")
-        assert 'value=""' in body[first : first + 200]
-
-    def test_a_stored_link_is_always_represented(self) -> None:
-        """Saving another field must not silently drop an existing link."""
-        body = self._body()
-        assert "if current and not suggestion:" in body
+    def test_a_stored_link_is_not_dropped_by_the_flow(self) -> None:
+        """The merge helper still rebuilds the whole map for existing entries."""
+        stored = flow.apply_device_link({"d1": "ha1", "d2": "ha2"}, "d1", None)
+        assert stored == {"d1": "ha1", "d2": "ha2"}
+        assert flow.linked_device_id(stored, "d2") == "ha2"
 
 
 class TestUnlinkReturnsTheEntity:
@@ -523,52 +523,65 @@ class TestSharedCircuitIsExpressible:
         )
         assert "monitored_by_ct_ids" not in errors
 
-    def test_the_form_offers_the_engine_channels(self) -> None:
-        """The field must be a picker over real channels, not free text.
+    def test_the_removed_channel_picker_is_gone(self) -> None:
+        """The v2 CT multi-select lived on a per-device form that no longer exists.
 
-        A registry-style free-text box invites a typo that the engine silently
-        discards.  The step therefore builds options from ``self._channels``.
+        Shared-circuit declarations are now inferred by the engine; the setup
+        flow only edits endpoints and their optional parents (DEC-04).
         """
         source = _config_flow_source()
-        assert "def _ct_options(" in source
-        start = source.index("def _ct_options(")
-        end = source.index("def _stored_monitored_cts(", start)
-        body = source[start:end]
-        assert "self._channels" in body
-        # A main feed is not a load row and must not be offered.
-        assert 'role == "main"' in body or "role == 'main'" in body
+        for removed in (
+            "def _ct_options(",
+            "def _stored_monitored_cts(",
+            "async_step_device_config_details",
+        ):
+            assert removed not in source, removed
 
-    def test_the_detail_step_passes_the_options_and_default(self) -> None:
-        source = _config_flow_source()
-        start = source.index("async def async_step_device_config_details(")
-        body = source[start : source.index("def _stored_device_links(", start)]
-        assert "ct_options=ct_options" in body
-        assert "ct_options = self._ct_options()" in body
-        assert "ct_default=self._stored_monitored_cts()" in body
+    def test_shared_cts_are_still_normalised_without_the_form(self) -> None:
+        """The pure normaliser still accepts several CTs for one declaration."""
+        params = flow.normalise_device_configuration(
+            {"monitored_by_ct_ids": "ct_lights, ct_basement"}
+        )
+        assert params["monitored_by_ct_ids"] == ["ct_lights", "ct_basement"]
 
-    def test_a_direct_visit_loads_the_channels(self) -> None:
-        """Entering the device branch without the wizard must still offer CTs.
+    def test_a_v3_endpoint_parent_is_a_user_declared_edge(self) -> None:
+        """The v3 flow expresses a parent as a CONTAINS edge, not a form field."""
+        endpoints = flow.normalise_endpoints(
+            [
+                {
+                    "endpoint_id": "main_l1",
+                    "kind": "ct",
+                    "scope": "circuit",
+                    "entity_id": "sensor.main_power",
+                },
+                {
+                    "endpoint_id": "lights_l1",
+                    "kind": "ct",
+                    "scope": "circuit",
+                    "entity_id": "sensor.lights_power",
+                },
+            ]
+        )
+        choices = flow.endpoint_choices(
+            endpoints, {"lights_l1": {"parent_endpoint_id": "main_l1", "parent_accepted": True}}
+        )
+        edge = flow.build_user_edge_plan(choices)[0]
+        assert edge["body"]["source"] == "main_l1"
+        assert edge["body"]["target"] == "lights_l1"
+        assert edge["body"]["declared_by"] == "user"
 
-        Otherwise the picker is empty exactly when a user comes back to edit one
-        device -- the case the feature exists for.
-        """
-        source = _config_flow_source()
-        start = source.index("async def async_step_device_config(")
-        body = source[start : source.index("async def async_step_device_config_details(", start)]
-        assert "if not self._channels:" in body
-        assert "normalise_channels(topology)" in body
-
-    def test_a_stored_ct_is_only_prefilled_when_it_is_offered(self) -> None:
-        """A multi-select silently drops values it has no option for.
-
-        So a stored declaration must be filtered to the offered channels, or a
-        hidden main-feed id would look "unchanged" on submit and be removed.
-        """
-        source = _config_flow_source()
-        start = source.index("def _stored_monitored_cts(")
-        body = source[start : source.index("def _link_candidates(", start)]
-        assert "self._ct_options()" in body
-        assert " in offered" in body
+    def test_an_unaccepted_parent_is_never_written(self) -> None:
+        """An inferred parent shown as a suggestion is not a declaration."""
+        endpoints = flow.normalise_endpoints(
+            [{"endpoint_id": "lights_l1", "kind": "ct", "scope": "circuit"}]
+        )
+        choices = flow.endpoint_choices(
+            endpoints,
+            {"lights_l1": {"parent_endpoint_id": "main_l1"}},
+            suggestions={"lights_l1": ["main_l1"]},
+        )
+        assert choices["lights_l1"]["parent_accepted"] is False
+        assert flow.build_user_edge_plan(choices) == []
 
 
 def _config_flow_source() -> str:
