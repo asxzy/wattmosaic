@@ -1,4 +1,12 @@
-"""Bounded per-channel sample buffers and aligned-window construction."""
+"""Bounded per-channel sample buffers and aligned-window construction.
+
+Wave 3 (P2) introduced :class:`~wattmosaic_engine.realtime.reader_state.ReaderStateStore`
+as the single per-reader ring keyed by ``observed_at``.  This module keeps the
+primitives that store reuses -- :func:`robust_noise_mad`, :class:`ChannelHealth`,
+:class:`ResolvedCadence` and the cadence resolvers -- plus the legacy
+:class:`SampleAligner` power/energy buffers.  Those buffers are deleted in Z2
+and must keep working until then.
+"""
 
 from __future__ import annotations
 
