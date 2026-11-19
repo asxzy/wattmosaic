@@ -349,6 +349,12 @@ class ChangeDetector:
             self._in_suspect(reader, sm, value, sample_at, at, staleness)
         elif sm.state is DetectorState.SETTLING:
             self._in_settling(reader, sm, value, sample_at)
+            if sm.state is DetectorState.STABLE:
+                # Settling ended on this sample, so it is the latest stable
+                # sample: a step that follows dates its onset (and takes its
+                # pre-step window) from here, not from a pre-settling sample
+                # that may sit on the other side of an earlier step.
+                sm.last_pre = self._sample_at(reader, sample_at)
         else:
             self._in_stable(reader, sm, value, sample_at, at, staleness)
             sm.last_pre = self._sample_at(reader, sample_at)
@@ -753,6 +759,14 @@ class ChangeDetector:
                 )
             )
             sm.last_emitted_onset_lo = onset_lo
+        # The event is accounted from ``baseline`` to the level the reader now
+        # holds, so that level is the reference for the next step.  Without
+        # this, a post-step reference left over from an earlier step (e.g. a
+        # short ON pulse whose OFF fell inside SETTLING) keeps measuring every
+        # later quiet sample against the stale ON level and re-emits the same
+        # OFF delta every confirmation period, forever (Z7).
+        if sm.post_step_baseline is not None:
+            sm.post_step_baseline = value
         self._abort(reader, sm, at, settling=True)
 
     # -- data gaps ----------------------------------------------------------- #

@@ -11,7 +11,7 @@ stratum              records  attrib. % group kWh MEAS. n  MAE W     forced
 hb17_co_switched          162     11.76  0.000000      156    0.228       0
 hb17_solo_switches        162     11.76  0.000000      156    0.228       0
 lab_dedicated              24     96.09  0.000000       71    1.556       0
-lab_shared (runtime)      240     49.23  0.104445      236    0.313       0
+lab_shared (runtime)      240     57.10  0.181977      236    0.290       0
 lab_ambiguous_pair        160      0.01  0.000000      160    0.058       0
 lab_automation_burst       24     73.34  0.000000      574    5.923       0
 ==================== ======== ========= ========= ======== ========= ======
@@ -27,7 +27,7 @@ already on (or after the horizon), so they add HA messages but no physics.
 ``lab_shared`` runs through the live runtime for one simulated hour: after two
 CONFIRMED co-switches of utility_1 + utility_2 are in history, I4 publishes
 their GROUP_IDENTIFIABLE sum and the steady pass keeps it current from the
-shared CT (51 group points, 0.104445 kWh); utility_3, alone on its CT, is
+shared CT (61 group points, 0.181977 kWh); utility_3, alone on its CT, is
 MEASURED.
 """
 
@@ -122,7 +122,7 @@ def test_measured_endpoints_match_truth_within_sigma(report: V3Report) -> None:
 
     Ceilings: measured value + headroom (dedicated 1.556 -> 2.0 W, RMSE 2.286
     -> 3.0 W, max 7.282 -> 10 W; shared (live runtime, utility_3 on its own
-    CT) 0.313 -> 0.6 W, RMSE 0.500 -> 1.0 W, max 2.273 -> 5 W; ambiguous_pair 0.058
+    CT) 0.290 -> 0.6 W, RMSE 0.513 -> 1.0 W, max 2.273 -> 5 W; ambiguous_pair 0.058
     -> 0.2 W; automation_burst 5.923 -> 7.5 W).  Burst's RMSE (88 W) and max
     (1.49 kW) come from transition-instant samples whose held value is a
     level the CT's truth curve also took within a sample interval; the MAE
@@ -148,14 +148,17 @@ def test_measured_endpoints_match_truth_within_sigma(report: V3Report) -> None:
 def test_attributed_share_floors(report: V3Report) -> None:
     """Attributed share per stratum (measured with ~10 % headroom).
 
-    dedicated 96.09 % -> 85; burst 73.34 % -> 65; shared 49.23 % -> 44..55
-    (utility_3 MEASURED plus the utility_1+2 group sum once it is history-backed;
+    dedicated 96.09 % -> 85; burst 73.34 % -> 65; shared 57.10 % -> 51..63
+    (Z7: P3 no longer re-emits a stale OFF step every confirmation period,
+    so the pair's co-switches confirm sooner and the group sum is published
+    from record 179 instead of 189;
+    utility_3 MEASURED plus the utility_1+2 group sum once it is history-backed;
     the 2.4 kW pair is never split).
     """
     assert report.scenarios["lab_dedicated"].attributed_pct >= 85.0
     assert report.scenarios["lab_automation_burst"].attributed_pct >= 65.0
     shared = report.scenarios["lab_shared"].attributed_pct
-    assert 44.0 <= shared <= 55.0, shared
+    assert 51.0 <= shared <= 63.0, shared
 
 
 def test_residual_preservation(report: V3Report) -> None:
@@ -163,7 +166,7 @@ def test_residual_preservation(report: V3Report) -> None:
 
     Measured 1.0 everywhere except dedicated/burst at 0.9583 (one of 24
     records: a transition sample where a fresh branch reading meets a stale
-    main reading) and lab_shared at 0.9708 (7 of 240, the same transition
+    main reading) and lab_shared at 0.9625 (9 of 240, the same transition
     effect).  Floor 0.9.
     """
     for label, stratum in report.scenarios.items():
@@ -192,7 +195,7 @@ def test_unknown_is_no_claim_not_zero(report: V3Report) -> None:
 def test_shared_branch_publishes_group_identified_energy(report: V3Report) -> None:
     """HB §21.7: two loads only ever seen together on one CT -> a group sum.
 
-    Measured 51 group points, 0.104445 kWh; floors 45 points and 0.09 kWh.
+    Measured 61 group points, 0.181977 kWh; floors 45 points and 0.09 kWh.
     The members are never given a number (forced attributions stay 0).
     """
     shared = report.scenarios["lab_shared"]
