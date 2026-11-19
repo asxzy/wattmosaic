@@ -86,7 +86,7 @@ Open the app → **Configuration**:
 | `log_level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
 | `log_json` | `true` | Structured JSON logs. |
 | `database_path` | `/data/wattmosaic.db` | SQLite file inside the persistent volume. |
-| `retention_days_raw` | `30` | Raw sample/event retention. |
+| `retention_days_raw` | `7` | Raw sample/event retention (1–90 days; reduced from 30 to keep the database small on Pi-class hosts). |
 | `retention_days_aggregates` | `730` | Aggregate retention. |
 | `queue_max_size` | `5000` | Bounded ingestion queue. |
 

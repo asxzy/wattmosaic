@@ -117,7 +117,7 @@ options:
   log_level: "INFO"
   log_json: true
   database_path: "/data/wattmosaic.db"
-  retention_days_raw: 30
+  retention_days_raw: 7
   retention_days_aggregates: 730
   # L2/L4 horizons are opt-in. null disables pruning (the engine reads an empty
   # WM_* value as None); set a day count to bound long-term evidence/versions.
@@ -144,7 +144,9 @@ schema:
   log_level: "list(DEBUG|INFO|WARNING|ERROR)"
   log_json: bool
   database_path: str
-  retention_days_raw: "int(1,3650)"
+  # Bound matches the engine's RETENTION_DAYS_RAW_RANGE (1-90); a parity test
+  # in tests/unit pins the two together so they cannot drift again.
+  retention_days_raw: "int(1,90)"
   retention_days_aggregates: "int(30,36500)"
   retention_days_evidence: "int(1,3650)?"
   retention_days_versions: "int(1,3650)?"

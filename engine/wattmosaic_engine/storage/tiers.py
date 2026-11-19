@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -490,6 +490,364 @@ def apply_evidence_retention(
     return counts
 
 
+# --------------------------------------------------------------------------- #
+# Z11 -- age retention for the derived tables (V2 DB-growth finding)
+# --------------------------------------------------------------------------- #
+
+#: The derived tables that grew without bound before Z11 (~69 MB/day, ~25 GB/yr)
+#: and now carry an age-based horizon.  Declared in one place so the prune pass,
+#: the config default and the tests agree on the table/column/key triple.
+#: ``(table, age_column, key_column)``: key_column is the primary key used by the
+#: DELETE, so a chunk prunes by the same key it selects on.
+DERIVED_RETENTION_TABLES: tuple[tuple[str, str, str], ...] = (
+    ("inference_snapshots", "created_at", "id"),
+    ("event_inference_records", "created_at", "record_id"),
+    ("ha_events_v3", "observed_at", "event_id"),
+    ("event_groups", "opened_at", "group_id"),
+    ("reader_residual_series", "at", "reader_id"),
+)
+
+#: Join tables pruned implicitly when their parent row is deleted.  They have no
+#: independent age column: a member is as old as the group it belongs to, and
+#: ``event_group_members`` has a FOREIGN KEY to ``event_groups`` (so members are
+#: deleted *before* the parent group).  Counts are folded into the parent's total.
+DERIVED_MEMBER_TABLES: dict[str, tuple[str, str]] = {
+    "event_groups": ("event_group_members", "group_id"),
+}
+
+#: Default horizons (days), matching the EngineConfig fields of the same name
+#: (Z11).  Kept here so the pure decision layer has defaults without importing
+#: config (config is the lowest layer and imports nothing from storage).
+DEFAULT_DERIVED_RETENTION_DAYS: dict[str, int] = {
+    "inference_snapshots": 90,
+    "event_inference_records": 90,
+    "ha_events_v3": 90,
+    "event_groups": 90,
+    "event_group_members": 90,
+    "reader_residual_series": 30,
+}
+
+#: Rows per chunk.  A single maintenance pass deletes at most this many rows per
+#: table, keeping every pass well inside DEC-37's 2 s CPU cap; the next pass
+#: continues where this one stopped.  Bounded chunks also keep each transaction
+#: short enough not to block a concurrent `ping()` on `/health`.
+DERIVED_PRUNE_CHUNK_SIZE = 500
+
+#: Group states that are still live: a non-finalized group must never be pruned
+#: even if it is older than the horizon (HB §12.3, DEC-30 replay guarantee).
+_LIVE_GROUP_STATUSES = frozenset({"detected", "matching", "provisional", "unresolved"})
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    """Columns of ``table`` (empty when the table does not exist yet)."""
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _live_group_keys(conn: sqlite3.Connection) -> frozenset[str]:
+    """``group_id`` of every group that is still live or non-finalized.
+
+    A group is protected when its state is one of :data:`_LIVE_GROUP_STATUSES`
+    (detected/matching/provisional/unresolved), when it has no ``closed_at``
+    (still open), or when a *newer revision* of the same group exists (the older
+    revision is immutable history a revision chain still points at).  A
+    CONFIRMED/REVISED group with a ``closed_at`` and no newer revision is
+    finalized and may be pruned once it ages out.
+    """
+    columns = _table_columns(conn, "event_groups")
+    if not columns or "status" not in columns:
+        return frozenset()
+    closed_expr = "closed_at" if "closed_at" in columns else "NULL"
+    try:
+        rows = conn.execute(
+            f"SELECT group_id, revision, status, {closed_expr} FROM event_groups"  # noqa: S608
+        ).fetchall()
+    except sqlite3.Error:
+        return frozenset()
+    non_final_revisions: dict[str, int] = {}
+    for row in rows:
+        group_id = str(row[0])
+        try:
+            revision = int(row[1])
+        except (TypeError, ValueError):
+            revision = 0
+        status = str(row[2]).lower()
+        closed = str(row[3]) if row[3] is not None else ""
+        if status in _LIVE_GROUP_STATUSES or not closed:
+            non_final_revisions[group_id] = max(non_final_revisions.get(group_id, 0), revision)
+    protected = set(non_final_revisions)
+    # A superseded revision is referenced by the newest revision of the same
+    # group; protect every older revision of a group that is itself non-final.
+    for group_id, revision in non_final_revisions.items():
+        rows_for_group = [r for r in rows if str(r[0]) == group_id]
+        for r in rows_for_group:
+            try:
+                if int(r[1]) < revision:
+                    protected.add(group_id)
+            except (TypeError, ValueError):
+                continue
+    return frozenset(protected)
+
+
+def _snapshot_referenced_ids(conn: sqlite3.Connection) -> dict[str, frozenset[str]]:
+    """Evidence/group/event/member ids cited by the live (current) snapshot.
+
+    The current snapshot is the highest ``id`` row in ``inference_snapshots``.
+    Its ``payload_json`` carries ``unresolved_events`` (ha_event ids) and
+    ``group_estimates`` (group ids and nested ``evidence_refs``).  A row these
+    ids name must outlive its age horizon: pruning it would break the HB §18
+    provenance the snapshot promises to resolve.  On a database with no
+    snapshot, every set is empty.
+    """
+    empty: dict[str, frozenset[str]] = {
+        "evidence": frozenset(),
+        "groups": frozenset(),
+        "ha_events": frozenset(),
+        "records": frozenset(),
+        "residual_readers": frozenset(),
+    }
+    columns = _table_columns(conn, "inference_snapshots")
+    if not columns or "payload_json" not in columns:
+        return empty
+    try:
+        row = conn.execute(
+            "SELECT payload_json FROM inference_snapshots ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    except sqlite3.Error:
+        return empty
+    if row is None or not row[0]:
+        return empty
+    try:
+        payload = json.loads(row[0])
+    except (TypeError, ValueError):
+        return empty
+    if not isinstance(payload, dict):
+        return empty
+
+    groups: set[str] = set()
+    evidence: set[str] = set()
+    ha_events: set[str] = set()
+    records: set[str] = set()
+    residual_readers: set[str] = set()
+    for point in payload.get("residual_estimates", []) or []:
+        if isinstance(point, dict) and point.get("reader_id") is not None:
+            residual_readers.add(str(point["reader_id"]))
+    for group in payload.get("group_estimates", []) or []:
+        if not isinstance(group, dict):
+            continue
+        gid = group.get("group_id")
+        if gid is not None:
+            groups.add(str(gid))
+        for ref in group.get("evidence_refs", []) or []:
+            if not isinstance(ref, dict) or "id" not in ref:
+                continue
+            kind = str(ref.get("kind", ""))
+            identifier = str(ref["id"])
+            if kind == "ha_event":
+                ha_events.add(identifier)
+            elif kind == "event_evidence":
+                evidence.add(identifier)
+            elif kind == "event_group":
+                groups.add(identifier)
+    for value in payload.get("unresolved_events", []) or []:
+        ha_events.add(str(value))
+    return {
+        "groups": frozenset(groups),
+        "evidence": frozenset(evidence),
+        "ha_events": frozenset(ha_events),
+        "records": frozenset(records),
+        "residual_readers": frozenset(residual_readers),
+    }
+
+
+def _active_record_ids(conn: sqlite3.Connection) -> frozenset[str]:
+    """Record ids still referenced by a live derived run or a newer record.
+
+    ``event_inference_records.previous_record_id`` forms an append-only revision
+    chain; a record cited by a newer one is immutable history that replay needs.
+    A derived run that has not been superseded (``superseded_by IS NULL``) may
+    still be resolved against its records, so those are protected too.  Only the
+    JSON ``evidence``/``triple`` columns link a run to records, so the parse is
+    deliberately tolerant of absent columns.
+    """
+    protected: set[str] = set()
+    columns = _table_columns(conn, "event_inference_records")
+    if columns and "previous_record_id" in columns:
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT previous_record_id FROM event_inference_records "
+                "WHERE previous_record_id IS NOT NULL"
+            ).fetchall()
+            protected.update(str(r[0]) for r in rows)
+        except sqlite3.Error:
+            pass
+    run_columns = _table_columns(conn, "derived_runs")
+    if run_columns and "superseded_by" in run_columns:
+        try:
+            runs = conn.execute(
+                "SELECT triple_json FROM derived_runs WHERE superseded_by IS NULL"
+            ).fetchall()
+            for run in runs:
+                if not run[0]:
+                    continue
+                try:
+                    data = json.loads(run[0])
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                for ref in data.get("evidence_refs", []) or []:
+                    if isinstance(ref, dict) and ref.get("kind") == "event_inference_record":
+                        protected.add(str(ref.get("id")))
+        except sqlite3.Error:
+            pass
+    return frozenset(protected)
+
+
+def apply_derived_retention(
+    conn: sqlite3.Connection,
+    *,
+    now: datetime | None = None,
+    horizons: Mapping[str, int] | None = None,
+    chunk_size: int = DERIVED_PRUNE_CHUNK_SIZE,
+    budget: Any | None = None,
+) -> dict[str, int]:
+    """Age-prune the derived tables, respecting provenance and DEC-37's CPU cap.
+
+    A pure decision layer over an injected ``conn`` and ``now`` (mirroring
+    :func:`apply_evidence_retention`): no wall clock, no repository layer, no
+    engine import.  ``horizons`` maps a table name to its retention in days and
+    falls back to :data:`DEFAULT_DERIVED_RETENTION_DAYS`, then the matching
+    ``EngineConfig`` field at the runtime call site.
+
+    ``budget`` is the optional cooperative :class:`~wattmosaic_engine.core.executors.JobBudget`
+    (duck-typed: anything with ``exceeded()``): after each bounded chunk the pass
+    stops when the budget is spent, so one background job never exceeds ~2 s of
+    CPU.  A later maintenance pass resumes where this one stopped.  ``chunk_size``
+    additionally bounds a pass even without a budget (deterministic tests).
+
+    Returns ``{table: rows_deleted}` for every table in
+    :data:`DERIVED_RETENTION_TABLES` (``0`` when the table is absent or nothing
+    aged out, so "deleted nothing" is visible rather than absent).  Provenance
+    rules, in order of precedence:
+
+    * the **current snapshot** is never deleted (the newest row); rows it cites
+      (ha_event ids, group ids, evidence refs) are never deleted;
+    * a **non-finalized group** / group with a newer revision, and every member
+      of a protected group, are never deleted;
+    * an **active record** (referenced by a newer record or a live derived run)
+      is never deleted;
+    * evidence rows still cited by a newer revision are already protected by
+      :func:`apply_evidence_retention` -- this pass does not touch that table.
+    """
+    if horizons is None:
+        horizons = {}
+    elif not isinstance(horizons, Mapping):
+        raise TypeError("horizons must be a mapping of table -> days")
+    limit = max(1, int(chunk_size))
+    current = _as_utc(now) if now is not None else utcnow()
+
+    # Collect protection sets once, before any delete (deleting a snapshot first
+    # would make the references it carried undiscoverable mid-pass).
+    snapshot_ids = _snapshot_referenced_ids(conn)
+    live_groups = _live_group_keys(conn)
+    active_records = _active_record_ids(conn)
+    # The live snapshot row itself is the newest id; never prune it.
+    live_snapshot_id: int | None = None
+    if _table_columns(conn, "inference_snapshots"):
+        row = conn.execute(
+            "SELECT id FROM inference_snapshots ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if row is not None:
+            live_snapshot_id = int(row[0])
+
+    totals = {table: 0 for table, _col, _key in DERIVED_RETENTION_TABLES}
+    # Compute all cutoffs up front from one `now`, so horizons are consistent
+    # even if a chunked pass spans several maintenance cycles.
+    cutoffs: dict[str, str] = {}
+    for table, _col, _key in DERIVED_RETENTION_TABLES:
+        days = int(horizons.get(table, DEFAULT_DERIVED_RETENTION_DAYS[table]))
+        cutoffs[table] = (current - timedelta(days=max(1, days))).isoformat()
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for table, age_col, key_col in DERIVED_RETENTION_TABLES:
+            columns = _table_columns(conn, table)
+            if not columns or age_col not in columns:
+                continue
+            cutoff = cutoffs[table]
+            # Fetch candidate keys aged past the horizon, bounded by one chunk.
+            candidates = conn.execute(
+                f"SELECT {key_col}, {age_col} FROM {table} "  # noqa: S608 - fixed names
+                f"WHERE {age_col} < ? ORDER BY {age_col} ASC LIMIT ?",
+                (cutoff, limit),
+            ).fetchall()
+            deleted = 0
+            for key, _aged_value in candidates:
+                if budget is not None and budget.exceeded():
+                    break
+                if not _is_prunable_row(
+                    table,
+                    key,
+                    live_snapshot_id=live_snapshot_id,
+                    snapshot_ids=snapshot_ids,
+                    live_groups=live_groups,
+                    active_records=active_records,
+                ):
+                    continue
+                # A group's members share its fate; delete them first so the
+                # FOREIGN KEY from event_group_members -> event_groups holds.
+                member = DERIVED_MEMBER_TABLES.get(table)
+                if member is not None:
+                    member_table, member_key = member
+                    if _table_columns(conn, member_table):
+                        conn.execute(
+                            f"DELETE FROM {member_table} WHERE {member_key} = ?",  # noqa: S608
+                            (key,),
+                        )
+                conn.execute(
+                    f"DELETE FROM {table} WHERE {key_col} = ?",  # noqa: S608 - fixed names
+                    (key,),
+                )
+                deleted += 1
+            totals[table] = deleted
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return totals
+
+
+def _is_prunable_row(
+    table: str,
+    key: Any,
+    *,
+    live_snapshot_id: int | None,
+    snapshot_ids: Mapping[str, frozenset[str]],
+    live_groups: frozenset[str],
+    active_records: frozenset[str],
+) -> bool:
+    """Whether one aged candidate row may be deleted (all provenance checks)."""
+    identifier = str(key)
+    if table == "inference_snapshots":
+        # The current snapshot is protected; an older snapshot whose content is
+        # identical to the current one is also protected from deletion only by
+        # its age (all older snapshots are history and may be pruned).
+        return live_snapshot_id is None or int(key) != live_snapshot_id
+    if table == "ha_events_v3":
+        return identifier not in snapshot_ids["ha_events"]
+    if table == "event_groups":
+        return identifier not in live_groups and identifier not in snapshot_ids["groups"]
+    if table == "event_inference_records":
+        # A record cited by a newer revision (active run) or by the live snapshot's
+        # group evidence is immutable history that replay still resolves.
+        return identifier not in active_records and identifier not in snapshot_ids["records"]
+    if table == "reader_residual_series":
+        # key_col is reader_id; a reader whose residual the current snapshot
+        # publishes is still live and its series must outlive its age horizon.
+        return identifier not in snapshot_ids["residual_readers"]
+    return True
+
+
 def partition_decision() -> str:
     """The recorded partitioning decision and the measurement behind it.
 
@@ -518,7 +876,8 @@ def partition_decision() -> str:
 
 #: ``addon/run.sh`` maps the App option ``retention_days_raw`` onto this variable;
 #: named here so the option surface and the engine field cannot drift apart in
-#: prose.  The default stays 30 (spec §2.1, ``OD-31``).
+#: prose.  The default is now 7 days (V2 DB-growth finding); the accepted range
+#: is 1-90 (``RETENTION_DAYS_RAW_RANGE``), which the add-on schema mirrors.
 RAW_RETENTION_ENV = "WM_RETENTION_DAYS_RAW"
 
 
@@ -526,8 +885,12 @@ __all__ = [
     "AGGREGATE_HORIZON",
     "BASE_TIER_TABLES",
     "CANONICAL_EVIDENCE_TABLE",
+    "DEFAULT_DERIVED_RETENTION_DAYS",
     "DEFAULT_EVIDENCE_RETENTION_DAYS",
     "DEFAULT_SAMPLES_RETENTION_DAYS",
+    "DERIVED_MEMBER_TABLES",
+    "DERIVED_PRUNE_CHUNK_SIZE",
+    "DERIVED_RETENTION_TABLES",
     "LEGACY_EVENT_TABLES",
     "PRUNABLE_TABLES",
     "RAW_HORIZON",
@@ -536,6 +899,7 @@ __all__ = [
     "TIERS",
     "TIER_TABLES",
     "TierError",
+    "apply_derived_retention",
     "apply_evidence_retention",
     "canonical_evidence_table",
     "has_growth",

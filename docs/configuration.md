@@ -43,12 +43,26 @@ incompatible contract. The `/mapping` endpoint and v2 forms are gone — use
 | Variable | Default | Description |
 | --- | --- | --- |
 | `WM_DATABASE_PATH` | `data/wattmosaic.db` | SQLite file. On HA OS use `/data/wattmosaic.db` (persistent volume). |
-| `WM_RETENTION_DAYS_RAW` | `30` | L1 raw reader-sample retention. The validator accepts 1–90 days; must exceed your longest model-training horizon. |
+| `WM_RETENTION_DAYS_RAW` | `7` | L1 raw reader-sample retention. The validator accepts 1–90 days; must exceed your longest model-training horizon. Reduced from 30 to 7: raw samples are ~88 % of database growth (~710 MB/day at 30 samples/s), so 30 d meant a 21–28 GB steady state on Pi-class hosts. The add-on `retention_days_raw` option has the same bounds. |
 | `WM_RETENTION_DAYS_AGGREGATES` | `730` | L3 aggregate retention (30–36500 days). |
 | `WM_RETENTION_DAYS_EVIDENCE` | unset | L2 event-evidence horizon in days. Empty disables it: evidence is long-term and only an explicit operator action bounds it. |
 | `WM_RETENTION_DAYS_VERSIONS` | unset | L4 version-history horizon in days. Empty disables it, for the same reason. |
 | `WM_EVIDENCE_RETENTION_DAYS` | `400` | Derived-evidence horizon (DEC-30). |
 | `WM_EVIDENCE_RAW_RETENTION_DAYS` | `30` | Raw samples cited by evidence; expires sooner than derived evidence. |
+| `WM_RETENTION_DAYS_SNAPSHOTS` | `90` | Age horizon for `inference_snapshots` (~51–52 MB/day). |
+| `WM_RETENTION_DAYS_RECORDS` | `90` | Age horizon for `event_inference_records`. |
+| `WM_RETENTION_DAYS_HA_EVENTS` | `90` | Age horizon for `ha_events_v3`. |
+| `WM_RETENTION_DAYS_GROUPS` | `90` | Age horizon for `event_groups` and `event_group_members`. |
+| `WM_RETENTION_DAYS_RESIDUAL_SERIES` | `30` | Age horizon for `reader_residual_series` (change-point series; cheap). |
+
+The five derived-table horizons (Z11) were previously unbounded (~69 MB/day,
+≈25 GB/year). They are pruned by the same background retention job as evidence,
+in bounded chunks (DEC-37, ≤ 2 s CPU per pass). **Provenance always wins over
+age:** a row still cited by the current inference snapshot, a non-finalized group
+(or a group with a newer revision), an unreferenced-but-active inference record,
+or an active version is never pruned even when it is older than its horizon.
+Each horizon is validated in the range 1–3650 days. These are engine/env
+settings, not App options.
 
 An explicit L2/L4 horizon must be at least as long as the raw horizon: evidence
 that does not outlive the raw window it explains cannot be audited.
@@ -200,7 +214,8 @@ switch is `AND`-ed with each per-artifact flag.
 
 - `stale_after_s`, `event_queue_max`, `steady_heartbeat_s` must be positive;
 - `unknown_penalty_scale` must be finite and non-negative;
-- `retention_days_raw` must be in 1–90, aggregates in 30–36500;
+- `retention_days_raw` must be in 1–90, aggregates in 30–36500, and each derived
+  horizon must be in 1–3650;
 - an explicit L2/L4 horizon must be ≥ the raw horizon;
 - isolation windows must be finite, non-negative, and the power window ≥ the
   isolation window; isolation override maps may only use known timing keys.
@@ -216,7 +231,7 @@ WM_API_TOKEN=<random 32+ chars>
 WM_DATABASE_PATH=/data/wattmosaic.db
 WM_LEARNING_ENABLED=true
 WM_STALE_AFTER_S=120
-WM_RETENTION_DAYS_RAW=30
+WM_RETENTION_DAYS_RAW=7
 WM_EVENT_QUEUE_MAX=1000
 WM_STEADY_HEARTBEAT_S=60
 WM_UNKNOWN_PENALTY_SCALE=1.0

@@ -53,6 +53,23 @@ and its [implementation spec](docs/specs/realtime-topology-disaggregation/README
   `WM_INFERENCE_INTERVAL_S` is deprecated and ignored — the three-loop runtime
   runs inference per event group, not on a fixed timer (DEC-03).
 
+### Storage and retention
+
+- **Raw-sample retention now defaults to 7 days** (was 30). Raw CT samples are
+  ~88 % of database growth (≈ 710 MB/day at 30 samples/s), so 30 days meant a
+  21–28 GB steady state — too large for Pi-class hosts. The accepted range is
+  1–90 days, now mirrored by the add-on `retention_days_raw` option (the add-on
+  previously allowed up to 3650, which the engine refused at startup). Evidence
+  summaries still live 400 days (DEC-30).
+- **Derived tables are now age-pruned.** `inference_snapshots`,
+  `event_inference_records`, `ha_events_v3`, `event_groups`/`event_group_members`
+  and `reader_residual_series` grew without bound (~69 MB/day, ≈25 GB/year).
+  They now have configurable horizons (`WM_RETENTION_DAYS_SNAPSHOTS` / `_RECORDS`
+  / `_HA_EVENTS` / `_GROUPS` / `_RESIDUAL_SERIES`; defaults 90/90/90/90/30 days),
+  pruned in bounded chunks by the background job (DEC-37). Provenance wins over
+  age: rows still cited by the current snapshot, a non-finalized group, or an
+  active version/record are never deleted. See [`docs/configuration.md`](docs/configuration.md).
+
 ### Upgrading, backup and rollback
 
 - **Automatic pre-migration backup.** Before any migration numbered 13 or above
