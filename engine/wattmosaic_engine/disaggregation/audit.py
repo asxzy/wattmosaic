@@ -46,23 +46,26 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from wattmosaic_engine.electrical._declared_shapes import (
+    AttributedValue,
+    ConfigEventDecl,
+    DeclaredTree,
+    EdgeState,
+    EvidenceVector,
+    RelationKindDecl,
+    ValueSource,
+)
+
 from ..contracts import (
     Circuit,
-    ConfidenceVector,
-    ConfigurationChangeEvent,
     EdgeLifecycle,
     EventIsolation,
     HaEntityBinding,
     InferenceRecord,
-    InferenceResult,
     IsolationStatus,
     MeasurementBasis,
-    RelationKind,
     ResidualPower,
-    Source,
-    Topology,
     TopologyRelation,
-    TopologyStatus,
     utcnow,
 )
 from ..device_links import device_for_entity
@@ -399,7 +402,7 @@ class AuditReport:
     records: list[InferenceRecord] = field(default_factory=list)
     #: Suspected configuration changes detected this pass.  Published as audit
     #: evidence; never promoted to a confirmed topology by the pass.
-    configuration_changes: list[ConfigurationChangeEvent] = field(default_factory=list)
+    configuration_changes: list[ConfigEventDecl] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=lambda: dict.fromkeys(COUNT_KEYS, 0))
     refused: dict[str, str] = field(default_factory=dict)
     errors: dict[str, str] = field(default_factory=dict)
@@ -559,7 +562,7 @@ def _enum_text(value: Any) -> str:
 def _event_row(event: Any) -> dict[str, Any]:
     """One event as a plain row, from an HA event object or a stored row.
 
-    ``DeviceEvent`` carries ``device_id``/``entity_id``/``new_state``/``occurred_at``
+    ``HaDeviceEvent`` carries ``device_id``/``entity_id``/``new_state``/``occurred_at``
     as attributes; the stored ``device_events`` rows carry the same names as keys
     plus ``attributes_json``.  Both must reach the isolator with the same keys, or
     one of the two intake paths silently analyses nothing.
@@ -644,7 +647,7 @@ def persist_isolations(
 
 
 def _confidence_delta(
-    previous: ConfidenceVector | None, current: ConfidenceVector
+    previous: EvidenceVector | None, current: EvidenceVector
 ) -> dict[str, float]:
     """Only the dimensions that moved, to full recorded precision."""
     if previous is None:
@@ -704,7 +707,7 @@ class AuditPass:
         self._last_power: dict[str, float] = {}
         self._last_revision: dict[str, int] = {}
         self._last_record: dict[str, str] = {}
-        self._last_confidence: dict[str, ConfidenceVector] = {}
+        self._last_confidence: dict[str, EvidenceVector] = {}
         #: Set only for the duration of a stored-history pass (see ``reanalyze``).
         self._override_histories: (
             dict[str, list[tuple[datetime, float]]] | None
@@ -859,12 +862,12 @@ class AuditPass:
         self,
         window: Any,
         *,
-        topology: Topology,
-        results: Sequence[InferenceResult] = (),
+        topology: DeclaredTree,
+        results: Sequence[AttributedValue] = (),
         events: Sequence[Any] | None = None,
         now: datetime | None = None,
         mode: str = "incremental",
-        observed_topology: Topology | None = None,
+        observed_topology: DeclaredTree | None = None,
         current_version: TopologyVersionRecord | None = None,
     ) -> AuditReport:
         """One pass over ``window``.  Never raises for a single bad input.
@@ -931,10 +934,10 @@ class AuditPass:
     def reanalyze(
         self,
         *,
-        topology: Topology,
+        topology: DeclaredTree,
         lookback_s: float,
         now: datetime | None = None,
-        results: Sequence[InferenceResult] = (),
+        results: Sequence[AttributedValue] = (),
     ) -> AuditReport:
         """Re-derive every artifact from stored raw history.
 
@@ -990,10 +993,10 @@ class AuditPass:
     def _detect_changes(
         self,
         *,
-        topology: Topology,
+        topology: DeclaredTree,
         at: datetime,
         report: AuditReport,
-        observed_topology: Topology | None,
+        observed_topology: DeclaredTree | None,
         current_version: TopologyVersionRecord | None,
     ) -> None:
         """Compare an observed snapshot with the current version and publish changes.
@@ -1049,7 +1052,7 @@ class AuditPass:
 
     # -- stage 0: inputs --------------------------------------------------- #
     @staticmethod
-    def _aligner_keys(topology: Topology) -> dict[str, str]:
+    def _aligner_keys(topology: DeclaredTree) -> dict[str, str]:
         """``aligner key -> topology ct_id`` for every enabled channel.
 
         Same derivation the ingestion path uses
@@ -1067,14 +1070,14 @@ class AuditPass:
             out[key] = str(channel.ct_id)
         return out
 
-    def _graph(self, topology: Topology, report: AuditReport) -> Any | None:
+    def _graph(self, topology: DeclaredTree, report: AuditReport) -> Any | None:
         try:
             return build_graph(topology)
         except Exception as exc:  # noqa: BLE001
             report.errors["build_graph"] = f"{type(exc).__name__}: {exc}"
             return None
 
-    def _registry(self, topology: Topology, report: AuditReport) -> FactorRegistry:
+    def _registry(self, topology: DeclaredTree, report: AuditReport) -> FactorRegistry:
         """Factor intervals for every channel, or an empty registry.
 
         An empty registry answers ``CT_MEASURED`` for a channel with no history,
@@ -1216,7 +1219,7 @@ class AuditPass:
             )
         return out
 
-    def _enrich(self, events: Sequence[Any], topology: Topology) -> list[dict[str, Any]]:
+    def _enrich(self, events: Sequence[Any], topology: DeclaredTree) -> list[dict[str, Any]]:
         """Attach the topology's declared CT scope to each event.
 
         ``EventIsolator`` reads ``attributes["supporting_ct_ids"]`` to tell a
@@ -1225,7 +1228,7 @@ class AuditPass:
         every competitor looks like it shares a CT and cleanliness is
         under-reported.
 
-        Events arrive in two shapes: the engine's ``DeviceEvent`` objects and the
+        Events arrive in two shapes: the engine's ``HaDeviceEvent`` objects and the
         stored ``device_events`` rows.  Both are normalised here -- reading only
         ``Mapping`` dropped every object-shaped event on the floor, which is the
         shape ``main.py`` actually passes.
@@ -1265,7 +1268,7 @@ class AuditPass:
     def _isolate(
         self,
         events: Sequence[Any],
-        topology: Topology,
+        topology: DeclaredTree,
         histories: Mapping[str, Sequence[tuple[datetime, float]]],
         at: datetime,
         report: AuditReport,
@@ -1449,7 +1452,7 @@ class AuditPass:
         self,
         isolations: Sequence[EventIsolation],
         histories: Mapping[str, Sequence[tuple[datetime, float]]],
-        by_device: Mapping[str, InferenceResult],
+        by_device: Mapping[str, AttributedValue],
         registry: FactorRegistry,
         graph: Any,
         at: datetime,
@@ -1531,7 +1534,7 @@ class AuditPass:
         report.counts["associations"] = sum(
             1
             for item in relations
-            if RelationKind(_enum_text(item.kind)) is RelationKind.DEVICE_CT_ASSOCIATION
+            if RelationKindDecl(_enum_text(item.kind)) is RelationKindDecl.DEVICE_CT_ASSOCIATION
         )
         if relations and self.config.write_association:
             report.written["associations"] = self._write(
@@ -1589,7 +1592,7 @@ class AuditPass:
         ]
 
     def _seed_power_history(
-        self, topology: Topology, start: datetime, end: datetime
+        self, topology: DeclaredTree, start: datetime, end: datetime
     ) -> None:
         """Seed per-device power baselines from stored inference results.
 
@@ -1614,7 +1617,7 @@ class AuditPass:
                 power = _float_or_none(row.get("power_w"))
                 if stamp is None or power is None or stamp > end:
                     continue
-                if _enum_text(row.get("source")) == Source.UNKNOWN.value:
+                if _enum_text(row.get("source")) == ValueSource.UNKNOWN.value:
                     continue
                 history = self._power_history.setdefault(
                     str(device.device_id), deque(maxlen=DEFAULT_POWER_HISTORY)
@@ -1788,7 +1791,7 @@ class AuditPass:
         parent_child = [
             item
             for item in inferred
-            if RelationKind(_enum_text(item.kind)) is RelationKind.ELECTRICAL_PARENT_CHILD
+            if RelationKindDecl(_enum_text(item.kind)) is RelationKindDecl.ELECTRICAL_PARENT_CHILD
         ]
         report.counts["parent_child"] = len(parent_child)
         out.extend(inferred)
@@ -1806,10 +1809,10 @@ class AuditPass:
             out.append(
                 TopologyRelation(
                     relation_id=f"declared_parent:{channel.ct_id}->{parent}",
-                    kind=RelationKind.ELECTRICAL_PARENT_CHILD,
+                    kind=RelationKindDecl.ELECTRICAL_PARENT_CHILD,
                     subject_id=str(channel.ct_id),
                     object_id=str(parent),
-                    status=TopologyStatus.CONFIRMED,
+                    status=EdgeState.CONFIRMED,
                     lifecycle=EdgeLifecycle.CONFIRMED,
                     requires_confirmation=False,
                     declared_by="user",
@@ -1824,7 +1827,7 @@ class AuditPass:
         relations: Sequence[TopologyRelation],
         registry: FactorRegistry,
         graph: Any,
-        by_device: Mapping[str, InferenceResult],
+        by_device: Mapping[str, AttributedValue],
         readings: Mapping[str, float],
         at: datetime,
         report: AuditReport,
@@ -1832,7 +1835,7 @@ class AuditPass:
         classification = [
             item
             for item in relations
-            if RelationKind(_enum_text(item.kind)) is RelationKind.DEVICE_CT_ASSOCIATION
+            if RelationKindDecl(_enum_text(item.kind)) is RelationKindDecl.DEVICE_CT_ASSOCIATION
         ]
         if not classification:
             return []
@@ -1878,7 +1881,7 @@ class AuditPass:
         circuits: Sequence[Circuit],
         graph: Any,
         registry: FactorRegistry,
-        by_device: Mapping[str, InferenceResult],
+        by_device: Mapping[str, AttributedValue],
         readings: Mapping[str, float],
         at: datetime,
         report: AuditReport,
@@ -1919,7 +1922,7 @@ class AuditPass:
                 str(device_id): float(result.power_w)
                 for device_id, result in by_device.items()
                 if str(device_id) in circuit.device_ids
-                and _enum_text(result.source) != Source.UNKNOWN.value
+                and _enum_text(result.source) != ValueSource.UNKNOWN.value
             }
             noise_floor = self._window_noise_floors.get(ct_id)
             scope = ResidualScope(
@@ -1971,11 +1974,11 @@ class AuditPass:
     # -- stage 5: records -------------------------------------------------- #
     def _records(
         self,
-        by_device: Mapping[str, InferenceResult],
+        by_device: Mapping[str, AttributedValue],
         isolations: Sequence[EventIsolation],
         relations: Sequence[TopologyRelation],
         circuits: Sequence[Circuit],
-        topology: Topology,
+        topology: DeclaredTree,
         at: datetime,
         report: AuditReport,
     ) -> list[InferenceRecord]:
@@ -2033,7 +2036,7 @@ class AuditPass:
     def _changed(
         self,
         device_id: str,
-        result: InferenceResult,
+        result: AttributedValue,
         previous: Mapping[str, Any] | None,
         at: datetime,
     ) -> bool:
@@ -2059,7 +2062,7 @@ class AuditPass:
             return True
         previous_confidence = _coerce_confidence(previous.get("confidence"))
         if previous_confidence is not None:
-            for name, value in ConfidenceVector(
+            for name, value in EvidenceVector(
                 power=_bounded(float(result.confidence))
             ).dimensions().items():
                 before = getattr(previous_confidence, name, None)
@@ -2075,11 +2078,11 @@ class AuditPass:
     def _record(
         self,
         device_id: str,
-        result: InferenceResult,
+        result: AttributedValue,
         isolations: Sequence[EventIsolation],
         relations: Sequence[TopologyRelation],
         circuits: Sequence[Circuit],
-        topology: Topology,
+        topology: DeclaredTree,
         at: datetime,
         *,
         previous: Mapping[str, Any] | None = None,
@@ -2099,7 +2102,7 @@ class AuditPass:
         associations = [
             item
             for item in relations
-            if RelationKind(_enum_text(item.kind)) is RelationKind.DEVICE_CT_ASSOCIATION
+            if RelationKindDecl(_enum_text(item.kind)) is RelationKindDecl.DEVICE_CT_ASSOCIATION
             and str(item.subject_id) == device_id
         ]
         circuits_here = [
@@ -2118,7 +2121,7 @@ class AuditPass:
             ]
         )
         source = result.source
-        if _enum_text(source) == Source.UNKNOWN.value:
+        if _enum_text(source) == ValueSource.UNKNOWN.value:
             # An unknown source cites nothing because it asserts nothing.  This
             # is the contract's own rule, not a shortcut here.
             evidence_refs = []
@@ -2128,7 +2131,7 @@ class AuditPass:
             # evidence than a raw observation, so it is recorded as such.
             evidence_refs = [f"record:{self._record_id(device_id, at, revision)}"]
 
-        confidence = ConfidenceVector(
+        confidence = EvidenceVector(
             power=_bounded(float(result.confidence)),
             ct_association=_max_confidence(associations),
             circuit_classification=_circuit_confidence(circuits_here),
@@ -2201,7 +2204,7 @@ class AuditPass:
 
     def _reason(
         self,
-        result: InferenceResult,
+        result: AttributedValue,
         isolations: Sequence[EventIsolation],
         associations: Sequence[TopologyRelation],
     ) -> str:
@@ -2218,11 +2221,11 @@ class AuditPass:
         if associations:
             return "associated_measurement"
         source = _enum_text(result.source)
-        if source == Source.DIRECT_MEASURED.value:
+        if source == ValueSource.DIRECT_MEASURED.value:
             return "direct_measurement"
-        if source == Source.MODEL_ESTIMATED.value:
+        if source == ValueSource.MODEL_ESTIMATED.value:
             return "model_estimate"
-        if source == Source.CONFIGURED_PRIOR.value:
+        if source == ValueSource.CONFIGURED_PRIOR.value:
             return "configured_prior"
         return "no_attribution"
 
@@ -2410,14 +2413,14 @@ def _circuit_confidence(circuits: Sequence[Circuit]) -> float | None:
     return max(values) if values else None
 
 
-def _coerce_confidence(raw: Any) -> ConfidenceVector | None:
+def _coerce_confidence(raw: Any) -> EvidenceVector | None:
     if raw is None:
         return None
-    if isinstance(raw, ConfidenceVector):
+    if isinstance(raw, EvidenceVector):
         return raw
     if isinstance(raw, Mapping):
         try:
-            return ConfidenceVector.model_validate(dict(raw))
+            return EvidenceVector.model_validate(dict(raw))
         except Exception:  # noqa: BLE001 - a malformed stored vector is not fatal
             return None
     return None

@@ -34,18 +34,23 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from wattmosaic_engine.contracts import (
     CTType,
     DeviceConfiguration,
     DeviceConfigurationSet,
+    EdgeEvidence,
+    EdgeLifecycleV3,
     ExpectedPower,
     HaConnectivity,
     LightConfiguration,
+    MappingEdge,
     MonitoringLevel,
-    Topology,
+    Observability,
 )
 from wattmosaic_engine.device_configuration import cts_claimed_by_dedicated
+from wattmosaic_engine.electrical._declared_shapes import DeclaredTree
 from wattmosaic_engine.ingestion.correlation import CorrelationReport
 
 #: Prefix for a device this module creates.  Kept distinct from discovery's
@@ -65,7 +70,7 @@ class Placement:
     #: Human-readable justification.  Shown, never parsed.
     evidence: tuple[str, ...] = field(default_factory=tuple)
     #: Display name the state snapshot reported for this fixture.  A device's
-    #: display name belongs to the topology row (``DeviceTopology.name``), not to
+    #: display name belongs to the topology row (``DeviceDecl.name``), not to
     #: the persisted configuration, so it travels on the placement and is handed
     #: to materialisation.  ``None`` means no name was supplied -- the engine then
     #: keeps the device id rather than inventing one from the slug.
@@ -159,7 +164,7 @@ def _existing_state_entities(
 def plan_placements(
     *,
     report: CorrelationReport,
-    topology: Topology,
+    topology: DeclaredTree,
     configurations: DeviceConfigurationSet | Iterable[DeviceConfiguration],
     assume_owned: bool = False,
     labels: Mapping[str, str] | None = None,
@@ -295,11 +300,52 @@ def merge_placements(
     )
 
 
+def mapping_edges_for_plan(
+    plan: PlacementPlan,
+    *,
+    valid_from: datetime,
+) -> tuple[MappingEdge, ...]:
+    """Build the v3 :class:`MappingEdge` rows an applied plan implies.
+
+    Auto placement is an inference, not a user declaration: every edge it
+    writes is ``declared_by="auto_placement"`` and starts at CANDIDATE with
+    INFERRED observability (HB §4.3 — one event never promotes an edge past
+    CANDIDATE).  A CT id is the v3 endpoint id for CT readers
+    (``entities.py: endpoint_id == legacy ct_id``), so the placement's monitored
+    CT becomes the mapping edge's ``endpoint_id`` verbatim.  A fixture with no
+    single monitored CT is left unmapped rather than fabricated onto a feed.
+    """
+    edges: list[MappingEdge] = []
+    for placement in plan.accepted:
+        ct_ids = tuple(dict.fromkeys(placement.configuration.monitored_by_ct_ids))
+        if len(ct_ids) != 1:
+            continue
+        endpoint_id = str(ct_ids[0])
+        edges.append(
+            MappingEdge(
+                mapping_edge_id=f"me::{placement.device_id}->{endpoint_id}",
+                subject_kind="device",
+                subject_id=placement.device_id,
+                endpoint_id=endpoint_id,
+                observability=Observability.INFERRED,
+                lifecycle=EdgeLifecycleV3.CANDIDATE,
+                declared_by="auto_placement",
+                evidence=EdgeEvidence(
+                    support=len(placement.evidence),
+                    independent_causes=1,
+                ),
+                valid_from=valid_from,
+            )
+        )
+    return tuple(sorted(edges, key=lambda edge: edge.mapping_edge_id))
+
+
 __all__ = [
     "AUTO_DEVICE_PREFIX",
     "Placement",
     "PlacementPlan",
     "auto_device_id",
+    "mapping_edges_for_plan",
     "merge_placements",
     "plan_placements",
 ]

@@ -42,43 +42,42 @@ from dataclasses import dataclass
 
 from wattmosaic_engine.contracts import (
     TIER_RANK,
-    ConfidenceTier,
     MonitoringLevel,
     PowerBehavior,
-    Source,
 )
+from wattmosaic_engine.electrical._declared_shapes import EvidenceGrade, ValueSource
 
 #: Documented *typical* score range per tier, used only to flag divergence.  Not
 #: enforced: the score is a blend of six components and a narrow range here would
 #: destroy its resolution (a repeated-update sample legitimately scores slightly
 #: lower than a fresh one inside the same tier).
-TIER_TYPICAL_SCORE: dict[ConfidenceTier, tuple[float, float]] = {
-    ConfidenceTier.TIER_0_UNKNOWN: (0.0, 0.25),
-    ConfidenceTier.TIER_1_MODELLED: (0.20, 0.65),
-    ConfidenceTier.TIER_2_INFERRED: (0.45, 0.85),
-    ConfidenceTier.TIER_3_MEASURED: (0.30, 0.97),
-    ConfidenceTier.TIER_4_VERIFIED: (0.60, 1.00),
+TIER_TYPICAL_SCORE: dict[EvidenceGrade, tuple[float, float]] = {
+    EvidenceGrade.TIER_0_UNKNOWN: (0.0, 0.25),
+    EvidenceGrade.TIER_1_MODELLED: (0.20, 0.65),
+    EvidenceGrade.TIER_2_INFERRED: (0.45, 0.85),
+    EvidenceGrade.TIER_3_MEASURED: (0.30, 0.97),
+    EvidenceGrade.TIER_4_VERIFIED: (0.60, 1.00),
 }
 
 #: Human-readable meaning, surfaced verbatim by the API so clients do not have to
 #: hard-code their own interpretation.
-TIER_DESCRIPTION: dict[ConfidenceTier, str] = {
-    ConfidenceTier.TIER_0_UNKNOWN: (
+TIER_DESCRIPTION: dict[EvidenceGrade, str] = {
+    EvidenceGrade.TIER_0_UNKNOWN: (
         "no evidence supports a device-level value; the power is left in the "
         "unknown residual"
     ),
-    ConfidenceTier.TIER_1_MODELLED: (
+    EvidenceGrade.TIER_1_MODELLED: (
         "value comes from a validated model or a configured prior only; no live "
         "measurement independently confirms it"
     ),
-    ConfidenceTier.TIER_2_INFERRED: (
+    EvidenceGrade.TIER_2_INFERRED: (
         "separated from shared or bulk CT rows; no independent corroboration"
     ),
-    ConfidenceTier.TIER_3_MEASURED: (
+    EvidenceGrade.TIER_3_MEASURED: (
         "a CT measured it, or a declared load signal corroborates a "
         "shared-channel estimate"
     ),
-    ConfidenceTier.TIER_4_VERIFIED: (
+    EvidenceGrade.TIER_4_VERIFIED: (
         "measured and independently corroborated by a declared load signal or a "
         "validated model agreeing within tolerance, on a fresh sample"
     ),
@@ -93,7 +92,7 @@ class TierInputs:
     whole state) is what makes the tier auditable and unit-testable.
     """
 
-    source: Source
+    source: ValueSource
     monitoring: MonitoringLevel = MonitoringLevel.UNKNOWN
     behavior: PowerBehavior = PowerBehavior.UNKNOWN
     #: The device's declared load signal says it is running.
@@ -123,88 +122,88 @@ class TierInputs:
     degraded: bool = False
 
 
-def evidence_tier(inp: TierInputs) -> tuple[ConfidenceTier, list[str]]:
+def evidence_tier(inp: TierInputs) -> tuple[EvidenceGrade, list[str]]:
     """Classify the evidence behind one attribution."""
     reasons: list[str] = []
 
     # ---- Tier 0: nothing supports a device-level number ------------------
-    if inp.source == Source.UNKNOWN:
+    if inp.source == ValueSource.UNKNOWN:
         reasons.append("source_unknown")
         if inp.monitoring == MonitoringLevel.HOME_TOTAL_ONLY:
             reasons.append("only_visible_in_home_total")
         elif inp.monitoring == MonitoringLevel.UNMONITORED:
             reasons.append("no_ct_observes_device")
-        return ConfidenceTier.TIER_0_UNKNOWN, reasons
+        return EvidenceGrade.TIER_0_UNKNOWN, reasons
 
     # ---- Tier 1: a model or a configured prior, nothing live ------------
-    if inp.source == Source.MODEL_ESTIMATED:
+    if inp.source == ValueSource.MODEL_ESTIMATED:
         reasons.append("model_only")
         if inp.stale:
             reasons.append("stale")
-        return ConfidenceTier.TIER_1_MODELLED, reasons
+        return EvidenceGrade.TIER_1_MODELLED, reasons
 
-    if inp.source == Source.CONFIGURED_PRIOR:
+    if inp.source == ValueSource.CONFIGURED_PRIOR:
         reasons.append(inp.prior_reason or "configured_prior_only")
         if inp.stale:
             reasons.append("stale")
-        return ConfidenceTier.TIER_1_MODELLED, reasons
+        return EvidenceGrade.TIER_1_MODELLED, reasons
 
     corroborated = inp.model_corroborates or (
         inp.state_says_on and inp.has_declared_load_signal
     )
 
     # ---- Tier 3/4: a CT actually measured this device -------------------
-    if inp.source == Source.DIRECT_MEASURED:
+    if inp.source == ValueSource.DIRECT_MEASURED:
         # Historical rows only: nothing produces this source any more, but a
         # stored result must still grade the way it was stored.  The reasons
         # name the *measurement*, never the retired channel role.
         reasons.append("direct_ct_measurement")
         if inp.stale:
             reasons.append("direct_ct_stale:not_verifiable")
-            return ConfidenceTier.TIER_3_MEASURED, reasons
+            return EvidenceGrade.TIER_3_MEASURED, reasons
         if inp.state_says_off:
             # The CT carries power but the device claims to be off.  The value is
             # measured; the *attribution* is what is in question.
             reasons.append("direct_ct_disagrees_with_state:not_verifiable")
-            return ConfidenceTier.TIER_3_MEASURED, reasons
+            return EvidenceGrade.TIER_3_MEASURED, reasons
         if corroborated and not inp.degraded:
             reasons.append(
                 "model_corroborates" if inp.model_corroborates else "load_signal_corroborates"
             )
-            return ConfidenceTier.TIER_4_VERIFIED, reasons
+            return EvidenceGrade.TIER_4_VERIFIED, reasons
         if corroborated:
             reasons.append("degraded_measurements")
-        return ConfidenceTier.TIER_3_MEASURED, reasons
+        return EvidenceGrade.TIER_3_MEASURED, reasons
 
     # ---- Tier 2/3: separated from rows ---------------------------------
-    if inp.source == Source.INFERRED:
+    if inp.source == ValueSource.INFERRED:
         reasons.append("constrained_separation")
         if inp.stale:
             reasons.append("inferred_stale")
-            return ConfidenceTier.TIER_2_INFERRED, reasons
+            return EvidenceGrade.TIER_2_INFERRED, reasons
         if inp.measured_step:
             # The CT row literally moved by this many watts at the instant this
             # device changed state, and nothing else on the row did.  That is a
             # measurement of the device's draw, not a share of a row: it is
             # graded like one even though the row is shared (ADR-0026).
             reasons.append("shared_circuit_step_measured")
-            return ConfidenceTier.TIER_3_MEASURED, reasons
+            return EvidenceGrade.TIER_3_MEASURED, reasons
         if inp.monitoring == MonitoringLevel.SHARED:
             reasons.append("shared_circuit_separation")
         if corroborated and not inp.degraded:
             reasons.append(
                 "model_corroborates" if inp.model_corroborates else "load_signal_corroborates"
             )
-            return ConfidenceTier.TIER_3_MEASURED, reasons
+            return EvidenceGrade.TIER_3_MEASURED, reasons
         if inp.degraded:
             reasons.append("degraded_measurements")
-        return ConfidenceTier.TIER_2_INFERRED, reasons
+        return EvidenceGrade.TIER_2_INFERRED, reasons
 
-    reasons.append("unhandled_source")  # pragma: no cover - Source is a closed enum
-    return ConfidenceTier.TIER_0_UNKNOWN, reasons
+    reasons.append("unhandled_source")  # pragma: no cover - ValueSource is a closed enum
+    return EvidenceGrade.TIER_0_UNKNOWN, reasons
 
 
-def grade(inp: TierInputs, score: float) -> tuple[ConfidenceTier, float, list[str]]:
+def grade(inp: TierInputs, score: float) -> tuple[EvidenceGrade, float, list[str]]:
     """Return ``(tier, score, reasons)`` for one attribution.
 
     The score is returned **unchanged**: grading evidence must not rewrite a
@@ -220,17 +219,17 @@ def grade(inp: TierInputs, score: float) -> tuple[ConfidenceTier, float, list[st
     return tier, float(score), reasons
 
 
-def tier_rank(tier: ConfidenceTier | str) -> int:
+def tier_rank(tier: EvidenceGrade | str) -> int:
     """Numeric rank for comparisons; unknown strings sort lowest."""
-    if isinstance(tier, ConfidenceTier):
+    if isinstance(tier, EvidenceGrade):
         return TIER_RANK[tier]
     try:
-        return TIER_RANK[ConfidenceTier(str(tier))]
+        return TIER_RANK[EvidenceGrade(str(tier))]
     except ValueError:
         return 0
 
 
-def describe(tier: ConfidenceTier) -> str:
+def describe(tier: EvidenceGrade) -> str:
     return TIER_DESCRIPTION[tier]
 
 

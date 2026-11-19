@@ -3,7 +3,7 @@
 The retired ``electrical/panel_tree.py`` built a panel → circuits → devices
 payload from the pointer-based topology graph.  This module is the v3
 replacement: it builds the same JSON envelope from the authoritative
-:class:`~wattmosaic_engine.contracts.Topology` contract and T1's primary display
+:class:`~wattmosaic_engine.contracts.DeclaredTree` contract and T1's primary display
 tree where available.  It is a pure read-time projection — no DB, no wall clock
 (``generated_at`` is supplied by the caller), no pointer-tree graph engine.
 
@@ -19,7 +19,9 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from ..contracts import CTChannel, DeviceTopology, Topology, utcnow
+from wattmosaic_engine.electrical._declared_shapes import ChannelDecl, DeclaredTree, DeviceDecl
+
+from ..contracts import utcnow
 from ..electrical.topology_graph import DisplayNode, TopologyGraph
 
 #: Schema version of the tree payload (panel contract §1.1).
@@ -40,7 +42,7 @@ def _slug(name: str) -> str:
     return _SLUG_RE.sub("_", name.lower()).strip("_") or "panel"
 
 
-def _panel_name(channel: CTChannel) -> str | None:
+def _panel_name(channel: ChannelDecl) -> str | None:
     """Panel id declared on a channel, or the legacy evidence marker."""
     panel_id = getattr(channel, "panel_id", None)
     if panel_id:
@@ -53,7 +55,7 @@ def _panel_name(channel: CTChannel) -> str | None:
     return None
 
 
-def _parent(channel: CTChannel) -> str | None:
+def _parent(channel: ChannelDecl) -> str | None:
     return getattr(channel, "parent_ct_id", None)
 
 
@@ -69,7 +71,7 @@ def _result_power(result: Any) -> float | None:
 
 
 def _readings_nodes(
-    topology: Topology, latest_results: Mapping[str, Any] | None
+    topology: DeclaredTree, latest_results: Mapping[str, Any] | None
 ) -> dict[str, float | None]:
     out: dict[str, float | None] = {}
     for device in topology.devices:
@@ -79,14 +81,14 @@ def _readings_nodes(
 
 
 def build_display_tree(
-    topology: Topology,
+    topology: DeclaredTree,
     *,
     latest_results: Mapping[str, Any] | None = None,
     generated_at: Any = None,
     include_nesting: bool = False,
     nesting: Any = None,
 ) -> dict[str, Any]:
-    """Build the panel display tree payload from a :class:`Topology`.
+    """Build the panel display tree payload from a :class:`DeclaredTree`.
 
     ``generated_at`` is injected by the caller (an ISO string); this module
     never reads a wall clock.  ``nesting`` may carry advisory nesting proposals
@@ -131,7 +133,7 @@ def build_display_tree(
         panels.setdefault(slug, []).append(channel.ct_id)
 
     device_power = _readings_nodes(topology, latest_results)
-    device_by_ct: dict[str, list[DeviceTopology]] = {}
+    device_by_ct: dict[str, list[DeviceDecl]] = {}
     for device in topology.devices:
         for cid in device.branch_ct_ids:
             device_by_ct.setdefault(cid, []).append(device)
@@ -160,7 +162,7 @@ def build_display_tree(
             "children": [*kids, *devices],
         }
 
-    def device_node(device: DeviceTopology, depth: int) -> dict[str, Any]:
+    def device_node(device: DeviceDecl, depth: int) -> dict[str, Any]:
         return {
             "id": f"device:{device.device_id}",
             "kind": "device",

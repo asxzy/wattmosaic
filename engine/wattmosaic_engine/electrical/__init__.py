@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from wattmosaic_engine.contracts import Topology
+from wattmosaic_engine.electrical._declared_shapes import DeclaredTree
 from wattmosaic_engine.electrical.direct import DEFAULT_MAX_LEG_SKEW_S
 from wattmosaic_engine.electrical.factors import (
     BasisSample,
@@ -86,7 +86,7 @@ class LinearConstraint:
 class ElectricalModel:
     """Facade implementing the authoritative §3.3 interface."""
 
-    topology: Topology
+    topology: DeclaredTree
     phase_split_l1: float = 0.5
     graph: TopologyGraph = field(init=False)
 

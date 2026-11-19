@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol, runtime_checkable
 
+from wattmosaic_engine.electrical._declared_shapes import DeclaredTree, EdgeState, RelationKindDecl
+
 from ..api.facade import InvalidRequest, NotFound
 from ..contracts import (
     ConfigurationEvent,
@@ -19,11 +21,8 @@ from ..contracts import (
     EdgeLifecycleV3,
     EndpointConfigRevision,
     MeasurementEndpoint,
-    RelationKind,
     RelationType,
-    Topology,
     TopologyEdgeV3,
-    TopologyStatus,
 )
 from ..electrical.topology_graph import DisplayNode, TopologyGraph
 from ..electrical.topology_inference import infer_nesting
@@ -611,16 +610,16 @@ def edges_confirmed_for(service: Any, subject_id: str) -> bool:
 class TopologyApiMixin:
     """Behaviour for one responsibility of :class:`EngineCore`."""
 
-    def topology(self) -> Topology:
+    def topology(self) -> DeclaredTree:
         topology = self._active_topology()
         if topology is None:
-            return Topology(version=0, status=TopologyStatus.CANDIDATE, notes=["no topology configured"])
+            return DeclaredTree(version=0, status=EdgeState.CANDIDATE, notes=["no topology configured"])
         return topology
 
-    def set_topology(self, topology: Any) -> Topology:
-        if not isinstance(topology, Topology):
-            topology = Topology.model_validate(topology)
-        if topology.status == TopologyStatus.CONFIRMED:
+    def set_topology(self, topology: Any) -> DeclaredTree:
+        if not isinstance(topology, DeclaredTree):
+            topology = DeclaredTree.model_validate(topology)
+        if topology.status == EdgeState.CONFIRMED:
             # Replacing a confirmed topology creates a candidate revision unless
             # the caller explicitly marks it confirmed.
             pass
@@ -634,15 +633,15 @@ class TopologyApiMixin:
         )
         return self.topology_cache or topology
 
-    def confirm_topology(self) -> Topology:
+    def confirm_topology(self) -> DeclaredTree:
         topology = self._active_topology()
         if topology is None:
             raise NotFound("no topology to confirm")
         confirmed = topology.model_copy(
             update={
-                "status": TopologyStatus.CONFIRMED,
+                "status": EdgeState.CONFIRMED,
                 "devices": [
-                    d.model_copy(update={"topology_status": TopologyStatus.CONFIRMED})
+                    d.model_copy(update={"topology_status": EdgeState.CONFIRMED})
                     for d in topology.devices
                 ],
             }
@@ -880,7 +879,7 @@ class TopologyApiMixin:
         different questions and must never be merged into one list.
         """
         out: dict[str, list[dict[str, Any]]] = {}
-        for relation_kind in RelationKind:
+        for relation_kind in RelationKindDecl:
             if kind is not None and str(getattr(relation_kind, "value", relation_kind)) != str(
                 kind
             ):
@@ -1087,7 +1086,7 @@ def _forward_fill(
     return out
 
 
-def _linkable_state_entities(topology: Topology) -> set[str]:
+def _linkable_state_entities(topology: DeclaredTree) -> set[str]:
     """Entities the topology declares as runtime signals for some device.
 
     Auto placement may only reason about entities the engine already links.  An

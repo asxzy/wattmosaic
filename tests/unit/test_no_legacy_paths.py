@@ -224,3 +224,98 @@ def test_contract_version_is_cut_over_to_3_0_0() -> None:
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     assert module.CONTRACT_VERSION == contracts.CONTRACT_VERSION
+
+
+# --------------------------------------------------------------------------- #
+# ZT: topology / disaggregation area — no legacy contract names.
+# --------------------------------------------------------------------------- #
+#
+# Contract 3.0 removes the legacy contract models and enums.  Every file owned
+# by the topology/disaggregation area must name the v3 contracts (or the neutral
+# migration seam ``electrical/_declared_shapes.py``) instead.  The seam is the
+# single documented bridge that still imports the retired models so the
+# read-only projections stay byte-identical; ZC rewrites only that file at the
+# final cutover.  It is excluded from this area-scoped assertion exactly as
+# ``contracts/legacy.py`` is excluded from the global gate above.
+
+ZT_AREA_FILES = (
+    "electrical/topology.py",
+    "electrical/factors.py",
+    "electrical/hierarchy.py",
+    "electrical/main_power.py",
+    "electrical/topology_change.py",
+    "electrical/topology_inference.py",
+    "electrical/__init__.py",
+    "disaggregation/association.py",
+    "disaggregation/audit.py",
+    "disaggregation/auto_placement.py",
+    "disaggregation/circuits.py",
+    "disaggregation/mapping.py",
+    "disaggregation/reconcile.py",
+    "disaggregation/tiers.py",
+    "disaggregation/group_fit.py",
+    "disaggregation/isolation.py",
+    "disaggregation/_shared.py",
+    "device_configuration.py",
+    "device_links.py",
+    "mapping/display_tree.py",
+    "versioning/__init__.py",
+    "versioning/service.py",
+    "versioning/workflow.py",
+    "core/topology_api.py",
+    "core/discovery_api.py",
+    "api/routes/topology.py",
+    "storage/repositories/topology.py",
+    "storage/repositories/associations.py",
+)
+
+#: Retired contract names eliminated from this area at contract 3.0.
+ZT_LEGACY_NAMES = frozenset(
+    {
+        "CTChannel",
+        "DeviceTopology",
+        "Topology",
+        "branch_ct_ids",
+        "parent_ct_id",
+        "paired_ct_id",
+        "alias_of_ct_id",
+        "Source",
+        "PowerState",
+        "ConfidenceTier",
+        "TopologyStatus",
+        "RelationKind",
+        "MappingObservability",
+        "MappingCellStatus",
+        "InferenceResult",
+        "Reconciliation",
+        "DeviceReaderMappingCell",
+        "DeviceModelVersion",
+        "DeviceModelParameters",
+        "LearningSample",
+        "Measurement",
+        "DeviceEvent",
+        "EventEvidenceRecord",
+        "ConfigurationChangeEvent",
+        "TopologyEdge",
+        "TopologyVersion",
+        "UnknownLoadProfile",
+        "PowerLevel",
+        "ConfidenceVector",
+    }
+)
+
+
+def test_no_legacy_names_in_topology_disaggregation() -> None:
+    """No topology/disaggregation area file binds a retired contract name."""
+    offenders: list[str] = []
+    for rel in ZT_AREA_FILES:
+        path = ENGINE / rel
+        if not path.exists():
+            continue  # a module deleted in a later cutover cannot offend
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        hits = _bound_names(tree) & ZT_LEGACY_NAMES
+        for name in sorted(hits):
+            offenders.append(f"{rel}: {name}")
+    assert not offenders, "legacy contract names remain in the area:\n" + "\n".join(
+        offenders
+    )

@@ -2,7 +2,7 @@
 
 This module is a *read-time projection* over three existing inputs:
 
-* the electrical :class:`~wattmosaic_engine.contracts.Topology` (channels,
+* the electrical :class:`~wattmosaic_engine.contracts.DeclaredTree` (channels,
   devices, containment and typed relations);
 * the device-model views (:class:`~wattmosaic_engine.models.view.ModelView`) keyed by device id;
 * evidence: ``DEVICE_CT_ASSOCIATION`` relations and unknown-load/residual
@@ -12,7 +12,7 @@ It never writes storage, never reads a clock, and never takes a sample.  A cell
 is recomputed only from the three inputs above, so the same inputs always yield
 a byte-identical result (REQ-MAPPING-001, REQ-MAPPING-005): there is no
 per-sample snapshot.  The matrix cites the source of every value it publishes
-through :attr:`DeviceReaderMappingCell.sources_used`.
+through :attr:`MappingCellDecl.sources_used`.
 
 Honesty rules that shape the projection
 ---------------------------------------
@@ -21,7 +21,7 @@ Honesty rules that shape the projection
   Otherwise the field is ``None``.  Observability ``UNKNOWN`` always carries
   ``None`` for all three, as the contract requires.
 * Unknown observed-but-unidentified loads get an explicit
-  :attr:`DeviceReaderMappingCell.is_unknown_load` marker with a namespaced,
+  :attr:`MappingCellDecl.is_unknown_load` marker with a namespaced,
   opaque ``device_id`` (never a fabricated real device id).
 * Cardinality (1:1 / 1:N / N:1 / N:N) is derived from the topology's own
   device↔reader incidence; a shared conductor is reported as
@@ -40,19 +40,21 @@ from datetime import datetime
 from typing import Any
 
 from wattmosaic_engine.contracts import (
-    ConfidenceVector,
-    CTChannel,
-    DeviceReaderMappingCell,
-    DeviceTopology,
-    MappingCellStatus,
-    MappingObservability,
     MeasurementBasis,
-    RelationKind,
-    Topology,
     TopologyRelation,
-    TopologyStatus,
-    UnknownLoadProfile,
     UnknownResidualEvent,
+)
+from wattmosaic_engine.electrical._declared_shapes import (
+    CellStateDecl,
+    ChannelDecl,
+    DeclaredTree,
+    DeviceDecl,
+    EdgeState,
+    EvidenceVector,
+    MappingCellDecl,
+    ObservabilityDecl,
+    RelationKindDecl,
+    UnknownLoadDecl,
 )
 from wattmosaic_engine.electrical.topology import build_graph, version_token
 from wattmosaic_engine.models.view import ModelView
@@ -92,7 +94,7 @@ class MappingEvidence:
     """The evidence side of the projection, all inputs optional/neutral."""
 
     associations: tuple[TopologyRelation, ...] = ()
-    unknown_load_profiles: tuple[UnknownLoadProfile, ...] = ()
+    unknown_load_profiles: tuple[UnknownLoadDecl, ...] = ()
     unknown_residual_events: tuple[UnknownResidualEvent, ...] = ()
 
 
@@ -121,7 +123,7 @@ class MappingCoverage:
 class MappingMatrix:
     """The derived matrix: cells plus its own coverage statement."""
 
-    cells: tuple[DeviceReaderMappingCell, ...]
+    cells: tuple[MappingCellDecl, ...]
     coverage: MappingCoverage
     reader_configuration_version: str
     topology_version: str | None = None
@@ -212,7 +214,7 @@ def _delta_values(rows: Sequence[Any]) -> list[float]:
 # --------------------------------------------------------------------------- #
 
 
-def _declared_pairs(topology: Topology) -> set[tuple[str, str]]:
+def _declared_pairs(topology: DeclaredTree) -> set[tuple[str, str]]:
     """Device↔reader pairs declared by the topology structure itself."""
     pairs: set[tuple[str, str]] = set()
     device_ids = {d.device_id for d in topology.devices}
@@ -228,10 +230,10 @@ def _declared_pairs(topology: Topology) -> set[tuple[str, str]]:
     return pairs
 
 
-def _is_ct_auto_circuit(device: DeviceTopology, channels: Mapping[str, CTChannel]) -> bool:
+def _is_ct_auto_circuit(device: DeviceDecl, channels: Mapping[str, ChannelDecl]) -> bool:
     """True for a discovery-generated CT circuit, not a real appliance.
 
-    Passive discovery emits one ``DeviceTopology`` per measured CT conductor
+    Passive discovery emits one ``DeviceDecl`` per measured CT conductor
     (``dev_<ct_id>``) so the topology validates and the circuit is visible.  Such
     a row describes a *conductor* that may feed zero or more appliances; it is
     not an appliance itself.  CTs belong on the reader/column axis, so these
@@ -267,7 +269,7 @@ def _is_ct_auto_circuit(device: DeviceTopology, channels: Mapping[str, CTChannel
 
 
 def _real_device_ids(
-    topology: Topology,
+    topology: DeclaredTree,
     *,
     device_sources: Sequence[Sequence[Any]] = (),
 ) -> tuple[str, ...]:
@@ -279,7 +281,7 @@ def _real_device_ids(
       the caller (HA registry devices and/or DeviceConfiguration-backed devices).
       Each record may be a mapping or an object exposing ``device_id`` and an
       optional ``name``.  A HA registry id may be either ``device_id`` or ``id``.
-    * ``topology.devices`` — a DeviceTopology row that is not a discovery CT
+    * ``topology.devices`` — a DeviceDecl row that is not a discovery CT
       auto-circuit (see :func:`_is_ct_auto_circuit`).  Config-backed devices and
       auto-placed HA appliances live here.
 
@@ -311,7 +313,7 @@ def _real_device_ids(
 
 
 def _device_names(
-    topology: Topology,
+    topology: DeclaredTree,
     *,
     device_sources: Sequence[Sequence[Any]] = (),
 ) -> dict[str, str]:
@@ -353,7 +355,7 @@ def _device_names(
     return {key: value for key, value in names.items() if key in axis}
 
 
-def _reader_ids(topology: Topology) -> tuple[str, ...]:
+def _reader_ids(topology: DeclaredTree) -> tuple[str, ...]:
     """The reader/column axis: every real CT channel in the topology."""
     return tuple(sorted(topology.channel_map()))
 
@@ -366,7 +368,7 @@ def _association_pairs(
     """Valid association edges keyed by (device, reader); evidence wins on dupes."""
     out: dict[tuple[str, str], TopologyRelation] = {}
     for relation in relations:
-        if str(getattr(relation.kind, "value", relation.kind)) != RelationKind.DEVICE_CT_ASSOCIATION.value:
+        if str(getattr(relation.kind, "value", relation.kind)) != RelationKindDecl.DEVICE_CT_ASSOCIATION.value:
             continue
         pair = (relation.subject_id, relation.object_id)
         if pair[0] not in known_devices or pair[1] not in known_readers:
@@ -392,19 +394,19 @@ def _observability(
     is_attribution_ct: bool,
     is_enclosing: bool,
     has_association: bool,
-) -> tuple[MappingObservability, bool]:
+) -> tuple[ObservabilityDecl, bool]:
     """Return (observability, identifiable) for a declared pairing."""
     if reader_is_owner:
-        return MappingObservability.DIRECT, True
+        return ObservabilityDecl.DIRECT, True
     if is_attribution_ct:
-        return MappingObservability.DERIVED, True
+        return ObservabilityDecl.DERIVED, True
     if is_enclosing:
         # A device behind a shared conductor: observed, not identifiable from
         # the topology alone.  A supported association may still identify it.
-        return MappingObservability.INDIRECT, not has_association
+        return ObservabilityDecl.INDIRECT, not has_association
     if has_association:
-        return MappingObservability.DERIVED, True
-    return MappingObservability.UNKNOWN, False
+        return ObservabilityDecl.DERIVED, True
+    return ObservabilityDecl.UNKNOWN, False
 
 
 def _contribution(
@@ -444,22 +446,22 @@ def _status(
     evidence_count: int,
     model: ModelView | None,
     identifiable: bool,
-    observability: MappingObservability,
-) -> MappingCellStatus:
-    if observability is MappingObservability.INDIRECT and not identifiable:
-        return MappingCellStatus.NON_IDENTIFIABLE
+    observability: ObservabilityDecl,
+) -> CellStateDecl:
+    if observability is ObservabilityDecl.INDIRECT and not identifiable:
+        return CellStateDecl.NON_IDENTIFIABLE
     if verdict in (_VERDICT_AMBIGUOUS, "conflicted"):
-        return MappingCellStatus.CONFLICTED
+        return CellStateDecl.CONFLICTED
     if verdict == _VERDICT_SUPPORTED:
-        confirmed = relation is not None and TopologyStatus(relation.status) is TopologyStatus.CONFIRMED
+        confirmed = relation is not None and EdgeState(relation.status) is EdgeState.CONFIRMED
         if confirmed and evidence_count >= CONFIRM_MIN_EVENTS:
-            return MappingCellStatus.CONFIRMED
-        return MappingCellStatus.PROVISIONAL
+            return CellStateDecl.CONFIRMED
+        return CellStateDecl.PROVISIONAL
     if verdict == _VERDICT_SPLIT:
-        return MappingCellStatus.PROVISIONAL
+        return CellStateDecl.PROVISIONAL
     if verdict == _VERDICT_SINGLE or model is not None:
-        return MappingCellStatus.LEARNING
-    return MappingCellStatus.UNKNOWN
+        return CellStateDecl.LEARNING
+    return CellStateDecl.UNKNOWN
 
 
 def _confidence(
@@ -467,12 +469,12 @@ def _confidence(
     relation: TopologyRelation | None,
     model: ModelView | None,
     verdict: str,
-) -> ConfidenceVector:
+) -> EvidenceVector:
     ct_association: float | None = None
     topology_conf: float | None = None
     if relation is not None:
         ct_association = _finite(relation.confidence)
-        if TopologyStatus(relation.status) is TopologyStatus.CONFIRMED:
+        if EdgeState(relation.status) is EdgeState.CONFIRMED:
             topology_conf = 1.0
         # Ambiguity caps confidence explicitly (REQ-MAPPING-006); it never
         # rewards the number of readers.
@@ -484,7 +486,7 @@ def _confidence(
     if model is not None:
         quality = model.quality
         power = _rounded(quality) if quality > 0.0 else None
-    return ConfidenceVector(
+    return EvidenceVector(
         power=power,
         ct_association=ct_association,
         topology=topology_conf,
@@ -520,15 +522,15 @@ def _device_cell(
     relation: TopologyRelation | None,
     model: ModelView | None,
     relation_type: str,
-    observability: MappingObservability,
+    observability: ObservabilityDecl,
     identifiable: bool,
     basis: MeasurementBasis,
     sources: list[dict[str, str]],
     reader_configuration_version: str,
     topology_version: str | None,
-) -> DeviceReaderMappingCell:
+) -> MappingCellDecl:
     estimate, low, high, supporting = _contribution(relation=relation, model=model)
-    if observability is MappingObservability.UNKNOWN:
+    if observability is ObservabilityDecl.UNKNOWN:
         estimate, low, high = None, None, None
     verdict = ""
     if relation is not None:
@@ -547,7 +549,7 @@ def _device_cell(
     )
     confidence = _confidence(relation=relation, model=model, verdict=verdict)
     last_validated = _last_validated(relation, verdict)
-    return DeviceReaderMappingCell(
+    return MappingCellDecl(
         device_id=device_id,
         reader_id=reader_id,
         reader_configuration_version=reader_configuration_version,
@@ -576,20 +578,20 @@ def _device_cell(
 
 def _unknown_cells(
     *,
-    profiles: Sequence[UnknownLoadProfile],
+    profiles: Sequence[UnknownLoadDecl],
     events: Sequence[UnknownResidualEvent],
     reader_configuration_version: str,
     topology_version: str | None,
-) -> tuple[list[DeviceReaderMappingCell], tuple[str, ...]]:
+) -> tuple[list[MappingCellDecl], tuple[str, ...]]:
     by_reader: dict[str, list[UnknownResidualEvent]] = {}
     for event in events:
         by_reader.setdefault(event.reader_id, []).append(event)
 
-    profile_by_scope: dict[str, list[UnknownLoadProfile]] = {}
+    profile_by_scope: dict[str, list[UnknownLoadDecl]] = {}
     for profile in profiles:
         profile_by_scope.setdefault(profile.scope_id, []).append(profile)
 
-    cells: list[DeviceReaderMappingCell] = []
+    cells: list[MappingCellDecl] = []
     scopes: set[str] = set()
     for reader_id in sorted(by_reader):
         reader_events = sorted(by_reader[reader_id], key=lambda e: (e.window_start, e.event_id))
@@ -607,18 +609,18 @@ def _unknown_cells(
             sources.append(_source("unknown_load_profile", "observed_profile"))
         scopes.update(str(event.scope_id) for event in reader_events)
         cells.append(
-            DeviceReaderMappingCell(
+            MappingCellDecl(
                 device_id=f"{_UNKNOWN_ID_PREFIX}{reader_id}",
                 reader_id=reader_id,
                 reader_configuration_version=reader_configuration_version,
-                observability=MappingObservability.DERIVED,
+                observability=ObservabilityDecl.DERIVED,
                 estimated_contribution_w=estimate,
                 min_contribution_w=None,
                 max_contribution_w=None,
-                confidence=ConfidenceVector(method=METHOD),
+                confidence=EvidenceVector(method=METHOD),
                 evidence_count=len(reader_events),
                 last_validated_at=None,
-                status=MappingCellStatus.NON_IDENTIFIABLE,
+                status=CellStateDecl.NON_IDENTIFIABLE,
                 basis=MeasurementBasis.UNKNOWN,
                 relation_type=None,
                 sources_used=_sorted_sources(sources),
@@ -637,7 +639,7 @@ def _unknown_cells(
 
 
 def build_mapping_matrix(
-    topology: Topology,
+    topology: DeclaredTree,
     *,
     models: Mapping[str, ModelView | None] | None = None,
     evidence: MappingEvidence | None = None,
@@ -699,7 +701,7 @@ def build_mapping_matrix(
     # device through more than one overlapping path (1:N from the device side).
     non_summing = tuple(sorted(reader for reader, devs in reader_devices.items() if len(devs) > 1))
 
-    cells: list[DeviceReaderMappingCell] = []
+    cells: list[MappingCellDecl] = []
     attributed_readers: set[str] = set()
     for device_id, reader_id in sorted(all_pairs):
         relation = assoc_by_pair.get((device_id, reader_id))
@@ -780,12 +782,12 @@ def build_mapping_matrix(
 
 
 # --------------------------------------------------------------------------- #
-# Reconciliation after a topology version change (REQ-TOPO-009,
+# BalanceReport after a topology version change (REQ-TOPO-009,
 # REQ-CHANGE-004/007, REQ-MAPPING-005; gap G-08)
 # --------------------------------------------------------------------------- #
 #
 # A confirmed topology change changes the configuration that downstream
-# inferences and mapping cells were computed against.  Reconciliation answers
+# inferences and mapping cells were computed against.  BalanceReport answers
 # exactly one question -- "what does this change invalidate?" -- without
 # mutating any historical observation.  It is a *pure projection*: given the new
 # topology and a snapshot of existing records/cells it returns (a) the matrix
@@ -873,7 +875,7 @@ def reconcile_topology_change(
     *,
     old_version: int | str | None,
     new_version: int | str | None,
-    new_topology: Topology,
+    new_topology: DeclaredTree,
     reader_configuration_version: str,
     inference_records: Sequence[Any] = (),
     current_matrix: MappingMatrix | None = None,

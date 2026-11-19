@@ -16,7 +16,9 @@ import json
 from datetime import datetime
 from typing import Any
 
-from ...contracts import MeasurementFactor, RelationKind, TopologyRelation, validate_factor_intervals
+from wattmosaic_engine.electrical._declared_shapes import RelationKindDecl
+
+from ...contracts import MeasurementFactor, TopologyRelation, validate_factor_intervals
 from ..repositories import Repository, enum_value, iso
 
 
@@ -54,7 +56,7 @@ class AssociationsRepository(Repository):
                 ),
             )
 
-    def relations_of_kind(self, kind: RelationKind | str) -> list[dict[str, Any]]:
+    def relations_of_kind(self, kind: RelationKindDecl | str) -> list[dict[str, Any]]:
         """Every stored edge of one kind, so kinds cannot be conflated by query."""
         with self._lock:
             rows = self._conn.execute(

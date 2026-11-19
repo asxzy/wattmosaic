@@ -33,14 +33,16 @@ from datetime import UTC, datetime
 from typing import Any
 
 from wattmosaic_engine.contracts import (
-    CTChannel,
     CTType,
-    DeviceTopology,
     EdgeLifecycle,
     Phase,
-    Topology,
     TopologyRelation,
-    TopologyStatus,
+)
+from wattmosaic_engine.electrical._declared_shapes import (
+    ChannelDecl,
+    DeclaredTree,
+    DeviceDecl,
+    EdgeState,
 )
 from wattmosaic_engine.electrical.factors import FactorRegistry, scale_reading
 
@@ -70,18 +72,18 @@ class Discipline:
     most_specific_ct_id: str | None
     enclosing_branch_ct_ids: tuple[str, ...]
     enclosing_main_ct_ids: tuple[str, ...]
-    topology_status: TopologyStatus
+    topology_status: EdgeState
 
     @property
     def is_confirmed(self) -> bool:
-        return self.topology_status == TopologyStatus.CONFIRMED
+        return self.topology_status == EdgeState.CONFIRMED
 
 
 @dataclass(slots=True)
 class TopologyGraph:
-    """Validated, indexed view over a :class:`Topology` contract."""
+    """Validated, indexed view over a :class:`DeclaredTree` contract."""
 
-    topology: Topology
+    topology: DeclaredTree
     phase_split_l1: float = 0.5
     #: Per-sample factor semantics (contract 1.6.0).  When supplied, scaling is
     #: resolved against the interval that covers the sample's timestamp, and a
@@ -97,8 +99,8 @@ class TopologyGraph:
     double_pole_pairs: list[tuple[str, str]] = field(default_factory=list, init=False)
     _ancestors: dict[str, tuple[str, ...]] = field(default_factory=dict, init=False)
     _descendants: dict[str, tuple[str, ...]] = field(default_factory=dict, init=False)
-    _channels: dict[str, CTChannel] = field(default_factory=dict, init=False)
-    _devices: dict[str, DeviceTopology] = field(default_factory=dict, init=False)
+    _channels: dict[str, ChannelDecl] = field(default_factory=dict, init=False)
+    _devices: dict[str, DeviceDecl] = field(default_factory=dict, init=False)
     _nested_mains_seen: list[str] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
@@ -112,13 +114,13 @@ class TopologyGraph:
     def _index(self) -> None:
         self.problems = []
         self._nested_mains_seen = []
-        cmap: dict[str, CTChannel] = {}
+        cmap: dict[str, ChannelDecl] = {}
         for ch in self.topology.channels:
             if ch.ct_id in cmap:
                 self.problems.append(f"duplicate CT id: {ch.ct_id}")
                 continue
             cmap[ch.ct_id] = ch
-        dmap: dict[str, DeviceTopology] = {}
+        dmap: dict[str, DeviceDecl] = {}
         for dev in self.topology.devices:
             if dev.device_id in dmap:
                 self.problems.append(f"duplicate device id: {dev.device_id}")
@@ -283,17 +285,17 @@ class TopologyGraph:
     # Lookups
     # ------------------------------------------------------------------ #
     @property
-    def channels(self) -> dict[str, CTChannel]:
+    def channels(self) -> dict[str, ChannelDecl]:
         return self._channels
 
     @property
-    def devices(self) -> dict[str, DeviceTopology]:
+    def devices(self) -> dict[str, DeviceDecl]:
         return self._devices
 
-    def channel(self, ct_id: str) -> CTChannel | None:
+    def channel(self, ct_id: str) -> ChannelDecl | None:
         return self._channels.get(ct_id)
 
-    def device(self, device_id: str) -> DeviceTopology | None:
+    def device(self, device_id: str) -> DeviceDecl | None:
         return self._devices.get(device_id)
 
     def ancestors(self, ct_id: str) -> tuple[str, ...]:
@@ -310,10 +312,10 @@ class TopologyGraph:
         ch = self._channels.get(ct_id)
         return bool(ch and ch.enabled)
 
-    def main_channels(self) -> list[CTChannel]:
+    def main_channels(self) -> list[ChannelDecl]:
         return [c for c in self._channels.values() if c.ct_type == CTType.MAIN and c.enabled]
 
-    def branch_channels(self) -> list[CTChannel]:
+    def branch_channels(self) -> list[ChannelDecl]:
         return [c for c in self._channels.values() if c.ct_type == CTType.BRANCH and c.enabled]
 
     def most_specific_branch_group(self, device_id: str) -> tuple[str, ...]:
@@ -418,7 +420,7 @@ class TopologyGraph:
                 most_specific_ct_id=None,
                 enclosing_branch_ct_ids=(),
                 enclosing_main_ct_ids=(),
-                topology_status=TopologyStatus.REJECTED,
+                topology_status=EdgeState.REJECTED,
             )
         group = self.attribution_ct_ids(device_id)
         most_specific = group[0] if group else None
@@ -446,7 +448,7 @@ class TopologyGraph:
             most_specific_ct_id=most_specific,
             enclosing_branch_ct_ids=tuple(enclosing_branch),
             enclosing_main_ct_ids=tuple(enclosing_main),
-            topology_status=TopologyStatus(dev.topology_status),
+            topology_status=EdgeState(dev.topology_status),
         )
 
     def nested_channel_ids(self, ct_id: str) -> tuple[str, ...]:
@@ -466,7 +468,7 @@ class TopologyGraph:
     def device_phase(self, device_id: str) -> Phase:
         """The declared phase of a device, else the one its own CTs establish.
 
-        ``DeviceTopology.phase`` is the strongest statement, but it is frequently
+        ``DeviceDecl.phase`` is the strongest statement, but it is frequently
         left ``UNKNOWN`` -- discovery never guesses it, and the wizard makes it
         optional.  The channel a device is measured by does state its own leg,
         and that is a declaration about the same conductor, so it is evidence
@@ -627,7 +629,7 @@ class TopologyGraph:
           Without a ``timestamp`` the registry cannot answer honestly (a factor
           change makes "now" ambiguous), so the declared *current* scalar is
           used -- exactly the legacy behaviour.
-        * otherwise ``CTChannel.measurement_multiplier``.
+        * otherwise ``ChannelDecl.measurement_multiplier``.
 
         The multiplier is *never* inferred from ``phase`` or ``ct_type``: the
         device commonly applies the circuit multiplier itself and already
@@ -675,7 +677,7 @@ class TopologyGraph:
             seen.add(current)
             current = target
 
-    def alias_channels(self) -> list[CTChannel]:
+    def alias_channels(self) -> list[ChannelDecl]:
         """Channels that measure a wire another channel already measures."""
         return [c for c in self._channels.values() if c.alias_of_ct_id is not None]
 
@@ -714,13 +716,13 @@ class TopologyGraph:
                 feeds.append(ch.ct_id)
         return sorted(feeds)
 
-    def feed_channels(self) -> list[CTChannel]:
-        """:meth:`effective_feeds` as ``CTChannel`` objects, in the same order."""
+    def feed_channels(self) -> list[ChannelDecl]:
+        """:meth:`effective_feeds` as ``ChannelDecl`` objects, in the same order."""
         return [self._channels[cid] for cid in self.effective_feeds() if cid in self._channels]
 
 
 def build_graph(
-    topology: Topology,
+    topology: DeclaredTree,
     *,
     phase_split_l1: float = 0.5,
     factors: FactorRegistry | None = None,
@@ -996,8 +998,8 @@ def _edge_key(relation: TopologyRelation) -> tuple[str, str, str]:
 
 
 def diff_topologies(
-    old: Topology,
-    new: Topology,
+    old: DeclaredTree,
+    new: DeclaredTree,
 ) -> TopologyDiff:
     """Diff the typed relation set of two topologies.
 
@@ -1062,10 +1064,10 @@ def _view_dict(view: EdgeView) -> dict[str, Any]:
 def make_version(
     *,
     version_number: int,
-    topology: Topology,
-    status: TopologyStatus | None = None,
+    topology: DeclaredTree,
+    status: EdgeState | None = None,
     parent: TopologyVersionRecord | None = None,
-    parent_topology: Topology | None = None,
+    parent_topology: DeclaredTree | None = None,
     created_at: datetime | None = None,
     created_by: str = "",
     summary: str = "",
@@ -1113,7 +1115,7 @@ def diff_edge_sets(
 
     Used when only the stored edge lists are available (a historical version
     read back from the payload table), where the endpoints are not re-derivable
-    from a ``Topology`` object.  ``old``/``new`` map ``edge_id -> EdgeView``.
+    from a ``DeclaredTree`` object.  ``old``/``new`` map ``edge_id -> EdgeView``.
     """
     added: list[EdgeView] = []
     removed: list[EdgeView] = []
@@ -1178,7 +1180,7 @@ def digest_edge_set(relations: Sequence[TopologyRelation]) -> str:
 def edge_views_from_payload(payload: Mapping[str, Any]) -> dict[str, EdgeView]:
     """Rebuild the indexed edge set of a stored version payload.
 
-    Accepts either the relation-shaped rows a ``Topology`` payload carries or
+    Accepts either the relation-shaped rows a ``DeclaredTree`` payload carries or
     the ``EdgeView``-shaped rows the version store writes, so both forms read
     through one path.
     """
@@ -1214,15 +1216,15 @@ def edge_views_from_payload(payload: Mapping[str, Any]) -> dict[str, EdgeView]:
 #: module exactly as they were before ``__all__`` was introduced.
 __all__ = [
     # pre-existing public surface (unchanged by the versioned-edge-set work)
-    "CTChannel",
+    "ChannelDecl",
     "CTType",
-    "DeviceTopology",
+    "DeviceDecl",
     "Discipline",
     "FactorRegistry",
     "Phase",
-    "Topology",
+    "DeclaredTree",
     "TopologyGraph",
-    "TopologyStatus",
+    "EdgeState",
     "annotations",
     "build_graph",
     "dataclass",

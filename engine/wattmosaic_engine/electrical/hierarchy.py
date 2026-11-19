@@ -2,7 +2,7 @@
 
 Why this module exists
 ----------------------
-``CTChannel.parent_reader_id`` is a wiring fact.  A wrong edge silently authorises a
+``ChannelDecl.parent_reader_id`` is a wiring fact.  A wrong edge silently authorises a
 wrong total, and a wrong total is indistinguishable from a correct one once it
 is stored, so parenthood is inferred **only** when measurement scope itself can
 prove containment.  Four relation kinds stay separate and non-implying:
@@ -68,13 +68,11 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from wattmosaic_engine.contracts import (
-    CTChannel,
     EdgeLifecycle,
     MeasurementBasis,
-    RelationKind,
     TopologyRelation,
-    TopologyStatus,
 )
+from wattmosaic_engine.electrical._declared_shapes import ChannelDecl, EdgeState, RelationKindDecl
 from wattmosaic_engine.electrical.factors import FactorRegistry
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle avoidance
@@ -104,9 +102,9 @@ RATIO_MIN_PARENT_W = 200.0
 #: series are one conductor measured twice (a circuit multiplier), not a nest.
 SCALED_COPY_RATIO_SPREAD_MAX = 0.02
 
-_PARENT_CHILD = RelationKind.ELECTRICAL_PARENT_CHILD
-_OVERLAP = RelationKind.CT_MEASUREMENT_OVERLAP
-_ASSOCIATION = RelationKind.DEVICE_CT_ASSOCIATION
+_PARENT_CHILD = RelationKindDecl.ELECTRICAL_PARENT_CHILD
+_OVERLAP = RelationKindDecl.CT_MEASUREMENT_OVERLAP
+_ASSOCIATION = RelationKindDecl.DEVICE_CT_ASSOCIATION
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,7 +316,7 @@ def _normalise_channels(
         channels.items() if isinstance(channels, Mapping) else ((None, item) for item in channels)
     )
     for ct_id, meta in items:
-        if isinstance(meta, CTChannel):
+        if isinstance(meta, ChannelDecl):
             key = str(meta.ct_id)
             out[key] = {
                 "ct_id": key,
@@ -356,12 +354,12 @@ def _resolve_alias(ct_id: str, channels: Mapping[str, Mapping[str, Any]]) -> str
     return current
 
 
-def _relation_kind(value: Any) -> RelationKind:
-    return RelationKind(_coerce_text(value))
+def _relation_kind(value: Any) -> RelationKindDecl:
+    return RelationKindDecl(_coerce_text(value))
 
 
-def _relation_status(value: Any) -> TopologyStatus:
-    return TopologyStatus(_coerce_text(value))
+def _relation_status(value: Any) -> EdgeState:
+    return EdgeState(_coerce_text(value))
 
 
 def _payload(item: Any) -> dict[str, Any]:
@@ -398,7 +396,7 @@ def _construct_rejected(payload: dict[str, Any], evidence: dict[str, Any]) -> To
         kind=_relation_kind(payload.get("kind", _PARENT_CHILD.value)),
         subject_id=str(payload.get("subject_id") or ""),
         object_id=str(payload.get("object_id") or ""),
-        status=TopologyStatus.REJECTED,
+        status=EdgeState.REJECTED,
         # Terminal on the lifecycle axis as well, so a reader that filters on
         # ``lifecycle`` sees the rejection without re-deriving it from
         # ``status``.  ``model_construct`` skips validation, but the field is
@@ -420,7 +418,7 @@ def _reject(relation: TopologyRelation, evidence: dict[str, Any]) -> TopologyRel
     payload.update(evidence)
     return relation.model_copy(
         update={
-            "status": TopologyStatus.REJECTED,
+            "status": EdgeState.REJECTED,
             "lifecycle": EdgeLifecycle.REJECTED,
             "evidence": payload,
         }
@@ -567,7 +565,7 @@ class HierarchyFinder:
                     kind=_OVERLAP,
                     subject_id=first,
                     object_id=second,
-                    status=TopologyStatus.CANDIDATE,
+                    status=EdgeState.CANDIDATE,
                     # An overlap is a proposal about two CTs, never a fact;
                     # the lifecycle states that independently of ``status``.
                     lifecycle=EdgeLifecycle.CANDIDATE,
@@ -870,7 +868,7 @@ class HierarchyFinder:
             kind=_PARENT_CHILD,
             subject_id=geometry.child_ct_id,
             object_id=geometry.parent_reader_id,
-            status=TopologyStatus.CANDIDATE,
+            status=EdgeState.CANDIDATE,
             # A containment edge is the strongest claim here, and it is still
             # only a proposal: the lifecycle says so independently of
             # ``status``, and only a user may move it to ``CONFIRMED``.
@@ -1203,8 +1201,8 @@ def persist(relations: Sequence[TopologyRelation], db: Database) -> int:
     """
     written = 0
     stored: dict[str, str] = {}
-    for row in db.relations_of_kind(RelationKind.ELECTRICAL_PARENT_CHILD):
-        if str(row.get("status")) == TopologyStatus.REJECTED.value:
+    for row in db.relations_of_kind(RelationKindDecl.ELECTRICAL_PARENT_CHILD):
+        if str(row.get("status")) == EdgeState.REJECTED.value:
             continue
         subject = str(row.get("subject_id") or "")
         parent = str(row.get("object_id") or "")
@@ -1218,7 +1216,7 @@ def persist(relations: Sequence[TopologyRelation], db: Database) -> int:
     for relation in batch:
         if _relation_kind(relation.kind) is not _PARENT_CHILD:
             continue
-        if TopologyStatus(_coerce_text(relation.status)) is TopologyStatus.REJECTED:
+        if EdgeState(_coerce_text(relation.status)) is EdgeState.REJECTED:
             continue
         subject = str(relation.subject_id)
         parent = str(relation.object_id)

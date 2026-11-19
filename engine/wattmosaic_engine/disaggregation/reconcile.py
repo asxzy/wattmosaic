@@ -1,4 +1,4 @@
-"""Reconciliation and configured-prior bounding (X02 split).
+"""BalanceReport and configured-prior bounding (X02 split).
 
 Moved verbatim from :mod:`~wattmosaic_engine.disaggregation.engine` as
 module-level functions that take engine state explicitly.  The residual is
@@ -13,11 +13,13 @@ from typing import Any
 import numpy as np
 
 from wattmosaic_engine.contracts import (
-    InferenceResult,
     QualityStatus,
-    Reconciliation,
-    Source,
-    TopologyStatus,
+)
+from wattmosaic_engine.electrical._declared_shapes import (
+    AttributedValue,
+    BalanceReport,
+    EdgeState,
+    ValueSource,
 )
 from wattmosaic_engine.electrical.main_power import main_power_w, meter_spread_w
 from wattmosaic_engine.electrical.matrix import MeasurementMatrix
@@ -28,7 +30,7 @@ from wattmosaic_engine.electrical.window import CoercedWindow
 def _bound_configured_priors_by_row(
     graph: TopologyGraph,
     window: CoercedWindow,
-    results: Sequence[InferenceResult],
+    results: Sequence[AttributedValue],
     diagnostics: dict[str, Any],
     *,
     max_measurement_age_s: float,
@@ -64,7 +66,7 @@ def _bound_configured_priors_by_row(
     priors = [
         result
         for result in results
-        if result.source == Source.CONFIGURED_PRIOR and result.power_w > 0.0
+        if result.source == ValueSource.CONFIGURED_PRIOR and result.power_w > 0.0
     ]
     if not priors:
         return
@@ -75,7 +77,7 @@ def _bound_configured_priors_by_row(
     # first claim on the row they observed.
     claimed: dict[str, float] = {}
     for result in results:
-        if result.source == Source.CONFIGURED_PRIOR or result.power_w <= 0.0:
+        if result.source == ValueSource.CONFIGURED_PRIOR or result.power_w <= 0.0:
             continue
         for cid in graph.attribution_ct_ids(result.device_id):
             claimed[cid] = claimed.get(cid, 0.0) + float(result.power_w)
@@ -147,16 +149,16 @@ def _bound_configured_priors_by_row(
 def _reconcile(
     graph: TopologyGraph,
     window: CoercedWindow,
-    results: Sequence[InferenceResult],
+    results: Sequence[AttributedValue],
     matrix: MeasurementMatrix,
     diagnostics: dict[str, Any],
     *,
     max_measurement_age_s: float,
     phase_split_l1: float,
-) -> Reconciliation:
-    inferred_w = sum(r.power_w for r in results if r.source == Source.INFERRED)
-    model_w = sum(r.power_w for r in results if r.source == Source.MODEL_ESTIMATED)
-    prior_w = sum(r.power_w for r in results if r.source == Source.CONFIGURED_PRIOR)
+) -> BalanceReport:
+    inferred_w = sum(r.power_w for r in results if r.source == ValueSource.INFERRED)
+    model_w = sum(r.power_w for r in results if r.source == ValueSource.MODEL_ESTIMATED)
+    prior_w = sum(r.power_w for r in results if r.source == ValueSource.CONFIGURED_PRIOR)
     accounted = inferred_w + model_w + prior_w
 
     main: Any = main_power_w(
@@ -334,7 +336,7 @@ def _reconcile(
         explanation.append("negative_residual_sample_vintage_skew")
         diagnostics["warnings"].append("negative_residual_sample_vintage_skew")
 
-    return Reconciliation(
+    return BalanceReport(
         timestamp=window.at,
         topology_version=graph.topology.version,
         main_power_w=main.total_w,
@@ -356,6 +358,6 @@ def _reconcile(
         explanation=explanation,
         topology_confirmed=(
             str(getattr(graph.topology.status, "value", graph.topology.status))
-            == TopologyStatus.CONFIRMED.value
+            == EdgeState.CONFIRMED.value
         ),
     )
