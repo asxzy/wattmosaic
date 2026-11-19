@@ -17,8 +17,12 @@ What it does, in order:
    :func:`wattmosaic_engine.replay.replay_week`, which drives
    :class:`wattmosaic_engine.learning.reconciliation.Reconciler` over the pure
    :func:`wattmosaic_engine.inference.orchestrator.infer_group` entry point under
-   an explicit model set. ``models`` accepts a ``ModelSet`` (a
+   an explicit version triple. ``models`` accepts a ``ModelSet`` (a
    ``ModelSetView``/``ModelSetId``); ``None`` keeps the built-in HB §17 v1 set.
+   When ``versions`` (from the replayed database or ``--versions``) is given it
+   is passed straight to ``replay_week`` as a :class:`VersionTriple`, so the
+   operator, mapping and model set are rebuilt from that database's *stored*
+   topology/mapping/model versions rather than relabelled afterwards.
 4. Emit a report shaped like ``tests.simulation.metrics.EvaluationReport`` with
    the :class:`~wattmosaic_engine.learning.reconciliation.DerivedRun` embedded
    under ``"replay"``, so a consumer reads a real replay and a simulated run with
@@ -45,17 +49,20 @@ Usage::
 
 The database is opened ``mode=ro``: this tool never writes to a capture.
 
-Version triple (Z2c fix)
-------------------------
+Version triple (Z2c fix, completed in V2b)
+-----------------------------------------
 The v3 replay binds its operator to a *(topology, mapping, model-set)* version
 triple.  This tool used to hard-code the HB §17 ``"v1"`` triple; for a real
 capture that is wrong -- the install being replayed has its own active topology
-version (S14), mapping version (S15) and model set (the L1 registry).  Before a
-real-DB replay we now read those three values from the database itself and
-report them; an explicit ``--versions topology,mapping,model-set`` override is
-available for a synthetic comparison, and a database that carries none of the
-three version tables fails with a clear error instead of silently replaying
-against the wrong triple.
+version (S14), mapping version (S15) and model set (the L1 registry).  We read
+those three values from the database being replayed (or from an explicit
+``--versions topology,mapping,model-set`` override) and pass the resulting
+triple **into** :func:`wattmosaic_engine.replay.replay_week` together with the
+database path.  The replay therefore rebuilds its operator, mapping and model
+set from that database's stored versions; the reported run is the real result,
+not an HB §17 run whose identity was relabelled afterwards.  A database that
+carries none of the three version tables fails with a clear error instead of
+silently replaying against the wrong triple.
 """
 
 from __future__ import annotations
@@ -570,11 +577,12 @@ def replay(
 
     ``versions`` is the triple read from the replayed database (or the
     ``--versions`` override): ``{'topology_version_id', 'mapping_version_id',
-    'model_set_id'}``. It is stamped onto the returned run so the report names
-    the versions the *install* actually used, not the hard-coded HB §17 ones.
-    The production replay surface itself binds its operator from an explicit
-    triple; this tool only rebinds the run's reported identity (the engine API
-    has no entry point to inject a custom triple into ``replay_week``).
+    'model_set_id'}``. It is passed straight to
+    :func:`wattmosaic_engine.replay.replay_week` (with ``db_path`` taken from the
+    capture source) so the production replay builds its operator, mapping and
+    model set from that database's stored topology/mapping/model versions. The
+    returned run is the real result under that triple, not an HB §17 run whose
+    identity was relabelled afterwards.
 
     ``topology``, ``variant`` and ``states`` are accepted for CLI/compat with
     the pre-v3 tool. They do not change the v3 operator; the declared-parent
@@ -591,26 +599,32 @@ def replay(
         max_age_s=max_age_s,
         parents=_declared_parents(capture),
     )
-    run = replay_week(frames, model_set=model_set, reason=reason)
     if versions is not None:
-        from dataclasses import replace  # noqa: PLC0415
-
         from wattmosaic_engine.contracts import VersionTriple  # noqa: PLC0415
 
-        run = replace(
-            run,
-            versions=VersionTriple(
-                topology_version_id=versions["topology_version_id"],
-                mapping_version_id=versions["mapping_version_id"],
-                model_set_id=versions["model_set_id"],
-            ),
-            derived_run_id=(
-                f"derived-{versions['topology_version_id']}-"
-                f"{versions['mapping_version_id']}-{versions['model_set_id']}-"
-                f"{run.fingerprint[:12]}"
-            ),
+        # A legacy database may carry topology/mapping versions but no active
+        # model versions; fall back to the built-in model-set id in that case.
+        from wattmosaic_engine.contracts import model_set_id as make_model_set_id  # noqa: PLC0415
+
+        model_set_id = versions.get("model_set_id") or make_model_set_id(
+            ("mdl-tv-v1", "mdl-lights-v1", "mdl-fridge-v1")
         )
-    return run
+        triple = VersionTriple(
+            topology_version_id=versions["topology_version_id"],
+            mapping_version_id=versions["mapping_version_id"],
+            model_set_id=model_set_id,
+        )
+        # Only a database-backed capture has stored versions to rebuild from.
+        # A JSONL capture (or an inline synthetic one) has no DB path; in that
+        # case the explicit override still names the triple, but the engine
+        # falls back to its built-in operator because no stored topology exists.
+        from pathlib import Path  # noqa: PLC0415
+
+        db_path: str | None = None
+        if capture.source and Path(capture.source).is_file():
+            db_path = capture.source
+        return replay_week(frames, triple=triple, db_path=db_path, reason=reason)
+    return replay_week(frames, model_set=model_set, reason=reason)
 
 
 def _derived_run_dict(run: Any) -> dict[str, Any]:

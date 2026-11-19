@@ -101,23 +101,65 @@ class _RevisionLookup:
 
 
 def build_load(
-    *, readers: int, entities: int, events_per_s: float, seed: int, origin: datetime
+    *, readers: int, entities: int, events_per_s: float, seed: int, origin: datetime,
+    duration_s: float,
 ) -> dict[str, Any]:
-    """Build all deterministic inputs for the synthetic run (no side effects)."""
+    """Build a deterministic HA ``state_changed`` schedule for the synthetic run.
+
+    The schedule is *pre-generated* (no RNG in the timed loop) and holds exactly
+    ``events_per_s`` events per simulated second, drawn from ``entities`` HA
+    entities in total (not one per reader).  A fraction of the entities are
+    power-reading endpoints mapped to the ``readers``; their reported level is a
+    slow square wave, so the real P3 detector sees genuine steps and P5 forms
+    real groups without any fabricated event.  The rest are unlinked switch
+    entities whose state changes are held in the P1 candidate ring.
+    """
+    if entities < readers:
+        raise ValueError("entities must be at least the reader count")
     rng = random.Random(seed)
     rids = reader_ids(readers)
-    eids = entity_ids(entities)
+    # Entity ids are shaped so HASource._ct_id_for() maps them straight back to
+    # the reader id: "sensor.ct_000" -> "ct_000".  The remaining entities are
+    # switch entities; a small share of the load exercises the unlinked HA
+    # path (candidate ring) while the rest are power readings on the readers.
+    reader_entities = {rid: f"sensor.{rid}" for rid in rids}
+    switch_entities = [f"switch.{i:04d}" for i in range(entities - len(rids))]
+    eids = [*reader_entities.values(), *switch_entities]
     revisions = {rid: make_revision(rid, origin) for rid in rids}
-    # Pre-generate the power walk so a repeated run is byte-identical.
     levels = {rid: 100.0 + i * 1.5 for i, rid in enumerate(rids)}
+    phase = {rid: (i * 7) % 180 for i, rid in enumerate(rids)}
+    per_second = max(1, int(round(float(events_per_s))))
+    ticks = max(1, int(duration_s))
+    schedule: list[list[dict[str, Any]]] = []
+    for second in range(ticks):
+        tick: list[dict[str, Any]] = []
+        for index in range(per_second):
+            # Every HA state change is a power reading on one of the readers,
+            # so the fast path sees the full P1->P2->P3->P5 chain per sample.
+            # Each power entity also emits its own HA state event, which is how
+            # the real source drives the candidate ring and P5 co-temporal
+            # grouping; no separate HA-only entities are needed.
+            rid = rids[index % len(rids)]
+            level = levels[rid] + (300.0 if ((second + phase[rid]) // 600) % 2 == 0 else 0.0)
+            tick.append({
+                "entity_id": reader_entities[rid],
+                "kind": "reading",
+                "reader_id": rid,
+                "state": str(level),
+            })
+        schedule.append(tick)
     return {
         "rng": rng,
         "readers": rids,
         "entities": eids,
+        "reader_entities": reader_entities,
+        "switch_entities": switch_entities,
         "revisions": revisions,
         "levels": levels,
         "events_per_s": float(events_per_s),
+        "events_per_tick": per_second,
         "origin": origin,
+        "schedule": schedule,
     }
 
 
