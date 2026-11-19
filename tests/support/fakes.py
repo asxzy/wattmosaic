@@ -3,7 +3,8 @@
 These are **test doubles, not reference implementations**.  They are
 intentionally naive and must never be imported by production code — a static
 test (``tests/unit/test_runtime_fakes.py``) enforces that no module under
-``engine/wattmosaic_engine/`` except this one imports ``runtime.fakes``.
+``engine/wattmosaic_engine/`` imports them.  They lived in ``runtime/fakes.py``
+until Z3b moved them (and the HB §17 tree) out of the engine.
 
 All fakes are immutable where practical and produce byte-identical results for
 identical inputs, so Wave-3/4 tasks can build and test against them in parallel.
@@ -18,7 +19,6 @@ from types import MappingProxyType
 from typing import Any
 
 import numpy as np
-
 from wattmosaic_engine.contracts import (
     ConfigurationEvent,
     DeltaPrior,
@@ -38,8 +38,7 @@ from wattmosaic_engine.contracts import (
     TopologyVersionId,
     VersionTriple,
 )
-
-from .interfaces import (
+from wattmosaic_engine.runtime.interfaces import (
     CONFIRMED,
     AlternativeEdge,
     Clock,

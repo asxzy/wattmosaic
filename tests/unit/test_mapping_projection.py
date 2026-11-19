@@ -30,7 +30,8 @@ from wattmosaic_engine.mapping import (
     materialise_matrix,
     stable_json,
 )
-from wattmosaic_engine.runtime.fakes import (
+
+from tests.support.fakes import (
     HB17_TREE,
     FakeMapping,
     FakeTopology,

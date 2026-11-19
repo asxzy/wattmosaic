@@ -31,7 +31,9 @@ from wattmosaic_engine.learning.reconciliation import (
     Reconciler,
     resolve_derived_run,
 )
-from wattmosaic_engine.runtime.fakes import (
+from wattmosaic_engine.runtime.interfaces import UnknownPrior
+
+from tests.support.fakes import (
     FakeMapping,
     FakeModelSet,
     FakeResidual,
@@ -40,7 +42,6 @@ from wattmosaic_engine.runtime.fakes import (
     InMemoryMatchStore,
     fake_operator,
 )
-from wattmosaic_engine.runtime.interfaces import UnknownPrior
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 RANGE = (T0, T0 + timedelta(days=7))

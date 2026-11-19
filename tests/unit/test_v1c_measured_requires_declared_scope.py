@@ -33,7 +33,9 @@ from wattmosaic_engine.contracts import (
 from wattmosaic_engine.core.runtime import RuntimeMixin
 from wattmosaic_engine.inference.orchestrator import infer_group, infer_steady
 from wattmosaic_engine.residual.reader_residual import UnknownPrior
-from wattmosaic_engine.runtime.fakes import (
+from wattmosaic_engine.runtime.interfaces import HeldReading, ObservationOperator
+
+from tests.support.fakes import (
     FakeMapping,
     FakeModelSet,
     FakeResidual,
@@ -42,7 +44,6 @@ from wattmosaic_engine.runtime.fakes import (
     InMemoryMatchStore,
     fake_operator,
 )
-from wattmosaic_engine.runtime.interfaces import HeldReading, ObservationOperator
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 VT = VersionTriple(

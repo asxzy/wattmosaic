@@ -18,8 +18,9 @@ import numpy as np
 import pytest
 from wattmosaic_engine.contracts import CandidateHypothesis, DeltaPrior, Observability
 from wattmosaic_engine.inference.joint import ANCHOR_WEIGHT, solve_joint_detailed
-from wattmosaic_engine.runtime.fakes import FakeMapping, FakeResidual, FakeTopology, fake_operator
 from wattmosaic_engine.runtime.interfaces import ObservationOperator, UnknownPrior
+
+from tests.support.fakes import FakeMapping, FakeResidual, FakeTopology, fake_operator
 
 CLOSED_BY = "I3"
 

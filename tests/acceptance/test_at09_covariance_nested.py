@@ -26,7 +26,8 @@ from wattmosaic_engine.inference.covariance import (
     estimate_reader_covariance,
 )
 from wattmosaic_engine.inference.joint import solve_joint, solve_joint_detailed
-from wattmosaic_engine.runtime.fakes import FakeMapping, FakeTopology, fake_operator
+
+from tests.support.fakes import FakeMapping, FakeTopology, fake_operator
 
 CLOSED_BY = "I3"
 

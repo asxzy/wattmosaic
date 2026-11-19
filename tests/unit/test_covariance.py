@@ -24,7 +24,8 @@ from wattmosaic_engine.inference.covariance import (
     posterior_covariance,
 )
 from wattmosaic_engine.inference.joint import solve_joint
-from wattmosaic_engine.runtime.fakes import (
+
+from tests.support.fakes import (
     HB17_TREE,
     FakeMapping,
     FakeTopology,

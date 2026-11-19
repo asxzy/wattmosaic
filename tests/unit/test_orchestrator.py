@@ -37,7 +37,15 @@ from wattmosaic_engine.contracts import (
 )
 from wattmosaic_engine.inference import orchestrator
 from wattmosaic_engine.inference.orchestrator import infer_group, infer_steady
-from wattmosaic_engine.runtime.fakes import (
+from wattmosaic_engine.runtime.interfaces import (
+    HeldReading,
+    InferGroup,
+    InferSteady,
+    JointSolution,
+    UnknownPrior,
+)
+
+from tests.support.fakes import (
     FakeMapping,
     FakeModelSet,
     FakeResidual,
@@ -45,13 +53,6 @@ from wattmosaic_engine.runtime.fakes import (
     InMemoryHistory,
     InMemoryMatchStore,
     fake_operator,
-)
-from wattmosaic_engine.runtime.interfaces import (
-    HeldReading,
-    InferGroup,
-    InferSteady,
-    JointSolution,
-    UnknownPrior,
 )
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)

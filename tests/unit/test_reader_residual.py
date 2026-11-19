@@ -56,17 +56,18 @@ from wattmosaic_engine.residual.reader_residual import (
     baseline_and_dynamic,
     signed_residual_w,
 )
-from wattmosaic_engine.runtime.fakes import (
-    HB17_TREE,
-    FakeMapping,
-    FakeTopology,
-    fake_operator,
-)
 from wattmosaic_engine.runtime.interfaces import (
     HeldReading,
     ObservationOperator,
     ResidualModelView,
     RowMeta,
+)
+
+from tests.support.fakes import (
+    HB17_TREE,
+    FakeMapping,
+    FakeTopology,
+    fake_operator,
 )
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)

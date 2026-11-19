@@ -33,9 +33,9 @@ from wattmosaic_engine.models.components import (
 )
 from wattmosaic_engine.models.kernel import KernelModel
 from wattmosaic_engine.models.spec import decode_spec, encode_spec
-from wattmosaic_engine.runtime.fakes import FakeModelSet
 from wattmosaic_engine.runtime.interfaces import PredictionContext
 
+from tests.support.fakes import FakeModelSet
 from tools.simulator.hb17 import HVAC_DELAY_S
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)

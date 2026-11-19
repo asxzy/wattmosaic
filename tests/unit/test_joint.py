@@ -48,18 +48,19 @@ from wattmosaic_engine.inference.joint import (
     solve_joint_detailed,
     unknown_share,
 )
-from wattmosaic_engine.runtime.fakes import (
+from wattmosaic_engine.runtime.interfaces import (
+    AlternativeEdge,
+    ObservationOperator,
+    UnknownPrior,
+)
+
+from tests.support.fakes import (
     HB17_TREE,
     FakeMapping,
     FakeModelSet,
     FakeResidual,
     FakeTopology,
     fake_operator,
-)
-from wattmosaic_engine.runtime.interfaces import (
-    AlternativeEdge,
-    ObservationOperator,
-    UnknownPrior,
 )
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)

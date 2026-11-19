@@ -37,12 +37,12 @@ from wattmosaic_engine.inference.orchestrator import infer_steady
 from wattmosaic_engine.main import EngineCore
 from wattmosaic_engine.realtime.grouping import GroupingEngine
 from wattmosaic_engine.residual.reader_residual import UnknownPriorModel
-from wattmosaic_engine.runtime.fakes import FakeMapping, FakeModelSet, FakeTopology
 from wattmosaic_engine.runtime.interfaces import HeldReading
 from wattmosaic_engine.storage.database import Database
 from wattmosaic_engine.storage.repositories.evidence import EvidenceRepository
 from wattmosaic_engine.versioning.service import VersionService
 
+from tests.support.fakes import FakeMapping, FakeModelSet, FakeTopology
 from tools.simulator import build_hb17
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)

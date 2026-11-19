@@ -65,13 +65,14 @@ from wattmosaic_engine.inference.estimates import (
 from wattmosaic_engine.inference.orchestrator import infer_steady
 from wattmosaic_engine.mapping.projection import materialise_cells, operator_root_readers
 from wattmosaic_engine.residual.reader_residual import UnknownPrior
-from wattmosaic_engine.runtime.fakes import (
+from wattmosaic_engine.runtime.interfaces import HeldReading, PredictionContext
+
+from tests.support.fakes import (
     FakeMapping,
     FakeResidual,
     FakeTopology,
     fake_operator,
 )
-from wattmosaic_engine.runtime.interfaces import HeldReading, PredictionContext
 
 T0 = datetime(2026, 3, 1, tzinfo=UTC)
 VT = VersionTriple(

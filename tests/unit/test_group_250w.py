@@ -50,13 +50,14 @@ from wattmosaic_engine.inference.identifiability import (
     assemble_estimates,
     subject_group_id,
 )
-from wattmosaic_engine.runtime.fakes import (
+from wattmosaic_engine.runtime.interfaces import HistoryRow, JointSolution
+
+from tests.support.fakes import (
     FakeMapping,
     FakeTopology,
     InMemoryHistory,
     fake_operator,
 )
-from wattmosaic_engine.runtime.interfaces import HistoryRow, JointSolution
 
 T0 = datetime(2026, 11, 5, 18, 0, 0, tzinfo=UTC)
 CADENCE_S = 15.0

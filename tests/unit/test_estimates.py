@@ -32,12 +32,13 @@ from wattmosaic_engine.inference.estimates import (
     reconciliation_from_estimates,
     status_for,
 )
-from wattmosaic_engine.runtime.fakes import (
+from wattmosaic_engine.runtime.interfaces import ObservationOperator
+
+from tests.support.fakes import (
     FakeMapping,
     FakeTopology,
     fake_operator,
 )
-from wattmosaic_engine.runtime.interfaces import ObservationOperator
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 VT = VersionTriple(

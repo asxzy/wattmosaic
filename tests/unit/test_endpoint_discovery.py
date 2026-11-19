@@ -265,7 +265,7 @@ def test_one_ha_entity_linked_to_two_subjects_is_accepted(tmp_path):
 # Keep the runtime fake dependency exercised: the test depends only on the
 # Protocol in production, and uses the K08 fake as the deterministic double.
 def test_endpoint_operator_builds_for_a_confirmed_plug():
-    from wattmosaic_engine.runtime.fakes import FakeModelSet, fake_operator
+    from tests.support.fakes import FakeModelSet, fake_operator
 
     class _Topo:
         def ancestors(self, r):

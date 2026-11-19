@@ -47,9 +47,10 @@ from wattmosaic_engine.realtime.grouping import (
     make_group_id,
     temporal_reason,
 )
-from wattmosaic_engine.runtime.fakes import FakeTopology
 from wattmosaic_engine.storage.database import Database
 from wattmosaic_engine.storage.repositories.evidence import EvidenceRepository
+
+from tests.support.fakes import FakeTopology
 
 T0 = datetime(2026, 11, 18, 12, 0, 0, tzinfo=UTC)
 VERSIONS = VersionTriple(topology_version_id="topo-1", mapping_version_id="map-1", model_set_id="mset-x")

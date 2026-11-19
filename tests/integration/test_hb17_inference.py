@@ -44,14 +44,15 @@ from wattmosaic_engine.electrical.operator import (
 )
 from wattmosaic_engine.inference.orchestrator import infer_group
 from wattmosaic_engine.residual.reader_residual import UnknownPriorModel
-from wattmosaic_engine.runtime.fakes import (
+from wattmosaic_engine.runtime.interfaces import HistoryRow
+
+from tests.support.fakes import (
     FakeMapping,
     FakeModelSet,
     FakeTopology,
     InMemoryHistory,
     InMemoryMatchStore,
 )
-from wattmosaic_engine.runtime.interfaces import HistoryRow
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 VT = VersionTriple(

@@ -29,13 +29,14 @@ from wattmosaic_engine.contracts import (
 from wattmosaic_engine.inference.candidates import generate_candidates  # real I1 surface
 from wattmosaic_engine.inference.joint import solve_joint_detailed, unknown_share  # real I3
 from wattmosaic_engine.inference.matching import classify_match  # real I6 decision rule
-from wattmosaic_engine.runtime.fakes import (
+from wattmosaic_engine.runtime.interfaces import ObservationOperator, UnknownPrior
+
+from tests.support.fakes import (
     FakeMapping,
     FakeModelSet,
     FakeTopology,
     fake_operator,
 )
-from wattmosaic_engine.runtime.interfaces import ObservationOperator, UnknownPrior
 
 CLOSED_BY = "I1"
 

@@ -33,7 +33,8 @@ from wattmosaic_engine.electrical.operator import (
     clear_operator_cache,
     operator_cache_stats,
 )
-from wattmosaic_engine.runtime.fakes import HB17_TREE, FakeMapping, FakeTopology
+
+from tests.support.fakes import HB17_TREE, FakeMapping, FakeTopology
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 READERS = ("Main", "Subpanel", "Circuit A", "Circuit B", "Circuit C")

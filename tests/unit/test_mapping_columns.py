@@ -12,7 +12,8 @@ from wattmosaic_engine.contracts import (
     TopologyEdgeV3,
 )
 from wattmosaic_engine.mapping import build_columns
-from wattmosaic_engine.runtime.fakes import FakeTopology
+
+from tests.support.fakes import FakeTopology
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 

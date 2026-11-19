@@ -40,7 +40,8 @@ from wattmosaic_engine.inference.evidence import (  # real I2 surface
     score_candidate,
 )
 from wattmosaic_engine.models.device_profile import DevicePowerProfile
-from wattmosaic_engine.runtime.fakes import FakeMapping, FakeModelSet, FakeTopology, fake_operator
+
+from tests.support.fakes import FakeMapping, FakeModelSet, FakeTopology, fake_operator
 
 CLOSED_BY = "I2"
 

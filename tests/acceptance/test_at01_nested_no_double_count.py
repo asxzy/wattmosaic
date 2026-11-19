@@ -31,7 +31,8 @@ from wattmosaic_engine.contracts import (
     VersionTriple,
 )
 from wattmosaic_engine.mapping import materialise_cells  # real M1 surface
-from wattmosaic_engine.runtime.fakes import FakeMapping, FakeTopology, fake_operator
+
+from tests.support.fakes import FakeMapping, FakeTopology, fake_operator
 
 CLOSED_BY = "M1"
 

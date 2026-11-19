@@ -17,7 +17,8 @@ from wattmosaic_engine.inference.temporal import (
     unit_step,
 )
 from wattmosaic_engine.models.device_profile import DevicePowerProfile
-from wattmosaic_engine.runtime.fakes import FakeModelSet
+
+from tests.support.fakes import FakeModelSet
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 

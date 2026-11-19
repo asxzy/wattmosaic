@@ -131,7 +131,7 @@ def test_unresolved_ha_group_is_reopened_by_its_late_confirmed_step(repo: Eviden
 
 
 def test_related_reader_far_apart_in_time_is_a_new_group(repo: EvidenceRepository) -> None:
-    from wattmosaic_engine.runtime.fakes import FakeTopology
+    from tests.support.fakes import FakeTopology
 
     topology = FakeTopology.from_tree({"Main": {"Sub": {}}}, at=T0)
     engine = GroupingEngine(versions=VERSIONS, repository=repo, topology=topology)
@@ -265,7 +265,8 @@ def test_ha_sub_events_resolve_to_linked_subjects(tmp_path: Any) -> None:
 
 def test_candidates_use_resolved_subjects_never_opaque_event_ids() -> None:
     from wattmosaic_engine.electrical.operator import build_observation_operator
-    from wattmosaic_engine.runtime.fakes import FakeMapping, FakeModelSet, FakeTopology
+
+    from tests.support.fakes import FakeMapping, FakeModelSet, FakeTopology
 
     operator = build_observation_operator(
         FakeTopology.from_tree({"ct_a": {}}, at=T0),

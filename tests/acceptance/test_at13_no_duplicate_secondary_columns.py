@@ -24,7 +24,8 @@ from wattmosaic_engine.contracts import (
     TopologyEdgeV3,
 )
 from wattmosaic_engine.mapping import build_columns  # real M1 surface
-from wattmosaic_engine.runtime.fakes import FakeTopology
+
+from tests.support.fakes import FakeTopology
 
 CLOSED_BY = "M1"
 

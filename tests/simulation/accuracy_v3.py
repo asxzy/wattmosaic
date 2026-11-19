@@ -68,10 +68,10 @@ from wattmosaic_engine.electrical.operator import (
 )
 from wattmosaic_engine.inference.orchestrator import infer_steady
 from wattmosaic_engine.residual.reader_residual import UnknownPriorModel
-from wattmosaic_engine.runtime.fakes import FakeMapping, FakeModelSet, FakeTopology
 from wattmosaic_engine.runtime.interfaces import HeldReading
 
 from tests.simulation.metrics import error_stats, trapezoid_energy_kwh
+from tests.support.fakes import FakeMapping, FakeModelSet, FakeTopology
 from tools.simulator import build_hb17, build_scenario
 from tools.simulator.frames import (
     assert_no_ground_truth_keys,

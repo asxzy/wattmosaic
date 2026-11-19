@@ -28,7 +28,8 @@ from wattmosaic_engine.contracts import (
     VersionTriple,
 )
 from wattmosaic_engine.mapping import MatrixStore, MatrixUpdater
-from wattmosaic_engine.runtime.fakes import (
+
+from tests.support.fakes import (
     HB17_TREE,
     FakeMapping,
     FakeTopology,

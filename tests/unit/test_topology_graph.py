@@ -25,7 +25,8 @@ from wattmosaic_engine.contracts.entities import (
 )
 from wattmosaic_engine.electrical.topology_graph import TopologyGraph
 from wattmosaic_engine.mapping import build_columns
-from wattmosaic_engine.runtime.fakes import HB17_TREE, FakeTopology
+
+from tests.support.fakes import HB17_TREE, FakeTopology
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 

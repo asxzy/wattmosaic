@@ -4,8 +4,9 @@ Acceptance:
 - Each fake satisfies its runtime-checkable Protocol.
 - ``fake_operator`` on the HB §17 tree puts a Circuit-A device in the rows of
   Circuit A, Subpanel and Main with coefficient 1.
-- A static test: no module under ``engine/wattmosaic_engine/`` except
-  ``runtime/fakes.py`` imports ``runtime.fakes``.
+- A static test: the fakes live in ``tests/support/fakes.py`` (Z3b), no
+  ``runtime/fakes.py`` exists in the engine and no engine module imports the
+  fakes.
 """
 
 from __future__ import annotations
@@ -33,7 +34,9 @@ from wattmosaic_engine.runtime import (
     TopologyView,
     VersionService,
 )
-from wattmosaic_engine.runtime.fakes import (
+from wattmosaic_engine.runtime.interfaces import HistoryRow, UnknownPrior
+
+from tests.support.fakes import (
     HB17_TREE,
     FakeMapping,
     FakeModelSet,
@@ -45,7 +48,6 @@ from wattmosaic_engine.runtime.fakes import (
     RecordingMatrixUpdater,
     fake_operator,
 )
-from wattmosaic_engine.runtime.interfaces import HistoryRow, UnknownPrior
 
 POWER_ROOT = Path(__file__).resolve().parents[2] / "engine" / "wattmosaic_engine"
 
@@ -203,29 +205,31 @@ def _imports_runtime_fakes(path: Path) -> bool:
         if isinstance(node, ast.ImportFrom):
             parts = (node.module or "").split(".")
             # from wattmosaic_engine.runtime import fakes / from .runtime import fakes
-            if parts[-1] == "fakes" and "runtime" in parts:
+            if parts[-1] == "fakes" and ("runtime" in parts or "support" in parts):
                 return True
-            if node.module == "wattmosaic_engine.runtime.fakes":
+            if any(a.name == "fakes" for a in node.names) and (
+                "runtime" in parts or "support" in parts
+            ):
                 return True
-            if any(a.name == "fakes" for a in node.names) and "runtime" in parts:
+            if parts[0] == "tests":
                 return True
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name == "wattmosaic_engine.runtime.fakes":
+                if alias.name.endswith(".fakes") or alias.name.split(".")[0] == "tests":
                     return True
     return False
 
 
+def test_fakes_live_in_tests_not_the_engine() -> None:
+    assert not (POWER_ROOT / "runtime" / "fakes.py").exists()
+
+
 def test_no_production_module_imports_runtime_fakes() -> None:
-    fakes_path = (POWER_ROOT / "runtime" / "fakes.py").resolve()
     offenders: list[str] = []
     for path in POWER_ROOT.rglob("*.py"):
-        resolved = path.resolve()
-        if resolved == fakes_path:
-            continue
         try:
             if _imports_runtime_fakes(path):
                 offenders.append(str(path.relative_to(POWER_ROOT)))
         except SyntaxError:  # pragma: no cover - all shipped modules parse
             continue
-    assert offenders == [], f"production modules import runtime.fakes: {offenders}"
+    assert offenders == [], f"production modules import test fakes: {offenders}"

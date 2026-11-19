@@ -39,14 +39,15 @@ from wattmosaic_engine.inference.topology_filter import (
     PROVISIONAL_FLAG,
     evaluate_topology,
 )
-from wattmosaic_engine.runtime.fakes import (
+from wattmosaic_engine.runtime.interfaces import MappingView, ObservationOperator
+
+from tests.support.fakes import (
     HB17_TREE,
     FakeMapping,
     FakeModelSet,
     FakeTopology,
     fake_operator,
 )
-from wattmosaic_engine.runtime.interfaces import MappingView, ObservationOperator
 
 NOW = datetime(2026, 2, 1, 12, 0, tzinfo=UTC)
 VERSIONS = VersionTriple(

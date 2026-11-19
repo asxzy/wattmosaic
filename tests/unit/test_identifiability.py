@@ -22,10 +22,11 @@ from wattmosaic_engine.inference.identifiability import (
     member_point_w,
     subject_group_id,
 )
-from wattmosaic_engine.runtime.fakes import (
+from wattmosaic_engine.runtime.interfaces import HistoryRow, JointSolution
+
+from tests.support.fakes import (
     InMemoryHistory,
 )
-from wattmosaic_engine.runtime.interfaces import HistoryRow, JointSolution
 
 T0 = datetime(2026, 11, 5, 18, 0, 0, tzinfo=UTC)
 VERSIONS = VersionTriple(

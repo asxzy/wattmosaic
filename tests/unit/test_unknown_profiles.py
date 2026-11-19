@@ -295,7 +295,7 @@ def test_profiles_for_scope_feeds_i1_unknown_profile_source() -> None:
     scoped = UnknownProfileView(
         profiles=(_profile(lifecycle="characterised", scope="Circuit B"),)
     )
-    from wattmosaic_engine.runtime.fakes import (
+    from tests.support.fakes import (
         FakeMapping,
         FakeModelSet,
         FakeTopology,

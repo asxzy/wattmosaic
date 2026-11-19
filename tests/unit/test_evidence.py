@@ -44,16 +44,17 @@ from wattmosaic_engine.inference.evidence import (
     version_as_float,
 )
 from wattmosaic_engine.models.device_profile import DevicePowerProfile
-from wattmosaic_engine.runtime.fakes import (
-    FakeMapping,
-    FakeModelSet,
-    FakeTopology,
-    fake_operator,
-)
 from wattmosaic_engine.runtime.interfaces import (
     EntryMeta,
     ObservationOperator,
     RowMeta,
+)
+
+from tests.support.fakes import (
+    FakeMapping,
+    FakeModelSet,
+    FakeTopology,
+    fake_operator,
 )
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
