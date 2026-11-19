@@ -9,17 +9,17 @@ from __future__ import annotations
 
 import pytest
 
-pytestmark = [
-    pytest.mark.acceptance,
-    pytest.mark.xfail(strict=True, reason="closed by D3"),
-]
+CLOSED_BY = "P6"
+
+pytestmark = [pytest.mark.acceptance]
 
 
 def test_missing_reader_is_none_through_every_layer(hb17) -> None:
     """An absent reading stays null everywhere; no layer fabricates 0 W."""
     from wattmosaic_engine.contracts import EstimateStatus
+    from wattmosaic_engine.core.at17 import run_missing_data_pipeline
 
-    result = run_missing_data_pipeline(hb17["observation"], silent_reader="ct_b")  # noqa: F821
+    result = run_missing_data_pipeline(hb17["observation"], silent_reader="ct_b")
 
     column = result.matrix.reader_totals["ct_b"]
     assert column.measured_w is None

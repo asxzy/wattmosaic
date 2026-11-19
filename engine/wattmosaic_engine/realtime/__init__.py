@@ -14,6 +14,7 @@ from ..residual.unknown_profiles import (
     run_unknown_detection,
 )
 from .candidate_ring import CandidateRing
+from .harness import EngineHarness
 from .normalize import (
     QuarantineCounter,
     QuarantineReason,
@@ -24,6 +25,7 @@ from .normalize import (
 
 __all__ = [
     "CandidateRing",
+    "EngineHarness",
     "QuarantineCounter",
     "QuarantineReason",
     "ReadingNormalizer",

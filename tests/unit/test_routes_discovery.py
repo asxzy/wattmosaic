@@ -50,6 +50,7 @@ ROUTE_SNAPSHOT: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/v1/provenance/{kind}/{id}"),
         ("GET", "/api/v1/quality"),
         ("GET", "/api/v1/relations"),
+        ("GET", "/api/v1/runtime-metrics"),
         ("GET", "/api/v1/residuals"),
         ("GET", "/api/v1/snapshot"),
         ("GET", "/api/v1/status"),
