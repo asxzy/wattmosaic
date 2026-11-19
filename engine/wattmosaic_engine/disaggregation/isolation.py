@@ -826,6 +826,30 @@ def physical_device_events(
     by_entity = _bindings_by_entity(binding_list)
     contributors, contributor_conflicts = _contributors_by_device(binding_list)
 
+    # P5: accept a v3 contracts.EventGroup as a source.  Its HA sub-events carry
+    # entity ids / timestamps but no device binding on the group object itself,
+    # so we expand v3 groups into plain event records that the legacy collapser
+    # understands (Z2 deletes this bridge with the old path).
+    from wattmosaic_engine.contracts import EventGroup as V3EventGroup
+
+    expanded: list[Any] = []
+    for raw in events:
+        if isinstance(raw, V3EventGroup):
+            for sub in raw.sub_events:
+                if sub.ref.kind == "ha_event":
+                    expanded.append(
+                        {
+                            "entity_id": sub.ref.id,
+                            "occurred_at": sub.observed_at,
+                            "received_at": sub.observed_at,
+                            "new_state": "on",
+                            "event_id": sub.sub_event_id,
+                        }
+                    )
+        else:
+            expanded.append(raw)
+    events = expanded
+
     buckets: dict[str, list[Any]] = {}
     first_seen: dict[str, int] = {}
     for index, raw in enumerate(events):
@@ -981,6 +1005,14 @@ def group_events(
     proximity_s: float = GROUP_PROXIMITY_S,
 ) -> list[EventGroup]:
     """Group one neighbourhood's events by declared cause and time proximity.
+
+    .. deprecated::
+        P5 supersedes this transient, HA-attribute-only grouping with the
+        persistent :class:`wattmosaic_engine.contracts.EventGroup` built by
+        :mod:`wattmosaic_engine.realtime.grouping` (context lineage, temporal
+        overlap and topology co-movement).  This function is retained for the
+        legacy isolation path; Z2 deletes it.  New code should consume the v3
+        groups directly.
 
     Two rules, both from spec 07 §9.2:
 
@@ -1318,6 +1350,24 @@ class EventIsolator:
         """
         if previous.status != IsolationStatus.ISOLATED:
             return previous
+
+        # P5: a v3 contracts.EventGroup may arrive as late evidence.  Its HA
+        # sub-events name the competing entities and carry their own timestamps;
+        # project each into the flat shape the rest of this method expects.  The
+        # prior verdict is never mutated (Z2 removes this legacy path).
+        from wattmosaic_engine.contracts import EventGroup as V3EventGroup
+
+        if isinstance(late_event, V3EventGroup):
+            subs = [s for s in late_event.sub_events if s.ref.kind == "ha_event"]
+            if not subs:
+                return previous
+            late_event = {
+                "device_id": late_event.group_id,
+                "entity_id": subs[0].ref.id,
+                "occurred_at": min(s.observed_at for s in subs),
+                "event_id": subs[0].sub_event_id,
+            }
+
         occurred_at = _field(late_event, "occurred_at")
         if not isinstance(occurred_at, datetime) or occurred_at.tzinfo is None:
             return previous
