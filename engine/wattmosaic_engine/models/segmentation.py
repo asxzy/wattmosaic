@@ -287,4 +287,75 @@ def _duration(start: datetime, end: datetime) -> float:
     return max(0.0, (end - start).total_seconds())
 
 
-__all__ = ["Segment", "SegmentationResult", "robust_noise", "segment_power_series"]
+# --------------------------------------------------------------------------- #
+# State grouping for the dynamic model (L3).
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(slots=True)
+class StateSegmentGroup:
+    """Near-constant power levels grouped from a segmentation result.
+
+    A single hidden operating state may be observed as several adjacent
+    ``Segment`` objects when a noisy sample briefly crosses the change-point
+    threshold; grouping them by power keeps one state per level.  All values are
+    robust statistics and ``mad_w is None`` when there are too few segments to
+    estimate a spread (absent is ``None``, never ``0.0``).
+    """
+
+    power_w: float
+    mad_w: float | None
+    sample_count: int
+    duration_s: float
+    segments: tuple[Segment, ...]
+
+
+def group_segments_into_states(
+    result: SegmentationResult, tolerance_w: float = 5.0
+) -> list[StateSegmentGroup]:
+    """Collapse a :class:`SegmentationResult` into distinct level groups.
+
+    Segments whose median power is within ``tolerance_w`` of an existing group
+    are merged into it.  Group order follows first appearance in time.  This is
+    the state initialisation used by the dynamic model; it never invents a level
+    that the segmenter did not find.
+    """
+    groups: list[list[Segment]] = []
+    for segment in result.segments:
+        placed = False
+        for group in groups:
+            group_power = _median([s.power_w for s in group])
+            if abs(segment.power_w - group_power) <= tolerance_w:
+                group.append(segment)
+                placed = True
+                break
+        if not placed:
+            groups.append([segment])
+
+    out: list[StateSegmentGroup] = []
+    for group in groups:
+        powers = [s.power_w for s in group]
+        mad: float | None = None
+        if len(powers) >= 2:
+            med = _median(powers)
+            mad = float(1.4826 * statistics.median([abs(p - med) for p in powers]))
+        out.append(
+            StateSegmentGroup(
+                power_w=_median(powers),
+                mad_w=mad,
+                sample_count=sum(s.sample_count for s in group),
+                duration_s=sum(max(0.0, s.duration_s) for s in group),
+                segments=tuple(group),
+            )
+        )
+    return out
+
+
+__all__ = [
+    "Segment",
+    "SegmentationResult",
+    "StateSegmentGroup",
+    "group_segments_into_states",
+    "robust_noise",
+    "segment_power_series",
+]
