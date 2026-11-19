@@ -54,7 +54,7 @@
 | P1 | 3 | VERIFIED |  |  | new path applies polarity once; legacy-path DEF-01 unproven (removed in Z2) |
 | P2 | 3 | VERIFIED |  |  |  |
 | P3 | 3 | VERIFIED |  |  | P3b follow-up: DATA_GAP delta None |
-| P4 | 3 | IN_PROGRESS |  |  |  |
+| P4 | 3 | VERIFIED |  |  | supersedes link not persisted (contract has no metadata) -> D5 |
 | P5 | 3 | NOT_STARTED | | | |
 | T1 | 3 | VERIFIED |  |  | primary_display_tree matches M1 build_columns |
 | T2 | 3 | VERIFIED |  |  |  |
@@ -86,7 +86,7 @@
 | D4 | 4 | VERIFIED |  |  |  |
 | H1 | 4 | NOT_STARTED | | | |
 | H2 | 4 | VERIFIED |  |  | partial: async_migrate_entry hook -> H1; v2 forms removal -> Z2 |
-| U2 | 4 | IN_PROGRESS |  | AT-20 |  |
+| U2 | 4 | VERIFIED |  | AT-20 | AT-20 closed |
 | P6 | 4 | NOT_STARTED | | | |
 | Z2 | 5 | NOT_STARTED | | | |
 | Z1 | 5 | NOT_STARTED | | | |

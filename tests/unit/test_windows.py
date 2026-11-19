@@ -96,17 +96,18 @@ def event(
     sigma_w: float | None = 1.0,
     step_class: StepClass = StepClass.SUSTAINED,
 ) -> MeasurementEvent:
+    gap = step_class == StepClass.DATA_GAP  # P3b: a gap carries None, never 0
     return MeasurementEvent(
         event_id=event_id,
         reader_id=reader,
-        delta_w=delta_w,
-        sigma_w=sigma_w if sigma_w is not None else 1.0,
-        z_score=8.0,
+        delta_w=None if gap else delta_w,
+        sigma_w=None if gap else (sigma_w if sigma_w is not None else 1.0),
+        z_score=None if gap else 8.0,
         step_class=step_class,
         onset_lo=T0,
         onset_hi=T0 + timedelta(seconds=CADENCE_S),
         pre_level_w=100.0,
-        post_level_w=100.0 + delta_w,
+        post_level_w=None if gap else 100.0 + delta_w,
         quality_score=0.9,
         detected_at=T0 + timedelta(seconds=2 * CADENCE_S),
     )
