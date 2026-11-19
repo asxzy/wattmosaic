@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 import numpy as np
+
 from wattmosaic_engine.contracts import CandidateHypothesis, DeltaPrior
 from wattmosaic_engine.models.device_profile import DevicePowerProfile
 from wattmosaic_engine.runtime.interfaces import ModelSetView

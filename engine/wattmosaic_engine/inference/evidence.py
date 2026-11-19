@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+
 from wattmosaic_engine.contracts import (
     CandidateHypothesis,
     DeltaPrior,
