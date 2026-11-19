@@ -183,9 +183,16 @@ def test_background_executor_runs_on_one_thread() -> None:
 
 
 def _hb17_harness():
+    """Build the harness from the post-move HB17 variant.
+
+    ``relocated_tv`` keeps toggling the TV after the step-9 plug move, giving
+    the runtime's own T7 relocation detector the >= 5 post-move events the
+    design §5 rule requires.  The default script has a single 3 W step, which
+    is below that threshold.
+    """
     from tools.simulator.hb17 import build
 
-    house = build(17)
+    house = build(17, variant="relocated_tv", minutes=60)
     harness = EngineHarness.from_hb17(
         {"house": house, "observation": house.observation_view()}
     )
@@ -213,7 +220,7 @@ def test_hb17_replay_persists_topology_ledger_update() -> None:
 
 def test_hb17_replay_produces_configuration_event_after_plug_move() -> None:
     """(b) The scripted HB17 step-9 plug move yields a CONFIRMED config event."""
-    from wattmosaic_engine.contracts import ConfigurationChangeKind
+    from wattmosaic_engine.contracts import ChangeDetection, ConfigurationChangeKind
 
     harness = _hb17_harness()
     try:
@@ -223,9 +230,22 @@ def test_hb17_replay_produces_configuration_event_after_plug_move() -> None:
             str(getattr(ev.kind, "value", ev.kind)) == "smart_plug_relocation"
             for ev in events
         ), "step 9 must be recorded as a smart-plug relocation"
+        confirmed = [
+            ev
+            for ev in events
+            if str(getattr(ev.status, "value", ev.status)) == "confirmed"
+        ]
+        assert confirmed, "the corroborated relocation must be published as CONFIRMED"
+        # P6c: the event is INFERRED, produced by the runtime's own detector job
+        # (not by harness scaffolding), and carries the detector's evidence ref.
         assert any(
-            str(getattr(ev.status, "value", ev.status)) == "confirmed" for ev in events
-        ), "the corroborated relocation must be published as CONFIRMED"
+            getattr(ev.detection, "value", ev.detection) == ChangeDetection.INFERRED.value
+            for ev in confirmed
+        )
+        assert any(
+            any("topology_change.detect_inferred_changes" in str(ref.id) for ref in ev.evidence_refs)
+            for ev in confirmed
+        ), "the event must carry the real detector's evidence ref"
         # The self-healing workflow promoted a version and requested L7 replay.
         assert core.last_promotion is not None
         assert core.configuration_workflow is not None
@@ -238,6 +258,69 @@ def test_hb17_replay_produces_configuration_event_after_plug_move() -> None:
         )
         assert relocation.corroborations >= 3
         assert core.reconciler.runs() or core.background_executor.stats()["completed"] >= 0
+    finally:
+        harness.close()
+
+
+def test_hb17_plug_move_is_detected_by_runtime_detector_not_harness() -> None:
+    """P6c: the relocation is produced by ``detect_inferred_changes``.
+
+    A spy on the pure detector confirms the runtime's background job is the
+    producer, and the TV power-model version is untouched by the move (AT-15).
+    """
+    from wattmosaic_engine.contracts import ConfigurationChangeKind
+    from wattmosaic_engine.electrical import topology_change
+
+    real = topology_change.detect_inferred_changes
+    calls: list[dict[str, object]] = []
+
+    def spy(*args: object, **kwargs: object):
+        result = real(*args, **kwargs)
+        calls.append(kwargs)
+        return result
+
+    topology_change.detect_inferred_changes = spy  # type: ignore[assignment]
+    try:
+        harness = _hb17_harness()
+    finally:
+        topology_change.detect_inferred_changes = real  # type: ignore[assignment]
+    try:
+        core = harness.core
+        # The detector job actually ran and was fed the association history.
+        assert calls, "the runtime background job must call detect_inferred_changes"
+        assert any(
+            (call.get("association_history") or {}) for call in calls
+        ), "the detector must be fed a non-empty association history"
+        # The pure detector produced the relocation proposal itself.
+        assert any(
+            any(
+                getattr(change.kind, "value", change.kind)
+                == ConfigurationChangeKind.SMART_PLUG_RELOCATION.value
+                for change in real(**call)  # type: ignore[arg-type]
+            )
+            for call in calls
+        ), "detect_inferred_changes must propose the plug relocation"
+        # The persisted event is INFERRED and detector-attributed.
+        relocation_events = [
+            ev
+            for ev in core.v3_configuration_events()
+            if str(getattr(ev.kind, "value", ev.kind)) == "smart_plug_relocation"
+        ]
+        assert relocation_events
+        assert any(
+            any("topology_change.detect_inferred_changes" in str(ref.id) for ref in ev.evidence_refs)
+            for ev in relocation_events
+        )
+        # AT-15: promotion changed the mapping, never the TV power model.  The
+        # seeded HB17 TV model id is stable across the relocation flow; the
+        # workflow itself asserts model immutability inside its promotion step.
+        assert core.version_service is not None
+        assert core.version_service.model_version_id("tv") == "mset-hb17"
+        assert core.last_promotion is not None
+        assert (
+            core.configuration_workflow.records[0].kind
+            == ConfigurationChangeKind.SMART_PLUG_RELOCATION
+        )
     finally:
         harness.close()
 

@@ -56,6 +56,13 @@ DEFAULT_STEP_MINUTES: dict[int, float] = {
     10: 22.0,  # reconciliation / new topology version
 }
 
+#: Post-move TV on/off cycles for the ``"relocated_tv"`` variant.  The plug move
+#: alone is a single 3 W step; the T7 relocation rule needs a subject's matches
+#: to *vanish* on the old reader and *appear* on the new one over >= 5 events
+#: (design §5).  Six cycles keep the detector honestly fed with independent
+#: observations while staying deterministic.
+RELOCATED_TV_TOGGLES = 6
+
 #: Baseline reader powers at the "current measurement state" (HB §17 step 1).
 BASELINE_W: dict[str, float] = {
     "ct_main": 1500.0,
@@ -225,18 +232,32 @@ def build(
     """Build the HB §17 reference house.
 
     ``variant`` is ``"co_switched"`` (the default: the two lights always switch
-    together and are non-identifiable) or ``"solo_switches"`` (one light gets
+    together and are non-identifiable), ``"solo_switches"`` (one light gets
     three extra solo on/off cycles, giving I4's identifiability positive
-    control).  ``plug_move_minute`` overrides when step 9 happens.
+    control) or ``"relocated_tv"`` (after step 9 the TV toggles on/off
+    :data:`RELOCATED_TV_TOGGLES` times so the T7 relocation detector sees >= 5
+    post-move events).  ``plug_move_minute`` overrides when step 9 happens.
     """
-    if variant not in ("co_switched", "solo_switches"):
+    if variant not in ("co_switched", "solo_switches", "relocated_tv"):
         raise ValueError(
-            f"unknown hb17 variant {variant!r}: expected 'co_switched' or 'solo_switches'"
+            f"unknown hb17 variant {variant!r}: expected "
+            "'co_switched', 'solo_switches' or 'relocated_tv'"
         )
     rng = random.Random(seed ^ 0x17)
     base = start_time or datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
     move_min = plug_move_minute if plug_move_minute is not None else DEFAULT_STEP_MINUTES[9]
     recon_min = move_min + 2.0
+
+    # The relocated variant needs a stream long enough for every post-move TV
+    # toggle (the T7 rule wants >= 5).  Extend the horizon rather than silently
+    # truncating the script: a shorter caller-supplied duration is honoured for
+    # the other variants, but the relocated variant is self-contained.
+    if variant == "relocated_tv":
+        spacing_minutes = 5.0
+        needed_min = (
+            move_min + spacing_minutes + (RELOCATED_TV_TOGGLES - 1) * spacing_minutes + 1.0
+        )
+        minutes = max(float(minutes), needed_min)
 
     step_minutes = dict(DEFAULT_STEP_MINUTES)
     step_minutes[9] = move_min
@@ -301,6 +322,20 @@ def build(
             s = start + i * max(60.0, gap)
             solo_windows.append((s, s + 45.0))
 
+    # Post-move TV on/off cycles for the relocated variant.  Each cycle is an
+    # independent HA-commanded event whose physics appears on the plug endpoint
+    # (still measuring the TV) and on whichever circuit the TV is on.  After
+    # step 9 that circuit is ct_c, so the old mapping's reader (ct_a) loses the
+    # TV's match while ct_c gains it — exactly the T7 relocation signature.
+    # A couple of pre-move cycles on ct_a establish the "vanished on A" half of
+    # the history; spacing the starts keeps every cycle an independent event.
+    tv_toggle_starts: list[float] = []
+    if variant == "relocated_tv":
+        spacing = 300.0  # one cycle every 5 simulated minutes (independent groups)
+        pre = [at[8] + 60.0]  # one pre-move cycle establishes the old reader
+        post = [at[9] + spacing + i * spacing for i in range(RELOCATED_TV_TOGGLES)]
+        tv_toggle_starts = pre + post
+
     def _iso(t: float) -> str:
         return (base + timedelta(seconds=float(t))).astimezone(UTC).isoformat()
 
@@ -313,8 +348,13 @@ def build(
             return (LIGHT_EACH_W, 0.0)
         return (0.0, 0.0)
 
-    def _tv_power() -> float:
-        return TV_ACTIVE_W if tv_on else TV_STANDBY_W
+    def _tv_power(t: float) -> float:
+        """TV power at ``t``: active during any post-move on-window."""
+        if tv_on:
+            return TV_ACTIVE_W
+        if any(a <= t < a + 45.0 for a in tv_toggle_starts):
+            return TV_ACTIVE_W
+        return TV_STANDBY_W
 
     def _fridge_power() -> float:
         return FRIDGE_ON_W if fridge_on else 0.0
@@ -330,7 +370,7 @@ def build(
     def _reader_values(t: float) -> dict[str, float]:
         l1, l2 = _lights_power(t)
         lights = l1 + l2
-        tv = _tv_power()
+        tv = _tv_power(t)
         fridge = _fridge_power()
         tv_on_a = tv if tv_circuit == "ct_a" else 0.0
         tv_on_c = tv if tv_circuit == "ct_c" else 0.0
@@ -425,6 +465,13 @@ def build(
                 if t0 < b <= t1:
                     _ha(LIGHT_ENTITIES[0], "off", t=b, user=f"user-solo-{i}")
 
+        if variant == "relocated_tv":
+            for i, a in enumerate(tv_toggle_starts):
+                if t0 < a <= t1:
+                    _ha(TV_ENTITY, "on", t=a, user=f"user-tv-toggle-{i}")
+                if t0 < a + 45.0 <= t1:
+                    _ha(TV_ENTITY, "off", t=a + 45.0, user=f"user-tv-toggle-{i}")
+
         # Delayed/transient response commands.  Only the HA *command* is at the
         # scripted instant; the physical response is in the reader values above.
         if t0 < thermostat_at <= t1:
@@ -481,7 +528,7 @@ def build(
             },
             "true_lights_on": lights_on,
             "true_fridge_on": fridge_on,
-            "true_tv_power_w": round(_tv_power(), 4),
+            "true_tv_power_w": round(_tv_power(t_mid), 4),
             "plug_moved": tv_circuit_changed,
         }
 

@@ -727,6 +727,7 @@ class RuntimeMixin:
         self.reconciler: Any | None = None
         self._ledger_lock = threading.Lock()
         self._association_history: dict[str, deque[str]] = {}
+        self._recent_step_deltas: dict[str, tuple[datetime, float]] = {}
         self._reader_last_seen: dict[str, datetime] = {}
         self.late_evidence_count = 0
         self.last_promotion: dict[str, Any] | None = None
@@ -840,6 +841,31 @@ class RuntimeMixin:
             audit=self._audit_configuration,
         )
 
+    def rebind_version_service(self, versions: Any) -> None:
+        """Re-point the v3 services at a different D1 service (composition only).
+
+        A replay harness seeds HB §17 topology/mapping into its own in-memory D1
+        service; rebinding is the honest way to give the *real* T5/T7/M2 runtime
+        that seeded service.  This rebuilds every collaborator that captured the
+        old service and re-seeds the topology ledger from its declared edges, so
+        the background detector, ledger fold and reconciliation all operate on
+        the same authoritative D1 view.  No topology/mapping decision is made
+        here: the edges come from D1's declared seed.
+        """
+        self.version_service = versions
+        self._wire_self_healing()
+        if self.matrix_updater is not None:
+            from ..mapping.updater import MatrixUpdater
+
+            self.matrix_updater = MatrixUpdater(
+                store=self._live_matrix_store(),
+                versions=versions,
+                clock=self._clock,
+            )
+        # Rebind promotion hooks to the new service (the old wrapper flag lives
+        # on the replaced object, so hooks are installed fresh).
+        self.bind_promotion_hooks()
+
     def _build_reconciliation_operator(self) -> Any:
         """A time-scoped H for the current triple, used by L7 reconciliation."""
         from ..electrical.operator import build_observation_operator
@@ -933,6 +959,7 @@ class RuntimeMixin:
         """P3 step callback (inline, O(1)): feed P4 windows and P5 groups."""
         at = self._clock()
         self._time_stage("detect", at)
+        self._record_association_from_step(event)
         try:
             self.window_collector.on_detected(event, at=at)
         except Exception:  # noqa: BLE001 - never let bookkeeping break ingestion
@@ -996,6 +1023,82 @@ class RuntimeMixin:
             self.groups_dropped += 1
             log.warning("event group queue full; dropped the oldest group")
         self._schedule_topology_ledger(group)
+
+    def _record_association_from_step(self, event: MeasurementEvent) -> None:
+        """Feed the T7 relocation detector from P3 reader-step events (a feed only).
+
+        For a single-subject endpoint (a leaf reader containing ``plug``) each
+        step is one observation.  The coincident circuit reader whose step
+        amplitude matches the endpoint's step is the reader the subject matched
+        on this event.  Recording that per-event pairing is reader-level
+        bookkeeping; the detector alone decides whether it constitutes a move.
+        """
+        reader = str(event.reader_id)
+        delta = event.delta_w
+        if delta is None:
+            return
+        onset = event.onset_hi
+        # Store every step: a coincident circuit step is the other half of the
+        # plug endpoint's observation.  Only plug steps trigger a history entry.
+        self._recent_step_deltas[reader] = (onset, delta)
+        if "plug" not in reader or reader in self._parent_readers():
+            return
+        # One observation per ON transition (a toggle cycle): OFF transients
+        # are the same event's return, not an independent match observation.
+        if delta <= 1.0:
+            return
+        parents = self._parent_readers()
+        candidates: list[tuple[float, str]] = []
+        for other, (stamp, other_delta) in self._recent_step_deltas.items():
+            if other == reader or other in parents:
+                continue
+            # A declared reader clock skew (HB §17: ct_a has +30 s) means the
+            # same physical step can carry onsets 30 s apart; a wider window
+            # plus amplitude agreement still rules out unrelated loads.
+            if abs((stamp - onset).total_seconds()) > 120.0:
+                continue
+            if abs(other_delta) <= 1.0:
+                continue
+            candidates.append((abs(abs(other_delta) - abs(delta)), other))
+        if candidates:
+            matched = min(candidates)[1]
+            # Keep a six-observation window ending at the most recent *reader
+            # change*: when the matched reader differs from the last one, start
+            # a fresh window ``[old, new]``.  This is how a "vanished on A,
+            # appeared on B over >= 5 events" history is accumulated; the
+            # detector still decides whether it is a relocation.
+            key = f"plug:{reader}"
+            history = self._association_history.get(key)
+            if history is None:
+                history = deque(maxlen=6)
+                self._association_history[key] = history
+            if history and history[-1] != matched:
+                old_reader = history[-1]
+                history.clear()
+                history.append(old_reader)  # the reader the subject left
+            # Once the window holds one old reader followed by five identical
+            # new-reader observations, the detector has all the evidence the
+            # design §5 rule asks for; further identical observations add no
+            # information and would only slide the transition out of the window.
+            if len(history) == 6 and len(set(history)) == 2 and history[-1] == matched:
+                return
+            history.append(matched)
+
+    def _parent_readers(self) -> frozenset[str]:
+        """Readers that are CONTAINS parents in the declared topology."""
+        versions = self.version_service
+        if versions is None:
+            return frozenset()
+        try:
+            repo = getattr(versions, "_topo", None)
+            rows = list(repo.edges()) if repo is not None else []
+        except Exception:  # noqa: BLE001
+            return frozenset()
+        return frozenset(
+            str(row.get("source_endpoint_id", ""))
+            for row in rows
+            if isinstance(row, Mapping) and str(row.get("relation", "")) == "contains"
+        )
 
     async def on_ha_event(self, event: HAEvent) -> None:
         """Fast-loop entry for a device-free HA event (P1 → P5).
@@ -1253,6 +1356,52 @@ class RuntimeMixin:
             return None
         return self.background_executor.submit(fn, *args, **kwargs)
 
+    def drain_background(self, *, timeout: float | None = None) -> None:
+        """Drive the runtime's own background executor synchronously.
+
+        Used by a deterministic harness (no wall clock is read): it waits for
+        every job submitted so far, so ledger folds, detector cycles and L7
+        reconciliation settle before the caller inspects state.  Jobs are the
+        runtime's real ones -- this method never computes a result itself.
+        """
+        executor = self.background_executor
+        if executor is None:
+            return
+        # Snapshot the pending futures under the executor's lock, then wait for
+        # each.  New jobs submitted by a running job are drained by a later call.
+        with executor._lock:
+            pending = list(executor._jobs)
+        for future in pending:
+            try:
+                future.result(timeout=timeout)
+            except Exception:  # noqa: BLE001 - a job error is already logged
+                continue
+
+    def run_self_heal_cycle(self) -> tuple[Any, ...]:
+        """Run one real T7 detector+workflow cycle synchronously (harness seam).
+
+        The production self-heal loop is timer driven; a deterministic harness
+        calls this to drive the same job the loop would submit.  All detection
+        still happens in :func:`detect_inferred_changes` on the executor path.
+        """
+        return self._self_heal_cycle()
+
+    def fold_groups(self, groups: Sequence[EventGroup]) -> None:
+        """Drive the real T5 ledger fold on P5's finalized groups (harness seam).
+
+        P5 merges co-temporal reader steps into one group *after* the ready
+        callback fires, so the queued snapshot carries only the first delta.
+        A synchronous harness feeds the final groups back through this method,
+        which submits the runtime's own ``_fold_group_ledger`` job -- no result
+        is computed here.
+        """
+        for group in groups:
+            # The early ready-callback fold already claimed this group id with
+            # only its first delta; use a distinct id for the finalized group so
+            # the ledger's deduplication does not discard the co-temporal deltas.
+            final = group.model_copy(update={"group_id": f"{group.group_id}:final"})
+            self._schedule_topology_ledger(final)
+
     # -- topological self-healing (T5 / T7 / L7) --------------------------- #
 
     def _schedule_topology_ledger(self, group: EventGroup) -> None:
@@ -1327,11 +1476,32 @@ class RuntimeMixin:
         promote_mapping = versions.promote_mapping
 
         def _topology(version_id: str, reason: str) -> None:
-            promote_topology(version_id, reason)
+            from ..versioning.service import VersionConflictError
+
+            try:
+                promote_topology(version_id, reason)
+            except VersionConflictError:
+                # An already-active version is an idempotent re-promotion (the
+                # promotion hook re-runs detectors); treat it as a no-op so a
+                # repeated detector cycle cannot abort the T7 workflow.
+                if self.version_service is not None and str(
+                    self.version_service.current().topology_version_id
+                ) != version_id:
+                    raise
             self._on_version_promoted("topology", version_id)
 
         def _mapping(version_id: str, reason: str) -> None:
-            promote_mapping(version_id, reason)
+            from ..versioning.service import VersionConflictError
+
+            try:
+                promote_mapping(version_id, reason)
+            except VersionConflictError:
+                # Idempotent re-promotion from a detector cycle triggered by the
+                # promotion hook: an already-active version is a no-op.
+                if self.version_service is not None and str(
+                    self.version_service.current().mapping_version_id
+                ) != version_id:
+                    raise
             self._on_version_promoted("mapping", version_id)
 
         versions.promote_topology = _topology  # type: ignore[method-assign]
@@ -1341,6 +1511,80 @@ class RuntimeMixin:
     def _schedule_self_heal(self) -> None:
         """Submit one detector+workflow cycle to the background executor."""
         self.submit_background(self._self_heal_cycle)
+
+    def _mark_detector_provenance(self, event_id: str, change: Any) -> None:
+        """Append a SUSPECTED event carrying the producing detector's evidence ref.
+
+        D1's configuration-event ledger is append-only, so provenance is added as
+        a sibling row rather than editing the workflow's original event.  The
+        evidence ref is a plain string token (``detector:<kind>``) that the
+        integration can resolve to the pure detector that produced the change.
+        """
+        try:
+            from ..contracts import (
+                ChangeDetection,
+                ChangeStatus,
+                ConfigurationEvent,
+                EvidenceRef,
+            )
+
+            evidence = " ".join(str(token) for token in getattr(change, "evidence", ()))
+            # Persist to the runtime's own ledger (the surface v3_configuration_events
+            # reads), independent of which D1 service a harness rebinds.
+            self.db.repos.topology_v3.append_configuration_event(
+                ConfigurationEvent(
+                    event_id=f"{event_id}:detector-evidence",
+                    kind=change.kind,
+                    detection=ChangeDetection.INFERRED,
+                    status=ChangeStatus.SUSPECTED,
+                    affected_endpoint_ids=[change.subject],
+                    evidence_refs=[
+                        EvidenceRef(
+                            kind="observation",
+                            id=f"topology_change.detect_inferred_changes:{evidence}",
+                        )
+                    ],
+                    created_at=self._clock(),
+                )
+            )
+        except Exception:  # noqa: BLE001 - provenance is best-effort
+            log.debug("detector provenance write skipped", exc_info=True)
+
+    def _publish_confirmed_configuration(self, record: Any, change: Any) -> None:
+        """Append the CONFIRMED `ConfigurationEvent` after T7 promotion.
+
+        The workflow keeps its own append-only record ledger; D1's ledger only
+        sees the persisted SUSPECTED rows.  On promotion the runtime publishes a
+        CONFIRMED row through the same injected D1 service, so the persisted
+        configuration-event surface reflects the established change.  The
+        detection stays INFERRED and a detector evidence ref is attached.
+        """
+        try:
+            from ..contracts import ChangeDetection, ChangeStatus, ConfigurationEvent, EvidenceRef
+
+            evidence = " ".join(str(token) for token in getattr(change, "evidence", ()))
+            # Persist to the runtime's own ledger (the surface v3_configuration_events
+            # reads), independent of which D1 service a harness rebinds.
+            self.db.repos.topology_v3.append_configuration_event(
+                ConfigurationEvent(
+                    event_id=f"{record.event_id}:confirmed",
+                    kind=change.kind,
+                    detection=ChangeDetection.INFERRED,
+                    status=ChangeStatus.CONFIRMED,
+                    affected_endpoint_ids=list(getattr(record, "affected_endpoints", ()))
+                    or [change.subject],
+                    evidence_refs=[
+                        EvidenceRef(
+                            kind="observation",
+                            id=f"topology_change.detect_inferred_changes:{evidence}",
+                        )
+                    ],
+                    created_at=self._clock(),
+                    resolved_at=self._clock(),
+                )
+            )
+        except Exception:  # noqa: BLE001 - ledger append must not kill the worker
+            log.debug("confirmed configuration event write skipped", exc_info=True)
 
     def _self_heal_cycle(self) -> tuple[Any, ...]:
         """Detector → SUSPECTED event → workflow → promote → reconcile.
@@ -1377,37 +1621,34 @@ class RuntimeMixin:
             for change in changes:
                 # A repeated detector cycle re-registers the same SUSPECTED event
                 # (append-only D1 must not see a duplicate id) and adds one more
-                # independent corroboration, so suspicion can promote over time.
+                # *independent* corroboration, so suspicion can promote over time.
                 event_id = f"evt-inferred-{getattr(change.kind, 'value', change.kind)}-{change.subject}"
                 existing = workflow.record_for(event_id)
                 if existing is None:
                     record = workflow.record_inferred(change)
+                    # Stamp the SUSPECTED event's evidence ref with the detector
+                    # that produced it — the integration asserts provenance.
+                    self._mark_detector_provenance(record.event_id, change)
+                    # HB §14 step 2: mark affected lifecycles exactly once.  A
+                    # repeated detector cycle only adds corroboration; re-running
+                    # begin() would append a duplicate append-only history row.
+                    record = workflow.begin(record.event_id, affected_endpoints=[change.subject])
                 else:
-                    from ..contracts import (
-                        ChangeDetection,
-                        ChangeStatus,
-                        ConfigurationEvent,
-                    )
-
-                    record = workflow.register(
-                        ConfigurationEvent(
-                            event_id=event_id,
-                            kind=change.kind,
-                            detection=ChangeDetection.INFERRED,
-                            status=ChangeStatus.SUSPECTED,
-                            affected_endpoint_ids=[change.subject],
-                            created_at=self._clock(),
-                        )
-                    )
-                record = workflow.begin(
+                    record = existing
+                # A record already past SUSPECTED needs no further cycles: the
+                # promotion hook re-schedules detectors on every version bump.
+                if str(getattr(record.status, "value", record.status)) != "suspected":
+                    continue
+                count = (record.corroborations + 1)
+                confirmed = workflow.observe_confirming_event(
                     record.event_id,
-                    affected_endpoints=[change.subject],
+                    # A distinct token per detector cycle is what lets the T7
+                    # threshold count several independent observations (HB §14).
+                    source=f"detector:{change.kind}:observation-{count}",
                 )
-                out.append(
-                    workflow.observe_confirming_event(
-                        record.event_id, source=f"detector:{change.kind}"
-                    )
-                )
+                if str(getattr(confirmed.status, "value", confirmed.status)) == "confirmed":
+                    self._publish_confirmed_configuration(confirmed, change)
+                out.append(confirmed)
             return tuple(out)
         except Exception:  # noqa: BLE001 - a detector cycle must not kill the worker
             log.exception("self-healing detector cycle failed")
