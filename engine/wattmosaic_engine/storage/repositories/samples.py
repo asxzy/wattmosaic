@@ -20,6 +20,7 @@ from ...contracts import (
     QualityFlag,
     ReaderMeasurement,
 )
+from ...contracts import utcnow as _utcnow
 from ..repositories import SAMPLE_FETCH_CHUNK, Repository, as_utc, enum_value, iso
 
 
@@ -230,6 +231,47 @@ class SamplesRepository(Repository):
                 ON s.ct_id = m.ct_id AND s.id = m.mid"""
             ).fetchall()
         return {r["ct_id"]: dict(r) for r in rows}
+
+    # -- reader state snapshot (P2) --------------------------------------- #
+    #: Key in the ``engine_state`` table for the serialized ReaderStateStore.
+    READER_STATE_KEY = "reader_state_v1"
+
+    def put_reader_state(self, blob: bytes) -> None:
+        """Persist the :mod:`~wattmosaic_engine.realtime.reader_state` blob.
+
+        The blob is an opaque, checksummed byte string produced by
+        :meth:`ReaderStateStore.snapshot_state`; it is stored verbatim as a
+        base64 string in the existing ``engine_state`` table (no migration
+        needed, since P2 owns no table).  Passing ``None`` removes the key, so
+        a store that has never held data never restores a stale snapshot.
+        """
+        import base64
+
+        if blob is None:
+            with self._lock:
+                self._conn.execute(
+                    "DELETE FROM engine_state WHERE key=?", (self.READER_STATE_KEY,)
+                )
+            return
+        value = base64.b64encode(bytes(blob)).decode("ascii")
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO engine_state(key, value, updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (self.READER_STATE_KEY, json.dumps(value), iso(_utcnow())),
+            )
+
+    def get_reader_state(self) -> bytes | None:
+        """Return the stored reader-state blob, or ``None`` when there is none."""
+        import base64
+
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM engine_state WHERE key=?", (self.READER_STATE_KEY,)
+            ).fetchone()
+        if row is None:
+            return None
+        return base64.b64decode(json.loads(row["value"]).encode("ascii"))
 
     def sample_exists(self, key: str) -> bool:
         """``sample:<ct_id>@<iso timestamp>`` -> a stored raw sample.
