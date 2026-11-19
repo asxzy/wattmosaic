@@ -42,6 +42,28 @@ class LearningMixin:
         accounting = self._accounting
         return int(getattr(accounting, "rejected", 0) or 0)
 
+    def on_confirmed_evidence(self, observation_ids: Any) -> int:
+        """Fast-path submit hook (L6/P6): enqueue evidence, never train inline.
+
+        The 5 s inference call hands its confirmed observation ids here.  This
+        method only marks subjects dirty and schedules one drain on the
+        background executor; training, validation, promotion and the registry
+        swap run there, never on the asyncio loop (ADR-0033 / DEC-37).  When no
+        worker is wired (legacy path until Z2) the call is a harmless no-op.
+
+        Returns the number of newly dirtied subjects, or ``0`` when no worker
+        exists.  The P6 hook supplies the worker via ``self.learning_worker``;
+        production code depends only on that attribute, never on a fake.
+        """
+        worker = getattr(self, "learning_worker", None)
+        if worker is None:
+            return 0
+        added = worker.submit(observation_ids)
+        # A cycle with no new work performs zero learning DB queries; schedule
+        # freely and let the worker's own pending-cycle guard deduplicate.
+        worker.schedule()
+        return int(added)
+
     def learning_status(self) -> dict[str, Any]:
         """Honest learning status: counters + effective_state + remedy.
 
