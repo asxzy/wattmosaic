@@ -8,7 +8,7 @@ needs answered: **which level is this?**
 Design rules (spec ``06-device-and-load-model-spec.md`` §5):
 
 * Every level is optional.  ``None`` means *not stated*, never zero.
-* A published value names its level via :class:`PowerLevel`.  ``UNKNOWN`` is
+* A published value names its level via :class:`PowerLevelV3`.  ``UNKNOWN`` is
   the neutral answer, so a profile that cannot place a value does not fabricate
   one.
 * A transient (start-up inrush / shutdown decay) is **not** an operating level
@@ -27,25 +27,23 @@ from typing import Any
 
 from ..contracts import (
     AdjustableSpec,
-    DeviceModelParameters,
     ExpectedPower,
     FixedSpec,
-    LearningSample,
+    LearningObservation,
     LevelStat,
     LoadShape,
     ModelType,
-    PowerLevel,
     PowerLevelV3,
 )
 from .base import _linear_interp, enforce_monotonic, finite
 
 #: The four levels in their natural order: lowest (off but connected) to
 #: highest (doing work), with the transient last because it is not a level.
-LEVEL_ORDER: tuple[PowerLevel, ...] = (
-    PowerLevel.STANDBY,
-    PowerLevel.IDLE,
-    PowerLevel.ACTIVE,
-    PowerLevel.TRANSIENT,
+LEVEL_ORDER: tuple[PowerLevelV3, ...] = (
+    PowerLevelV3.STANDBY,
+    PowerLevelV3.IDLE,
+    PowerLevelV3.ACTIVE,
+    PowerLevelV3.TRANSIENT,
 )
 
 
@@ -128,7 +126,7 @@ class AdjustableResponse:
     @classmethod
     def from_samples(
         cls,
-        samples: Sequence[LearningSample],
+        samples: Sequence[LearningObservation],
         *,
         control_variable: str = "level",
         monotonic: bool = True,
@@ -143,12 +141,13 @@ class AdjustableResponse:
         desired = control_variable.strip().lower()
         points: list[tuple[float, float]] = []
         for sample in samples:
-            if not sample.accepted:
+            if sample.status != "confirmed":
                 continue
-            variable = (sample.control_variable or "").strip().lower()
+            variable = str(sample.attributes.get("control_variable") or "").strip().lower()
             if variable != desired:
                 continue
-            x, y = finite(sample.control_value), finite(sample.event_power_w)
+            x = finite(sample.attributes.get("control_value"))
+            y = finite(sample.level_w if sample.basis == "ABSOLUTE_ANCHOR" else sample.delta_w)
             if x is not None and y is not None:
                 points.append((x, y))
         return cls.from_declared(
@@ -163,9 +162,14 @@ class AdjustableResponse:
         """The model implementation axis this response belongs to."""
         return ModelType.DIMMABLE
 
-    def as_parameters(self) -> DeviceModelParameters:
-        """The curve in the contract's shared ``DeviceModelParameters`` shape."""
-        return DeviceModelParameters(curve=[(x, y) for x, y in self.points])
+    def as_parameters(self) -> AdjustableSpec:
+        """The declared curve as a v3 :class:`AdjustableSpec`."""
+        return AdjustableSpec(
+            control_variable=self.control_variable,
+            knots_x=[x for x, _ in self.points],
+            knots_w=[y for _, y in self.points],
+            monotone=self.monotonic,
+        )
 
     def power_at(self, level: float | None) -> float | None:
         """Interpolate the declared curve at ``level`` (clamped, never extrapolated).
@@ -312,7 +316,7 @@ class DevicePowerProfile:
         )
 
     # -- level lookup ----------------------------------------------------- #
-    def level_for(self, power_w: float | None) -> PowerLevel:
+    def level_for(self, power_w: float | None) -> PowerLevelV3:
         """Name the level a value sits at, or ``UNKNOWN`` when it matches none.
 
         The comparison uses the profile's tolerance and prefers the **lowest**
@@ -321,22 +325,22 @@ class DevicePowerProfile:
         matches nothing is ``UNKNOWN`` -- the honest answer, not a guess.
         """
         if power_w is None:
-            return PowerLevel.UNKNOWN
+            return PowerLevelV3.UNKNOWN
         for level in LEVEL_ORDER:
             stated = self.level_w(level)
             if stated is not None and abs(float(power_w) - stated) <= self.tolerance_w:
                 return level
-        return PowerLevel.UNKNOWN
+        return PowerLevelV3.UNKNOWN
 
-    def level_w(self, level: PowerLevel) -> float | None:
+    def level_w(self, level: PowerLevelV3) -> float | None:
         """The stated watts for one level, or ``None`` when not stated."""
-        if level is PowerLevel.STANDBY:
+        if level is PowerLevelV3.STANDBY:
             return self.standby_w
-        if level is PowerLevel.IDLE:
+        if level is PowerLevelV3.IDLE:
             return self.idle_w
-        if level is PowerLevel.ACTIVE:
+        if level is PowerLevelV3.ACTIVE:
             return self.active_w
-        if level is PowerLevel.TRANSIENT:
+        if level is PowerLevelV3.TRANSIENT:
             return self.transient_w
         return None
 
@@ -376,7 +380,7 @@ class DevicePowerProfile:
     def is_steady_state(self, power_w: float | None) -> bool:
         """True when ``power_w`` is a steady-state level, never a transient."""
         level = self.level_for(power_w)
-        return level is not PowerLevel.TRANSIENT and level is not PowerLevel.UNKNOWN
+        return level is not PowerLevelV3.TRANSIENT and level is not PowerLevelV3.UNKNOWN
 
     # -- adjustable response ---------------------------------------------- #
     def with_adjustable_response(self, response: AdjustableResponse) -> DevicePowerProfile:
@@ -607,7 +611,7 @@ def _opt_float(value: Any) -> float | None:
 
 
 #: The transient level, named once so a caller cannot forget to exclude it.
-TRANSIENT_LEVEL = PowerLevel.TRANSIENT
+TRANSIENT_LEVEL = PowerLevelV3.TRANSIENT
 
 
 __all__ = [

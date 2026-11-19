@@ -14,12 +14,12 @@ import json
 from datetime import datetime
 from typing import Any
 
-from ...contracts import LearningObservation, LearningSample, utcnow
+from ...contracts import LearningObservation, utcnow
 from ..repositories import Repository, enum_value, iso
 
 
 class LearningRepository(Repository):
-    def insert_learning_sample(self, sample: LearningSample) -> None:
+    def insert_learning_sample(self, sample: Any) -> None:
         with self._lock:
             self._conn.execute(
                 """INSERT OR REPLACE INTO learning_samples(sample_id, device_id, captured_at, duration_s,

@@ -24,9 +24,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ..contracts import OperatingStage, Source, StageStatus
+from ..contracts import OperatingStage, StageStatus
 from ..storage.database import Database, iso
-from .models import DeviceRun
+from .models import DeviceRun, RunSource
 
 
 class DeviceRunRepository:
@@ -231,9 +231,9 @@ def run_from_row(row: dict[str, Any]) -> DeviceRun | None:
             except (TypeError, ValueError):
                 continue
     try:
-        source = Source(str(row.get("source") or Source.INFERRED.value))
+        source = RunSource(str(row.get("source") or RunSource.INFERRED.value))
     except ValueError:
-        source = Source.INFERRED
+        source = RunSource.INFERRED
     return DeviceRun(
         run_id=str(row.get("run_id") or ""),
         device_id=str(row.get("device_id") or ""),

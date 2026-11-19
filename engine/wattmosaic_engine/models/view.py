@@ -2,7 +2,7 @@
 
 The retired ``electrical/models.py`` parameter interpreter is gone: its
 ``expected_power_w`` duck-typed an arbitrary object and re-implemented model
-prediction from raw ``DeviceModelParameters`` (DEF-02 — a composite reloaded
+prediction from raw archived parameters (DEF-02 — a composite reloaded
 with the wrong control variable and predicted a different number).  All model
 access now goes through the single v3 prediction path in
 :class:`~wattmosaic_engine.models.registry.Registry` / ``ModelSetView.predict``.
@@ -28,17 +28,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from ..contracts import (
-    DeviceModelParameters,
-    DeviceModelVersion,
-    ModelStatus,
-    ModelType,
-    PowerLevelV3,
-    PowerPrediction,
-)
+from ..contracts import ModelStatus, ModelType, PowerLevelV3, PowerPrediction
 from ..runtime.interfaces import ModelSetView, PredictionContext
 from .prediction import predict_with_spec
-from .serde import version_from_row
+from .serde import LegacyModelRow, LegacyParameters, version_from_row
 
 #: Default factor applied to a learnt operating power when deriving an upper
 #: bound.  1.35 allows a legitimate overload / start-up surge without letting
@@ -75,7 +68,7 @@ class ModelView:
     model_type: ModelType | None = None
     version: int | None = None
     status: ModelStatus | None = None
-    params: DeviceModelParameters = field(default_factory=DeviceModelParameters)
+    params: LegacyParameters = field(default_factory=LegacyParameters)
     validation_quality: float = 0.0
     confidence: float = 0.0
     estimated_power_w: float | None = None
@@ -118,10 +111,10 @@ def _validation_quality(metrics: Mapping[str, Any]) -> float:
     return 0.0
 
 
-def _view_from_version(device_id: str, version: DeviceModelVersion) -> ModelView | None:
+def _view_from_version(device_id: str, version: LegacyModelRow) -> ModelView | None:
     """Project a legacy version through the v3 prediction path.
 
-    A legacy ``DeviceModelVersion`` carries raw ``DeviceModelParameters`` rather
+    An archived model row carries raw parameters rather
     than a v3 spec.  The L1 codec is the only decoder: build ``FixedSpec`` level
     statistics from the declared levels and let ``predict_with_spec`` answer the
     operating-level prediction.  Unknown values stay ``None``.
@@ -238,25 +231,24 @@ def resolve_model(
             raw = models.get(device_id)
             if raw is None:
                 return None
-            if isinstance(raw, DeviceModelVersion):
+            if isinstance(raw, LegacyModelRow):
                 return _view_from_version(device_id, raw)
             if isinstance(raw, Mapping):
                 payload = dict(raw)
                 active = payload.get("active") if "active" in payload else payload
                 if active is None:
                     return None
-                if isinstance(active, DeviceModelVersion):
+                if isinstance(active, LegacyModelRow):
                     return _view_from_version(device_id, active)
                 if isinstance(active, Mapping):
-                    # A serialized ``DeviceModelVersion`` (with nested
+                    # A serialized legacy model version (with nested
                     # ``parameters``/``validation_metrics``), as served by the
                     # legacy ``models()`` facade path.
                     if "parameters" in active or "validation_metrics" in active:
                         try:
-                            parsed = DeviceModelVersion.model_validate(
-                                {"device_id": device_id, **dict(active)}
-                            )
-                            return _view_from_version(device_id, parsed)
+                            parsed = version_from_row({"device_id": device_id, **dict(active)})
+                            if parsed is not None:
+                                return _view_from_version(device_id, parsed)
                         except Exception:  # noqa: BLE001
                             pass
                     # A v3 ``PowerModelVersion`` dump (with ``spec``): predict

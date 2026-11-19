@@ -8,7 +8,7 @@ Integration rules
 * An interval longer than ``stale_after_s`` is a *gap*: no energy is accrued
   across it.  This prevents a sensor/engine outage from being silently turned
   into consumed kWh.
-* A result that is not a measurement at all is never integrated.  ``Source.
+* A result that is not a measurement at all is never integrated.  ``source=
   UNKNOWN``, a placeholder watt value (``provenance["power_w_is_placeholder"]``)
   and ``quality_status`` of ``bad``/``missing`` contribute no kWh — the energy
   deliverable must not be built from a number that does not describe the load.
@@ -42,9 +42,10 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
-from ..contracts import InferenceResult, OperatingStage, QualityStatus, Source, StageStatus
+from ..contracts import EstimateStatus, OperatingStage, QualityStatus, StageStatus
 from ..storage.database import Database
 from .models import DeviceRun, EnergyBucket, _RunTracker
 from .repository import DeviceRunRepository
@@ -173,7 +174,7 @@ class EnergyAggregator:
     # ------------------------------------------------------------------ #
     def add_result(
         self,
-        result: InferenceResult,
+        result: Any,
         at: datetime | None = None,
         *,
         measurement_age_s: float | None = None,
@@ -199,7 +200,7 @@ class EnergyAggregator:
         power = float(result.power_w)
         if power != power or math.isinf(power):
             return
-        source = result.source.value if hasattr(result.source, "value") else str(result.source)
+        source = str(getattr(result.source, "value", getattr(result, "source", "inferred")))
 
         if not self._is_measurable(result, source):
             # A placeholder / unknown / failed result describes no load: it
@@ -258,19 +259,19 @@ class EnergyAggregator:
         self._start_run_if_needed(device, device_id, at, power, source)
 
     @staticmethod
-    def _is_measurable(result: InferenceResult, source: str) -> bool:
+    def _is_measurable(result: Any, source: str) -> bool:
         """Whether this result describes an actual load measurement.
 
         Energy is the deliverable, so a number that does not describe the load
         must not be integrated:
 
-        * ``Source.UNKNOWN`` — the engine explicitly could not attribute power
+        * ``source=UNKNOWN`` — the engine explicitly could not attribute power
           (the watt value is a placeholder, not a measurement);
         * ``provenance["power_w_is_placeholder"]`` — the engine marks its
           fabricated 0 W this way even when a stronger source is claimed;
         * ``quality_status`` of ``bad`` / ``missing`` — the reading failed.
         """
-        if str(source) == Source.UNKNOWN.value:
+        if str(source) == EstimateStatus.UNKNOWN.value:
             return False
         provenance = result.provenance
         if isinstance(provenance, Mapping) and bool(provenance.get("power_w_is_placeholder")):
@@ -406,11 +407,11 @@ class EnergyAggregator:
             peak_power_w=power,
             sample_count=1,
             points=[(at, power)],
-            source=_source_enum(source),
+            source=source,
         )
 
     def _track_run(
-        self, device: _DeviceState, result: InferenceResult, at: datetime, power: float, source: str
+        self, device: _DeviceState, result: Any, at: datetime, power: float, source: str
     ) -> None:
         run = device.run
         if run is None:
@@ -613,12 +614,13 @@ class EnergyAggregator:
             device.accumulators = defaultdict(dict)
             device.run = None
             for at, power, source in replay:
-                result = InferenceResult(
+                result = SimpleNamespace(
                     device_id=device_id,
                     timestamp=at,
                     power_w=power,
-                    source=_source_enum(source),
-                    confidence=0.0,
+                    source=source,
+                    quality_status=None,
+                    provenance={},
                 )
                 self.add_result(result, at)
             sink: list[EnergyBucket] = []
@@ -667,7 +669,7 @@ class EnergyAggregator:
                 power = float(row.get("power_w"))
             except (TypeError, ValueError):
                 continue
-            source = str(row.get("source") or Source.INFERRED.value)
+            source = str(row.get("source") or "inferred")
             points.append((at, power, source))
         points.sort(key=lambda item: item[0])
         return points
@@ -735,13 +737,6 @@ class EnergyAggregator:
         """Drain the in-memory closed-run log (for tests / API publication)."""
         out, self._closed_runs = self._closed_runs, []
         return out
-
-
-def _source_enum(value: str) -> Source:
-    try:
-        return Source(str(value))
-    except ValueError:
-        return Source.INFERRED
 
 
 __all__ = ["DEFAULT_BUCKET_SIZES", "DeviceRun", "EnergyAggregator", "EnergyBucket"]

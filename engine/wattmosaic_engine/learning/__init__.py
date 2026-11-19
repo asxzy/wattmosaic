@@ -1,65 +1,60 @@
-"""Automatic learning pipeline (sample → train → validate → promote)."""
+"""Automatic learning pipeline (observation → train → promote) — contract 3.0.
+
+The realtime path is observation-based: :mod:`observations` turns immutable
+event evidence into device-attributed :class:`LearningObservation` values,
+:mod:`sample_filter` applies the quality gate, :mod:`incremental` and
+:mod:`promotion` train and promote per model class, and :mod:`worker` runs that
+work off the event loop.  :mod:`reconciliation` replays immutable evidence under
+explicit model/topology versions.
+"""
 
 from .observations import (
     build_group_observations,
     build_observations,
     observation_for_estimate,
 )
-from .pipeline import LearningPipeline
-from .promotion import PromotionDecision, PromotionManager
+from .promotion import PromotionDecisionV2, evaluate_promotion_v2
 from .reporting import (
     DYNAMIC_TOPOLOGY_NOTE,
     DYNAMIC_TOPOLOGY_QUALITIES,
     LearningAccounting,
     build_learning_status,
 )
-from .sample_collector import SampleCollector, extract_control
-from .sample_filter import (
-    GateDecision,
-    GateInputs,
-    GateRejection,
-    SampleDecision,
-    SampleEvidence,
-    SampleFilter,
-    evaluate_gate,
-    rejection_summary,
-)
+from .sample_filter import GateDecision, GateInputs, GateRejection, evaluate_gate
 from .stages import current_stage, recognize_stages, segment_cycle, stage_distinguishable
 from .thresholds import LearningThresholds
-from .trainer import Trainer, TrainingResult, training_quality
-from .validation import ValidationReport, compare_models, split_holdout, validate_model
+from .validation import (
+    ClassCriteria,
+    FrozenEvaluation,
+    compare_frozen,
+    evaluate_frozen,
+    per_class_accepts,
+    split_by_observation_id,
+)
 
 __all__ = [
     "DYNAMIC_TOPOLOGY_NOTE",
     "DYNAMIC_TOPOLOGY_QUALITIES",
+    "ClassCriteria",
+    "FrozenEvaluation",
     "GateDecision",
     "GateInputs",
     "GateRejection",
     "LearningAccounting",
-    "LearningPipeline",
     "LearningThresholds",
-    "PromotionDecision",
-    "PromotionManager",
-    "SampleCollector",
-    "SampleDecision",
-    "SampleEvidence",
-    "SampleFilter",
-    "Trainer",
-    "TrainingResult",
-    "ValidationReport",
+    "PromotionDecisionV2",
     "build_group_observations",
     "build_learning_status",
     "build_observations",
-    "compare_models",
+    "compare_frozen",
     "current_stage",
+    "evaluate_frozen",
     "evaluate_gate",
-    "extract_control",
+    "evaluate_promotion_v2",
     "observation_for_estimate",
+    "per_class_accepts",
     "recognize_stages",
-    "rejection_summary",
     "segment_cycle",
-    "split_holdout",
+    "split_by_observation_id",
     "stage_distinguishable",
-    "training_quality",
-    "validate_model",
 ]
