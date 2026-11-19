@@ -101,3 +101,4 @@
 | V1a | ? | VERIFIED | | | v3 accuracy harness merged; HB17 runtime path publishes nothing -> V1 investigates |
 | V2a | ? | IN_REVIEW | | | tools merged; rehearsal PASS 11->25 and back; perf tool uses stub health/matrix + replay relabels versions -> V2b |
 | V1c | ? | VERIFIED | | | MEASURED only from declared single-subject endpoint; gate green |
+| Z3a | ? | VERIFIED | | | live-path name heuristics removed (A1-A5); gate green at c1c3736 |
