@@ -148,7 +148,7 @@ def test_migration_versions_are_sequential() -> None:
     reserved = set(migrations_module.RESERVED_VERSIONS)
     spare = set(migrations_module.SPARE_VERSIONS)
     assert reserved == {12}
-    assert spare == set(range(22, 25))  # 21 allocated to D5 (evidence supersedes)
+    assert spare == set(range(23, 25))  # 21 D5, 22 ZF (nullable confidence)
     assert 12 not in versions
     assert all(13 <= version <= 25 for version in versions if version > 11)
     assert not reserved & set(versions)

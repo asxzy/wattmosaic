@@ -103,7 +103,8 @@ RESERVED_VERSIONS: frozenset[int] = frozenset({12})
 #: :data:`RESERVED_VERSIONS`, these may legitimately become migrations later; a
 #: gap in this range must therefore not be read as "a migration is missing".
 # 21 is no longer spare: D5 allocated it to ``v021_evidence_supersedes``.
-SPARE_VERSIONS: frozenset[int] = frozenset(range(22, 25))
+# 22 is no longer spare: ZF allocated it to ``v022_nullable_confidence``.
+SPARE_VERSIONS: frozenset[int] = frozenset(range(23, 25))
 
 #: Human-readable reasons, keyed by reserved number, used only by discovery's
 #: refusal message.  Kept private so the public ``RESERVED_VERSIONS`` stays a

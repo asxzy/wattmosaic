@@ -89,6 +89,12 @@ def _estimate_row(estimate: DeviceEstimate, versions: Any, at: str) -> tuple[Any
     ``source`` is the method, ``confidence`` is the identifiability component
     of the confidence vector when present, and an explicit ``estimate_json``
     carries everything a reader needs to rebuild the typed estimate.
+
+    HB §18: an absent confidence component is ``None``, never ``0``.  The
+    ``confidence`` column is nullable (migration 22), so a valid estimate whose
+    :class:`~wattmosaic_engine.contracts.ConfidenceVectorV3` has no
+    identifiability component is persisted as ``NULL`` rather than failing a
+    ``NOT NULL`` constraint.
     """
     bounds = estimate.bounds
     confidence = estimate.confidence
