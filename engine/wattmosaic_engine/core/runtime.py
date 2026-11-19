@@ -326,6 +326,7 @@ class RuntimeMixin:
         self.version_service: VersionService | None = None
         self.model_registry_v3: Registry | None = None
         self.matrix_updater: MatrixUpdater | None = None
+        self.matrix_reconciler: Any | None = None
         self.snapshot_assembler: SnapshotAssembler | None = None
         self.background_executor: BackgroundExecutor | None = None
         self.inference_executor: ThreadPoolExecutor | None = None
@@ -399,8 +400,15 @@ class RuntimeMixin:
         registry.add_listener(self._on_model_set_changed)
         # One D1 change-listener: every topology/mapping activation (declared
         # configuration events, T7 self-heal, user pin/reject/declare, rollback)
-        # refreshes the triple new event groups are stamped with.
+        # refreshes the triple new event groups are stamped with and reconciles
+        # the matrix store the runtime publishes (HB §17 step 10).  Both run off
+        # the asyncio loop via the single background executor.
         self.version_service.add_listener(self._on_versions_changed)
+        from ..mapping.reconcile import Reconciler as MatrixReconciler
+
+        self.matrix_reconciler = MatrixReconciler(
+            matrix_store, self.version_service, clock=self._clock
+        )
         self.matrix_updater = MatrixUpdater(
             store=matrix_store,
             versions=self.version_service,
@@ -507,6 +515,7 @@ class RuntimeMixin:
             add(self._on_versions_changed)
         self._wire_self_healing()
         if self.matrix_updater is not None:
+            from ..mapping.reconcile import Reconciler as MatrixReconciler
             from ..mapping.updater import MatrixUpdater
 
             # One M2 store: when the D1 service marks cells on a configuration
@@ -518,6 +527,11 @@ class RuntimeMixin:
                 store=store,
                 versions=versions,
                 clock=self._clock,
+            )
+            # The matrix reconciler must point at the rebound service and the
+            # same shared store so promotions reconcile the cells /matrix reads.
+            self.matrix_reconciler = MatrixReconciler(
+                store, versions, clock=self._clock
             )
         # Rebind promotion hooks to the new service (the old wrapper flag lives
         # on the replaced object, so hooks are installed fresh).
@@ -938,8 +952,29 @@ class RuntimeMixin:
         )
 
     def _on_versions_changed(self, kind: str, version_id: str) -> None:
-        """D1 hook: a topology or mapping version became active."""
+        """D1 hook: a topology or mapping version became active.
+
+        Refresh the triple P5 stamps, then reconcile the matrix store the runtime
+        publishes (HB §17 step 10).  Reconciliation diffs the stored versions and
+        writes cell versions, so it is submitted to the single background
+        executor, never run on the asyncio loop.
+        """
         self._refresh_grouping_versions()
+        if self.matrix_reconciler is not None:
+            self.submit_background(
+                self._run_matrix_reconcile, kind, version_id
+            )
+
+    def _run_matrix_reconcile(self, kind: str, version_id: str) -> Any | None:
+        """Background job: reconcile the live matrix after a version promotion."""
+        reconciler = self.matrix_reconciler
+        if reconciler is None:
+            return None
+        try:
+            return reconciler.reconcile(f"{kind}_promotion")
+        except Exception:  # noqa: BLE001 - best-effort background work
+            log.exception("matrix reconciliation failed for %s %s", kind, version_id)
+            return None
 
     def _refresh_grouping_versions(self) -> None:
         """Re-stamp P5 with the current triple (and topology view).
