@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import datetime
 from typing import Any
+from urllib.parse import quote
 
 from .const import (
     COMMAND_SET_DEVICE_CONFIGURATION,
@@ -2184,4 +2185,471 @@ def device_configuration_command(
         "device_id": str(device_id).strip(),
         "parameters": dict(parameters),
     }
+
+
+# --------------------------------------------------------------------------- #
+# HA setup flow v3 — endpoints, user edges, plug scope (H2)
+# --------------------------------------------------------------------------- #
+#
+# Everything in this section is pure: it never imports ``homeassistant``, never
+# touches a database and never reads a wall clock.  The only side effects are the
+# HTTP calls in :func:`async_commit_endpoint_setup`, which are made through an
+# injected client and recorded so tests can assert on the exact request log.
+#
+# Invariants (DEC-13, H2):
+#   * HA writes only what the user picked.  A parent is posted as a
+#     ``declared_by=user`` CONTAINS edge only when its ``user_accepted`` flag is
+#     true.  Inferred (PROVISIONAL) edges are suggestions: they are never posted
+#     unless the user leaves them checked.
+#   * There is no ``POST /topology/confirm``.  A user declaration is authoritative
+#     (DEC-10), so the engine promotes it when it records the edge.
+#   * A plug scope is confirmed only when the user selected a device.
+#   * Absent values are ``None``, never 0.0.
+
+#: The two v3 HTTP paths the setup flow writes to.  Mirrored from
+#: ``interfaces.md`` §9; deliberately strings so this module stays pure.
+TOPOLOGY_EDGES_PATH = "/topology/edges"
+ENDPOINT_PATH = "/endpoints/{endpoint_id}"
+ENDPOINT_SCOPE_PATH = "/endpoints/{endpoint_id}/scope"
+ENTITY_LINKS_PATH = "/entity-links"
+
+
+def _text(value: Any) -> str:
+    """Trim a form value to a non-empty string, or return ``""``."""
+    return str(value).strip() if value is not None else ""
+
+
+def _optional_text(value: Any) -> str | None:
+    """Trim a form value to a non-empty string, or return ``None``."""
+    text = _text(value)
+    return text or None
+
+
+#: Endpoint kinds the flow understands.  Mirrors ``contracts.entities.EndpointKind``.
+_ENDPOINT_KINDS: frozenset[str] = frozenset(
+    {"ct", "smart_plug", "appliance_monitor", "panel_main", "virtual"}
+)
+
+#: An endpoint that *physically* measures exactly one load.  Only these may be
+#: offered the "measures one appliance" question (DEC-05).  A circuit CT is
+#: never in this set: a circuit CT can never get SINGLE_SUBJECT automatically.
+_SINGLE_SUBJECT_KINDS: frozenset[str] = frozenset({"smart_plug", "appliance_monitor"})
+
+
+def endpoint_id(endpoint: Mapping[str, Any]) -> str | None:
+    """The endpoint's id, or ``None`` when the payload is unusable."""
+    if not isinstance(endpoint, Mapping):
+        return None
+    return _optional_text(endpoint.get("endpoint_id") or endpoint.get("id"))
+
+
+def endpoint_kind(endpoint: Mapping[str, Any]) -> str:
+    """Lower-cased endpoint ``kind``; ``"unknown"`` when absent or unexpected."""
+    if not isinstance(endpoint, Mapping):
+        return "unknown"
+    kind = _text(endpoint.get("kind")).lower()
+    return kind if kind in _ENDPOINT_KINDS else "unknown"
+
+
+def is_single_subject_candidate(endpoint: Mapping[str, Any]) -> bool:
+    """Whether a plug endpoint may be offered the single-subject scope question.
+
+    A candidate plug with ``scope == "single_subject"`` and a candidate or
+    missing ``scope_status`` is offered.  A circuit CT is never offered, even if
+    a discovery payload happens to carry a stray proposal for one (DEC-05/06).
+    """
+    if endpoint_kind(endpoint) not in _SINGLE_SUBJECT_KINDS:
+        return False
+    scope = _text(endpoint.get("scope")).lower()
+    if scope != "single_subject":
+        return False
+    status = _text(endpoint.get("scope_status")).lower()
+    return status in ("", "candidate")
+
+
+def single_subject_proposal(endpoint: Mapping[str, Any]) -> str | None:
+    """The subject id a discovery candidate proposes for a single-subject plug.
+
+    This is a *proposal*, not a confirmation: it is used only to pre-select the
+    device picker.  Nothing is written unless the user selects a device in the
+    submitted choices.
+    """
+    if not is_single_subject_candidate(endpoint):
+        return None
+    return _optional_text(endpoint.get("scope_subject_id"))
+
+
+def normalise_endpoints(payload: Any) -> list[dict[str, Any]]:
+    """Normalise ``GET /endpoints`` into the shape the wizard renders.
+
+    Accepts a bare list or ``{"endpoints": [...]}``.  Only the fields the flow
+    needs are kept, with absent values represented as ``None``/empty rather than
+    invented.  Order is preserved; duplicate ids are dropped (first wins).
+    """
+    raw: Any = payload
+    if isinstance(payload, Mapping):
+        raw = payload.get("endpoints") or payload.get("items") or []
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw:
+        eid = endpoint_id(item)
+        if eid is None or eid in seen:
+            continue
+        seen.add(eid)
+        out.append(
+            {
+                "endpoint_id": eid,
+                "kind": endpoint_kind(item),
+                "scope": _text(item.get("scope")).lower() if isinstance(item, Mapping) else "",
+                "scope_status": (
+                    _text(item.get("scope_status")).lower() if isinstance(item, Mapping) else ""
+                ),
+                "scope_subject_id": (
+                    single_subject_proposal(item) if isinstance(item, Mapping) else None
+                ),
+                "display_name": (
+                    _optional_text(item.get("display_name") or item.get("name"))
+                    if isinstance(item, Mapping)
+                    else None
+                ),
+                "entity_id": (
+                    _optional_text(item.get("entity_id")) if isinstance(item, Mapping) else None
+                ),
+                "enabled": (
+                    bool(item.get("enabled", True)) if isinstance(item, Mapping) else True
+                ),
+            }
+        )
+    return out
+
+
+def suggested_parents(endpoints: Sequence[Mapping[str, Any]]) -> dict[str, list[str]]:
+    """Engine PROVISIONAL CONTAINS parents, grouped by child endpoint id.
+
+    ``GET /topology`` exposes inferred edges as suggestions (T4).  Only
+    PROVISIONAL/CANDIDATE ``CONTAINS`` edges are proposals; confirmed edges are
+    already hard structure and are not re-written by the wizard.  The result is
+    keyed by the *child* (target) endpoint id, and each parent is an engine
+    endpoint id.  No edge is written by this function.
+    """
+    suggestions: dict[str, list[str]] = {}
+    if not isinstance(endpoints, Sequence) or isinstance(endpoints, (str, bytes)):
+        return suggestions
+    for edge in endpoints:
+        if not isinstance(edge, Mapping):
+            continue
+        relation = _text(edge.get("relation")).upper()
+        lifecycle = _text(edge.get("lifecycle")).upper()
+        if relation != "CONTAINS" or lifecycle not in ("PROVISIONAL", "CANDIDATE"):
+            continue
+        child = _optional_text(edge.get("target_endpoint_id") or edge.get("target"))
+        parent = _optional_text(edge.get("source_endpoint_id") or edge.get("source"))
+        if not child or not parent or child == parent:
+            continue
+        parents = suggestions.setdefault(child, [])
+        if parent not in parents:
+            parents.append(parent)
+    return suggestions
+
+
+def unambiguous_parent(endpoint_id_value: str, suggestions: Mapping[str, Sequence[str]]) -> str | None:
+    """A single unambiguous engine suggestion, or ``None``.
+
+    Two competing proposals are ambiguous: pre-selecting either would present a
+    guess as a measurement, so the wizard leaves the field for the user.
+    """
+    candidates = suggestions.get(endpoint_id_value, ())
+    if len(candidates) == 1:
+        return str(candidates[0])
+    return None
+
+
+def endpoint_choice(
+    submitted: Mapping[str, Any] | None,
+    endpoint: Mapping[str, Any],
+    *,
+    suggestions: Mapping[str, Sequence[str]] | None = None,
+) -> dict[str, Any]:
+    """The wizard's decision for one endpoint, with no hidden writes.
+
+    ``parent_chosen`` is the *submitted* parent (empty means none).  When the
+    form did not carry a parent field, a single unambiguous engine suggestion is
+    offered as ``suggested_parent`` and preselected in the UI — but the caller
+    must still submit it explicitly (``parent_accepted``) before it is written.
+    ``scope_subject_id`` is set only when the user selected a device.
+    """
+    data = submitted if isinstance(submitted, Mapping) else {}
+    eid = str(endpoint.get("endpoint_id") or "")
+    suggestion = (
+        unambiguous_parent(eid, suggestions or {}) if is_container_endpoint(endpoint) else None
+    )
+    parent_submitted = _optional_text(data.get("parent_endpoint_id"))
+    parent_accepted = bool(data.get("parent_accepted", False))
+    scope_subject = _optional_text(data.get("scope_subject_id"))
+    # A plug's subject is written only for a single-subject candidate.  The
+    # discovery proposal is carried separately (display-only): it preselects the
+    # picker, but a real user submission is still required before it is posted.
+    scope_proposal = single_subject_proposal(endpoint)
+    if not is_single_subject_candidate(endpoint):
+        scope_subject = None
+        scope_proposal = None
+    return {
+        "endpoint_id": eid,
+        "kind": str(endpoint.get("kind") or "unknown"),
+        # The parent actually recorded from the form, if any.
+        "parent_endpoint_id": parent_submitted,
+        # A suggested-but-not-accepted parent is NOT a parent to write; it is
+        # carried separately so the UI can label it and the user can leave it
+        # checked to accept it.
+        "parent_accepted": parent_submitted is not None and parent_accepted,
+        "suggested_parent": suggestion,
+        "suggested_scope_subject": scope_proposal,
+        "scope_subject_id": scope_subject,
+        "enabled": bool(data.get("enabled", endpoint.get("enabled", True))),
+    }
+
+
+def is_container_endpoint(endpoint: Mapping[str, Any]) -> bool:
+    """Whether an endpoint may be declared as a CONTAINS parent.
+
+    Circuit CTs / panel mains may contain children; a single-subject plug may
+    not.  A discovery payload may state this explicitly; otherwise it is
+    inferred from the endpoint kind.
+    """
+    if not isinstance(endpoint, Mapping):
+        return False
+    explicit = endpoint.get("can_contain")
+    if isinstance(explicit, bool):
+        return explicit
+    return endpoint_kind(endpoint) in ("ct", "panel_main")
+
+
+def endpoint_choices(
+    endpoints: Sequence[Mapping[str, Any]],
+    submitted: Mapping[str, Any] | None,
+    *,
+    suggestions: Mapping[str, Sequence[str]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Build the decision map for every endpoint in one form submission.
+
+    ``submitted`` is keyed by endpoint id (``{endpoint_id: {...}}``).  An absent
+    key means "no opinion" and keeps only the endpoint's own suggestion, never
+    an accepted parent or scope.
+    """
+    data = submitted if isinstance(submitted, Mapping) else {}
+    result: dict[str, dict[str, Any]] = {}
+    for endpoint in endpoints:
+        eid = str(endpoint.get("endpoint_id") or "")
+        if not eid:
+            continue
+        raw = data.get(eid)
+        result[eid] = endpoint_choice(
+            raw if isinstance(raw, Mapping) else {}, endpoint, suggestions=suggestions
+        )
+    return result
+
+
+def _quote_segment(value: str) -> str:
+    """Percent-encode one path segment (endpoint ids may contain dots)."""
+    return quote(str(value), safe="")
+
+
+def build_user_edge_plan(choices: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Turn accepted endpoint choices into ``POST /topology/edges`` bodies.
+
+    Only a choice with ``parent_accepted=True`` and a non-empty
+    ``parent_endpoint_id`` produces an edge.  Every edge is
+    ``relation=CONTAINS``, ``declared_by=user`` — a user declaration is a
+    CONFIRMED, authoritative edge (DEC-10), and an inferred parent becomes a
+    declaration only when the user accepted it (DEC-13).  There is never a
+    ``POST /topology/confirm`` in this plan.
+    """
+    plan: list[dict[str, Any]] = []
+    for child, choice in sorted(choices.items()):
+        if not isinstance(choice, Mapping):
+            continue
+        if not bool(choice.get("parent_accepted", False)):
+            continue
+        parent = _optional_text(choice.get("parent_endpoint_id"))
+        if parent is None or parent == child:
+            continue
+        plan.append(
+            {
+                "path": TOPOLOGY_EDGES_PATH,
+                "body": {
+                    "relation": "CONTAINS",
+                    "source": parent,
+                    "target": child,
+                    "declared_by": "user",
+                },
+            }
+        )
+    return plan
+
+
+def build_scope_plan(choices: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Turn plug scope selections into ``POST /endpoints/{id}/scope`` bodies.
+
+    A confirm call is made only when the user actually selected a device
+    (``scope_subject_id``).  No selection means no call — never a silent
+    auto-confirm of an inferred or discovered subject.
+    """
+    plan: list[dict[str, Any]] = []
+    for endpoint_id_value, choice in sorted(choices.items()):
+        if not isinstance(choice, Mapping):
+            continue
+        subject = _optional_text(choice.get("scope_subject_id"))
+        if subject is None:
+            continue
+        plan.append(
+            {
+                "path": ENDPOINT_SCOPE_PATH.format(
+                    endpoint_id=_quote_segment(endpoint_id_value)
+                ),
+                "body": {"action": "confirm", "subject_id": subject},
+            }
+        )
+    return plan
+
+
+def build_entity_link_plan(
+    choices: Mapping[str, Mapping[str, Any]],
+    *,
+    entities_by_endpoint: Mapping[str, Sequence[str]] | None = None,
+) -> list[dict[str, Any]]:
+    """Build the ``ha_entity_links`` write bodies for confirmed device links.
+
+    ``entities_by_endpoint`` maps a plug endpoint id to the HA entity ids its
+    confirmed subject exposes as behavioural state evidence.  One entity may
+    link to several subjects (DEC-08), so each body is a many-to-many link with
+    ``target_kind="device"``.  Only endpoints whose scope was confirmed in this
+    submission (a selected device) produce a link, and only for entity ids that
+    were actually supplied.  The body shape follows the v3 entity-link contract
+    (``entity_id``, ``target_kind``, ``target_id``, ``declared_by``).
+    """
+    source = entities_by_endpoint or {}
+    plan: list[dict[str, Any]] = []
+    for endpoint_id_value, choice in sorted(choices.items()):
+        if not isinstance(choice, Mapping):
+            continue
+        subject = _optional_text(choice.get("scope_subject_id"))
+        if subject is None:
+            continue
+        for entity_id in source.get(endpoint_id_value, ()):
+            clean = _optional_text(entity_id)
+            if clean is None:
+                continue
+            plan.append(
+                {
+                    "path": ENTITY_LINKS_PATH,
+                    "body": {
+                        "entity_id": clean,
+                        "target_kind": "device",
+                        "target_id": subject,
+                        "declared_by": "user",
+                    },
+                }
+            )
+    return plan
+
+
+def build_endpoint_setup_plan(
+    choices: Mapping[str, Mapping[str, Any]],
+    *,
+    entities_by_endpoint: Mapping[str, Sequence[str]] | None = None,
+) -> list[dict[str, Any]]:
+    """The complete, ordered v3 write plan for a setup submission.
+
+    Order matters for the request log: user edges first (T4), then scope
+    confirmations (D2), then entity links (DEC-08).  No plan item is ever a
+    ``POST /topology/confirm``.
+    """
+    return [
+        *build_user_edge_plan(choices),
+        *build_scope_plan(choices),
+        *build_entity_link_plan(choices, entities_by_endpoint=entities_by_endpoint),
+    ]
+
+
+async def async_commit_endpoint_setup(
+    client: Any,
+    plan: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Execute a write plan through an injected client and return its request log.
+
+    ``client`` must expose ``post(path, body)`` (or ``async_post``).  The returned
+    log records every request actually made, so tests can assert that no
+    inferred parent or silent confirm was sent.  A failing request is recorded
+    with ``ok=False`` and the scrubbed error text; the loop continues so one
+    failed edge does not hide the rest of the declaration.
+    """
+    log: list[dict[str, Any]] = []
+    post = getattr(client, "post", None) or getattr(client, "async_post", None)
+    if not callable(post):
+        raise TypeError("client must expose post(path, body) or async_post(path, body)")
+    for item in plan:
+        path = str(item.get("path") or "")
+        body = item.get("body") if isinstance(item.get("body"), Mapping) else {}
+        record: dict[str, Any] = {"path": path, "body": dict(body), "ok": False, "error": None}
+        try:
+            result = post(path, dict(body))
+            if hasattr(result, "__await__"):
+                result = await result
+            record["result"] = result
+            record["ok"] = True
+        except Exception as err:  # noqa: BLE001 - report, never raise into the flow
+            record["error"] = sanitize_text(err) or "request failed"
+        log.append(record)
+    return log
+
+
+def migrate_ct_assignments_to_v3(
+    assignments: Mapping[str, Mapping[str, Any]] | None,
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Convert stored ``ct_assignments`` into the v3 endpoint-choice shape.
+
+    Step 3 of H2: stored declarations become **user edges** on the next replay.
+    The legacy ``parent_ct_id`` is turned into an accepted
+    ``parent_endpoint_id`` (a user-declared CONTAINS edge), and a legacy
+    ``device_id`` on a single-subject endpoint becomes a confirmed scope.  Any
+    key that is not a known legacy declaration is dropped and named in the
+    returned ``dropped`` list so the caller can log a notice.
+
+    Legacy CT ids are preserved verbatim as endpoint ids (DEC-04).  This is a
+    pure conversion: nothing is posted here.
+    """
+    known_keys = {
+        "role",
+        "phase",
+        "polarity",
+        "paired_ct_id",
+        "parent_ct_id",
+        "alias_of_ct_id",
+        "measurement_multiplier",
+        "device_id",
+        "enabled",
+    }
+    choices: dict[str, dict[str, Any]] = {}
+    dropped: list[str] = []
+    for raw_id, raw in (assignments or {}).items():
+        eid = _optional_text(raw_id)
+        if eid is None or not isinstance(raw, Mapping):
+            continue
+        for key in raw:
+            if key not in known_keys:
+                dropped.append(f"{eid}.{key}")
+        parent = _optional_text(raw.get("parent_ct_id"))
+        subject = _optional_text(raw.get("device_id"))
+        choices[eid] = {
+            "endpoint_id": eid,
+            "kind": "ct",
+            "parent_endpoint_id": parent,
+            "parent_accepted": parent is not None,
+            "suggested_parent": None,
+            "scope_subject_id": subject,
+            "enabled": bool(raw.get("enabled", True)),
+        }
+    return choices, dropped
 
