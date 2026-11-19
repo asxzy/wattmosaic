@@ -111,3 +111,4 @@
 | Z7 | ? | VERIFIED | | | phantom OFF re-emission fixed; groups close on promotion; no negative consumer power; gate green at 4aa4aa0 |
 | Z8 | ? | VERIFIED | | | one live evidence row per (event,reader), finalize on close, v026; evidence ~30MB/day; total ~806MB/day dominated by raw ct_samples |
 | Z9 | ? | VERIFIED | | | matrix reconcile on promotion/rollback; gate green |
+| Z10 | ? | VERIFIED | | | prompt OFF inside settling, tightened by Z10b (return-to-pre rule, robust settled level); gate green at 2011cef |
