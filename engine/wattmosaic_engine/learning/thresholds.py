@@ -91,6 +91,14 @@ class LearningThresholds:
     #: minimum association confidence supplied by the electrical solver
     min_association_confidence: float = 0.60
 
+    # -- learning gate v2 (L4, design §9 / HB §13.1) ----------------------- #
+    #: maximum share of |ΔY| explainable by the unknown-load alternative; a
+    #: larger share makes the device delta ambiguous (design §9 step 4).
+    max_unknown_share: float = 0.20
+    #: an observation differing from the active model by more than this many
+    #: sigmas is a possible behaviour change, not a confirmed update (step 7).
+    model_consistency_sigma: float = 4.0
+
     # -- duplicates ------------------------------------------------------ #
     #: two events with identical (device, state) closer than this are duplicates
     duplicate_window_s: float = 30.0
