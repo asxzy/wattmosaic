@@ -100,3 +100,4 @@
 | ZF | ? | VERIFIED | | | quality from ReaderStateStore, v022 nullable confidence; ratio fixed to |balance_error|/main |
 | V1a | ? | VERIFIED | | | v3 accuracy harness merged; HB17 runtime path publishes nothing -> V1 investigates |
 | V2a | ? | IN_REVIEW | | | tools merged; rehearsal PASS 11->25 and back; perf tool uses stub health/matrix + replay relabels versions -> V2b |
+| V1c | ? | VERIFIED | | | MEASURED only from declared single-subject endpoint; gate green |
