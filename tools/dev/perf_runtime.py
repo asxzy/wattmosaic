@@ -516,7 +516,7 @@ def run_benchmark(
                 stamp = now[0]
                 core.submit_background(core._prune_evidence)
                 core.submit_background(core.reader_state.prune, stamp)
-                core.submit_background(core.candidate_ring.prune, stamp)
+                core.submit_background(core.candidate_ring.prune, now=stamp)
                 core.submit_background(core.run_self_heal_cycle)
                 core.submit_background(core.learning_worker.flush)
             # Advance P5's lifecycle on the injected clock so live groups stay
