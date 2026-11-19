@@ -1515,7 +1515,10 @@ def state_overrides(active: Sequence[str], quiet: Sequence[str]) -> dict[str, st
     the rest of the branch to it.  Overrides are declarative and per-device, so
     no global constant changes meaning for other devices.
     """
-    from wattmosaic_engine.disaggregation.engine import ON_STATES
+    # The engine's global ON-state vocabulary moved to the v3 power-model base
+    # (L1/K06).  Reading it from there keeps the override rule identical while
+    # avoiding the deleted legacy ``disaggregation.engine`` module.
+    from wattmosaic_engine.models.base import ON_STATES_DEFAULT as ON_STATES
 
     out: dict[str, str] = {}
     for label, evidence_on in [(item, True) for item in active] + [

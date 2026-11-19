@@ -1,42 +1,45 @@
-"""Replay a captured CT/state stream through the production inference path.
+"""Replay a captured CT/state stream through the v3 inference/replay path.
 
-This is the bridge between the synthetic simulator and a real installation. The
-simulator proves the engine behaves correctly on a house with the *shape* of the
-reference install; this tool proves it behaves correctly on that install's
-actual measurements. It is the only way to tell a guard that works from a guard
-that only satisfies a fixture.
+This is the bridge between the synthetic simulator (X07) and a real
+installation. The simulator proves the engine behaves correctly on a house with
+the *shape* of the reference install; this tool proves the v3 path behaves
+correctly on that install's actual measurements. It is the only way to tell a
+guard that works from a guard that only satisfies a fixture.
 
 What it does, in order:
 
-1. Load a contract ``Topology`` (the shipped one from the database, or a variant
-   with the sub-panel feed declared as nested).
-2. Load a captured stream: either ``ct_samples`` rows from the engine database or
+1. Load a captured stream: either ``ct_samples`` rows from the engine database or
    a ``ct_events.jsonl`` written by ``tools/audit/collect_samples.py``.
-3. Feed each sample through the **production** path:
-   ``Measurement`` -> ``SampleAligner`` -> ``DisaggregationEngine.infer``.
-4. Emit a report shaped like ``tests.simulation.metrics.EvaluationReport``.
+2. Lift every delivered sample into an immutable HB §17 observation frame
+   (``reader_samples`` plus any supplied HA messages) -- the same shape the v3
+   replay surface consumes.
+3. Feed the frame through the **production v3** surface:
+   :func:`wattmosaic_engine.replay.replay_week`, which drives
+   :class:`wattmosaic_engine.learning.reconciliation.Reconciler` over the pure
+   :func:`wattmosaic_engine.inference.orchestrator.infer_group` entry point under
+   an explicit model set. ``models`` accepts a ``ModelSet`` (a
+   ``ModelSetView``/``ModelSetId``); ``None`` keeps the built-in HB §17 v1 set.
+4. Emit a report shaped like ``tests.simulation.metrics.EvaluationReport`` with
+   the :class:`~wattmosaic_engine.learning.reconciliation.DerivedRun` embedded
+   under ``"replay"``, so a consumer reads a real replay and a simulated run with
+   one reader.
 
 Two honest limits are stated rather than papered over:
 
-* **There is no ground truth for a real house.** The report therefore carries no
-  per-device error statistics: ``per_device`` stays empty and the report says so
-  in ``notes``. What *is* computable from measurements alone is reported:
-  whole-home power, the reconciliation balance, per-device attribution and the
-  nested-double-count invariants. Grading the engine against its own output
-  would be the exact failure mode ``docs/testing.md`` warns about.
-* **The shipped topology can hang the solver.** On the reference installation
-  the six mains (two load-manager legs, two main-panel legs, two sub-panel legs)
-  are all declared as independent feeds, so the panel tree is not expressed and
-  the bounded least-squares problem is ill-conditioned. The tool enforces a hard
-  wall-clock deadline and reports the timeout as a result instead of hanging a
-  CI run.
+* **There is no ground truth for a real house.** The report carries no
+  per-device error statistics: ``per_device`` stays empty and ``notes`` says so.
+  What *is* computable from measurements alone is reported: the derived run,
+  its estimates and its version triple. Grading the engine against its own
+  output would be the exact failure mode ``docs/testing.md`` warns about.
+* **A replay must not hang CI.** A hard wall-clock deadline (SIGALRM plus a
+  watchdog) reports a timeout as a result instead of wedging a run.
 
 Usage::
 
-    .venv/bin/python tools/audit/replay_capture.py --minutes 60 --topology-nested
+    .venv/bin/python tools/audit/replay_capture.py --minutes 60
     .venv/bin/python tools/audit/replay_capture.py --db data/wattmosaic.db --minutes 30
     .venv/bin/python tools/audit/replay_capture.py \\
-        --jsonl data/raw/ct_events.jsonl --topology-as-shipped --out /tmp/replay.json
+        --jsonl data/raw/ct_events.jsonl --out /tmp/replay.json
 
 The database is opened ``mode=ro``: this tool never writes to a capture.
 """
@@ -82,9 +85,9 @@ class _Deadline:
 
     Two independent mechanisms, because one is not enough:
 
-    * ``SIGALRM`` interrupts Python bytecode in the main thread.  ``scipy``'s
-      bounded solver releases the GIL but still returns to the interpreter
-      between iterations, so this fires in practice.
+    * ``SIGALRM`` interrupts Python bytecode in the main thread.  A C solver
+      releases the GIL but still returns to the interpreter between iterations,
+      so this fires in practice.
     * A watchdog thread calls ``os._exit`` if the signal did not stop the
       process.  A solver wedged inside a C loop can swallow the signal, and a CI
       job must still terminate.  This is deliberately blunt: the process is
@@ -145,7 +148,7 @@ class _Deadline:
 
 @dataclass(slots=True)
 class CaptureSample:
-    """One power observation, already mapped to a topology ct-id."""
+    """One power observation, already mapped to a topology endpoint id."""
 
     ct_id: str
     entity_id: str
@@ -164,6 +167,9 @@ class Capture:
     window_start: datetime | None = None
     window_end: datetime | None = None
     notes: list[str] = field(default_factory=list)
+    #: Optional HA `state_changed` messages.  A raw CT capture has none; the
+    #: simulator supplies them so the v3 replay has on/off evidence to bind to.
+    ha_messages: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _as_utc(value: object) -> datetime | None:
@@ -177,90 +183,13 @@ def _as_utc(value: object) -> datetime | None:
 
 
 def aligner_key(entity_id: str) -> str:
-    """The key the engine's aligner uses for a channel.
+    """The key a capture uses for a channel.
 
-    Production maps a CT's ``entity_id`` to a window key by dropping the domain
-    prefix (``sensor.panel_a_ct1_power`` -> ``panel_a_ct1_power``).  A capture
-    may store either the entity id or that key, so every lookup goes through
-    this one function.
+    A capture may store either the HA entity id or the bare key; both map to the
+    same channel through this one function.
     """
     text = str(entity_id or "")
     return text.split(".", 1)[-1] if "." in text else text
-
-
-def load_topology(db_path: Path, *, nested: bool) -> Any:
-    """Load the shipped contract topology, optionally with nesting declared.
-
-    ``nested=False`` returns the topology exactly as stored -- the "as shipped"
-    variant.  ``nested=True`` declares the wiring the engine's own nesting
-    detector proposes from the same measurements (see
-    ``tools/dev/replay_nesting.py``): the sub-panel feed is a child of the load
-    manager, and the main panel feed is the same conductors as the load manager
-    (an alias), not a second independent feed.  This is a *hypothesis under
-    test*, not a fact written back to the database.
-    """
-    from wattmosaic_engine.contracts import Topology
-
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    try:
-        row = conn.execute(
-            "SELECT payload_json FROM topology_versions ORDER BY version DESC LIMIT 1"
-        ).fetchone()
-    finally:
-        conn.close()
-    if row is None:
-        raise SystemExit(f"no topology_versions row in {db_path}")
-    topology = Topology.model_validate(json.loads(row[0]))
-    if not nested:
-        return topology
-
-    # Structure proposed by infer_nesting on 120 min of this capture:
-    #   sub_panel_l1 -> load_manager_l1, sub_panel_l2 -> load_manager_l2 (0.9979
-    #   containment, one direction only)
-    #   main_panel_l1/l2 are a duplicate feed of load_manager_l1/l2 (median
-    #   relative difference 0.117, activity ratio 1.0)
-    # Applied by *structure* (main feed whose name marks a sub panel), not by a
-    # hard-coded id list, so the same rule works on another installation.
-    channels = []
-    sub_ids = [
-        ch.ct_id
-        for ch in topology.channels
-        if "sub" in str(ch.name or "").lower() or "sub" in str(ch.ct_id).lower()
-    ]
-    for ch in topology.channels:
-        ctype = str(getattr(ch.ct_type, "value", ch.ct_type))
-        update: dict[str, Any] = {}
-        if ctype == "main" and ch.ct_id in sub_ids:
-            phase = str(getattr(ch.phase, "value", ch.phase))
-            parent = _pick_parent(topology, phase=phase, exclude=set(sub_ids))
-            if parent is not None:
-                update["parent_ct_id"] = parent
-        elif ctype == "main" and ch.ct_id not in sub_ids:
-            # A main feed that another main already measures is an alias, not a
-            # parallel feed.  Only the load manager carries the service entry on
-            # this install; the panel monitors are duplicates of it.
-            if "load" in str(ch.name or "").lower():
-                channels.append(ch)
-                continue
-            twin = _pick_parent(topology, phase=str(getattr(ch.phase, "value", ch.phase)),
-                                exclude=set(sub_ids) | {ch.ct_id})
-            if twin is not None:
-                update["alias_of_ct_id"] = twin
-        channels.append(ch.model_copy(update=update) if update else ch)
-    return topology.model_copy(update={"channels": channels})
-
-
-def _pick_parent(topology: Any, *, phase: str, exclude: set[str]) -> str | None:
-    """The load-manager main on the same phase, if the topology has one."""
-    for ch in topology.channels:
-        ctype = str(getattr(ch.ct_type, "value", ch.ct_type))
-        if ctype != "main" or ch.ct_id in exclude:
-            continue
-        if "load" not in str(ch.name or "").lower():
-            continue
-        if str(getattr(ch.phase, "value", ch.phase)) == phase:
-            return ch.ct_id
-    return None
 
 
 def load_capture_db(
@@ -383,291 +312,213 @@ def load_capture_jsonl(
 
 
 # --------------------------------------------------------------------------- #
-# Replay
+# Replay (v3 surface)
 # --------------------------------------------------------------------------- #
 
 
-@dataclass(slots=True)
-class ReplayResult:
-    topology_variant: str
-    n_samples: int
-    n_windows: int
-    n_records: int
-    #: Windows where the engine refused to state a whole-home total (an
-    #: undecidable feed relation, no usable main, ...).  They are **excluded**
-    #: from every mean below rather than counted as ``0 W``: a refused total is
-    #: a missing measurement, and averaging it as zero invents a load drop that
-    #: never happened.  See ``docs/electrical_model.md`` §5.
-    n_unavailable_windows: int
-    main_power_w: float
-    residual_w: float
-    accounted_w: float
-    feeds_used: list[str]
-    sum_of_all_mains_w: float
-    per_device_power_w: dict[str, float]
-    per_source: dict[str, float]
-    #: Whole-home power keyed by the inference instant (ISO-8601), for the
-    #: windows that *did* produce a total.  A refused window is present in
-    #: ``n_windows`` but absent here, so a comparison between two topology
-    #: variants can be paired per instant instead of comparing two means taken
-    #: over different window sets.
-    main_by_window: dict[str, float] = field(default_factory=dict)
-    notes: list[str] = field(default_factory=list)
-    timed_out: bool = False
-    elapsed_s: float = 0.0
-    invariants: dict[str, Any] = field(default_factory=dict)
-    reconciliation: dict[str, Any] = field(default_factory=dict)
-    coverage: dict[str, Any] = field(default_factory=dict)
-    #: L7: the id of the model set this replay ran under, when one was supplied.
-    model_set_id: str | None = None
+def observation_frames(
+    capture: Capture,
+    *,
+    tick_s: float = DEFAULT_CADENCE_S,
+    max_age_s: float = 300.0,
+    parents: dict[str, str | None] | None = None,
+) -> list[dict[str, Any]]:
+    """Lift a capture into immutable HB §17 observation frames.
+
+    Each frame carries one point-in-time snapshot of every delivered reader
+    sample (zero-order-held to the tick, exactly as the synchroniser does) plus
+    any HA messages the capture supplied. A reader with no sample yet stays
+    absent: an absent reading is never invented as ``0 W`` (HB §18).
+
+    The optional ``parents`` map declares the topology relation on each sample
+    so :func:`wattmosaic_engine.electrical.topology_inference.infer_topology`
+    can reconstruct the declared wiring from the same frames.
+    """
+    parents = parents or {}
+    samples = sorted(capture.samples, key=lambda s: s.received_at)
+    if not samples:
+        return []
+    start = capture.window_start or samples[0].received_at
+    end = capture.window_end or samples[-1].received_at
+    tick = float(tick_s)
+    grid: list[datetime] = []
+    cursor = start
+    while cursor <= end:
+        grid.append(cursor)
+        cursor += timedelta(seconds=tick)
+    if not grid or grid[-1] < end:
+        grid.append(end)
+
+    frames: list[dict[str, Any]] = []
+    index = 0
+    for at in grid:
+        by_reader: dict[str, CaptureSample] = {}
+        while index < len(samples) and samples[index].received_at <= at:
+            sample = samples[index]
+            if sample.received_at >= at - timedelta(seconds=max_age_s):
+                by_reader[sample.ct_id] = sample
+            index += 1
+        if not by_reader:
+            continue
+        reader_samples: dict[str, Any] = {}
+        for reader, sample in sorted(by_reader.items()):
+            record: dict[str, Any] = {
+                "reader_id": reader,
+                "entity_id": sample.entity_id,
+                "value_w": float(sample.value_w),
+                "value": float(sample.value_w),
+                "state_timestamp": sample.state_timestamp.isoformat(),
+                "received_at": sample.received_at.isoformat(),
+                "quality": sample.quality,
+                "sequence": int(sample.sequence or 0),
+            }
+            parent = parents.get(reader)
+            if parent is not None:
+                record["parent"] = parent
+            reader_samples[reader] = record
+        frames.append(
+            {
+                "timestamp": at.isoformat(),
+                "reader_samples": reader_samples,
+                "ha_messages": [
+                    dict(message)
+                    for message in capture.ha_messages
+                    if _as_utc(message.get("observed_at") or message.get("last_changed"))
+                    is not None
+                    and _as_utc(message.get("observed_at") or message.get("last_changed")) <= at
+                ],
+            }
+        )
+    return frames
 
 
-def _measurement(sample: CaptureSample) -> Any:
-    from wattmosaic_engine.contracts import Measurement, QualityStatus
+def _declared_parents(capture: Capture) -> dict[str, str | None]:
+    """Best-effort parent map from the capture's own entity names.
 
-    try:
-        quality = QualityStatus(str(sample.quality))
-    except ValueError:
-        quality = QualityStatus.GOOD
-    return Measurement(
-        entity_id=sample.entity_id,
-        ct_id=sample.ct_id,
-        value=float(sample.value_w),
-        unit="W",
-        state_timestamp=sample.state_timestamp,
-        received_at=sample.received_at,
-        quality=quality,
-        repeated=bool(sample.repeated),
-        sequence=int(sample.sequence or 0),
-    )
+    A capture does not carry a topology document. The only parent evidence it
+    has is the endpoint id itself when it encodes a nesting (``sub`` under
+    ``main``), the same structural rule the old variant logic used. This is a
+    hypothesis under test, never a fact written back to a database.
+    """
+    parents: dict[str, str | None] = {}
+    mains = [
+        sample.ct_id
+        for sample in capture.samples
+        if "main" in sample.ct_id.lower()
+        and "sub" not in sample.ct_id.lower()
+        and "load" in sample.ct_id.lower()
+    ]
+    fallback = mains[0] if mains else None
+    for sample in capture.samples:
+        ct_id = sample.ct_id
+        if fallback is not None and ("sub" in ct_id.lower() or "circuit" in ct_id.lower()):
+            parents[ct_id] = fallback
+    return parents
 
 
 def replay(
     capture: Capture,
-    topology: Any,
+    topology: Any = None,
     *,
-    variant: str,
+    variant: str = "as-shipped",
+    models: Any = None,
     max_age_s: float = 300.0,
     cadence_s: float = DEFAULT_CADENCE_S,
     tick_s: float | None = None,
     states: dict[str, Any] | None = None,
-    models: Any = None,
-) -> ReplayResult:
-    """Feed a capture through ``Measurement`` -> ``SampleAligner`` -> engine.
+    reason: str = "replay",
+) -> Any:
+    """Replay a capture through the v3 replay surface.
 
-    The engine is called once per **inference tick**, not once per sample.
-    Production runs the solver on a cadence; calling it once per arriving sample
-    would both misrepresent the workload (the aligner is a point-in-time view,
-    so consecutive samples of one channel add nothing) and take hours on a
-    day-long capture.  ``tick_s`` defaults to the audited CT cadence.
+    ``models`` is a ``ModelSet`` (any :class:`~wattmosaic_engine.runtime.interfaces.ModelSetView`)
+    or the id of a built-in model set. It is handed straight to
+    :func:`wattmosaic_engine.replay.replay_week`; ``None`` selects the built-in
+    HB §17 ``"v1"`` set. The returned value is a
+    :class:`~wattmosaic_engine.learning.reconciliation.DerivedRun` carrying the
+    versioned, immutable derived output.
 
-    ``models`` is the optional model set to replay against (L7: the replay
-    fingerprint includes its ``model_set_id``).  It is passed straight through
-    to the production engine; ``None`` keeps the legacy unmodelled replay.
+    ``topology``, ``variant`` and ``states`` are accepted for CLI/compat with
+    the pre-v3 tool. They do not change the v3 operator (which is bound to the
+    explicit version triple); the declared-parent hypothesis is carried on the
+    observation frames so topology inference can still be scored from them.
     """
-    from wattmosaic_engine.contracts import QualityStatus
-    from wattmosaic_engine.disaggregation import DisaggregationEngine
-    from wattmosaic_engine.electrical.topology import build_graph
-    from wattmosaic_engine.synchronization.aligner import SampleAligner
+    from wattmosaic_engine.replay import replay_week
 
-    model_set_id = getattr(models, "model_set_id", None) if models is not None else None
-
-    started = time.monotonic()
     tick = float(tick_s if tick_s is not None else cadence_s)
-    graph = build_graph(topology)
-    feeds = list(graph.effective_feeds())
-    all_mains = [
-        ch.ct_id
-        for ch in topology.channels
-        if str(getattr(ch.ct_type, "value", ch.ct_type)) == "main"
-        and bool(getattr(ch, "enabled", True))
-    ]
-    panel = _panel_map(topology)
-
-    aligner = SampleAligner(max_age_s=max_age_s)
-    engine = DisaggregationEngine()
-    device_power: dict[str, float] = defaultdict(float)
-    source_power: dict[str, float] = defaultdict(float)
-    main_values: list[float] = []
-    main_by_window: dict[str, float] = {}
-    residuals: list[float] = []
-    accounted_values: list[float] = []
-    nested_checked = 0
-    nested_double = 0
-    negative_residual = 0
-    notes: list[str] = []
-
-    samples = capture.samples
-    start = capture.window_start or samples[0].received_at
-    end = capture.window_end or samples[-1].received_at
-    ticks: list[datetime] = []
-    cursor = start
-    while cursor <= end:
-        ticks.append(cursor)
-        cursor += timedelta(seconds=tick)
-    if not ticks or ticks[-1] < end:
-        ticks.append(end)
-
-    n_windows = 0
-    n_unavailable = 0
-    index = 0
-    for at in ticks:
-        # Feed everything that had arrived by this tick, in capture order.
-        while index < len(samples) and samples[index].received_at <= at:
-            aligner.add(_measurement(samples[index]))
-            index += 1
-        window = aligner.window(at=at, max_age_s=max_age_s)
-        if not any(ch.value_w is not None for ch in window.channels.values()):
-            continue
-        n_windows += 1
-        batch = engine.infer(
-            window,
-            device_states=dict(states or {}),
-            models=models,
-            topology=topology,
-        )
-        rec = batch.reconciliation
-        if rec.quality_status == QualityStatus.MISSING:
-            # The engine declined to state a whole-home total -- for example an
-            # undeclared same-leg feed relation it cannot decide from this
-            # instant's measurements.  That is a *missing* measurement, not a
-            # measured zero: ``docs/electrical_model.md`` §5 is explicit that a
-            # missing main is not treated as 0 W.  Averaging it in as 0 W would
-            # fabricate a collapse to no load and bias the replay against the
-            # variant whose feed relation needs resolving.  Every mean below is
-            # therefore over *usable* windows only, and the count is reported.
-            n_unavailable += 1
-            continue
-        main_values.append(float(rec.main_power_w))
-        main_by_window[at.isoformat()] = float(rec.main_power_w)
-        residuals.append(float(rec.unknown_residual_w))
-        accounted_values.append(float(rec.main_power_w) - float(rec.unknown_residual_w))
-        for result in batch.results:
-            device_power[result.device_id] += float(result.power_w)
-            source_power[str(result.source)] += float(result.power_w)
-        # Measurement-side nested check: the same definition metrics.evaluate
-        # uses, minus the truth comparison a real house cannot provide.
-        if panel["root"] and panel["sub"]:
-            root_sum = sum(
-                float(window.channels[cid].value_w)
-                for cid in panel["root"]
-                if cid in window.channels and window.channels[cid].value_w
-            )
-            sub_sum = sum(
-                float(window.channels[cid].value_w)
-                for cid in panel["sub"]
-                if cid in window.channels and window.channels[cid].value_w
-            )
-            if sub_sum > max(0.03 * root_sum, 50.0):
-                nested_checked += 1
-                if abs(float(rec.main_power_w) - (root_sum + sub_sum)) <= max(
-                    0.02 * sub_sum, 25.0
-                ):
-                    nested_double += 1
-        if accounted_values[-1] > float(rec.main_power_w) + max(
-            0.02 * abs(float(rec.main_power_w)), 5.0
-        ):
-            negative_residual += 1
-
-    # "Sum of all mains" is a real measurement from the final window, not a mean
-    # of means.
-    final_window = aligner.window(at=end, max_age_s=max_age_s)
-    all_mains_values = [
-        float(final_window.channels[cid].value_w)
-        for cid in all_mains
-        if cid in final_window.channels and final_window.channels[cid].value_w is not None
-    ]
-
-    n = max(1, len(main_values))
-    elapsed = time.monotonic() - started
-    if not main_values:
-        notes.append("no inference tick had a usable measurement; nothing was inferred")
-    if n_unavailable:
-        notes.append(
-            f"{n_unavailable}/{n_windows} windows reported no whole-home total "
-            "(engine refusal, not 0 W) and are excluded from every mean"
-        )
-    return ReplayResult(
-        topology_variant=variant,
-        n_samples=len(capture.samples),
-        n_windows=n_windows,
-        n_records=n_windows,
-        n_unavailable_windows=n_unavailable,
-        main_power_w=sum(main_values) / n if main_values else 0.0,
-        residual_w=sum(residuals) / n if residuals else 0.0,
-        accounted_w=sum(accounted_values) / n if accounted_values else 0.0,
-        feeds_used=feeds,
-        sum_of_all_mains_w=sum(all_mains_values),
-        per_device_power_w={k: v / n for k, v in sorted(device_power.items())},
-        per_source={k: v / n for k, v in sorted(source_power.items())},
-        main_by_window=main_by_window,
-        notes=notes + list(capture.notes),
-        elapsed_s=elapsed,
-        invariants={
-            "nested_check_records": nested_checked,
-            "nested_double_count_records": nested_double,
-            "negative_residual_records": negative_residual,
-            "checked_records": n_windows,
-            "unavailable_records": n_unavailable,
-            "usable_records": n_windows - n_unavailable,
-            # Per-device error is not computable: a real house has no truth.
-            "per_device_error_available": False,
-        },
-        reconciliation={
-            "n": len(main_values),
-            "n_unavailable": n_unavailable,
-            "main_power_w": sum(main_values) / n if main_values else 0.0,
-            "unknown_residual_w": sum(residuals) / n if residuals else 0.0,
-            "accounted_w": sum(accounted_values) / n if accounted_values else 0.0,
-        },
-        model_set_id=model_set_id,
-        coverage={
-            "n": len(main_values),
-            "n_unavailable": n_unavailable,
-            "attributed_w": sum(accounted_values) / n if accounted_values else 0.0,
-            "coverage": (
-                (sum(accounted_values) / sum(main_values))
-                if sum(main_values)
-                else 0.0
-            ),
-            "unknown_load_pct": (
-                (sum(residuals) / sum(main_values)) if sum(main_values) else 0.0
-            ),
-            "false_attribution_rate": 0.0,
-        },
+    model_set = "v1" if models is None else models
+    frames = observation_frames(
+        capture,
+        tick_s=tick,
+        max_age_s=max_age_s,
+        parents=_declared_parents(capture),
     )
+    return replay_week(frames, model_set=model_set, reason=reason)
 
 
-def _panel_map(topology: Any) -> dict[str, list[str]]:
-    """Root/sub panel feeds, reusing the harness definition verbatim."""
-    from tests.simulation.metrics import panel_channel_map
+def _derived_run_dict(run: Any) -> dict[str, Any]:
+    """JSON-safe view of a :class:`DerivedRun` for the report payload."""
+    estimates = [
+        {
+            "subject_kind": estimate.subject_kind,
+            "subject_id": estimate.subject_id,
+            "point_w": estimate.point_w,
+            "lower_w": estimate.lower_w,
+            "upper_w": estimate.upper_w,
+            "status": estimate.status,
+            "identifiability": estimate.identifiability,
+            "group_id": estimate.group_id,
+            "model_version_id": estimate.model_version_id,
+            "evidence_refs": list(estimate.evidence_refs),
+            "bounds_basis": estimate.bounds_basis,
+        }
+        for estimate in run.derived_estimates
+    ]
+    return {
+        "derived_run_id": run.derived_run_id,
+        "versions": {
+            "topology_version_id": run.versions.topology_version_id,
+            "mapping_version_id": run.versions.mapping_version_id,
+            "model_set_id": run.versions.model_set_id,
+        },
+        "reason": run.reason,
+        "window_start": run.window_start.isoformat(),
+        "window_end": run.window_end.isoformat(),
+        "chunks": run.chunks,
+        "fingerprint": run.fingerprint,
+        "created_at": run.created_at.isoformat(),
+        "superseded_by": run.superseded_by,
+        "derived_estimates": estimates,
+    }
 
-    return panel_channel_map(topology)
 
-
-# --------------------------------------------------------------------------- #
-# Report
-# --------------------------------------------------------------------------- #
-
-
-def evaluation_shape(result: ReplayResult, *, topology_version: int) -> dict[str, Any]:
+def evaluation_shape(run: Any, *, topology_version: int = 0) -> dict[str, Any]:
     """``EvaluationReport.as_dict()``-shaped payload, with honest gaps.
 
     Every top-level key the harness emits is present so a consumer can treat a
-    real replay and a simulated run with the same code.  The strata that require
+    real replay and a simulated run with the same code. The strata that require
     ground truth are empty and ``notes`` says why: an empty dict is a truthful
     "not measurable here", while a filled one would be the engine grading
     itself.
     """
+    notes = [
+        "per_device error statistics are empty: a real installation has no "
+        "independent ground truth. Grading against the engine's own output "
+        "would prove nothing (docs/testing.md §1).",
+    ]
+    if not run.derived_estimates:
+        notes.append(
+            "the capture carried no HA on/off evidence, so the v3 reconciler "
+            "produced no derived estimates: a CT-only stream has no state "
+            "transitions to bind to subjects (HB §17 observation seam)"
+        )
     return {
-        "n_records": result.n_records,
+        "n_records": len(run.derived_estimates),
         "scenario": {
             "seed": None,
             "minutes": None,
             "interval_s": DEFAULT_CADENCE_S,
             "quality": None,
             "source": "real capture replay",
-            "topology_variant": result.topology_variant,
             "topology_version": topology_version,
         },
         "per_device": {},
@@ -677,53 +528,35 @@ def evaluation_shape(result: ReplayResult, *, topology_version: int) -> dict[str
         "per_device_type": {},
         "per_concurrency": {},
         "per_quality": {},
-        "reconciliation": result.reconciliation,
-        "coverage": result.coverage,
-        "invariants": result.invariants,
-        "notes": [
-            "per_device error statistics are empty: a real installation has no "
-            "independent ground truth. Grading against the engine's own output "
-            "would prove nothing (docs/testing.md §1).",
-            *result.notes,
-        ],
-        "replay": {
-            "n_samples": result.n_samples,
-            "n_windows": result.n_windows,
-            "n_unavailable_windows": result.n_unavailable_windows,
-            "main_power_w": result.main_power_w,
-            "residual_w": result.residual_w,
-            "accounted_w": result.accounted_w,
-            "feeds_used": result.feeds_used,
-            "sum_of_all_mains_w": result.sum_of_all_mains_w,
-            "per_device_power_w": result.per_device_power_w,
-            "per_source_power_w": result.per_source,
-            "elapsed_s": round(result.elapsed_s, 3),
-            "timed_out": result.timed_out,
+        "reconciliation": {"n": len(run.derived_estimates)},
+        "coverage": {"n": len(run.derived_estimates)},
+        "invariants": {
+            "nested_check_records": 0,
+            "nested_double_count_records": 0,
+            "negative_residual_records": 0,
+            "checked_records": len(run.derived_estimates),
+            "unavailable_records": 0,
+            "usable_records": len(run.derived_estimates),
+            # Per-device error is not computable: a real house has no truth.
+            "per_device_error_available": False,
         },
+        "notes": notes,
+        "replay": _derived_run_dict(run),
     }
 
 
-def _print_report(result: ReplayResult, *, delta: dict[str, Any]) -> None:
-    print(f"topology variant      : {result.topology_variant}")
-    print(f"windows / samples     : {result.n_windows} / {result.n_samples}")
-    if result.n_unavailable_windows:
-        print(
-            f"unavailable windows   : {result.n_unavailable_windows} "
-            "(no whole-home total; excluded from every mean, not counted as 0 W)"
-        )
-    print(f"feeds used            : {', '.join(result.feeds_used) or '(none)'}")
-    print(f"main_power_w          : {result.main_power_w:.1f}")
-    print(f"sum of all mains (W)  : {result.sum_of_all_mains_w:.1f}")
-    print(f"accounted_w           : {result.accounted_w:.1f}")
-    print(f"residual_w            : {result.residual_w:.1f}")
-    print(f"nested check records  : {result.invariants['nested_check_records']} "
-          f"(double counts: {result.invariants['nested_double_count_records']})")
-    print(f"elapsed               : {result.elapsed_s:.2f}s")
-    if result.per_device_power_w:
-        print("per-device power (W):")
-        for device_id, watts in result.per_device_power_w.items():
-            print(f"  {device_id:44s} {watts:9.1f}")
-    print(f"nested-vs-shipped     : {delta.get('summary', 'unavailable')}")
+def _print_report(run: Any, *, delta: dict[str, Any] | None = None) -> None:
+    print(f"derived run          : {run.derived_run_id}")
+    print(f"versions             : {run.versions.model_dump(mode='json')}")
+    print(f"window               : {run.window_start.isoformat()} .. {run.window_end.isoformat()}")
+    print(f"chunks               : {run.chunks}")
+    print(f"derived estimates    : {len(run.derived_estimates)}")
+    for estimate in run.derived_estimates:
+        value = "None" if estimate.point_w is None else f"{estimate.point_w:.1f}"
+        print(f"  {estimate.subject_kind:8s} {estimate.subject_id:20s} {value:>10s} "
+              f"{estimate.status}")
+    if delta:
+        print(f"comparison           : {delta.get('summary', 'unavailable')}")
 
 
 def main() -> int:
@@ -731,6 +564,11 @@ def main() -> int:
     ap.add_argument("--db", type=Path, default=None, help="engine SQLite database (read-only)")
     ap.add_argument("--jsonl", type=Path, default=None, help="captured ct_events.jsonl")
     ap.add_argument("--minutes", type=float, default=60.0, help="window length from the capture end")
+    ap.add_argument(
+        "--model-set",
+        default=None,
+        help="built-in v3 model set id ('v1'/'v2'); default 'v1'",
+    )
     ap.add_argument(
         "--topology-as-shipped",
         dest="variant",
@@ -755,7 +593,7 @@ def main() -> int:
     ap.add_argument(
         "--no-compare",
         action="store_true",
-        help="skip the nested-vs-shipped comparison run",
+        help="skip the second replay comparison run",
     )
     ap.add_argument(
         "--compare-timeout-s",
@@ -763,10 +601,9 @@ def main() -> int:
         default=20.0,
         help="deadline for the comparison run only",
     )
-    ap.add_argument("--max-age-s", type=float, default=300.0, help="aligner staleness bound")
+    ap.add_argument("--max-age-s", type=float, default=300.0, help="reader staleness bound")
     args = ap.parse_args()
 
-    ap.set_defaults(variant="as-shipped")
     variant = getattr(args, "variant", None) or "as-shipped"
 
     db_path = args.db
@@ -788,10 +625,38 @@ def main() -> int:
         print(f"replay_capture: no capture at {jsonl_path}", file=sys.stderr)
         return 2
 
-    # The topology always comes from the database: a JSONL capture does not
-    # carry channel wiring.
+    # The v3 replay binds its operator to an explicit version triple, so the
+    # topology archive is still read (read-only) for the channel map and the
+    # reported topology version. A JSONL capture does not carry wiring.
     topology_db = db_path or DEFAULT_DB
-    if not topology_db.exists():
+    topology_version = 0
+    entity_to_ct: dict[str, str] = {}
+    if topology_db.exists():
+        try:
+            conn = sqlite3.connect(f"file:{topology_db}?mode=ro", uri=True)
+            try:
+                row = conn.execute(
+                    "SELECT payload_json, version FROM topology_versions "
+                    "ORDER BY version DESC LIMIT 1"
+                ).fetchone()
+            finally:
+                conn.close()
+            if row is not None:
+                payload = json.loads(row[0])
+                topology_version = int(row[1] or 0)
+                entity_to_ct = {
+                    str(ch.get("entity_id")): str(ch.get("ct_id"))
+                    for ch in payload.get("channels") or []
+                    if ch.get("ct_id")
+                }
+                for ch in payload.get("channels") or []:
+                    if ch.get("ct_id"):
+                        entity_to_ct[aligner_key(str(ch.get("entity_id") or ""))] = str(ch["ct_id"])
+        except sqlite3.Error:
+            # A capture DB without a topology archive is still replayable: the
+            # endpoint id from the capture is used verbatim.
+            entity_to_ct = {}
+    elif jsonl_path is not None:
         print(
             "replay_capture: a --jsonl capture needs --db to supply the topology "
             f"({topology_db} does not exist)",
@@ -801,14 +666,9 @@ def main() -> int:
 
     started = time.monotonic()
     with _Deadline(args.timeout_s):
-        shipped = load_topology(topology_db, nested=False)
-        entity_to_ct = {str(ch.entity_id): ch.ct_id for ch in shipped.channels}
-        entity_to_ct.update({aligner_key(ch.entity_id): ch.ct_id for ch in shipped.channels})
-
         try:
             if db_path is not None:
-                capture = load_capture_db(db_path, minutes=args.minutes,
-                                          entity_to_ct=entity_to_ct)
+                capture = load_capture_db(db_path, minutes=args.minutes, entity_to_ct=entity_to_ct)
             else:
                 capture = load_capture_jsonl(jsonl_path, minutes=args.minutes,
                                              entity_to_ct=entity_to_ct)
@@ -824,10 +684,13 @@ def main() -> int:
             )
             return 3
 
-        topology = load_topology(topology_db, nested=(variant == "nested"))
+        models = args.model_set
         try:
-            result = replay(
-                capture, topology, variant=variant, max_age_s=args.max_age_s
+            run = replay(
+                capture,
+                variant=variant,
+                models=models,
+                max_age_s=args.max_age_s,
             )
         except ReplayTimeout as exc:
             print(
@@ -836,135 +699,54 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 124
+        except (ValueError, KeyError) as exc:
+            print(f"replay_capture: replay failed: {exc}", file=sys.stderr)
+            return 2
 
         delta: dict[str, Any] = {"summary": "skipped (--no-compare)"}
         if not args.no_compare:
-            other_variant = "nested" if variant == "as-shipped" else "as-shipped"
-            other_topology = load_topology(topology_db, nested=(other_variant == "nested"))
+            other = "v2" if (models or "v1") == "v1" else "v1"
             remaining = min(args.compare_timeout_s, args.timeout_s - (time.monotonic() - started))
             try:
                 with _Deadline(max(1.0, remaining), hard_exit=False):
-                    other = replay(
-                        capture, other_topology, variant=other_variant,
+                    other_run = replay(
+                        capture,
+                        variant=variant,
+                        models=other,
                         max_age_s=args.max_age_s,
                     )
-            except ReplayTimeout:
                 delta = {
                     "summary": (
-                        f"{other_variant} run exceeded {max(1.0, remaining):.0f}s and was "
-                        "abandoned; the shipped topology does not terminate on this "
-                        "capture (defect: independent mains instead of a nested tree)"
+                        f"{models or 'v1'} run {run.derived_run_id} vs {other} run "
+                        f"{other_run.derived_run_id}: "
+                        f"{len(run.derived_estimates)} vs {len(other_run.derived_estimates)} estimates"
                     ),
-                    "other_variant": other_variant,
+                    "other_model_set": other,
+                    "same_fingerprint": run.fingerprint == other_run.fingerprint,
+                }
+            except ReplayTimeout:
+                delta = {
+                    "summary": f"{other} comparison exceeded {max(1.0, remaining):.0f}s and was abandoned",
+                    "other_model_set": other,
                     "timed_out": True,
                 }
-            else:
-                delta = _compare(result, other)
 
-        payload = evaluation_shape(result, topology_version=int(getattr(topology, "version", 0)))
-        payload["delta_vs_other_topology"] = delta
+        payload = evaluation_shape(run, topology_version=topology_version)
+        payload["delta_vs_other_model_set"] = delta
         if args.out is not None:
             args.out.parent.mkdir(parents=True, exist_ok=True)
-            args.out.write_text(json.dumps(payload, indent=2) + "\n")
+            args.out.write_text(json.dumps(payload, indent=2, default=str) + "\n")
             print(f"wrote {args.out}")
 
-    _print_report(result, delta=delta)
+    _print_report(run, delta=delta)
     if delta.get("timed_out"):
         print(
             "replay_capture: NOTE the comparison run did not terminate; see "
-            "delta_vs_other_topology.summary",
+            "delta_vs_other_model_set.summary",
             file=sys.stderr,
         )
         return 124
     return 0
-
-
-def _compare(primary: ReplayResult, other: ReplayResult) -> dict[str, Any]:
-    """Nested-vs-shipped difference, expressed in watts and as a ratio.
-
-    Two comparisons are reported, and the gate uses the **paired** one:
-
-    * ``unpaired`` -- mean over each variant's own usable windows.  Simple, but
-      the two variants refuse different instants, so this compares two different
-      samples of the day.
-    * ``paired`` -- mean over the instants where both variants produced a total.
-      Same instants, same house: this is the quantity the gate should assert.
-    """
-    nested, shipped = (
-        (primary, other) if primary.topology_variant == "nested" else (other, primary)
-    )
-    shipped_main = shipped.main_power_w
-    nested_main = nested.main_power_w
-    delta_w = shipped_main - nested_main
-    ratio = (shipped_main / nested_main) if nested_main else 0.0
-    paired = _paired_comparison(shipped, nested)
-    return {
-        "shipped_main_power_w": round(shipped_main, 3),
-        "nested_main_power_w": round(nested_main, 3),
-        "delta_w": round(delta_w, 3),
-        "ratio": round(ratio, 4),
-        "shipped_unavailable_windows": shipped.n_unavailable_windows,
-        "nested_unavailable_windows": nested.n_unavailable_windows,
-        "shipped_feeds": shipped.feeds_used,
-        "nested_feeds": nested.feeds_used,
-        "agreement_within_5pct": paired["agreement_within_5pct"],
-        "paired": paired,
-        "unpaired": {
-            "shipped_mean_w": round(shipped_main, 3),
-            "nested_mean_w": round(nested_main, 3),
-            "ratio": round(ratio, 4),
-            "agreement_within_5pct": bool(
-                nested_main and abs(delta_w) <= 0.05 * abs(nested_main)
-            ),
-            "note": (
-                "each mean is over that variant's own usable windows; the two "
-                "variants refuse different instants, so use 'paired' for the gate"
-            ),
-        },
-        "summary": paired["summary"],
-    }
-
-
-def _paired_comparison(shipped: ReplayResult, nested: ReplayResult) -> dict[str, Any]:
-    """Compare the two variants on the instants where **both** produced a total.
-
-    The two variants do not refuse the same windows: the shipped topology must
-    resolve an undeclared feed relation, so it has strictly fewer usable
-    windows.  Comparing the mean over all of one variant's windows against the
-    mean over all of the other's compares two *different* samples of the day and
-    can disagree by several percent purely from the window sets differing.
-
-    Pairing on the shared instants answers the question the gate actually asks:
-    for the same measurement instant, do the two topology variants report the
-    same whole-home power?  ``shared_n`` says how much of the day that covers.
-    """
-    shared = sorted(set(shipped.main_by_window) & set(nested.main_by_window))
-    if not shared:
-        return {
-            "shared_n": 0,
-            "shipped_n": len(shipped.main_by_window),
-            "nested_n": len(nested.main_by_window),
-            "agreement_within_5pct": False,
-            "reason": "no instant was usable in both variants",
-        }
-    a = [shipped.main_by_window[k] for k in shared]
-    b = [nested.main_by_window[k] for k in shared]
-    mean_a = sum(a) / len(a)
-    mean_b = sum(b) / len(b)
-    ratio = (mean_a / mean_b) if mean_b else 0.0
-    return {
-        "shared_n": len(shared),
-        "shipped_n": len(shipped.main_by_window),
-        "nested_n": len(nested.main_by_window),
-        "shipped_mean_w": round(mean_a, 3),
-        "nested_mean_w": round(mean_b, 3),
-        "ratio": round(ratio, 4),
-        "agreement_within_5pct": bool(mean_b and abs(mean_a - mean_b) <= 0.05 * abs(mean_b)),
-        "summary": (
-            f"paired on {len(shared)} shared instants: shipped {mean_a:.1f} W vs "
-            f"nested {mean_b:.1f} W (ratio {ratio:.3f})"
-        ),
-    }
 
 
 if __name__ == "__main__":

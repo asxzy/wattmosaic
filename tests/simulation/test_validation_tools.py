@@ -171,3 +171,97 @@ def test_passive_validation_from_rejects_a_non_capture(tmp_path) -> None:
     with pytest.raises(SystemExit) as exc:
         passive_validation.load_capture(missing)
     assert "no capture at" in str(exc.value)
+
+
+# --------------------------------------------------------------------------- #
+# z2c: the ported v3 nesting replay, exercised over the HB §17 simulator data.
+# No real household database or path is used -- the SQLite file is built in
+# tmp_path from the synthetic simulator's observation frame.
+# --------------------------------------------------------------------------- #
+def _hb17_db(tmp_path, *, seed: int = 7, minutes: float = 25.0) -> Path:
+    """Write a minimal engine-shaped DB from the synthetic HB §17 house."""
+    import sqlite3
+
+    from tools.simulator import build_hb17
+
+    house = build_hb17(seed=seed, minutes=minutes, interval_s=10.0)
+    path = tmp_path / "hb17.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE topology_versions (version INTEGER, payload_json TEXT)"
+    )
+    # The declared parents are the scoring ground truth: ct_sub -> ct_main,
+    # ct_a/ct_b -> ct_sub, ct_c -> ct_main (HB §17).
+    topology = {
+        "version": 1,
+        "status": "candidate",
+        "channels": [
+            {"ct_id": rid, "entity_id": sample["entity_id"], "name": rid,
+             "ct_type": "main", "phase": "l1", "enabled": True,
+             "parent_ct_id": parent}
+            for rid, parent, sample in [
+                ("ct_main", None, {"entity_id": "sensor.ct_main_power"}),
+                ("ct_sub", "ct_main", {"entity_id": "sensor.ct_sub_power"}),
+                ("ct_a", "ct_sub", {"entity_id": "sensor.ct_a_power"}),
+                ("ct_b", "ct_sub", {"entity_id": "sensor.ct_b_power"}),
+                ("ct_c", "ct_main", {"entity_id": "sensor.ct_c_power"}),
+            ]
+        ],
+        "devices": [],
+    }
+    conn.execute(
+        "INSERT INTO topology_versions (version, payload_json) VALUES (?, ?)",
+        (1, json.dumps(topology)),
+    )
+    conn.execute(
+        "CREATE TABLE ct_samples (id INTEGER PRIMARY KEY, ct_id TEXT, entity_id TEXT, "
+        "value_w REAL, state_timestamp TEXT, received_at TEXT, quality TEXT)"
+    )
+    for record in house.records:
+        for reader_id, sample in (record.get("reader_samples") or {}).items():
+            conn.execute(
+                "INSERT INTO ct_samples (ct_id, entity_id, value_w, state_timestamp, "
+                "received_at, quality) VALUES (?, ?, ?, ?, ?, ?)",
+                (reader_id, sample["entity_id"], sample["value_w"],
+                 sample["state_timestamp"], sample["received_at"], sample["quality"]),
+            )
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_replay_nesting_port_scores_hb17_declared_parents(tmp_path) -> None:
+    """``--score`` port: inferred CONTAINS edges reproduce declared parents.
+
+    The v3 engine sees the synthetic HB §17 reader history through
+    :func:`wattmosaic_engine.electrical.topology_inference.infer_topology` and
+    the declared parents come from the synthetic topology -- never a real DB.
+    """
+    sys.path.insert(0, str(TOOLS / "dev"))
+    sys.path.insert(0, str(REPO_ROOT / "engine"))
+    import replay_nesting
+
+    path = _hb17_db(tmp_path)
+    topology, observation = replay_nesting.load_observation(path, hours=2.0)
+    assert topology.version == 1
+    assert observation, "the simulator DB must yield reader frames"
+
+    from wattmosaic_engine.electrical.topology_inference import infer_topology
+
+    view = infer_topology(observation)
+    # Scoring must run without error and report the measurable children.
+    assert replay_nesting.score(topology, view) == 0
+
+
+def test_replay_nesting_requires_an_explicit_db(monkeypatch, capsys) -> None:
+    """No checkout path is hard-coded: --db is required and never defaulted."""
+    sys.path.insert(0, str(TOOLS / "dev"))
+    import replay_nesting
+
+    # With no --db the parser exits with an error rather than falling back to a
+    # checkout-relative database path (the old tool defaulted to ROOT/data/...).
+    monkeypatch.setattr(sys, "argv", ["replay_nesting.py", "--hours", "1"])
+    with pytest.raises(SystemExit) as exc:
+        replay_nesting.main()
+    assert exc.value.code == 2
+    assert "--db is required" in capsys.readouterr().err
