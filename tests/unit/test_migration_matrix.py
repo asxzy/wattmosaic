@@ -130,7 +130,7 @@ def test_matrix_covers_every_prior_version() -> None:
     assert max(versions) == LATEST_VERSION
     assert not RESERVED & set(versions)
     assert frozenset({12}) == RESERVED_VERSIONS
-    assert frozenset(range(21, 25)) == SPARE_VERSIONS
+    assert frozenset(range(22, 25)) == SPARE_VERSIONS  # 21 allocated to D5
 
 
 @pytest.mark.parametrize("version", PRIOR_VERSIONS)

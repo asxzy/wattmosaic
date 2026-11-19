@@ -13,13 +13,20 @@ The function accepts *components*, not the whole engine, so it can be used from
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from collections.abc import Mapping
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from ..contracts import CONTRACT_VERSION, HealthResponse, utcnow
+from ..storage.tiers import (
+    TIERS,
+    has_growth,
+    table_tiers,
+    time_column_of,
+)
 
 log = logging.getLogger("wattmosaic.diagnostics")
 
@@ -167,6 +174,63 @@ def _errors_section(database: Any) -> dict[str, Any]:
     }
 
 
+def storage_health_section(database: Any, *, now: datetime | None = None) -> dict[str, Any]:
+    """Per-table row count, growth/day and oldest row for every registered table.
+
+    The table set is the published tier registry (:func:`table_tiers`), so the
+    health surface lists every new table without a second hand-written list and
+    the test "lists every table registered in TIERS" holds by construction.
+
+    ``growth_per_day`` is the count of rows in the most recent 24 hours -- a
+    ready proxy for growth -- and is ``None`` for a versioned (L4) table, which
+    is immutable history and has no meaningful growth rate (HB §18: absent is
+    ``None``, never a fabricated ``0``).  ``oldest_row`` is the oldest age-key
+    value, or ``None`` when the table is empty or has no single age key.
+    """
+    current = now if now is not None else utcnow()
+    result: dict[str, Any] = {}
+    for table, tier in table_tiers():
+        base: dict[str, Any] = {
+            "tier": tier if tier in TIERS else None,
+            "row_count": 0,
+            "growth_per_day": None,
+            "oldest_row": None,
+        }
+        result[table] = base
+        if database is None:
+            continue
+        try:
+            columns = {
+                str(row[1])
+                for row in database._conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+        except Exception:  # noqa: BLE001 - a missing table reports an empty health row
+            continue
+        if not columns:
+            continue
+        with contextlib.suppress(Exception):  # noqa: BLE001 - a missing table is an empty health row
+            base["row_count"] = int(
+                database._conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
+            )
+        column = time_column_of(table)
+        if column is None or column not in columns:
+            continue
+        with contextlib.suppress(Exception):  # noqa: BLE001
+            oldest = database._conn.execute(
+                f"SELECT MIN({column}) AS oldest FROM {table}"
+            ).fetchone()["oldest"]
+            base["oldest_row"] = None if oldest is None else str(oldest)
+        if has_growth(tier):
+            with contextlib.suppress(Exception):  # noqa: BLE001
+                cutoff = (current - timedelta(days=1)).isoformat()
+                base["growth_per_day"] = int(
+                    database._conn.execute(
+                        f"SELECT COUNT(*) AS n FROM {table} WHERE {column} >= ?", (cutoff,)
+                    ).fetchone()["n"]
+                )
+    return result
+
+
 def collect_diagnostics(
     *,
     config: Any = None,
@@ -177,9 +241,14 @@ def collect_diagnostics(
     core: Any = None,
     extra: Mapping[str, Any] | None = None,
     error_limit: int = 20,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Assemble the diagnostics report as a plain JSON-safe dict."""
-    generated = utcnow()
+    """Assemble the diagnostics report as a plain JSON-safe dict.
+
+    ``now`` is injected so a caller with a fixed clock gets a deterministic
+    report; it defaults to :func:`utcnow` at the boundary only.
+    """
+    generated = now if now is not None else utcnow()
     core_health = _safe_call(core, "health") if core is not None else None
     health = _health_section(core_health, None)
     engine_health = {
@@ -211,6 +280,9 @@ def collect_diagnostics(
         "models": _model_section(core, database),
         "inference_quality": _quality_section(quality),
         "database": _db_section(database),
+        # D5: the per-table health of every registered table, including the new
+        # wave-2/3 tables.  Reads the tier registry, not a second list.
+        "storage_health": storage_health_section(database, now=generated),
         "last_successful_processing_at": last_success,
         "errors": _errors_section(database),
         "configuration": redact(config.redacted()) if config is not None and hasattr(config, "redacted") else {},
@@ -249,4 +321,10 @@ def run_diagnostics(**kwargs: Any) -> dict[str, Any]:
     return report
 
 
-__all__ = ["collect_diagnostics", "is_sensitive_key", "redact", "run_diagnostics"]
+__all__ = [
+    "collect_diagnostics",
+    "is_sensitive_key",
+    "redact",
+    "run_diagnostics",
+    "storage_health_section",
+]
