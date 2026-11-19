@@ -224,3 +224,68 @@ def test_contract_version_is_cut_over_to_3_0_0() -> None:
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     assert module.CONTRACT_VERSION == contracts.CONTRACT_VERSION
+
+
+def test_no_legacy_names_in_zl() -> None:
+    """ZL (models + learning + aggregation + model/learning repositories).
+
+    Contract 3.0 removed the legacy power-model classes, the sample-based
+    learning pipeline and the pointer-based contracts.  No file in the ZL area
+    may define or import any of those names; the surviving read adapters for
+    archived model rows use local duck-typed value objects instead.
+    """
+    legacy_names = frozenset(
+        {
+            "CTChannel",
+            "DeviceTopology",
+            "Topology",
+            "branch_ct_ids",
+            "parent_ct_id",
+            "paired_ct_id",
+            "alias_of_ct_id",
+            "Source",
+            "PowerState",
+            "ConfidenceTier",
+            "TopologyStatus",
+            "RelationKind",
+            "MappingObservability",
+            "MappingCellStatus",
+            "InferenceResult",
+            "Reconciliation",
+            "DeviceReaderMappingCell",
+            "DeviceModelVersion",
+            "DeviceModelParameters",
+            "LearningSample",
+            "Measurement",
+            "DeviceEvent",
+            "EventEvidenceRecord",
+            "ConfigurationChangeEvent",
+            "TopologyEdge",
+            "TopologyVersion",
+            "UnknownLoadProfile",
+            "PowerLevel",
+            "ConfidenceVector",
+        }
+    )
+    area = (
+        ENGINE / "models",
+        ENGINE / "learning",
+        ENGINE / "aggregation",
+    )
+    files = [p for root in area for p in root.rglob("*.py")]
+    files += [
+        ENGINE / "storage" / "repositories" / "models.py",
+        ENGINE / "storage" / "repositories" / "learning.py",
+    ]
+    offenders: list[str] = []
+    for path in files:
+        if not path.exists():
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        hits = _bound_names(tree) & legacy_names
+        for name in sorted(hits):
+            offenders.append(f"{path.relative_to(ROOT).as_posix()}: {name}")
+    assert not offenders, "ZL area still references legacy names:\n" + "\n".join(offenders)

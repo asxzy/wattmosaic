@@ -31,7 +31,15 @@ from ..contracts import (
     PowerModelSpec,
     PowerModelVersion,
 )
-from .serde import SchemaVersionError
+
+
+class SchemaVersionError(ValueError):
+    """A persisted model spec was written by an incompatible (newer) schema.
+
+    A newer spec must never be decoded with silent defaults: that is how a
+    reloaded model would quietly predict the wrong power (DEF-02).
+    """
+
 
 _SPEC_ADAPTER: TypeAdapter[PowerModelSpec] = TypeAdapter(PowerModelSpec)
 

@@ -28,7 +28,6 @@ from pydantic import Field, TypeAdapter
 from ...contracts import (
     AdjustableSpec,
     ComponentSumSpec,
-    DeviceModelVersion,
     DynamicSpec,
     EvidenceRef,
     FixedSpec,
@@ -43,7 +42,7 @@ from ..repositories import Repository, enum_value, iso
 
 
 class ModelsRepository(Repository):
-    def save_model_version(self, model: DeviceModelVersion, activate: bool = False) -> None:
+    def save_model_version(self, model: Any, activate: bool = False) -> None:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:

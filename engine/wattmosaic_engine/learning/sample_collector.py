@@ -23,11 +23,12 @@ from __future__ import annotations
 import statistics
 from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
-from ..contracts import DeviceEvent, LearningSample, utcnow
+from ..contracts import utcnow
 from ..models.protocols import (
     context_attributes,
     normalise_timestamp,
@@ -91,7 +92,7 @@ def _median(values: Sequence[float]) -> float | None:
     return float(statistics.median(clean))
 
 
-def _state_of(event: DeviceEvent | Mapping[str, Any] | Any) -> str | None:
+def _state_of(event: Any) -> str | None:
     if isinstance(event, Mapping):
         state = event.get("new_state", event.get("state"))
     else:
@@ -101,26 +102,26 @@ def _state_of(event: DeviceEvent | Mapping[str, Any] | Any) -> str | None:
     return str(state).strip().lower()
 
 
-def _attrs_of(event: DeviceEvent | Mapping[str, Any] | Any) -> dict[str, Any]:
+def _attrs_of(event: Any) -> dict[str, Any]:
     if isinstance(event, Mapping):
         attrs = event.get("attributes") or {}
         return dict(attrs) if isinstance(attrs, Mapping) else {}
     return context_attributes(event)
 
 
-def _time_of(event: DeviceEvent | Mapping[str, Any] | Any) -> datetime:
+def _time_of(event: Any) -> datetime:
     raw = (
         event.get("occurred_at") or event.get("timestamp") if isinstance(event, Mapping) else getattr(event, "occurred_at", None)
     )
     return normalise_timestamp(raw) or utcnow()
 
 
-def _device_of(event: DeviceEvent | Mapping[str, Any] | Any) -> str | None:
+def _device_of(event: Any) -> str | None:
     device_id = event.get("device_id") if isinstance(event, Mapping) else getattr(event, "device_id", None)
     return str(device_id) if device_id else None
 
 
-def _supporting_cts(event: DeviceEvent | Mapping[str, Any] | Any, attrs: Mapping[str, Any]) -> list[str]:
+def _supporting_cts(event: Any, attrs: Mapping[str, Any]) -> list[str]:
     for source in (attrs, event if isinstance(event, Mapping) else getattr(event, "__dict__", {})):
         value = source.get("supporting_ct_ids") or source.get("ct_ids")
         if value:
@@ -133,8 +134,32 @@ def _supporting_cts(event: DeviceEvent | Mapping[str, Any] | Any, attrs: Mapping
     return []
 
 
+@dataclass(slots=True)
+class CollectedSample:
+    """A read-only collector candidate (archived sample-table shape).
+
+    The archived ``learning_samples`` table keeps this flat shape for one
+    release; it is never treated as a v3 device-attributed observation.
+    """
+
+    sample_id: str
+    device_id: str
+    captured_at: datetime
+    duration_s: float = 0.0
+    baseline_power_w: float = 0.0
+    event_power_w: float = 0.0
+    delta_power_w: float = 0.0
+    control_value: float | None = None
+    control_variable: str | None = None
+    supporting_ct_ids: list[str] = field(default_factory=list)
+    quality_score: float = 0.0
+    accepted: bool = True
+    rejection_reason: str | None = None
+    notes: list[str] = field(default_factory=list)
+
+
 class SampleCollector:
-    """Accumulates CT snapshots and builds :class:`LearningSample` candidates."""
+    """Accumulates CT snapshots and builds collected-sample candidates."""
 
     def __init__(
         self,
@@ -238,13 +263,13 @@ class SampleCollector:
         return seen
 
     # -- collection ------------------------------------------------------- #
-    def consider(self, events: Sequence[Any], window: Any) -> list[LearningSample]:
+    def consider(self, events: Sequence[Any], window: Any) -> list[CollectedSample]:
         """Build candidates for ``events`` using the accumulated CT history.
 
         One malformed event never aborts the batch (spec §21).
         """
         self.observe(window)
-        samples: list[LearningSample] = []
+        samples: list[CollectedSample] = []
         for event in events:
             try:
                 sample = self.build(event)
@@ -262,7 +287,7 @@ class SampleCollector:
         baseline_values: Mapping[str, Sequence[float]] | None = None,
         event_values: Mapping[str, Sequence[float]] | None = None,
         at: datetime | None = None,
-    ) -> LearningSample | None:
+    ) -> CollectedSample | None:
         """Build one sample from an event and (optionally) explicit CT values.
 
         Explicit ``baseline_values``/``event_values`` make the collector usable
@@ -357,7 +382,7 @@ class SampleCollector:
             notes.append("no_measurement")
 
         duration = max(0.0, (event_end - event_start).total_seconds()) if event_median is not None else 0.0
-        return LearningSample(
+        return CollectedSample(
             sample_id=uuid4().hex,
             device_id=_device_of(event) or "unknown",
             captured_at=at,
@@ -374,4 +399,4 @@ class SampleCollector:
         )
 
 
-__all__ = ["SampleCollector", "extract_control"]
+__all__ = ["CollectedSample", "SampleCollector", "extract_control"]

@@ -2,7 +2,7 @@
 
 Why this module exists
 ----------------------
-``Reconciliation.unknown_residual_w`` is already exact::
+``unknown_residual_w`` is already exact::
 
     accounted + unknown_residual_w == main_power_w
     unmonitored_w + meter_disagreement_w == unknown_residual_w

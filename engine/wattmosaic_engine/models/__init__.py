@@ -1,34 +1,39 @@
-"""Device-model framework.
+"""Versioned power models (contract 3.0).
 
-Concrete models all implement ``fit`` / ``predict`` / ``validate`` / ``describe``
-and expose ``model_type``.  See ``docs/learning.md`` for the model-selection
-guidance.
+The live prediction path is the v3 codec (:mod:`spec`) plus registry
+(:mod:`registry`) over the discriminated ``PowerModelSpec`` union.  Concrete
+classes (:mod:`fixed`, :mod:`adjustable`, :mod:`dynamic`, :mod:`kernel`,
+:mod:`components`) fit and predict those specs.  Declared device profiles adapt
+user configuration onto the same prediction surface.
+
+A few archived-row read helpers remain in :mod:`serde` / :mod:`view` for the
+one-release read-only legacy tables; they never produce validated live power.
 """
 
 from .adjustable import AdjustableModel, fit_adjustable_spec
 from .base import (
-    DeviceModel,
-    build_model,
-    context_from_sample,
+    OFF_STATES_DEFAULT,
+    ON_STATES_DEFAULT,
     enforce_monotonic,
     error_metrics,
-    model_class_for,
+    finite,
+    median,
+    robust_sigma,
 )
-from .binary import BinaryDeviceModel
-from .composite import CompositeDeviceModel
+from .components import ComponentSumModel, component_ids_from_links, predict_component_sum
 from .device_profile import AdjustableResponse, DevicePowerProfile
-from .dimmable import DimmableDeviceModel
+from .dynamic import DynamicModel, fit_dynamic_spec
 from .fixed import (
     FixedPowerModel,
     fit_fixed_spec,
     model_class_for_load_shape,
     suggest_model_class,
 )
+from .kernel import KernelModel, fit_kernel_from_windows
 from .learn import learn_power_model
-from .multi_state import MultiStateDeviceModel
+from .prediction import expected_window_for_spec, predict_with_spec, transition_prior_for_spec
 from .protocols import ModelContextProtocol, SimpleReading, SimpleWindow, window_channels
-from .registry import ModelEstimate, ModelRegistry
-from .residual import ResidualDeviceModel
+from .registry import DatabaseModelRepository, ModelEstimate, ModelRegistry, Registry
 from .residual_power import (
     IncompatibleBasisError,
     ResidualAnalyzer,
@@ -42,29 +47,33 @@ from .residual_power import (
 )
 from .residual_power import persist as persist_residual
 from .segmentation import Segment, SegmentationResult, segment_power_series
-from .time_varying import CycleSummary, TimeVaryingApplianceModel, trapezoidal_energy_kwh
-from .variable_speed import VariableSpeedDeviceModel
+from .serde import LegacyModelRow, LegacyParameters
+from .spec import decode_spec, encode_spec
+from .view import ModelView, model_upper_bounds, resolve_model
 
 __all__ = [
     "AdjustableModel",
     "AdjustableResponse",
-    "BinaryDeviceModel",
-    "CompositeDeviceModel",
-    "CycleSummary",
-    "DeviceModel",
-    "FixedPowerModel",
+    "ComponentSumModel",
+    "DatabaseModelRepository",
     "DevicePowerProfile",
-    "DimmableDeviceModel",
+    "DynamicModel",
+    "FixedPowerModel",
     "IncompatibleBasisError",
+    "KernelModel",
+    "LegacyModelRow",
+    "LegacyParameters",
     "ModelContextProtocol",
     "ModelEstimate",
     "ModelRegistry",
-    "MultiStateDeviceModel",
+    "ModelView",
+    "OFF_STATES_DEFAULT",
+    "ON_STATES_DEFAULT",
+    "Registry",
     "ResidualAnalyzer",
     "ResidualAttempt",
     "ResidualDecomposition",
     "ResidualDecompositionConflict",
-    "ResidualDeviceModel",
     "ResidualNotComputed",
     "ResidualScope",
     "ResidualTrend",
@@ -72,21 +81,29 @@ __all__ = [
     "SegmentationResult",
     "SimpleReading",
     "SimpleWindow",
-    "TimeVaryingApplianceModel",
-    "VariableSpeedDeviceModel",
     "bases_are_compatible",
-    "build_model",
-    "context_from_sample",
-    "fit_adjustable_spec",
-    "fit_fixed_spec",
-    "learn_power_model",
+    "component_ids_from_links",
+    "decode_spec",
+    "encode_spec",
     "enforce_monotonic",
     "error_metrics",
-    "model_class_for",
+    "expected_window_for_spec",
+    "fit_adjustable_spec",
+    "fit_dynamic_spec",
+    "fit_fixed_spec",
+    "fit_kernel_from_windows",
+    "finite",
+    "learn_power_model",
+    "median",
     "model_class_for_load_shape",
+    "model_upper_bounds",
     "persist_residual",
+    "predict_component_sum",
+    "predict_with_spec",
+    "resolve_model",
+    "robust_sigma",
     "segment_power_series",
     "suggest_model_class",
-    "trapezoidal_energy_kwh",
+    "transition_prior_for_spec",
     "window_channels",
 ]

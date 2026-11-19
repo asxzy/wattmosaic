@@ -4,8 +4,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 
-from ..contracts import OperatingStage, Source, StageStatus
+from ..contracts import OperatingStage, StageStatus
+
+
+class RunSource(str, Enum):
+    """How a run's power was obtained (aggregation-owned, contract 3.0)."""
+
+    DIRECT_MEASURED = "direct_measured"
+    INFERRED = "inferred"
+    MODEL_ESTIMATED = "model_estimated"
+    CONFIGURED_PRIOR = "configured_prior"
+    UNKNOWN = "unknown"
 
 
 @dataclass(slots=True)
@@ -55,7 +66,7 @@ class DeviceRun:
     mean_power_w: float = 0.0
     stages: list[OperatingStage] = field(default_factory=list)
     stage_status: StageStatus = StageStatus.UNKNOWN
-    source: Source = Source.INFERRED
+    source: RunSource = RunSource.INFERRED
     sample_count: int = 0
     #: L7 version tags (None when the run predates versioned replay).
     model_set_id: str | None = None
@@ -77,7 +88,7 @@ class DeviceRun:
             "peak_power_w": self.peak_power_w,
             "mean_power_w": self.mean_power_w,
             "stages": [stage.model_dump(mode="json") for stage in self.stages],
-            "source": self.source.value if hasattr(self.source, "value") else str(self.source),
+            "source": str(getattr(self.source, "value", self.source)),
             "model_set_id": self.model_set_id,
             "topology_version_id": self.topology_version_id,
         }
@@ -102,7 +113,7 @@ class _RunTracker:
     sample_count: int = 0
     last_power_w: float = 0.0
     points: list[tuple[datetime, float]] = field(default_factory=list)
-    source: Source = Source.INFERRED
+    source: RunSource = RunSource.INFERRED
 
 
-__all__ = ["DeviceRun", "EnergyBucket"]
+__all__ = ["DeviceRun", "EnergyBucket", "RunSource"]
