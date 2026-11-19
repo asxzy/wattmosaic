@@ -477,53 +477,9 @@ def coerce_quality(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def coerce_snapshot(raw: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Normalise a whole ``SnapshotResponse`` into a safe internal structure.
-
-    Never raises.  Missing ``reconciliation`` is synthesised as an empty one so
-    global entities degrade to ``unknown`` rather than crashing the update.
-    """
-    if not isinstance(raw, Mapping):
-        raw = {}
-
-    results: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    raw_results = raw.get("results")
-    if isinstance(raw_results, Iterable) and not isinstance(raw_results, (str, bytes)):
-        for item in raw_results:
-            coerced = coerce_device_result(item)  # type: ignore[arg-type]
-            if coerced is None or coerced["device_id"] in seen:
-                continue
-            seen.add(coerced["device_id"])
-            results.append(coerced)
-
-    quality_raw = raw.get("quality")
-    return {
-        "timestamp": parse_datetime(raw.get("timestamp")),
-        "reconciliation": coerce_reconciliation(raw.get("reconciliation")),  # type: ignore[arg-type]
-        "results": results,
-        "results_by_id": {item["device_id"]: item for item in results},
-        "quality": coerce_quality(quality_raw) if isinstance(quality_raw, Mapping) else None,
-    }
-
-
 # --------------------------------------------------------------------------- #
 # Contract-3.0 snapshot coercion (D4 ``GET /snapshot`` -> entity values)
 # --------------------------------------------------------------------------- #
-
-#: Ids of a v3 payload: a v3 snapshot has a ``snapshot_id`` and a ``versions``
-#: object; the removed legacy shape had ``results``/``reconciliation.main_power_w``.
-#: The coordinator no longer feature-detects (Z1 removed v2 handling); this
-#: helper remains as a pure predicate for diagnostics and tests.
-def is_v3_snapshot(raw: Any) -> bool:
-    """Feature-detect a v3 snapshot by payload shape (no version header)."""
-    if not isinstance(raw, Mapping):
-        return False
-    if "device_estimates" in raw or "group_estimates" in raw:
-        return True
-    if isinstance(raw.get("versions"), Mapping) and "snapshot_id" in raw:
-        return True
-    return False
 
 
 def _coerce_enum(raw: Any, options: tuple[str, ...], default: str) -> str:
@@ -641,10 +597,9 @@ def coerce_v3_group(raw: Any) -> dict[str, Any] | None:
 def coerce_v3_snapshot(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     """Normalise a whole v3 ``InferenceSnapshot`` JSON payload.
 
-    Never raises.  The result uses the same top-level keys as
-    :func:`coerce_snapshot` (``results``/``results_by_id``/``reconciliation``/
-    ``quality``/``timestamp``) so every existing entity keeps working, plus two
-    new keys: ``groups`` (keyed by stable ``group_id``) and ``v3_versions``.
+    Never raises.  The result carries ``results``/``results_by_id``/
+    ``reconciliation``/``quality``/``timestamp`` (the keys every entity reads),
+    plus ``groups`` (keyed by stable ``group_id``) and ``v3_versions``.
     """
     if not isinstance(raw, Mapping):
         raw = {}

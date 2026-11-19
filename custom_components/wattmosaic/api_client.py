@@ -363,12 +363,8 @@ class EngineClient:
         return await self._request("GET", f"/devices/{_quote(device_id)}")
 
     async def topology(self) -> dict[str, Any]:
-        """``GET /topology`` -> ``Topology``."""
-        return await self._request("GET", "/topology")
-
-    async def put_topology(self, topology: Mapping[str, Any]) -> dict[str, Any]:
-        """``PUT /topology``.  The engine keeps it ``candidate`` by default."""
-        return await self._request("PUT", "/topology", json_body=dict(topology))
+        """``GET /topology/v3``: v3 topology read (active version, edges, primary tree)."""
+        return await self._request("GET", "/topology/v3")
 
     async def quality(self) -> dict[str, Any]:
         """``GET /quality`` -> ``DataQualityReport``."""

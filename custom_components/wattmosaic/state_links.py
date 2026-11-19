@@ -23,9 +23,9 @@ power.  It renders what the engine already decided.  This is the single most
 important architectural rule."*  The engine may be run outside Home Assistant
 (Docker, other hosts), so it must never import ``homeassistant.helpers``.  The
 entity registry exists only inside HA, therefore the resolution is done here, at
-the integration boundary, and the *result* — explicit entity ids — is written
-into the topology metadata the engine already reads.  The engine keeps consuming
-one declarative contract and stays host-agnostic.
+the integration boundary, and the *result* — explicit entity ids — is what may
+cross to the engine (as v3 ``ha_entity_links`` bodies, see
+:func:`build_ha_entity_link_bodies`).  The engine stays host-agnostic.
 
 That is deliberately the opposite direction from placement: an HA device id is a
 display concern and never travels to the engine; the entity ids it resolves to
@@ -36,9 +36,9 @@ What is selected, and what is refused
 A device's state entities are the domains in :data:`STATE_DOMAINS`.  Power,
 energy, current and voltage entities are **measurements**, never transitions: a
 watch power reading written into ``device_states`` would fabricate an ``on``.
-The device's own CT entities are excluded on that evidence explicitly, because a
-registry row can lack ``device_class``/``unit_of_measurement`` while the
-topology still knows the entity is the CT.
+A caller that knows a device's own CT entities can pass them as
+``ct_entity_ids`` so they are excluded even when a registry row lacks
+``device_class``/``unit_of_measurement``.
 
 Nothing is guessed.  Names, areas and "looks like a switch" heuristics are not
 used: a fabricated binding attributes one appliance's power to another and the
@@ -54,12 +54,6 @@ import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
-
-#: Metadata key for state entities the *user declared via a device link*.  Kept
-#: separate from the evidence-owned ``state_entity_ids`` (ADR-0011) and from
-#: ``config_load_entity_ids`` (an engine-side device configuration) so removing a
-#: link restores the other two lists exactly.
-LINK_STATE_ENTITIES_KEY = "link_state_entity_ids"
 
 #: Domains whose entity state describes whether the device is running.
 STATE_DOMAINS: frozenset[str] = frozenset(
@@ -218,47 +212,6 @@ def registry_device_ids(registry: Any) -> list[str]:
     return sorted(ids)
 
 
-def ct_entities_by_device(topology: Mapping[str, Any] | None) -> dict[str, list[str]]:
-    """``{device_id: [ct entity ids]}`` from a topology payload.
-
-    These are *measurements*.  They are passed to :func:`resolve_links` so a
-    registry row that carries no ``device_class``/``unit_of_measurement`` still
-    cannot be mistaken for a state transition: the topology already knows the
-    entity is a CT.
-    """
-    if not isinstance(topology, Mapping):
-        return {}
-    channels = {
-        _text(channel.get("ct_id")): _text(channel.get("entity_id"))
-        for channel in (topology.get("channels") or [])
-        if isinstance(channel, Mapping)
-    }
-    out: dict[str, list[str]] = {}
-    for device in topology.get("devices") or []:
-        if not isinstance(device, Mapping):
-            continue
-        device_id = _text(device.get("device_id"))
-        if not device_id:
-            continue
-        for key in ("dedicated_ct_ids", "branch_ct_ids"):
-            for ct_id in device.get(key) or []:
-                entity_id = channels.get(_text(ct_id))
-                if entity_id and entity_id not in out.setdefault(device_id, []):
-                    out[device_id].append(entity_id)
-    return out
-
-
-def device_ids(topology: Mapping[str, Any] | None) -> list[str]:
-    """Every ``device_id`` in a topology payload."""
-    if not isinstance(topology, Mapping):
-        return []
-    return [
-        _text(device.get("device_id"))
-        for device in (topology.get("devices") or [])
-        if isinstance(device, Mapping) and _text(device.get("device_id"))
-    ]
-
-
 def _domain_of(entity_id: str) -> str:
     return entity_id.split(".", 1)[0].lower() if "." in entity_id else ""
 
@@ -356,7 +309,7 @@ def resolve_links(
     ``entities`` is a registry-shaped iterable (``entity_id``, ``device_id``,
     optionally ``domain``/``device_class``/``unit``/``disabled``/``entity_category``).
     It is plain data so this module stays importable and testable without Home
-    Assistant.  ``ct_entity_ids`` is the topology's own per-device measurement
+    Assistant.  ``ct_entity_ids`` (optional) is each device's own measurement
     entities; they are excluded even when the registry carries no attributes.
     ``registry_device_ids``, when supplied, lets a vanished device be reported as
     such rather than as a device with no state entities.
@@ -391,7 +344,7 @@ def resolve_links(
                     "link": link,
                     "link_kind": "device" if is_device_registry_id(link) else "entity",
                     "reason": "engine_device_not_in_topology",
-                    "detail": "the engine topology has no such device_id",
+                    "detail": "the engine reports no such device_id",
                 }
             )
             continue
@@ -472,56 +425,6 @@ def resolve_links(
     )
 
 
-def apply_state_entities(device: dict[str, Any], entity_ids: Iterable[str]) -> bool:
-    """Write/retract the link-owned state ids on one device dict, in place.
-
-    Returns whether the device changed.  Only :data:`LINK_STATE_ENTITIES_KEY` is
-    touched, so ``state_entity_ids`` (mapping evidence) and
-    ``config_load_entity_ids`` (engine device configuration) survive byte for
-    byte: clearing a link can never destroy provenance.
-    """
-    wanted = [str(e) for e in entity_ids if str(e)]
-    metadata = dict(device.get("metadata") or {})
-    if wanted:
-        if metadata.get(LINK_STATE_ENTITIES_KEY) == wanted:
-            return False
-        metadata[LINK_STATE_ENTITIES_KEY] = wanted
-    elif LINK_STATE_ENTITIES_KEY in metadata:
-        metadata.pop(LINK_STATE_ENTITIES_KEY, None)
-    else:
-        return False
-    device["metadata"] = metadata
-    return True
-
-
-def apply_state_link_metadata(
-    topology: Mapping[str, Any] | None,
-    resolution: LinkResolution,
-) -> tuple[dict[str, Any], bool]:
-    """Write/retract :data:`LINK_STATE_ENTITIES_KEY` on every topology device.
-
-    Returns ``(updated_topology, changed)``.  The input is never mutated: the
-    engine's topology is versioned and replaced atomically, so a caller must
-    send the returned copy.
-    """
-    updated = dict(topology or {})
-    raw_devices = updated.get("devices")
-    devices: list[dict[str, Any]] = []
-    changed = False
-    if isinstance(raw_devices, list):
-        for item in raw_devices:
-            if not isinstance(item, Mapping):
-                continue
-            device = dict(item)
-            device_id = _text(device.get("device_id"))
-            if apply_state_entities(device, resolution.state_entities.get(device_id, ())):
-                changed = True
-            devices.append(device)
-    if devices:
-        updated["devices"] = devices
-    return updated, changed
-
-
 def state_link_signature(resolution: LinkResolution) -> str:
     """Stable fingerprint of a resolution, used to bound topology rewrites.
 
@@ -577,17 +480,12 @@ def build_ha_entity_link_bodies(
 
 
 __all__ = [
-    "LINK_STATE_ENTITIES_KEY",
     "LinkResolution",
     "MEASUREMENT_DEVICE_CLASSES",
     "MEASUREMENT_DOMAINS",
     "MEASUREMENT_UNITS",
     "STATE_DOMAINS",
-    "apply_state_entities",
-    "apply_state_link_metadata",
     "build_ha_entity_link_bodies",
-    "ct_entities_by_device",
-    "device_ids",
     "is_device_registry_id",
     "registry_rows",
     "registry_device_ids",

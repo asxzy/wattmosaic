@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
@@ -21,13 +21,10 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .api_client import EngineClient, EngineError
 from .const import (
-    CONF_CT_ASSIGNMENTS,
     CONF_DEVICE_LINKS,
     CONF_ENERGY_ENTITIES,
     CONF_SCAN_INTERVAL,
     CONF_STALE_AFTER,
-    CONF_TOPOLOGY_CONFIRMED,
-    CONF_TOPOLOGY_VERSION,
     CONF_UNAVAILABLE_AFTER,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_STALE_AFTER,
@@ -35,11 +32,8 @@ from .const import (
     DOMAIN,
 )
 from .entity_values import explicit_device_link, merge_energy_choice
-from .flow_logic import TOPOLOGY_PUSH_TIMEOUT, TopologyPushState, async_replay_topology
 from .state_links import (
     LinkResolution,
-    ct_entities_by_device,
-    device_ids,
     registry_device_ids,
     registry_rows,
     resolve_links,
@@ -48,7 +42,6 @@ from .util import (
     coerce_v3_snapshot,
     device_entities_available,
     is_engine_unavailable,
-    sanitize_text,
     utcnow,
 )
 
@@ -133,11 +126,6 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
         self._device_meta: dict[str, dict[str, Any]] = {}
         self._group_last_seen: dict[str, datetime] = {}
         self._poll_count: int = 0
-        self.topology_push = TopologyPushState()
-        #: Set once ``async_setup_entry`` has run the first replay check.  Polls
-        #: before that (the first refresh) must not push: setup owns that call,
-        #: and a write must not be able to delay or fail platform setup.
-        self._topology_checked_once = False
 
         super().__init__(
             hass,
@@ -237,9 +225,11 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
         """Most recent error text (secrets already scrubbed by the client)."""
         return self._last.last_error
 
-    # -- topology replay ----------------------------------------------------- #
+    # -- device links -------------------------------------------------------- #
 
-    def resolve_state_links(self, topology: Any = None) -> LinkResolution:
+    def resolve_state_links(
+        self, engine_devices: Iterable[str] | None = None
+    ) -> LinkResolution:
         """Turn ``CONF_DEVICE_LINKS`` into explicit per-device state entity ids.
 
         This is the *only* place the Home Assistant entity registry is consulted
@@ -248,10 +238,11 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
         ``homeassistant.helpers``.  Only the resolved entity ids cross the
         boundary.
 
-        ``topology`` is the engine's topology payload (or ``None`` when it could
-        not be read).  It supplies the device ids and each device's own CT
-        entities, so a link can never resolve to a measurement entity even when
-        the registry row carries no attributes.
+        ``engine_devices`` is the engine's device id list; it defaults to the
+        device metadata this coordinator already polls from ``GET /devices``,
+        so a link to a device the engine does not know is *reported* rather
+        than silently dropped.  Measurement entities are refused on the
+        registry's own attributes (domain, device class, unit).
         """
         links = {**self.entry.data, **self.entry.options}.get(CONF_DEVICE_LINKS)
         if not isinstance(links, Mapping) or not links:
@@ -274,83 +265,11 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
         return resolve_links(
             links,
             entities=rows,
-            engine_devices=device_ids(topology),
-            ct_entity_ids=ct_entities_by_device(topology),
+            engine_devices=(
+                list(engine_devices) if engine_devices is not None else list(self._device_meta)
+            ),
             registry_device_ids=known_registry,
         )
-
-    def _state_link_inputs(self) -> str | None:
-        """Fingerprint of the stored links, or ``None`` when none are declared."""
-        links = {**self.entry.data, **self.entry.options}.get(CONF_DEVICE_LINKS)
-        if not isinstance(links, Mapping) or not links:
-            return None
-        return ";".join(
-            f"{key}={links[key]}" for key in sorted(links) if str(links[key] or "")
-        )
-
-    async def async_ensure_topology_pushed(self) -> TopologyPushState:
-        """Replay the stored topology declaration onto the engine if needed.
-
-        The config entry is the *only* record of the user's confirmed CT
-        nesting/aliasing: the engine's topology is a derived table that a
-        database reset or a discovery bootstrap can silently replace with a
-        parentless candidate.  This replays the declaration, and it is safe to
-        call on every poll because :func:`flow_logic.async_replay_topology`
-        decides whether anything must be written.
-
-        It also replays the *resolved* device links: ``device_links`` may hold
-        an HA device-registry id, which no engine can interpret.  Resolving it
-        here and writing ``metadata.link_state_entity_ids`` is what lets a
-        transition reach the engine's learning intake at all.
-
-        Never raises: a replay failure is recorded on :attr:`topology_push` and
-        retried on the next poll.  Setup and entity availability must not depend
-        on the engine accepting a write.
-        """
-        config = {**self.entry.data, **self.entry.options}
-        assignments = config.get(CONF_CT_ASSIGNMENTS) or {}
-        if not isinstance(assignments, Mapping):
-            assignments = {}
-        links_present = self._state_link_inputs() is not None
-        if not assignments and not links_present:
-            # A fresh install has no declaration.  Never fabricate one.
-            self.topology_push.reason = "no_assignments"
-            self._topology_checked_once = True
-            return self.topology_push
-
-        observed = None
-        if self._last is not None:
-            observed = (self._last.reconciliation or {}).get("topology_version")
-
-        # ``async_replay_topology`` catches every engine error itself; the
-        # ``except`` here only covers a programming error so a poll can never
-        # die because of the audit path.
-        try:
-            self.topology_push = await asyncio.wait_for(
-                async_replay_topology(
-                    self.client,
-                    assignments,
-                    confirmed=bool(config.get(CONF_TOPOLOGY_CONFIRMED)),
-                    stored_version=config.get(CONF_TOPOLOGY_VERSION),
-                    state=self.topology_push,
-                    observed_version=observed,
-                    # A callable, not a value: the resolution needs the
-                    # topology the replay itself reads (device ids + CT ids).
-                    state_links=self.resolve_state_links if links_present else None,
-                    link_signature=self._state_link_inputs(),
-                ),
-                timeout=TOPOLOGY_PUSH_TIMEOUT,
-            )
-        except Exception as err:  # noqa: BLE001 - a replay must never break setup
-            self.topology_push.error = sanitize_text(err) or "topology replay failed"
-            _LOGGER.debug("WattMosaic topology replay did not complete", exc_info=True)
-        self._topology_checked_once = True
-        return self.topology_push
-
-    @property
-    def topology_push_diagnostics(self) -> dict[str, Any]:
-        """Secret-free audit trail of the last topology replay."""
-        return self.topology_push.as_diagnostics()
 
     @property
     def engine_topology(self) -> dict[str, Any] | None:
@@ -384,11 +303,6 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
         """
         topology = self.engine_topology or {}
         return str(topology.get("status") or "").strip().lower() == "confirmed"
-
-    @property
-    def topology_pushed(self) -> bool:
-        """Whether the stored declaration has been accepted by the engine."""
-        return self.topology_push.pushed
 
     def device_result(self, device_id: str) -> dict[str, Any] | None:
         if self.data is None:
@@ -535,20 +449,6 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
             groups=groups,
             group_last_seen=dict(self._group_last_seen),
         )
-
-        # Re-check the stored topology declaration against the revision the
-        # engine just reported.  Skipped on the very first refresh: setup runs
-        # that check itself, after a successful poll, so a write can never
-        # delay or fail platform setup.  Subsequent polls re-check, which is a
-        # no-op unless the engine's version changed, a previous push failed, or
-        # the declaration differs.  A failure is recorded for diagnostics and
-        # retried next poll: it must never turn a good snapshot into
-        # `UpdateFailed`.
-        if self._topology_checked_once:
-            try:
-                await self.async_ensure_topology_pushed()
-            except Exception:  # noqa: BLE001 - replay must never break the poll
-                _LOGGER.debug("WattMosaic topology replay check failed", exc_info=True)
 
         return self._last
 

@@ -403,12 +403,22 @@ class TestApiClient:
             run(client.health())
         assert "token-abc" not in str(excinfo.value)
 
-    def test_no_legacy_topology_confirm_or_nesting_methods(self) -> None:
-        """The 3.0 cutover removes the confirm and nesting client methods."""
+    def test_no_legacy_topology_write_confirm_or_nesting_methods(self) -> None:
+        """The 3.0 cutover removes the legacy write, confirm and nesting methods."""
         client, session = self._client(json_response({"version": 2, "channels": []}))
+        assert not hasattr(client, "put_topology")
         assert not hasattr(client, "confirm_topology")
         assert not hasattr(client, "nesting_candidates")
         assert session.calls == []
+
+    def test_topology_reads_the_v3_route(self) -> None:
+        """``topology()`` is the v3 read: active version, edges, primary tree."""
+        payload = {"version_id": "topo-1", "edges": [], "primary_display_tree": []}
+        client, session = self._client(json_response(payload))
+        assert run(client.topology()) == payload
+        call = session.calls[0]
+        assert call["method"] == "GET"
+        assert call["url"].endswith("/api/v1/topology/v3")
 
     def test_export_device(self) -> None:
         client, session = self._client(json_response({"device_id": "a", "samples": []}))
@@ -464,6 +474,22 @@ def _inference_result(**overrides: Any) -> dict[str, Any]:
     }
     payload.update(overrides)
     return payload
+
+
+def _global_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
+    """The coerced global-entity input: timestamp, reconciliation, quality.
+
+    Built from the live coercers ``coerce_v3_snapshot`` itself delegates to
+    (``coerce_reconciliation``/``coerce_quality``), so the reconciliation-field
+    contract the global sensors read is pinned independently of the v3 key
+    mapping.
+    """
+    quality = raw.get("quality")
+    return {
+        "timestamp": util.parse_datetime(raw.get("timestamp")),
+        "reconciliation": util.coerce_reconciliation(raw.get("reconciliation")),
+        "quality": util.coerce_quality(quality) if isinstance(quality, dict) else None,
+    }
 
 
 class TestSnapshotCoercion:
@@ -526,32 +552,36 @@ class TestSnapshotCoercion:
         assert result is not None
         assert result["power_w"] is None
 
-    def test_snapshot_indexes_results_and_dedupes(self) -> None:
-        snapshot = util.coerce_snapshot(
-            {
-                "timestamp": NOW.isoformat(),
-                "reconciliation": {"main_power_w": 5231.0, "l1_power_w": 2708.1, "l2_power_w": 2522.9},
-                "results": [
-                    _inference_result(),
-                    _inference_result(power_w=999.0),  # duplicate id: ignored
-                    {"device_id": "hot_water", "timestamp": NOW.isoformat(), "power_w": 14.95,
-                     "source": "direct_measured", "confidence": 1.0, "quality_status": "good"},
+    def test_v3_snapshot_indexes_results_and_dedupes(self) -> None:
+        snapshot = util.coerce_v3_snapshot(
+            _v3_snapshot(
+                device_estimates=[
+                    _v3_estimate(),
+                    _v3_estimate(point_w=999.0),  # duplicate id: ignored
+                    _v3_estimate(subject_id="hot_water", status="measured", point_w=14.95),
                 ],
-                "quality": {"overall_score": 0.93, "issues": ["channel ct3 slightly old"]},
-            }
+                reconciliation={"main_w": 5231.0},
+                system_quality={"overall_score": 0.93, "issues": ["channel ct3 slightly old"]},
+            )
         )
-        assert set(snapshot["results_by_id"]) == {"network_gear", "hot_water"}
-        assert snapshot["results_by_id"]["network_gear"]["power_w"] == 236.5
+        assert set(snapshot["results_by_id"]) == {"lamp-a", "hot_water"}
+        assert snapshot["results_by_id"]["lamp-a"]["power_w"] == 60.0
         assert snapshot["reconciliation"]["main_power_w"] == 5231.0
         assert snapshot["quality"]["overall_score_pct"] == 93.0
 
-    def test_snapshot_never_raises_on_garbage(self) -> None:
-        for garbage in (None, {}, {"results": "notalist"}, {"reconciliation": 7}, []):
-            snapshot = util.coerce_snapshot(garbage)  # type: ignore[arg-type]
+    def test_v3_snapshot_never_raises_on_garbage(self) -> None:
+        for garbage in (
+            None,
+            {},
+            {"device_estimates": "notalist"},
+            {"reconciliation": 7},
+            [],
+        ):
+            snapshot = util.coerce_v3_snapshot(garbage)  # type: ignore[arg-type]
             assert snapshot["results"] == []
             # A missing reconciliation must not fabricate 0 W as a measurement.
             assert snapshot["reconciliation"]["main_power_w"] is None
-            assert snapshot["reconciliation"]["present"] is False
+            assert snapshot["groups"] == {}
 
     def test_malformed_timestamp_is_none(self) -> None:
         assert util.parse_datetime("not-a-date") is None
@@ -732,7 +762,7 @@ class TestStaleness:
         assert values["available"] is False
 
     def test_global_values_unavailable_when_stale(self) -> None:
-        snapshot = util.coerce_snapshot(
+        snapshot = _global_snapshot(
             {
                 "timestamp": (NOW - timedelta(seconds=400)).isoformat(),
                 "reconciliation": {"main_power_w": 5000.0},
@@ -767,7 +797,7 @@ class TestStaleness:
             assert result["engine_status"] in entity_defs.GLOBAL_SENSORS["engine_status"]["options"]
 
     def test_global_reconciliation_values(self) -> None:
-        snapshot = util.coerce_snapshot(
+        snapshot = _global_snapshot(
             {
                 "timestamp": NOW.isoformat(),
                 "reconciliation": {
@@ -799,7 +829,7 @@ class TestStaleness:
         assert values["learning_active"] is True
 
     def test_reconciliation_stale_quality_marks_balance_unavailable(self) -> None:
-        snapshot = util.coerce_snapshot(
+        snapshot = _global_snapshot(
             {
                 "timestamp": NOW.isoformat(),
                 "reconciliation": {"main_power_w": 1.0, "quality_status": "stale"},
@@ -820,7 +850,7 @@ class TestStaleness:
         from one computed over a guessed panel tree -- which is exactly the
         failure that made a double-counted 2.14x total look trustworthy.
         """
-        confirmed = util.coerce_snapshot(
+        confirmed = _global_snapshot(
             {
                 "timestamp": NOW.isoformat(),
                 "reconciliation": {
@@ -838,7 +868,7 @@ class TestStaleness:
 
     def test_topology_confirmed_absent_reads_as_not_confirmed(self) -> None:
         """An older engine omits the key; absence must never read as ``True``."""
-        snapshot = util.coerce_snapshot(
+        snapshot = _global_snapshot(
             {
                 "timestamp": NOW.isoformat(),
                 "reconciliation": {"main_power_w": 10.0, "quality_status": "good"},
@@ -872,7 +902,7 @@ class TestStaleness:
         explanation silently vanished -- the same class of "nothing changed, so
         nothing is wrong" defect this round is fixing.
         """
-        snapshot = util.coerce_snapshot(
+        snapshot = _global_snapshot(
             {
                 "timestamp": NOW.isoformat(),
                 "reconciliation": {
@@ -909,7 +939,7 @@ class TestStaleness:
         contribution is clipped into the residual (166.4) while the raw spread
         (348.9) is exposed beside it, and the flag says which situation it is.
         """
-        snapshot = util.coerce_snapshot(
+        snapshot = _global_snapshot(
             {
                 "timestamp": NOW.isoformat(),
                 "reconciliation": {
@@ -946,7 +976,7 @@ class TestStaleness:
         ``0.0`` would assert "the two meters agree", which an engine that never
         measured a spread cannot know.
         """
-        snapshot = util.coerce_snapshot(
+        snapshot = _global_snapshot(
             {
                 "timestamp": NOW.isoformat(),
                 "reconciliation": {
@@ -967,7 +997,7 @@ class TestStaleness:
 
     def test_an_older_engine_does_not_fabricate_a_zero_split(self) -> None:
         """Absent must read as "not reported", never as "0 W of disagreement"."""
-        snapshot = util.coerce_snapshot(
+        snapshot = _global_snapshot(
             {
                 "timestamp": NOW.isoformat(),
                 "reconciliation": {
@@ -1879,133 +1909,6 @@ class TestAssignmentValidation:
         assert (confirmed, error) == (None, "invalid_mapping")
 
 
-class TestTopologyUpdate:
-    def test_applies_assignments_and_keeps_candidate(self) -> None:
-        updated = flow.build_topology_update(
-            _topology(),
-            {"ct_hot_tub_ct1": {"role": "branch", "phase": "l1", "device_id": "hot_tub"}},
-        )
-        assert updated["status"] == "candidate"
-        channel = next(c for c in updated["channels"] if c["ct_id"] == "ct_hot_tub_ct1")
-        # The declared role and device are applied, and the merge still leaves
-        # the revision a candidate.
-        assert channel["ct_type"] == "branch"
-        assert channel["device_id"] == "hot_tub"
-        assert channel["topology_status"] == "candidate"
-
-    def test_confirmed_marks_everything(self) -> None:
-        updated = flow.build_topology_update(_topology(), {}, confirmed=True)
-        assert updated["status"] == "confirmed"
-        assert all(c["topology_status"] == "confirmed" for c in updated["channels"])
-
-    def test_mirrors_dedicated_cts_onto_devices(self) -> None:
-        """The declared CT reaches the device's attribution list, once.
-
-        The mirror used to write ``dedicated_ct_ids``; the contract's only
-        attribution list is now ``branch_ct_ids``, so a channel whose ``device_id``
-        names the device lands there.  The intent -- the device is left with a
-        measurement row naming the submitted CT, and the retired list is not
-        resurrected -- is unchanged.
-        """
-        topology = {
-            "version": 2,
-            "status": "candidate",
-            "channels": [
-                {"ct_id": "ct_hot_tub_ct1", "entity_id": "sensor.c", "name": "Hot Tub CT1",
-                 "ct_type": "branch", "phase": "l1", "polarity": "normal",
-                 "device_id": "hot_tub"},
-            ],
-            "devices": [
-                {"device_id": "hot_tub", "name": "Hot Tub", "phase": "l1",
-                 "dedicated_ct_ids": [], "branch_ct_ids": ["ct_hot_tub_ct1"]},
-            ],
-        }
-        updated = flow.build_topology_update(
-            topology,
-            {"ct_hot_tub_ct1": {"role": "branch", "phase": "l1", "device_id": "hot_tub"}},
-        )
-        device = next(d for d in updated["devices"] if d["device_id"] == "hot_tub")
-        assert device["branch_ct_ids"] == ["ct_hot_tub_ct1"]
-        # ``dedicated_ct_ids`` must not come back: the engine contract drops it
-        # in wave 2 and a resurrected key would fail validation.
-        assert not device.get("dedicated_ct_ids")
-        assert "dedicated_ct_ids" not in device
-
-    def test_does_not_mutate_input(self) -> None:
-        original = _topology()
-        flow.build_topology_update(
-            original, {"ct_main_1": {"role": "branch", "phase": "l1"}}
-        )
-        assert original["channels"][0]["ct_type"] == "main"
-
-    def test_appends_notes(self) -> None:
-        updated = flow.build_topology_update(_topology(), {}, notes=["hello"])
-        assert updated["notes"] == ["hello"]
-
-    def test_handles_missing_topology(self) -> None:
-        updated = flow.build_topology_update(None, {})
-        assert updated["channels"] == []
-        assert updated["status"] == "candidate"
-
-    def test_demoting_a_dedicated_ct_keeps_the_device_on_its_row(self) -> None:
-        """A CT that stops naming its device still measures the circuit.
-
-        Clearing ``device_id`` is how a user says "this circuit feeds more than
-        one fixture".  The channel loses its device and the device loses the CT
-        from its attribution list -- but the CT still *observes* that device.
-        Dropping it from both places left the device with no attribution row at
-        all: the graph resolved zero, and the fixture reported nothing forever
-        while the wizard reported success.
-        """
-        topology = {
-            "version": 3,
-            "status": "candidate",
-            "channels": [
-                {"ct_id": "ct_lights", "entity_id": "sensor.lights", "name": "Lights",
-                 "ct_type": "branch", "phase": "l1", "polarity": "normal",
-                 "device_id": "lights"},
-            ],
-            "devices": [
-                {"device_id": "lights", "name": "Lights",
-                 "dedicated_ct_ids": ["ct_lights"], "branch_ct_ids": [],
-                 "phase": "l1", "topology_status": "candidate"},
-            ],
-        }
-        updated = flow.build_topology_update(
-            topology,
-            {"ct_lights": {"role": "branch", "phase": "l1", "device_id": None}},
-        )
-        channel = updated["channels"][0]
-        device = updated["devices"][0]
-        assert channel["ct_type"] == "branch"
-        assert channel["device_id"] is None
-        assert not device.get("dedicated_ct_ids")
-        assert device["branch_ct_ids"] == ["ct_lights"]
-
-    def test_making_a_dedicated_ct_a_main_does_not_attribute_it(self) -> None:
-        """A feed is a containment constraint, never a device's measurement row."""
-        topology = {
-            "version": 3,
-            "status": "candidate",
-            "channels": [
-                {"ct_id": "ct_lights", "entity_id": "sensor.lights", "name": "Lights",
-                 "ct_type": "branch", "phase": "l1", "polarity": "normal",
-                 "device_id": "lights"},
-            ],
-            "devices": [
-                {"device_id": "lights", "name": "Lights",
-                 "dedicated_ct_ids": ["ct_lights"], "branch_ct_ids": [],
-                 "phase": "l1", "topology_status": "candidate"},
-            ],
-        }
-        updated = flow.build_topology_update(
-            topology, {"ct_lights": {"role": "main", "phase": "l1", "device_id": None}}
-        )
-        device = updated["devices"][0]
-        assert not device.get("dedicated_ct_ids")
-        assert not device.get("branch_ct_ids")
-
-
 class TestDeviceCandidates:
     def test_normalises_dict_payload(self) -> None:
         devices = flow.normalise_device_list(
@@ -2694,7 +2597,7 @@ class TestHaModuleHygiene:
 
     def test_pure_modules_import_standalone(self) -> None:
         # Already imported at module import; assert they expose their API.
-        assert callable(util.coerce_snapshot)
+        assert callable(util.coerce_v3_snapshot)
         assert callable(api.EngineClient)
         assert callable(flow.validate_assignments)
         assert callable(services.validate_service_call)
@@ -3149,107 +3052,6 @@ class TestPlacementRequestParameters:
 
 
 # --------------------------------------------------------------------------- #
-# Topology replay: the stored declaration survives a database reset
-# --------------------------------------------------------------------------- #
-
-
-class TestTopologyReplayAgainstTheRealClient:
-    """The replay through the real ``EngineClient`` + stub session.
-
-    ``test_topology_push.py`` pins the decision logic against a recording fake.
-    This class proves the *same* semantics hold through the production HTTP
-    client, i.e. that the request bodies and the confirm order are what the
-    engine contract expects.
-    """
-
-    ASSIGNMENTS = {
-        "main_l1": {"role": "main", "phase": "l1"},
-        "panel_l1": {"role": "main", "phase": "l1", "alias_of_ct_id": "main_l1"},
-        "sub_l1": {"role": "main", "phase": "l1", "parent_ct_id": "main_l1"},
-    }
-
-    def _topology(self) -> dict[str, Any]:
-        return {
-            "version": 1,
-            "status": "candidate",
-            "channels": [
-                {"ct_id": "main_l1", "entity_id": "sensor.m", "name": "Main",
-                 "ct_type": "main", "phase": "l1", "polarity": "normal"},
-                {"ct_id": "panel_l1", "entity_id": "sensor.p", "name": "Panel",
-                 "ct_type": "main", "phase": "l1", "polarity": "normal"},
-                {"ct_id": "sub_l1", "entity_id": "sensor.s", "name": "Sub",
-                 "ct_type": "main", "phase": "l1", "polarity": "normal"},
-            ],
-            "devices": [{"device_id": "d", "name": "D"}],
-        }
-
-    def _client(self, responses: list[Any]) -> tuple[api.EngineClient, StubSession]:
-        session = StubSession(responses)
-        client = api.EngineClient(
-            session,
-            "http://engine.local:8787",
-            api_token="token-abc",
-            sleep=TestApiClient._no_sleep,
-        )
-        return client, session
-
-    def test_legacy_confirm_route_is_not_called(self) -> None:
-        """The 3.0 client has no confirm POST; a confirming replay never issues one.
-
-        The PUT (still a valid transport call) carries the merged declaration;
-        the removed confirm step is simply unavailable on the real client, so the
-        replay records the failure honestly instead of crashing.
-        """
-        updated = self._topology()
-        updated["version"] = 2
-        client, session = self._client(
-            [json_response(self._topology()), json_response(updated), json_response(updated)]
-        )
-        state = run(
-            flow.async_replay_topology(
-                client,
-                self.ASSIGNMENTS,
-                confirmed=True,
-                stored_version=5,
-                observed_version=1,
-            )
-        )
-        methods = [call["method"] for call in session.calls]
-        assert methods == ["GET", "PUT"]
-        assert session.calls[1]["url"].endswith("/api/v1/topology")
-        assert all("/topology/confirm" not in call["url"] for call in session.calls)
-        assert state.error  # the removed confirm method could not be called
-
-        body = session.calls[1]["json"]
-        by_id = {channel["ct_id"]: channel for channel in body["channels"]}
-        assert by_id["panel_l1"]["alias_of_ct_id"] == "main_l1"
-        assert by_id["sub_l1"]["parent_ct_id"] == "main_l1"
-        assert body["status"] == "confirmed"
-
-    def test_an_unreachable_engine_is_an_error_not_an_exception(self) -> None:
-        client, _ = self._client([api.EngineUnavailable("engine unreachable")])
-        state = run(
-            flow.async_replay_topology(
-                client,
-                self.ASSIGNMENTS,
-                confirmed=True,
-                stored_version=5,
-                observed_version=1,
-            )
-        )
-        assert state.pushed is False
-        assert state.error
-        assert state.attempts == 1
-
-    def test_the_engine_never_sees_the_api_token_in_the_audit_text(self) -> None:
-        state = flow.TopologyPushState(
-            error=util.sanitize_text("failed with X-API-Token: token-abc")
-        )
-        view = state.as_diagnostics()
-        assert "token-abc" not in json.dumps(view)
-
-
-# --------------------------------------------------------------------------- #
 # H1 — contract 3.0 HA surface: null semantics, status, groups
 # --------------------------------------------------------------------------- #
 
@@ -3320,16 +3122,6 @@ def _v3_snapshot(**overrides: Any) -> dict[str, Any]:
     }
     payload.update(overrides)
     return payload
-
-
-class TestV3SnapshotDetection:
-    def test_v3_shape_is_detected(self) -> None:
-        assert util.is_v3_snapshot(_v3_snapshot()) is True
-        assert util.is_v3_snapshot({"device_estimates": [], "snapshot_id": "x"}) is True
-
-    def test_legacy_shape_is_not_v3(self) -> None:
-        assert util.is_v3_snapshot({"results": [], "reconciliation": {}}) is False
-        assert util.is_v3_snapshot(None) is False
 
 
 class TestV3NullSemantics:

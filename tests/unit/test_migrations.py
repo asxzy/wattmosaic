@@ -669,46 +669,6 @@ def test_normalise_assignment_no_longer_aliases_the_legacy_role() -> None:
     assert flow.normalise_assignment({"role": "not_a_role"})["role"] == "unknown"
 
 
-def test_migrated_entry_replays_without_error(schema8_db: Path) -> None:
-    """AC-5 end to end: a legacy entry replays onto a migrated engine topology.
-
-    Before the migration the stored role was ``dedicated_device`` while the
-    engine's channel said ``branch``: ``assignment_matches_channel`` compared the
-    two, ``plan_topology_push`` returned ``declaration_missing``, and the replay
-    PUT the old role straight back -- which the engine rejects with 400 once the
-    enum drops the value.
-    """
-    flow = _flow_logic()
-    db = Database(schema8_db)
-    try:
-        topology = db.load_topology()
-    finally:
-        db.close()
-    assert topology is not None
-    payload = json.loads(json.dumps(topology.model_dump(mode="json"), default=str))
-
-    data, _, _ = _migrate_entry()
-    assignments = data["ct_assignments"]
-
-    plan = flow.plan_topology_push(payload, assignments, confirmed=True, stored_version=None)
-    assert plan.reason != "declaration_missing"
-    assert plan.push is True
-
-    updated = flow.build_topology_update(payload, assignments, confirmed=True)
-    # What the engine would receive must still be a valid topology: no 400.
-    Topology.model_validate(updated)
-    channel = next(c for c in updated["channels"] if c["ct_id"] == "tub_l1")
-    assert channel["ct_type"] == "branch"
-    device = next(d for d in updated["devices"] if d["device_id"] == "hot_tub")
-    assert "tub_l1" in device["branch_ct_ids"]
-    assert sorted(device["branch_ct_ids"]) == ["tub_l1", "tub_l2"]
-
-    # And a second replay is a no-op: the declaration now matches the engine.
-    second = flow.plan_topology_push(updated, assignments, confirmed=True, stored_version=None)
-    assert second.push is False
-    assert second.reason in {"in_sync", "engine_matches"}
-
-
 # --------------------------------------------------------------------------- #
 # Loading ``flow_logic`` without Home Assistant
 # --------------------------------------------------------------------------- #

@@ -15,7 +15,6 @@ from homeassistant.core import HomeAssistant
 from .const import (
     CONF_API_TOKEN,
     CONF_BASE_URL,
-    CONF_CT_ASSIGNMENTS,
     CONF_SCAN_INTERVAL,
     CONF_STALE_AFTER,
     CONF_TOPOLOGY_CONFIRMED,
@@ -24,7 +23,6 @@ from .const import (
     VERSION,
 )
 from .coordinator import WattMosaicCoordinator
-from .flow_logic import normalise_channels
 from .util import redact_config
 
 _LOGGER = logging.getLogger(__name__)
@@ -102,9 +100,6 @@ async def async_get_config_entry_diagnostics(
             ).items()
         },
         "v3_versions": (snapshot or {}).get("v3_versions") or {},
-        # Audit trail of the topology replay: "pushed v5 at 12:03, engine now
-        # v5" is answerable from a diagnostics download alone.
-        **coordinator.topology_push_diagnostics,
     }
     if coordinator.data and coordinator.data.last_error:
         diagnostics["last_errors"].append(coordinator.data.last_error)
@@ -129,52 +124,32 @@ async def async_get_config_entry_diagnostics(
         health, config, coordinator, entry
     )
 
-    # Topology summary + model status (read-only; failures degrade gracefully).
+    # v3 topology summary (read-only; failures degrade gracefully).
     try:
         topology = await client.topology()
     except Exception as err:  # noqa: BLE001
         topology = None
         diagnostics["last_errors"].append(f"topology fetch failed: {err}")
+    if isinstance(topology, dict):
+        diagnostics["topology"] = _summarise_topology_v3(topology)
 
     # What every ``device_links`` entry resolved to, and — just as important —
     # which ones resolved to nothing and why.  A link that resolves to no state
     # entity is why ``samples_seen`` stays 0, and the engine can never say so
     # because the HA registry is not its business.
-    if isinstance(topology, dict):
-        try:
-            view = coordinator.resolve_state_links(topology).as_diagnostics()
-            diagnostics["state_links"] = view["state_links"]
-            diagnostics["state_links_declared"] = view["links_declared"]
-            # Named at the top level, not nested under the successful links: a
-            # device that resolved to *nothing* is the reason ``samples_seen``
-            # stays 0, and it must be impossible to miss in a support download.
-            diagnostics["devices_without_state_entity"] = view[
-                "devices_without_state_entity"
-            ]
-        except Exception as err:  # noqa: BLE001 - diagnostics must never fail
-            diagnostics["state_links"] = {"error": str(err)}
-            diagnostics["devices_without_state_entity"] = []
-    if isinstance(topology, dict):
-        channels = normalise_channels(topology)
-        diagnostics["topology"] = {
-            "version": topology.get("version"),
-            "status": topology.get("status"),
-            "channel_count": len(channels),
-            "device_count": len(topology.get("devices") or []),
-            "channels": channels,
-            "notes": topology.get("notes", []),
-            "assignments": config.get(CONF_CT_ASSIGNMENTS, {}),
-        }
-        # Surface the ids actually written on each device, so a support
-        # download can be compared against the resolution above: if the engine
-        # nowhere carries them, the write never landed.
-        diagnostics["topology"]["device_link_state_entity_ids"] = {
-            str(device.get("device_id")): list(
-                (device.get("metadata") or {}).get("link_state_entity_ids") or []
-            )
-            for device in (topology.get("devices") or [])
-            if isinstance(device, dict)
-        }
+    try:
+        view = coordinator.resolve_state_links().as_diagnostics()
+        diagnostics["state_links"] = view["state_links"]
+        diagnostics["state_links_declared"] = view["links_declared"]
+        # Named at the top level, not nested under the successful links: a
+        # device that resolved to *nothing* is the reason ``samples_seen``
+        # stays 0, and it must be impossible to miss in a support download.
+        diagnostics["devices_without_state_entity"] = view[
+            "devices_without_state_entity"
+        ]
+    except Exception as err:  # noqa: BLE001 - diagnostics must never fail
+        diagnostics["state_links"] = {"error": str(err)}
+        diagnostics["devices_without_state_entity"] = []
 
     diagnostics["models"] = {}
     results = (coordinator.data.results if coordinator.data else {}) or {}
@@ -192,6 +167,24 @@ async def async_get_config_entry_diagnostics(
         diagnostics["coordinator"]["last_success"] = health.get("inference_last_run_at")
 
     return diagnostics
+
+
+def _summarise_topology_v3(topology: dict[str, Any]) -> dict[str, Any]:
+    """Secret-free summary of ``GET /topology/v3``: version and edge counts."""
+    edges = [edge for edge in (topology.get("edges") or []) if isinstance(edge, dict)]
+    by_lifecycle: dict[str, int] = {}
+    for edge in edges:
+        lifecycle = str(edge.get("lifecycle") or "unknown")
+        by_lifecycle[lifecycle] = by_lifecycle.get(lifecycle, 0) + 1
+    tree = topology.get("primary_display_tree")
+    return {
+        "version_id": topology.get("version_id"),
+        "version": topology.get("version"),
+        "status": topology.get("status"),
+        "edge_count": len(edges),
+        "edges_by_lifecycle": dict(sorted(by_lifecycle.items())),
+        "primary_tree_size": len(tree) if isinstance(tree, list) else None,
+    }
 
 
 def _learning_section(
