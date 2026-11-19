@@ -311,8 +311,11 @@ def test_infer_steady_conflict_beyond_three_sigma_is_flagged() -> None:
         "Main": HeldReading(value=140.0, held_since=T0, last_confirmed_at=T0, state="held"),
         "Circuit A": HeldReading(value=140.0, held_since=T0, last_confirmed_at=T0, state="held"),
     }
+    # DEC-05: the DIRECT row is only a measured reading when its endpoint
+    # declares a confirmed single-subject scope naming the subject.
     result = infer_steady(
-        readings, op, _models(), _residual(), established, VT, lambda: T0
+        readings, op, _models(), _residual(), established, VT, lambda: T0,
+        declared_single_subject={("Circuit A", "tv")},
     )
     assert result.unresolved_events == ["tv"]
     assert result.conflicted_subject_ids == ["tv"]

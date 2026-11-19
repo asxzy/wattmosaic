@@ -493,6 +493,17 @@ def _run_lab_steady(frames: Sequence[Mapping[str, Any]], house: Any) -> list[dic
     measured_refs = {dev: list(cts) for dev, cts in declared.items()}
     readers = tuple(sorted(endpoints))
     subjects = tuple(sorted(pairs))
+    # DEC-05: only endpoints declared (by the user) as measuring exactly one
+    # subject are MEASURED.  The lab's exclusive branch CTs are such endpoints;
+    # a CT shared by a co-switched group is not (its members stay UNKNOWN).
+    by_endpoint: dict[str, list[str]] = defaultdict(list)
+    for device, endpoint in pairs.items():
+        by_endpoint[endpoint].append(device[1])
+    declared_single_subject = frozenset(
+        (endpoint, devices[0])
+        for endpoint, devices in by_endpoint.items()
+        if len(devices) == 1
+    )
     views: list[dict[str, Any]] = []
     for frame in frames:
         obs = frame["observation"]
@@ -521,6 +532,7 @@ def _run_lab_steady(frames: Sequence[Mapping[str, Any]], house: Any) -> list[dic
             result = infer_steady(
                 readings, operator, FakeModelSet.fixed({}), UnknownPriorModel(),
                 _EmptyEstablished(), _VERSIONS, lambda at=at: at,
+                declared_single_subject=declared_single_subject,
             )
             view["devices"] = {
                 str(e.subject_id): {"point_w": e.point_w, "status": str(getattr(e.status, "value", e.status))}

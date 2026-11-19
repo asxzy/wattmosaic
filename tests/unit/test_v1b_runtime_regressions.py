@@ -225,6 +225,7 @@ def test_i5_pins_measured_bounds_to_the_direct_reading() -> None:
         result = infer_steady(
             {"plug": HeldReading(value=value, held_since=T0, last_confirmed_at=T0, state="held")},
             operator, FakeModelSet.fixed({}), UnknownPriorModel(), _Empty(), VERSIONS, lambda: T0,
+            declared_single_subject={("plug", "tv")},
         )
         (tv,) = result.device_estimates
         assert str(tv.status) == "measured"

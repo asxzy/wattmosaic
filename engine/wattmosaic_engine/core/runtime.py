@@ -769,6 +769,7 @@ class RuntimeMixin:
         return {
             "group": group,
             "ha_subjects": ha_subjects,
+            "declared_single_subject": self._declared_single_subject_pairs(),
             "operator": operator,
             "models": self.model_registry_v3,
             "residual": self.unknown_prior,
@@ -820,6 +821,7 @@ class RuntimeMixin:
             bundle["versions"],
             bundle["clock"],
             ha_subjects=bundle.get("ha_subjects"),
+            declared_single_subject=bundle.get("declared_single_subject", ()),
         )
 
     async def _event_loop(self) -> None:
@@ -1056,6 +1058,35 @@ class RuntimeMixin:
             finally:
                 self._record_latency("background", (time.monotonic() - started) * 1000.0)
 
+    def _declared_single_subject_pairs(self) -> frozenset[tuple[str, str]]:
+        """``{(reader_id, subject_id)}`` for declared single-subject endpoints.
+
+        DEC-05 / HB §8.5: MEASURED is only legal for an S13 endpoint whose
+        current scope is ``single_subject``, is not rejected, and names that
+        subject.  This is the same declaration check the steady refresh uses in
+        :meth:`_single_subject_of`, factored out so the event path and the
+        steady path pass the *same* evidence to I7.  A circuit CT never gains a
+        pair here automatically; a user must declare and confirm its scope.
+        """
+        entities = getattr(getattr(self.db, "repos", None), "entities", None)
+        if entities is None:
+            return frozenset()
+        try:
+            endpoints = entities.endpoints()
+        except Exception:  # noqa: BLE001 - no declaration registry: nothing declared
+            return frozenset()
+        pairs: set[tuple[str, str]] = set()
+        for endpoint in endpoints:
+            if str(endpoint.get("scope")) != "single_subject":
+                continue
+            if str(endpoint.get("scope_status")) == "rejected":
+                continue
+            subject_id = endpoint.get("scope_subject_id")
+            if not subject_id:
+                continue
+            pairs.add((str(endpoint["endpoint_id"]), str(subject_id)))
+        return frozenset(pairs)
+
     def _single_subject_of(
         self, reader: str, map_view: Any, parents: set[str]
     ) -> tuple[tuple[str, str], ...]:
@@ -1072,18 +1103,11 @@ class RuntimeMixin:
         """
         if reader in parents:
             return ()
-        entities = getattr(getattr(self.db, "repos", None), "entities", None)
-        try:
-            endpoint = entities.get_endpoint(reader) if entities is not None else None
-        except Exception:  # noqa: BLE001 - no endpoint registry: nothing is declared
-            endpoint = None
-        if not endpoint or str(endpoint.get("scope")) != "single_subject":
-            return ()
-        if str(endpoint.get("scope_status")) == "rejected":
-            return ()
-        subject_id = endpoint.get("scope_subject_id")
+        declared = self._declared_single_subject_pairs()
         subjects = tuple(map_view.subjects_on(reader))
-        if len(subjects) != 1 or subjects[0][1] != subject_id:
+        if len(subjects) != 1:
+            return ()
+        if (reader, subjects[0][1]) not in declared:
             return ()
         if map_view.most_specific_reader(subjects[0]) != reader:
             return ()
@@ -1178,6 +1202,7 @@ class RuntimeMixin:
         result = infer_steady(
             {reader: reading}, operator, self.model_registry_v3, self.unknown_prior,
             established, versions, self._clock,
+            declared_single_subject=self._declared_single_subject_pairs(),
         )
         self.infer_steady_calls += 1
         if subjects:
