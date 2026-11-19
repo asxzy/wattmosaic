@@ -64,6 +64,10 @@ def test_perf_runtime_quick_report_shape(tmp_path: Path) -> None:
         assert summary["count"] > 0
 
     assert isinstance(report["background_jobs"], dict)
+    # V2: a timing wrapper once hid each job's signature from the executor's
+    # ``budget=`` probe, so every background job raised TypeError and its
+    # "duration" was the time to fail.  The jobs must actually run.
+    assert scale["background_jobs_failed"] == 0
     assert report["db_growth_bytes_per_day"] >= 0
     # Per-table growth is measured after the matrix seed (fixture, not growth).
     per_table = report["db_growth_by_table_bytes_per_day"]
@@ -101,3 +105,30 @@ def test_perf_runtime_module_builds_a_contract_valid_matrix() -> None:
     assert len(payload.cells) == 50_000
     assert len(payload.columns) == 100 and len(payload.rows) == 500
     assert len({node.reader_id for node in payload.columns}) == 100
+
+
+def test_timed_jobs_keep_their_signature_for_the_budget_probe() -> None:
+    """V2: a timed job without ``budget`` must not be handed ``budget=``.
+
+    The quick run ends before the 60 s jobs fire, so the full-scale defect
+    (every background job raising ``TypeError``) is pinned here directly.
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    from wattmosaic_engine.core.executors import BackgroundExecutor
+
+    from tools.dev import perf_runtime
+
+    calls: list[str] = []
+
+    def prune(now: object = None) -> None:  # no ``budget`` parameter
+        calls.append("ran")
+
+    sink: dict[str, list[float]] = {}
+    executor = BackgroundExecutor()
+    try:
+        executor.submit(perf_runtime.timed_job("prune", prune, sink)).result(timeout=5)
+    finally:
+        executor.shutdown(wait=True)
+    assert calls == ["ran"]
+    assert executor.failed == 0
+    assert len(sink["prune"]) == 1

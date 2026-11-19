@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import json
 import sys
 import time
@@ -258,6 +259,24 @@ def seed_matrix(db: Any, devices: int, readers: int, at: datetime) -> Any:
 # --------------------------------------------------------------------------- #
 
 
+def timed_job(name: str, fn: Any, sink: dict[str, list[float]]) -> Any:
+    """Wrap a runtime job so its real invocations are timed into ``sink[name]``.
+
+    ``functools.wraps`` keeps the job's real signature visible to the
+    executor's ``budget=`` probe (``core.executors._accepts_budget``): without
+    it the ``**kwargs`` wrapper made every job look budget-aware and each call
+    failed with ``TypeError``, so the "duration" was the time to fail.
+    """
+    @functools.wraps(fn)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        t0 = time.perf_counter()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            sink.setdefault(name, []).append((time.perf_counter() - t0) * 1000.0)
+    return wrapped
+
+
 def run_benchmark(
     *,
     readers: int,
@@ -349,14 +368,7 @@ def run_benchmark(
     published_count = 0
 
     def timed(name: str, fn: Any) -> Any:
-        """Wrap a runtime job so its real invocations are measured."""
-        def wrapped(*args: Any, **kwargs: Any) -> Any:
-            t0 = time.perf_counter()
-            try:
-                return fn(*args, **kwargs)
-            finally:
-                job_ms.setdefault(name, []).append((time.perf_counter() - t0) * 1000.0)
-        return wrapped
+        return timed_job(name, fn, job_ms)
 
     # The runtime's own background jobs (not a stand-in prune loop).
     core._prune_evidence = timed("prune_evidence", core._prune_evidence)
@@ -584,6 +596,11 @@ def run_benchmark(
             finalized_rows = 0
         db_end = db_path.stat().st_size if db_path.exists() else 0
     finally:
+        background_failed = (
+            int(core.background_executor.failed)
+            if core.background_executor is not None
+            else 0
+        )
         core.inference_executor.shutdown(wait=False)
         if core.background_executor is not None:
             core.background_executor.shutdown(wait=False)
@@ -625,6 +642,7 @@ def run_benchmark(
             "matrix_cells_seeded": cells_written,
             "event_evidence_rows": event_evidence_rows,
             "event_evidence_finalized_rows": finalized_rows,
+            "background_jobs_failed": background_failed,
         },
         "fast_path_us_per_sample": {
             "p50_us": round(support.percentile(fast_us, 0.50), 4),
