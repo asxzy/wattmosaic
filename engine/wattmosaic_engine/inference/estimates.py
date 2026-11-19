@@ -1,10 +1,10 @@
-"""Estimate assembly, status, reconciliation and snapshot (I5, HB §8.5/§12.1).
+"""Estimate assembly, status and reconciliation (I5, HB §8.5/§12.1).
 
 This module turns a joint solution plus an I4 identifiability report into the
 published :class:`~wattmosaic_engine.contracts.DeviceEstimate` /
 :class:`~wattmosaic_engine.contracts.DeviceGroupEstimate` objects, the
-:class:`~wattmosaic_engine.contracts.ReconciliationV3` balance and the
-:class:`~wattmosaic_engine.contracts.InferenceSnapshot`.  It applies design §7's
+:class:`~wattmosaic_engine.contracts.ReconciliationV3` balance (the
+published snapshot is assembled by ``core.snapshot``).  It applies design §7's
 HB §8.5 status table exactly:
 
 =========================================================  ==========  =========
@@ -38,8 +38,6 @@ injected).  Production code imports only contracts and runtime *Protocols* from
 
 from __future__ import annotations
 
-import hashlib
-import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -48,19 +46,13 @@ from typing import Any
 
 from wattmosaic_engine.contracts import (
     Bounds,
-    DataQualityReport,
     DeviceEstimate,
     DeviceGroupEstimate,
     EstimateStatus,
     EvidenceRef,
     IdentifiabilityStatus,
     InferenceMethod,
-    InferenceSnapshot,
-    MeasurementBasis,
-    MeasurementType,
     PowerLevelV3,
-    ReaderMeasurement,
-    ReaderResidualPoint,
     ReconciliationV3,
     UnknownEstimate,
     VersionTriple,
@@ -73,9 +65,7 @@ from .identifiability import IdentifiabilityReport
 __all__: list[str] = [
     "DirectReading",
     "EstimateInputs",
-    "SnapshotInputs",
     "assemble_status_estimates",
-    "build_snapshot",
     "contributing_readers",
     "level_from_model",
     "reconciliation_from_estimates",
@@ -83,7 +73,6 @@ __all__: list[str] = [
 ]
 
 _NONZERO_TOL = 1e-9
-_SINGLE_SUBJECT_ENDPOINTS = frozenset({"ct_plug", "tv_plug", "plug", "TV plug"})
 
 
 # --------------------------------------------------------------------------- #
@@ -112,21 +101,6 @@ def _row_sigma(operator: ObservationOperator, reader_id: str) -> float | None:
     for row in operator.rows:
         if row.reader_id == reader_id:
             return _finite(row.sigma_w)
-    return None
-
-
-def _name_set(values: Sequence[Any]) -> set[str]:
-    return {_name(value) for value in values}
-
-
-def _parse_ts(value: Any) -> datetime | None:
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, str):
-        try:
-            return datetime.fromisoformat(value)
-        except ValueError:
-            return None
     return None
 
 
@@ -602,436 +576,3 @@ def reconciliation_from_estimates(
         unknown_w=total(unknown_parts),
         residual_w=residual_w,
     )
-
-
-# --------------------------------------------------------------------------- #
-# hb17 observation -> snapshot (the AT-14 target surface).
-#
-# CLASS B stand-in (Z3b removes it): everything from here to the end of
-# ``build_snapshot`` is scenario-specific scaffolding, allowlisted by
-# tests/unit/test_z3a_no_scenario_names.py until Z3b replaces it.
-# --------------------------------------------------------------------------- #
-
-_TV_STANDBY_W = 3.0  # HB §17 step 8: reported by the plug, not a fabrication.
-#: The stand-in's declared TV power model (the HB §17 TV's standby level).  The
-#: production path takes levels from the model registry instead (A1).
-_TV_MODEL_LEVELS = {"tv": {PowerLevelV3.STANDBY: (_TV_STANDBY_W, 0.5)}}
-
-
-@dataclass(frozen=True, slots=True)
-class SnapshotInputs:
-    """Optional injected inputs for :func:`build_snapshot`."""
-
-    at: datetime | None = None
-    versions: VersionTriple | None = None
-    solution_points: Mapping[str, float] | None = None
-    identifiability: Mapping[str, IdentifiabilityStatus] | None = None
-    known_groups: Sequence[tuple[str, ...]] = ()
-
-
-def _reading_w(sample: Mapping[str, Any]) -> float | None:
-    for name in ("active_power_w", "value_w", "value"):
-        value = _finite(sample.get(name))
-        if value is not None:
-            return value
-    return None
-
-
-def _records(observation: Any) -> list[Mapping[str, Any]]:
-    if isinstance(observation, Mapping):
-        return [observation]
-    return [record for record in observation if isinstance(record, Mapping)]
-
-
-def _reader_series(
-    records: Sequence[Mapping[str, Any]],
-) -> dict[str, list[tuple[datetime, float]]]:
-    series: dict[str, list[tuple[datetime, float]]] = {}
-    for record in records:
-        for reader_id, sample in (record.get("reader_samples") or {}).items():
-            value = _reading_w(sample)
-            at = _parse_ts(sample.get("state_timestamp")) or _parse_ts(record.get("timestamp"))
-            if value is None or at is None:
-                continue
-            series.setdefault(reader_id, []).append((at, value))
-    for points in series.values():
-        points.sort(key=lambda item: item[0])
-    return series
-
-
-def _trend(points: Sequence[tuple[datetime, float]], *, fraction: float = 0.1) -> float:
-    """Difference between the high and low quantiles of a stable series."""
-    if not points:
-        return 0.0
-    values = sorted(value for _, value in points)
-    low = values[max(0, int(len(values) * fraction))]
-    high = values[min(len(values) - 1, len(values) - 1 - int(len(values) * fraction))]
-    return high - low
-
-
-def _readers_of(observation: Any) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for record in _records(observation):
-        for reader_id, sample in (record.get("reader_samples") or {}).items():
-            result.setdefault(reader_id, sample)
-    return result
-
-
-def _ha_events_of(observation: Any, subject_entities: Mapping[str, str]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for record in _records(observation):
-        for message in record.get("ha_messages") or ():
-            if message.get("entity_id") in subject_entities:
-                out.append(dict(message))
-    return out
-
-
-def _subject_entities(event: Mapping[str, Any]) -> dict[str, str]:
-    """Map observable HA entity ids to subjects from their attributes/state."""
-    result: dict[str, str] = {}
-    for message in event.get("ha_messages") or ():
-        entity = str(message.get("entity_id") or "")
-        attributes = message.get("attributes") or {}
-        if not isinstance(attributes, Mapping):
-            continue
-        if "power_w_observation" in attributes:
-            result[entity] = "tv"
-        elif "device_class" in attributes and entity.startswith("light."):
-            result[entity] = entity
-    return result
-
-
-def build_snapshot(observation: Any, *, inputs: SnapshotInputs | None = None) -> InferenceSnapshot:
-    """Build an HB §12.1 snapshot from a deterministic hb17 observation frame.
-
-    The observation is the **only** input: no ground truth is read.  The TV is
-    MEASURED from a confirmed single-subject endpoint (its plug), co-switched
-    lights that cannot be separated become a GROUP_IDENTIFIABLE group (members
-    null), the non-HA fridge step lands in the main residual/unknown term, and
-    the reconciliation counts each physical load exactly once (AT-14).
-    """
-    inputs = inputs or SnapshotInputs()
-    records = _records(observation)
-    readers = _readers_of(observation)
-    series = _reader_series(records)
-
-    # -- time & versions ---------------------------------------------------- #
-    at = inputs.at
-    if at is None:
-        stamps = [_parse_ts(record.get("timestamp")) for record in records]
-        observed = next((stamp for stamp in reversed(stamps) if stamp is not None), None)
-        if observed is None:
-            raise ValueError("build_snapshot needs a timestamp (in observations or inputs.at)")
-        at = observed
-    versions = inputs.versions or VersionTriple(
-        topology_version_id="topo-hb17",
-        mapping_version_id="map-hb17",
-        model_set_id="mset-hb17",
-    )
-
-    # -- build a minimal operator: which readers see which subjects ---------- #
-    # The plug is a DIRECT single-subject endpoint; each circuit/parent CT that
-    # physically sees a load gets a non-zero coefficient.  The hb17 initial
-    # topology is Main > Subpanel > {Circuit A, Circuit B}, Circuit C under Main.
-    parent_by_reader = {
-        reader_id: str(sample.get("parent")) if sample.get("parent") is not None else None
-        for reader_id, sample in readers.items()
-    }
-    reader_ids = tuple(sorted(readers))
-    subject_kinds: list[tuple[str, str]] = [("device", "tv")]
-    plug_readers = [
-        rid for rid in reader_ids
-        if rid.lower() in _SINGLE_SUBJECT_ENDPOINTS
-    ]
-    plug_reader = plug_readers[0] if plug_readers else None
-
-    # Direct endpoint reading of the TV: prefer the plug's reported standby
-    # (HB §17 step 8), never collapse it to 0.
-    direct: dict[str, DirectReading] = {}
-    tv_points: dict[str, float] = {}
-    if plug_reader is not None:
-        plug_samples = series.get(plug_reader, [])
-        if plug_samples:
-            newest_at, newest_value = plug_samples[-1]
-            direct["tv"] = DirectReading(
-                subject_id="tv",
-                reader_id=plug_reader,
-                power_w=newest_value,
-                observed_at=newest_at,
-            )
-            tv_points["tv"] = newest_value
-        # A plug HA standby message pins the 3 W value when sampled noise
-        # would otherwise report 2.3–3.7 W.
-        entities = _subject_entities({"ha_messages": [
-            message for record in records for message in (record.get("ha_messages") or ())
-        ]})
-        events = _ha_events_of(observation, entities)
-        for event in events:
-            attrs = event.get("attributes") or {}
-            reported = _finite(attrs.get("power_w_observation")) if isinstance(attrs, Mapping) else None
-            if reported is not None and abs(reported - _TV_STANDBY_W) < 0.5:
-                seen_at = _parse_ts(event.get("observed_at")) or at
-                direct["tv"] = DirectReading(
-                    subject_id="tv",
-                    reader_id=plug_reader,
-                    power_w=reported,
-                    observed_at=seen_at,
-                )
-                tv_points["tv"] = reported
-                break
-
-    # -- identifiability ----------------------------------------------------- #
-    ident: dict[str, IdentifiabilityStatus] = dict(inputs.identifiability or {})
-    ident.setdefault("tv", IdentifiabilityStatus.IDENTIFIABLE)
-    groups: list[tuple[str, ...]] = list(inputs.known_groups)
-    # The two co-switched living-room lights share every event and are never
-    # separated: I4 would classify them GROUP_IDENTIFIABLE.  We derive this from
-    # the HA messages, never from truth.
-    light_ids = sorted({
-        str(message.get("entity_id"))
-        for record in records
-        for message in (record.get("ha_messages") or ())
-        if str(message.get("entity_id") or "").startswith("light.")
-    })
-    if len(light_ids) >= 2:
-        groups.append(tuple(light_ids))
-        for light_id in light_ids:
-            subject_kinds.append(("device", light_id))
-            ident.setdefault(light_id, IdentifiabilityStatus.NON_IDENTIFIABLE)
-
-    report = _synthetic_report(
-        subject_kinds, ident, groups, readers=reader_ids, parent_by_reader=parent_by_reader,
-        plug_reader=plug_reader, at=at,
-    )
-    solution_points = dict(inputs.solution_points or {})
-    solution_points.update(tv_points)
-    assembly_inputs = EstimateInputs(
-        report=report,
-        operator=report.operator,
-        versions=versions,
-        at=at,
-        points=solution_points,
-        direct=direct,
-        reader_quality={
-            rid: {"quality": 1.0} for rid in reader_ids
-        },
-        ages_s={rid: 0.0 for rid in reader_ids},
-        model_levels=_TV_MODEL_LEVELS,
-    )
-    # Recover the operator built by _synthetic_report via its stored mapping.
-    devices, device_groups = assemble_status_estimates(assembly_inputs)
-
-    # -- residual & reconciliation ------------------------------------------ #
-    # The unmonitored load directly on Main is the difference between Main and
-    # the sum of its CT children plus the explained physical loads.  It is
-    # residual evidence, never a fabricated device.
-    residual_by_reader: dict[str, float | None] = {}
-    main_id = next((rid for rid in reader_ids if rid == "ct_main" or rid == "Main"), None)
-    if main_id and series.get(main_id):
-        main_value = series[main_id][-1][1]
-        children = [
-            rid for rid, parent in parent_by_reader.items()
-            if parent == main_id and rid != plug_reader and rid in series and series[rid]
-        ]
-        child_sum = sum(series[rid][-1][1] for rid in children)
-        residual_by_reader[main_id] = main_value - child_sum
-
-    reconciliation = reconciliation_from_estimates(
-        devices=devices,
-        groups=device_groups,
-        unknowns=(),  # residual is its own term; unknown is not double counted.
-        residual_by_reader=residual_by_reader,
-        main_w=series[main_id][-1][1] if main_id and series.get(main_id) else None,
-        # Stand-in (Z3b): this scenario builder names its own root.
-        root_reader_ids=(main_id,) if main_id else (),
-    )
-
-    # -- measurements, residuals, quality ----------------------------------- #
-    measurements: list[ReaderMeasurement] = []
-    for reader_id, sample in readers.items():
-        observed = _parse_ts(sample.get("state_timestamp")) or at
-        received = _parse_ts(sample.get("received_at")) or observed
-        measurements.append(
-            ReaderMeasurement(
-                reader_id=reader_id,
-                observed_at=observed,
-                received_at=received,
-                active_power_w=_reading_w(sample),
-                phase="unknown",
-                measurement_type=MeasurementType.INSTANTANEOUS,
-                measurement_window_ms=int(sample.get("measurement_window_ms") or 0),
-                calibration_version="hb17",
-                measurement_basis="monitor_reported",
-                quality_flags=[],
-                sequence=int(sample.get("sequence") or 0),
-            )
-        )
-    residual_estimates = [
-        ReaderResidualPoint(
-            reader_id=rid,
-            at=at,
-            residual_w=value,
-            topology_version_id=versions.topology_version_id,
-            basis=MeasurementBasis.CT_MEASURED,
-        )
-        for rid, value in residual_by_reader.items()
-    ]
-    snapshot_id = "snap-" + hashlib.sha256(
-        json.dumps(
-            {
-                "at": at.isoformat(),
-                "devices": [e.subject_id for e in devices],
-                "groups": [g.group_id for g in device_groups],
-            },
-            sort_keys=True,
-        ).encode("utf-8")
-    ).hexdigest()[:16]
-
-    return InferenceSnapshot(
-        snapshot_id=snapshot_id,
-        observed_at=at,
-        computed_at=at,
-        versions=versions,
-        reader_measurements=measurements,
-        device_estimates=devices,
-        group_estimates=device_groups,
-        residual_estimates=residual_estimates,
-        reconciliation=reconciliation,
-        system_quality=DataQualityReport(timestamp=at),
-        stale_sources=[],
-        unresolved_events=[],
-    )
-
-
-def _synthetic_report(
-    subject_kinds: Sequence[tuple[str, str]],
-    ident: Mapping[str, IdentifiabilityStatus],
-    groups: Sequence[tuple[str, ...]],
-    *,
-    readers: Sequence[str],
-    parent_by_reader: Mapping[str, str | None],
-    plug_reader: str | None,
-    at: datetime,
-) -> Any:
-    """A lightweight object with the I4 report + operator needed for assembly.
-
-    It exposes ``subject_ids``, ``subjects``, ``groups``, ``null_space_share``,
-    ``usable_rows`` and an ``operator``.  Group members are grouped; the TV is
-    identifiable and measured by its plug.
-    """
-    from dataclasses import dataclass as _dc
-
-    import numpy as np
-
-    from wattmosaic_engine.contracts import EdgeLifecycleV3, Observability
-    from wattmosaic_engine.runtime.interfaces import EntryMeta, RowMeta
-
-    @_dc(frozen=True)
-    class _Group:
-        group_id: str
-        member_ids: tuple[str, ...]
-        identifiability: IdentifiabilityStatus
-        sum_w: float | None
-        sigma_w: float | None
-        source_reader_ids: tuple[str, ...]
-        evidence_refs: tuple[EvidenceRef, ...]
-        covers_all_candidates: bool
-
-    @_dc(frozen=True)
-    class _Report:
-        subject_ids: tuple[str, ...]
-        subjects: dict[str, IdentifiabilityStatus]
-        groups: tuple[_Group, ...]
-        null_space_share: dict[str, float]
-        usable_rows: tuple[int, ...]
-        operator: Any
-
-        def group_of(self, subject_id: str) -> _Group | None:
-            for group in self.groups:
-                if subject_id in group.member_ids:
-                    return group
-            return None
-
-        def identifiable_ids(self) -> tuple[str, ...]:
-            return tuple(
-                sid for sid in self.subject_ids
-                if self.subjects[sid] is IdentifiabilityStatus.IDENTIFIABLE
-            )
-
-    # H: direct plug row for the TV, and an EXPECTED row for each CT that
-    # physically sees a subject (plug readers never get duplicate columns).
-    subject_ids = tuple(dict.fromkeys(sid for _kind, sid in subject_kinds))
-    columns = {sid: index for index, sid in enumerate(subject_ids)}
-    rows = tuple(RowMeta(reader_id=rid, kind="reader", sigma_w=None, sigma_inflation=1.0)
-                 for rid in readers)
-    H = np.zeros((len(readers), len(subject_ids)), dtype=float)
-    entries: dict[tuple[int, int], EntryMeta] = {}
-
-    plug_columns = [columns["tv"]] if "tv" in columns else []
-    for column in plug_columns:
-        for index, rid in enumerate(readers):
-            if rid == plug_reader:
-                H[index, column] = 1.0
-                entries[(index, column)] = EntryMeta(
-                    coefficient=1.0, observability=Observability.DIRECT,
-                    edge_lifecycle=None, edge_ids=(),
-                )
-    # Co-switched lights appear on Circuit A / Subpanel / Main (HB §17).
-    for member in (m for grp in groups for m in grp):
-        column = columns.get(member)
-        if column is None:
-            continue
-        for index, rid in enumerate(readers):
-            if rid == plug_reader:
-                continue
-            if any(token in rid for token in ("a", "sub", "main")):
-                H[index, column] = 1.0
-                entries[(index, column)] = EntryMeta(
-                    coefficient=1.0,
-                    observability=Observability.EXPECTED,
-                    edge_lifecycle=EdgeLifecycleV3.CONFIRMED,
-                    edge_ids=(),
-                )
-
-    operator = ObservationOperator(
-        H=H,
-        rows=rows,
-        subjects=tuple(subject_kinds),
-        entries=entries,
-        unknown_scopes=(),
-        soft_alternatives=(),
-        topology_version_id="topo-hb17",
-        mapping_version_id="map-hb17",
-        at=at,
-    )
-
-    group_objs: list[_Group] = []
-    for members in groups:
-        member_ids = tuple(m for m in members if m in ident)
-        if len(member_ids) < 2:
-            continue
-        group_objs.append(
-            _Group(
-                group_id=hashlib.sha256("\0".join(sorted(member_ids)).encode()).hexdigest()[:16],
-                member_ids=member_ids,
-                identifiability=IdentifiabilityStatus.GROUP_IDENTIFIABLE,
-                sum_w=None,  # no event-delta sum in the observation-only path
-                sigma_w=None,
-                source_reader_ids=tuple(
-                    rid for rid in readers
-                    if rid != plug_reader and any(token in rid for token in ("a", "sub", "main"))
-                ),
-                evidence_refs=(),
-                covers_all_candidates=False,
-            )
-        )
-    report = _Report(
-        subject_ids=subject_ids,
-        subjects=dict(ident),
-        groups=tuple(group_objs),
-        null_space_share={sid: 0.0 if ident[sid] is IdentifiabilityStatus.IDENTIFIABLE else 1.0
-                          for sid in subject_ids},
-        usable_rows=tuple(range(len(readers))),
-        operator=operator,
-    )
-    return report

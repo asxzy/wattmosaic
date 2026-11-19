@@ -31,7 +31,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
@@ -344,6 +344,11 @@ class VersionService:
             self._map_activated.get(active_map, datetime.max.replace(tzinfo=UTC)),
             self._clock(),
         )
+
+    @property
+    def matrix_store(self) -> Any | None:
+        """The M2 matrix store whose cells a configuration event marks, if any."""
+        return self._matrix_store
 
     # -- triple assembly ---------------------------------------------------- #
 
@@ -850,205 +855,6 @@ class VersionService:
         return sorted(set(ids))
 
 
-    # -- T7: declared/inferred change workflow helpers --------------------- #
-
-    @classmethod
-    def from_hb17(
-        cls,
-        observation: Any,
-        *,
-        model_set_id: str = "mset-hb17",
-        devices: Mapping[str, str] | None = None,
-        db: Any = None,
-    ) -> VersionService:
-        """Build a D1 service seeded with the HB §17 reference mapping/topology.
-
-        This is the public surface the §21 acceptance tests use.  It constructs a
-        real, migrated in-memory SQLite database, seeds the topology CONTAINS
-        edges from the declared reader parents and the tv/lights/fridge mapping
-        edges from the observation stream, and returns a service with an injected
-        fixed clock (no wall clock is read).  The observation ground-truth seam
-        is respected: only declared ``parent`` metadata and HA entity ids — both
-        observable — are used to seed, never the simulator's ``truth`` frame.
-
-        ``devices`` optionally replaces the default declared ``subject ->
-        endpoint`` mapping (a user's up-front declaration, e.g. one subject per
-        HA light and the TV on its plug); the default is unchanged.  ``db``
-        optionally seeds an existing (migrated) database instead of a private
-        in-memory one, so a harness's facade reads (matrix, topology) see the
-        same D1 versions the runtime infers with.
-        """
-        from wattmosaic_engine.storage.database import Database
-
-        db = db if db is not None else Database(":memory:")
-        clock = lambda: datetime(2026, 1, 1, tzinfo=UTC)  # noqa: E731 - injected fixed clock
-        svc = cls(
-            topology_repo=db.repos.topology_v3,
-            mapping_repo=db.repos.mapping,
-            clock=clock,
-            model_set_id=model_set_id,
-        )
-        svc._hb17_db = db  # keep the connection alive for the service's lifetime
-        svc._hb17_origin = clock()
-        svc._seed_hb17(observation, devices=devices)
-        svc._seed_matrix_cells(observation)
-        return svc
-
-    def _seed_matrix_cells(self, observation: Any) -> None:
-        """Build an M2 matrix store with one cell per (subject, reader) pair.
-
-        AT-16 asserts that a CT-direction event marks the affected cells
-        SUSPECTED_CHANGE; a real install's matrix would be supplied by M2, so
-        here we seed honest, minimal cells from the observable mapping edges.
-        """
-        from wattmosaic_engine.mapping import MatrixStore
-
-        store = self._matrix_store if self._matrix_store is not None else MatrixStore(
-            clock=self._clock
-        )
-        self._matrix_store = store
-        triple = self.current()
-        # Import the blank-cell builder to make structurally valid cells.
-        from wattmosaic_engine.mapping.store import _blank_cell
-
-        # Collect every reader id: mapping endpoints plus all reader endpoints
-        # declared in the topology.  A CT-direction change on any reader must
-        # have at least one cell to mark SUSPECTED_CHANGE (AT-16).
-        readers: set[str] = set()
-        for row in self._map.mapping_edges(triple.mapping_version_id):
-            readers.add(str(row["endpoint_id"]))
-        for row in self._topo.edges():
-            readers.add(str(row["source_endpoint_id"]))
-            readers.add(str(row["target_endpoint_id"]))
-        for reader in sorted(readers):
-            key = ("device", f"subject_on_{reader}", reader)
-            cell = _blank_cell(key, self._clock())
-            cell = cell.model_copy(
-                update={
-                    "provenance": cell.provenance.model_copy(
-                        update={
-                            "topology_version_id": triple.topology_version_id,
-                            "mapping_version_id": triple.mapping_version_id,
-                        }
-                    )
-                }
-            )
-            store.apply_cells([cell], at=self._clock(), reason="seed hb17 mapping")
-        self._seed_observation_readings(observation)
-
-    def _seed_observation_readings(self, observation: Any) -> None:
-        """Store observable reader measurements for as-of snapshot reads."""
-        readings: dict[str, list[tuple[Any, float | None]]] = {}
-        records = observation if isinstance(observation, (list, tuple)) else [observation]
-        for record in records:
-            if not isinstance(record, Mapping):
-                continue
-            samples = record.get("reader_samples") or {}
-            if not isinstance(samples, Mapping):
-                continue
-            stamp = record.get("timestamp")
-            at = _as_utc(stamp) if stamp else self._hb17_origin
-            for reader, sample in samples.items():
-                if not isinstance(sample, Mapping):
-                    continue
-                value = sample.get("value_w", sample.get("value"))
-                readings.setdefault(str(reader), []).append((at, value))
-        self.set_observation_snapshot(readings)
-
-    def _seed_hb17(self, observation: Any, *, devices: Mapping[str, str] | None = None) -> None:
-        """Seed declared topology/mapping edges from observable HB §17 data."""
-        from wattmosaic_engine.contracts import EdgeEvidence, Observability, RelationType
-
-        at = self._hb17_origin
-        records = observation if isinstance(observation, (list, tuple)) else [observation]
-        parents: dict[str, str] = {}
-        endpoints: set[str] = set()
-        for record in records:
-            if not isinstance(record, Mapping):
-                continue
-            samples = record.get("reader_samples") or record.get("measurements") or {}
-            if not isinstance(samples, Mapping):
-                continue
-            for reader, sample in samples.items():
-                if not isinstance(sample, Mapping):
-                    continue
-                reader = str(sample.get("reader_id", reader))
-                endpoints.add(reader)
-                parent = sample.get("parent")
-                if isinstance(parent, str) and parent:
-                    parents[reader] = parent
-        edges: list[TopologyEdgeV3] = []
-        for child, parent in sorted(parents.items()):
-            edges.append(
-                TopologyEdgeV3(
-                    edge_id=f"te::declared::{parent}::{child}",
-                    relation=RelationType.CONTAINS,
-                    source_endpoint_id=parent,
-                    target_endpoint_id=child,
-                    lifecycle=EdgeLifecycleV3.CONFIRMED,
-                    declared_by="user",
-                    beta=1.0,
-                    beta_basis="unity",
-                    evidence=EdgeEvidence(support=8, independent_causes=2),
-                    valid_from=at,
-                    pinned=True,
-                )
-            )
-        # The declared edges must belong to the *active topology version*:
-        # every consumer reads ``topology_view(current().topology_version_id)``.
-        # Upserting the rows alone left that view empty, so the operator had no
-        # CONTAINS nesting and P5 co-movement never saw related readers.
-        if edges:
-            self._promote_topology(self.propose_topology(edges, None))
-
-        # Seed v3 mapping edges.  The tv's current mapping is ct_a (pre-move);
-        # step 9 of the HB §17 truth moves it to ct_c, which the AT-15 event
-        # applies.  The refrigerator is *not* declared: HB §17 says it is not
-        # connected to HA, so nothing observable names it, and Circuit B's scope
-        # is its unknown-load scope (step 7).  Seeding ``fridge -> ct_b`` as a
-        # DIRECT edge made Circuit B a single-subject endpoint and published the
-        # fridge as MEASURED from a circuit that also carries 200 W of other load.
-        device_endpoints = dict(devices) if devices is not None else {
-            "tv": "ct_a",
-            "lights": "ct_a",
-        }
-        map_edges = [
-            MappingEdge(
-                mapping_edge_id=f"me::{subject}->{endpoint}",
-                subject_kind="device",
-                subject_id=subject,
-                endpoint_id=endpoint,
-                observability=Observability.DIRECT,
-                lifecycle=EdgeLifecycleV3.CONFIRMED,
-                declared_by="migration",
-                evidence=EdgeEvidence(support=8, independent_causes=2),
-                valid_from=at,
-            )
-            for subject, endpoint in sorted(device_endpoints.items())
-        ]
-        self._seed_mapping_edges(map_edges)
-        self._topo_views.clear()
-        self._map_views.clear()
-
-    def _seed_mapping_edges(self, edges: Sequence[MappingEdge]) -> None:
-        """Replace the active mapping version with a seeded edge set."""
-        number = self._next_number(self._mapping_versions())
-        version_id = f"map-{number}"
-        edge_ids = self._store_mapping_edges(edges)
-        active = self._map.active_mapping_version_id()
-        # Append a version and promote it as the active seed (d1 promote checks
-        # the parent, so we pass the current active as parent and set active).
-        self._insert_mapping_version(
-            version_id, number, active, edge_ids, "candidate", None
-        )
-        self._set_active_mapping(version_id)
-        self._map_activated[version_id] = self._clock()
-
-    @property
-    def origin(self) -> datetime:
-        """The fixed clock instant used to seed the service (HB §17 origin)."""
-        return getattr(self, "_hb17_origin", self._clock())
-
     # -- mapping edge contract reads ---------------------------------------- #
     def mapping_edge(self, subject: str, endpoint: str | None = None) -> MappingEdge | None:
         """The current :class:`MappingEdge` for ``subject`` (and endpoint)."""
@@ -1094,27 +900,6 @@ class VersionService:
             ),
             self._map,
         )
-
-    def snapshot_value_at(self, reader_id: str, *, at: datetime) -> float | None:
-        """The last observed measurement of ``reader_id`` at or before ``at``.
-
-        A calibration change is not retroactive: it must not rewrite this value.
-        The injected observation snapshot is stored on the service by
-        :meth:`from_hb17`; absent readings stay ``None`` (HB §18).
-        """
-        readings = getattr(self, "_hb17_readings", None) or {}
-        candidates = [
-            (stamp, value)
-            for stamp, value in readings.get(reader_id, ())
-            if stamp <= at and value is not None
-        ]
-        if not candidates:
-            return None
-        return max(candidates, key=lambda item: item[0])[1]
-
-    def set_observation_snapshot(self, readings: Mapping[str, Sequence[tuple[datetime, float | None]]]) -> None:
-        """Inject a (reader -> [(time, value)]) observation snapshot for as-of reads."""
-        self._hb17_readings = {key: list(values) for key, values in readings.items()}
 
     # -- declared/inferred change events (T7) ------------------------------- #
     def _emit_configuration_event(self, event: ConfigurationEvent) -> ConfigurationEvent:

@@ -418,6 +418,8 @@ def _run_hb17_runtime(house: Any) -> list[dict[str, Any]]:
     from wattmosaic_engine.contracts.entities import PhysicalDevice
     from wattmosaic_engine.realtime import EngineHarness
 
+    from tests.support.hb17_seed import declared_seed
+
     start = house.start_time
     observation = house.observation_view()
 
@@ -434,7 +436,10 @@ def _run_hb17_runtime(house: Any) -> list[dict[str, Any]]:
                  "role": "state", "valid_from": at, "declared_by": "user"}
             )
 
-    harness = EngineHarness.start(observation, start_time=start, devices=HB17_DEVICES, configure=configure)
+    harness = EngineHarness.start(
+        observation, start_time=start, seed=declared_seed(observation, devices=HB17_DEVICES),
+        configure=configure,
+    )
     views: list[dict[str, Any]] = []
     try:
         for record in observation:
@@ -600,6 +605,8 @@ def _run_lab_runtime(frames: Sequence[Mapping[str, Any]], house: Any) -> list[di
     """
     from wattmosaic_engine.realtime import EngineHarness
 
+    from tests.support.hb17_seed import declared_seed
+
     declared = _lab_declared(house)
     devices = {dev: cts[0] for dev, cts in declared.items() if len(cts) == 1}
     links = [
@@ -629,7 +636,9 @@ def _run_lab_runtime(frames: Sequence[Mapping[str, Any]], house: Any) -> list[di
                  "role": "state", "valid_from": at, "declared_by": "user"}
             )
 
-    harness = EngineHarness.start(stream, start_time=start, devices=devices, configure=configure)
+    harness = EngineHarness.start(
+        stream, start_time=start, seed=declared_seed(stream, devices=devices), configure=configure
+    )
     measured_refs = {dev: [ct] for dev, ct in devices.items()}
     views: list[dict[str, Any]] = []
     try:

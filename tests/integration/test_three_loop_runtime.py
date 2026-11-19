@@ -38,6 +38,8 @@ from wattmosaic_engine.main import EngineCore
 from wattmosaic_engine.realtime import EngineHarness
 from wattmosaic_engine.storage.database import Database
 
+from tests.support.hb17_seed import hb17_seed, start_hb17_harness
+
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
 
@@ -123,9 +125,7 @@ def test_harness_replays_hb17_end_to_end() -> None:
     from tools.simulator.hb17 import build
 
     house = build(17)
-    harness = EngineHarness.from_hb17(
-        {"house": house, "observation": house.observation_view()}
-    )
+    harness = start_hb17_harness({"house": house, "observation": house.observation_view()})
     try:
         assert harness.replay_result.n_ticks > 0
         assert harness.replay_result.n_messages > 0
@@ -281,8 +281,11 @@ def _hb17_harness():
              "enabled": True, "created_at": house.start_time - timedelta(days=1)}
         )
 
-    # As ``EngineHarness.from_hb17`` does, plus the endpoint declaration.
-    harness = EngineHarness.start(observation, start_time=house.start_time, configure=declare_plug)
+    # As ``start_hb17_harness`` does, plus the endpoint declaration.
+    harness = EngineHarness.start(
+        observation, start_time=house.start_time, seed=hb17_seed(observation),
+        configure=declare_plug,
+    )
     harness.run(observation)
     harness.settle()
     return harness

@@ -1,4 +1,4 @@
-"""Deterministic HB §17 harness: replay driver bound to a real ``EngineCore``.
+"""Deterministic replay harness: a replay driver bound to a real ``EngineCore``.
 
 This is the P6 seam used by ``tests/acceptance/conftest.py``'s ``engine_harness``
 fixture, the V1 end-to-end walkthrough and the v3 accuracy harness.  It
@@ -20,8 +20,10 @@ No wall clock is read: every timestamp comes from the house's ``start_time``
 plus the record's simulated offset, so two runs of the same seed are
 byte-identical (AT-19, V1).
 
-The harness deliberately does not import ``runtime.fakes`` (production code
-never does).  It makes **no** inference, topology or mapping decision itself:
+The harness imports no test fakes and no scenario data: the declared topology
+and mapping arrive through an injected ``seed`` callable (the HB §17 seed lives
+in ``tests/support/hb17_seed.py``).  It makes **no** inference, topology or
+mapping decision itself:
 it only feeds messages, advances the injected clock and drives the runtime's own
 executors/loops.  The T5 ledger, T7 detectors and the configuration workflow are
 all the real ones.
@@ -146,13 +148,9 @@ class _CoreConsumer:
 class EngineHarness:
     """A running ``EngineCore`` driven by a deterministic replay.
 
-    Two ways to use it:
-
-    * :meth:`from_hb17` builds the harness and replays the whole stream (the
-      acceptance fixture and the integration tests use this);
-    * :meth:`start` builds it without replaying; the caller then calls
-      :meth:`feed` per record (or :meth:`run`) and inspects :attr:`snapshot`
-      between records (the V1 walkthrough and the accuracy harness).
+    :meth:`start` builds it without replaying; the caller then calls
+    :meth:`feed` per record (or :meth:`run`, then :meth:`settle`) and inspects
+    :attr:`snapshot` between records.
 
     ``result`` is the latest :class:`~wattmosaic_engine.contracts.JointInferenceResult`
     the event loop published (``None`` when the stream carried no inferable
@@ -179,22 +177,21 @@ class EngineHarness:
         observation: Iterable[Mapping[str, Any]],
         *,
         start_time: datetime | None = None,
-        devices: Mapping[str, str] | None = None,
+        seed: Callable[[Any], Any] | None = None,
         configure: Callable[[Any], None] | None = None,
     ) -> EngineHarness:
-        """Build ``EngineCore`` over an in-memory DB, seeded from ``observation``.
+        """Build ``EngineCore`` over an in-memory DB for ``observation``.
 
-        Topology/mapping are seeded by ``VersionService.from_hb17`` from the
-        observation's declared reader parents and entity ids (never from truth);
-        ``devices`` optionally replaces the declared ``subject -> endpoint``
-        mapping.  ``configure(core)`` runs after seeding and before any message, for
-        declarations a user would make up front (entity links, models).
+        ``seed(core)`` returns the D1 version service holding the user's
+        declared topology/mapping (built over ``core.db``); the runtime is
+        rebound to it.  Without a seed the core keeps its own (empty) D1
+        service.  ``configure(core)`` runs after seeding and before any message,
+        for declarations a user would make up front (entity links, models).
         """
         from ..config.settings import EngineConfig
         from ..main import EngineCore
         from ..realtime.grouping import GroupingEngine
         from ..storage.database import Database
-        from ..versioning.service import VersionService
 
         observation = list(observation)
         start = start_time or _as_utc(
@@ -213,12 +210,11 @@ class EngineHarness:
         )
         core = EngineCore(config, db, clock=clock)
         core._wire_v3_services()
-        # Rebind through the runtime's composition seam so the real T5/T7/M2
-        # services, promotion hooks and ledger view all point at the same
-        # authoritative D1 instance -- no detection or mapping decision here.
-        core.rebind_version_service(
-            VersionService.from_hb17(observation, devices=devices, db=db)
-        )
+        if seed is not None:
+            # Rebind through the runtime's composition seam so the real T5/T7/M2
+            # services, promotion hooks and ledger view all point at the same
+            # authoritative D1 instance -- no detection or mapping decision here.
+            core.rebind_version_service(seed(core))
         triple = core.version_service.current()
         core.grouping_engine = GroupingEngine(
             versions=triple,
@@ -232,18 +228,6 @@ class EngineHarness:
         if configure is not None:
             configure(core)
         return cls(core, db, now, origin)
-
-    @classmethod
-    def from_hb17(cls, hb17: Any, *, model_set_id: str = "mset-hb17") -> EngineHarness:
-        """Build and drive a harness from the HB §17 acceptance fixture."""
-        house = hb17.get("house") if isinstance(hb17, Mapping) else hb17
-        observation = hb17.get("observation", []) if isinstance(hb17, Mapping) else []
-        if not observation and house is not None:
-            observation = house.observation_view()
-        harness = cls.start(observation, start_time=getattr(house, "start_time", None))
-        harness.run(observation)
-        harness.settle()
-        return harness
 
     # -- clock -------------------------------------------------------------- #
     @property

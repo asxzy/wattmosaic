@@ -16,7 +16,6 @@ from wattmosaic_engine.contracts import (
     ConfidenceVectorV3,
     DeviceEstimate,
     EstimateStatus,
-    EvidenceRef,
     IdentifiabilityStatus,
     InferenceMethod,
     VersionTriple,
@@ -27,7 +26,6 @@ from wattmosaic_engine.inference.confidence_v3 import (
 )
 from wattmosaic_engine.inference.estimates import (
     DirectReading,
-    build_snapshot,
     contributing_readers,
     reconciliation_from_estimates,
     status_for,
@@ -138,49 +136,6 @@ def test_status_row_otherwise_unknown() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# §17 step 8 and group-member rules.
-# --------------------------------------------------------------------------- #
-
-
-def test_tv_in_standby_is_measured_3w_not_zero() -> None:
-    from tools.simulator.hb17 import build
-
-    snapshot = build_snapshot(build(17).observation_view())
-    tv = next(e for e in snapshot.device_estimates if e.subject_id == "tv")
-    assert tv.status == EstimateStatus.MEASURED
-    assert tv.point_w == pytest.approx(3.0, abs=0.01)
-    assert tv.point_w > 0.0
-    assert tv.method == InferenceMethod.DIRECT_READING
-    assert tv.level == "standby"
-
-
-def test_a_group_member_is_never_estimated() -> None:
-    from tools.simulator.hb17 import build
-
-    snapshot = build_snapshot(build(17).observation_view())
-    members = [
-        e for e in snapshot.device_estimates
-        if e.identifiability == IdentifiabilityStatus.NON_IDENTIFIABLE
-    ]
-    assert members, "the co-switched lights must be unpublished members"
-    for member in members:
-        assert member.point_w is None
-        assert member.status == EstimateStatus.UNKNOWN
-        assert member.group_id is not None
-
-
-def test_identified_w_counts_the_tv_once() -> None:
-    """Mutation guard: the plug/circuit/parent rows never add multiple TVs."""
-    from tools.simulator.hb17 import build
-
-    snapshot = build_snapshot(build(17).observation_view())
-    tv = next(e for e in snapshot.device_estimates if e.subject_id == "tv")
-    assert tv.point_w == pytest.approx(3.0)
-    assert len([e for e in snapshot.device_estimates if e.subject_id == "tv"]) == 1
-    assert snapshot.reconciliation.identified_w == pytest.approx(3.0)
-
-
-# --------------------------------------------------------------------------- #
 # Provenance.
 # --------------------------------------------------------------------------- #
 
@@ -207,21 +162,6 @@ def test_provenance_zero_weight_reader_is_absent() -> None:
         mapping_version_id=op.mapping_version_id, at=op.at,
     )
     assert contributing_readers(op2, "plug-device") == ("Circuit A", "Subpanel")
-
-
-def test_each_estimate_carries_its_own_versions_and_evidence() -> None:
-    from tools.simulator.hb17 import build
-
-    snapshot = build_snapshot(build(17).observation_view())
-    for estimate in snapshot.device_estimates:
-        assert estimate.versions.topology_version_id
-        assert estimate.versions.mapping_version_id
-        assert estimate.versions.model_set_id
-        for ref in estimate.evidence_refs:
-            assert isinstance(ref, EvidenceRef)
-            assert ref.id
-        # No batch-wide ledger: every estimate lists only its own readers.
-        assert len(estimate.source_reader_ids) == len(set(estimate.source_reader_ids))
 
 
 # --------------------------------------------------------------------------- #

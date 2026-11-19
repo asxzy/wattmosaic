@@ -304,6 +304,24 @@ class InferenceRepository(Repository):
         result["payload"] = json.loads(row["payload_json"])
         return result
 
+    def snapshot_as_of(self, at: datetime) -> dict[str, Any] | None:
+        """The last persisted snapshot observed at or before ``at`` (HB §9.9).
+
+        Snapshots are append-only, so this as-of read is what a later change
+        (e.g. a calibration declaration) can never rewrite.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM inference_snapshots WHERE observed_at <= ? "
+                "ORDER BY observed_at DESC, id DESC LIMIT 1",
+                (iso(at),),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["payload"] = json.loads(row["payload_json"])
+        return result
+
     # -- v3 group estimates ------------------------------------------------ #
     def put_group_estimate(self, group: Any) -> None:
         """Append one group estimate row.  ``(group_id, at)`` is unique, so a

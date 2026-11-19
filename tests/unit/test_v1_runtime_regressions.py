@@ -13,7 +13,8 @@ publish something wrong) for the HB §17 house, independent of the walkthrough:
 * the runtime handed the bare S16 repository to I4 as ``IdentifiabilityHistory``;
 * HA sub-events never resolved to their linked subjects in I1;
 * M2 crashed on MEASURED point bounds (write and ``/matrix`` read);
-* ``VersionService.from_hb17`` seeded topology edges outside any version;
+* the HB §17 seed (``VersionService.from_hb17``, now ``tests/support/hb17_seed``)
+  seeded topology edges outside any version;
 * T7's default candidate mapping was empty (a relocation wiped the mapping).
 """
 
@@ -49,7 +50,8 @@ from wattmosaic_engine.mapping.service import _decode_power
 from wattmosaic_engine.realtime.grouping import GroupingEngine, form_groups
 from wattmosaic_engine.storage.database import Database
 from wattmosaic_engine.storage.repositories.evidence import EvidenceRepository
-from wattmosaic_engine.versioning.service import VersionService
+
+from tests.support.hb17_seed import seed_hb17_versions
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 VERSIONS = VersionTriple(topology_version_id="topo-1", mapping_version_id="map-1", model_set_id="m")
@@ -314,10 +316,10 @@ def test_cell_power_carries_a_point_interval_on_write_and_read() -> None:
         Bounds(lower_w=3.0, upper_w=3.0, basis="posterior")
 
 
-def test_from_hb17_edges_belong_to_the_active_topology_version() -> None:
+def test_hb17_seed_edges_belong_to_the_active_topology_version() -> None:
     from tools.simulator import build_hb17
 
-    svc = VersionService.from_hb17(build_hb17(17, minutes=2).observation_view())
+    svc = seed_hb17_versions(Database(":memory:"), build_hb17(17, minutes=2).observation_view())
     view = svc.topology_view(svc.current().topology_version_id)
     assert {(e.source_endpoint_id, e.target_endpoint_id) for e in view.edges()} == {
         ("ct_main", "ct_sub"), ("ct_sub", "ct_a"), ("ct_sub", "ct_b"), ("ct_main", "ct_c"),
@@ -329,7 +331,7 @@ def test_default_candidate_mapping_keeps_the_current_edges() -> None:
 
     from tools.simulator import build_hb17
 
-    svc = VersionService.from_hb17(build_hb17(17, minutes=2).observation_view())
+    svc = seed_hb17_versions(Database(":memory:"), build_hb17(17, minutes=2).observation_view())
     view = svc.mapping_view(svc.current().mapping_version_id)
     assert {e.subject_id for e in view.edges()} == {"tv", "lights"}
     # HB §17: the refrigerator has no HA entity, so Circuit B declares no subject.

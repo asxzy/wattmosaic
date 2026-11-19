@@ -824,7 +824,7 @@ def infer_topology(
             deltas[reader] = (delta, sigma_floor_w)
         view = view.observe_group(
             DeltaObservation(
-                group_id=f"hb17-group-{index}",
+                group_id=f"replay-group-{index}",
                 deltas=deltas,
                 at=bucket[0][0],
             )

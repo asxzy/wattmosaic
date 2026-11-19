@@ -60,6 +60,7 @@ from wattmosaic_engine.contracts.entities import PhysicalDevice
 from wattmosaic_engine.core.runtime import EvidenceHistory
 from wattmosaic_engine.realtime import EngineHarness
 
+from tests.support.hb17_seed import hb17_seed
 from tools.simulator import build_hb17
 from tools.simulator.frames import find_ground_truth_keys
 from tools.simulator.hb17 import BASELINE_W, FRIDGE_ON_W, LIGHT_ON_W, TV_STANDBY_W
@@ -193,7 +194,7 @@ class _Walk:
         self.harness = EngineHarness.start(
             self.observation,
             start_time=self.house.start_time,
-            devices=DEVICES,
+            seed=hb17_seed(self.observation, devices=DEVICES),
             configure=_configure(self.house.start_time),
         )
         self.core = self.harness.core
@@ -568,7 +569,7 @@ def test_step8_tv_standby_is_measured_from_its_plug_never_zero(walk: _Walk) -> N
 class _Moved:
     """The relocated-TV variant: six post-move TV cycles feed the T7 detector.
 
-    Default ``from_hb17`` mapping (the TV on Circuit A) plus the one declared HA
+    Default ``hb17_seed`` mapping (the TV on Circuit A) plus the one declared HA
     link that says which device the plug's switch controls.
     """
 
@@ -590,7 +591,9 @@ class _Moved:
                  "enabled": True, "created_at": start - timedelta(days=1)}
             )
 
-        self.harness = EngineHarness.start(observation, start_time=start, configure=configure)
+        self.harness = EngineHarness.start(
+            observation, start_time=start, seed=hb17_seed(observation), configure=configure
+        )
         self.core = self.harness.core
         self.initial = self.core.version_service.current()
         move = self.house.step_at(9).at_s

@@ -40,9 +40,9 @@ from wattmosaic_engine.residual.reader_residual import UnknownPriorModel
 from wattmosaic_engine.runtime.interfaces import HeldReading
 from wattmosaic_engine.storage.database import Database
 from wattmosaic_engine.storage.repositories.evidence import EvidenceRepository
-from wattmosaic_engine.versioning.service import VersionService
 
 from tests.support.fakes import FakeMapping, FakeModelSet, FakeTopology
+from tests.support.hb17_seed import hb17_seed
 from tools.simulator import build_hb17
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
@@ -78,7 +78,7 @@ def _hb17_core(devices: dict[str, str] | None = None) -> tuple[EngineCore, list[
     db = Database(":memory:")
     core = EngineCore(EngineConfig(database_path=":memory:", ha_token="x"), db, clock=lambda: now[0])
     core._wire_v3_services()
-    core.rebind_version_service(VersionService.from_hb17(observation, devices=devices, db=db))
+    core.rebind_version_service(hb17_seed(observation, devices=devices)(core))
     triple = core.version_service.current()
     core.grouping_engine = GroupingEngine(
         versions=triple, repository=db.repos.evidence,

@@ -17,9 +17,13 @@ pytestmark = [pytest.mark.acceptance]
 def test_plug_move_versions_mapping_not_model(hb17) -> None:
     """The plug move is a topology/mapping event, never a model change."""
     from wattmosaic_engine.contracts import EdgeLifecycleV3
-    from wattmosaic_engine.versioning import VersionService  # target surface (T7/D1)
+    from wattmosaic_engine.storage.database import Database
 
-    svc = VersionService.from_hb17(hb17["observation"])
+    from tests.support.hb17_seed import seed_hb17_versions
+
+    # The user's declared topology/mapping, promoted through D1 (T7/D1 surface).
+    db = Database(":memory:")
+    svc = seed_hb17_versions(db, hb17["observation"])
     before = svc.current()
     model_version_before = svc.model_version_id("tv")
 
