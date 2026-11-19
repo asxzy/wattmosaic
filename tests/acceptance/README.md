@@ -45,8 +45,8 @@ directory), so collection always succeeds and the test xfails strictly.
 | `test_at12_columns_multi_level.py` | Matrix columns reflect multi-level readers | U1 | **closed** (CLOSED_BY = "U1") |
 | `test_at13_no_duplicate_secondary_columns.py` | No duplicate reader columns for secondary edges | M1 | open |
 | `test_at14_physical_load_counted_once.py` | One physical load counted once | I5 | closed |
-| `test_at15_plug_relocation.py` | Plug relocation changes mapping, not power model | T7 | open |
-| `test_at16_reader_reconciliation.py` | Reader/calibration change triggers reconciliation | T7 | open |
+| `test_at15_plug_relocation.py` | Plug relocation changes mapping, not power model | T7 | **closed** (CLOSED_BY = "T7") |
+| `test_at16_reader_reconciliation.py` | Reader/calibration change triggers reconciliation | T7 | **closed** (CLOSED_BY = "T7") |
 | `test_at17_missing_not_zero.py` | Missing data does not become zero | D3 | open |
 | `test_at18_late_event_revision.py` | Late events revise provisional results | I6 | closed |
 | `test_at19_replay_newer_model.py` | Historical replay with a newer model | L7 | open |
