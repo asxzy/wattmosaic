@@ -81,7 +81,14 @@ class _Accumulator:
     def mean_power_w(self) -> float:
         return self.power_sum / self.power_count if self.power_count else 0.0
 
-    def to_bucket(self, device_id: str, *, complete: bool) -> EnergyBucket:
+    def to_bucket(
+        self,
+        device_id: str,
+        *,
+        complete: bool,
+        model_set_id: str | None = None,
+        topology_version_id: str | None = None,
+    ) -> EnergyBucket:
         return EnergyBucket(
             device_id=device_id,
             bucket_start=self.bucket_start,
@@ -93,6 +100,8 @@ class _Accumulator:
             sample_count=self.sample_count,
             complete=complete,
             source=self.source,
+            model_set_id=model_set_id,
+            topology_version_id=topology_version_id,
         )
 
 
@@ -135,8 +144,13 @@ class EnergyAggregator:
         #: never accrue more than this across one interval without a sample
         max_interval_s: float | None = None,
         repository: DeviceRunRepository | None = None,
+        model_set_id: str | None = None,
+        topology_version_id: str | None = None,
     ) -> None:
         self._db = database
+        #: L7 version tags attached to every bucket/run this aggregator writes.
+        self.model_set_id = model_set_id
+        self.topology_version_id = topology_version_id
         self.bucket_sizes = tuple(sorted({int(b) for b in bucket_sizes if int(b) > 0}))
         if not self.bucket_sizes:
             raise ValueError("bucket_sizes must contain at least one positive size")
@@ -322,7 +336,12 @@ class EnergyAggregator:
         completed = [start for start in pending if start < current_start]
         for start in sorted(completed):
             accum = pending.pop(start)
-            bucket = accum.to_bucket(device.device_id, complete=True)
+            bucket = accum.to_bucket(
+                device.device_id,
+                complete=True,
+                model_set_id=self.model_set_id,
+                topology_version_id=self.topology_version_id,
+            )
             self._persist_bucket(bucket)
 
     def _persist_bucket(self, bucket: EnergyBucket) -> None:
@@ -458,6 +477,8 @@ class EnergyAggregator:
             stage_status=stage_status,
             source=tracker.source,
             sample_count=tracker.sample_count,
+            model_set_id=self.model_set_id,
+            topology_version_id=self.topology_version_id,
         )
         if reason == "gap":
             run.stages = [
@@ -523,7 +544,12 @@ class EnergyAggregator:
                     # free of double counting.
                     if complete and last_at is not None and last_at >= end:
                         accumulators.pop(start, None)
-                    bucket = accum.to_bucket(device_id, complete=complete)
+                    bucket = accum.to_bucket(
+                        device_id,
+                        complete=complete,
+                        model_set_id=self.model_set_id,
+                        topology_version_id=self.topology_version_id,
+                    )
                     self._persist_bucket(bucket)
                     written.append(bucket)
         self.close_open_runs(now)
@@ -600,7 +626,14 @@ class EnergyAggregator:
             try:
                 for accumulators in device.accumulators.values():
                     for _start, accum in sorted(accumulators.items()):
-                        self._persist_bucket(accum.to_bucket(device_id, complete=False))
+                        self._persist_bucket(
+                            accum.to_bucket(
+                                device_id,
+                                complete=False,
+                                model_set_id=self.model_set_id,
+                                topology_version_id=self.topology_version_id,
+                            )
+                        )
             finally:
                 self._persist_sink = None
             rebuilt.extend(sink)

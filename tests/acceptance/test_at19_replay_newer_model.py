@@ -9,10 +9,9 @@ from __future__ import annotations
 
 import pytest
 
-pytestmark = [
-    pytest.mark.acceptance,
-    pytest.mark.xfail(strict=True, reason="closed by L7"),
-]
+pytestmark = [pytest.mark.acceptance]
+
+CLOSED_BY = "L7"
 
 
 def test_replay_with_new_model_differs_but_evidence_is_immutable(hb17) -> None:

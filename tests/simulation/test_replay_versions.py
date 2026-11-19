@@ -39,6 +39,10 @@ ALGORITHM_VERSION = "replay-gate@1.0"
 #: Each exercises a different inference branch while keeping the gate fast.
 SAMPLED_SCENARIOS: tuple[str, ...] = ("T01", "T05", "T07", "T08", "T09", "T13")
 
+#: Stable model-set id for the replay gate.  Two runs share it; the negative
+#: control below flips it to prove it participates in identity (L7).
+MODEL_SET_ID = "mset-replay-gate@1.0"
+
 
 def _capture(scenario_id: str, *, seed: int, minutes: float, interval: float):
     """Build one T-scenario and lift its delivered measurements into a Capture."""
@@ -71,10 +75,16 @@ def _capture(scenario_id: str, *, seed: int, minutes: float, interval: float):
     return capture, house.topology.to_contract_topology()
 
 
-def _result_fingerprint(result) -> str:
-    """SHA-256 over the result's semantic fields, excluding wall-clock time."""
+def _result_fingerprint(result, model_set_id: str = MODEL_SET_ID) -> str:
+    """SHA-256 over the result's semantic fields, excluding wall-clock time.
+
+    The model-set id is part of identity (L7): a replay under a different
+    model set must produce a different fingerprint, while two runs with the
+    same algorithm version *and* model set stay byte-identical.
+    """
     payload = {
         "algorithm_version": ALGORITHM_VERSION,
+        "model_set_id": model_set_id,
         "n_samples": result.n_samples,
         "n_windows": result.n_windows,
         "n_unavailable_windows": result.n_unavailable_windows,
@@ -136,3 +146,14 @@ def test_fingerprint_changes_when_the_algorithm_version_changes() -> None:
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     assert digest(payload_a) != digest(payload_b)
+
+
+def test_fingerprint_changes_when_the_model_set_changes() -> None:
+    """L7: the model-set id is part of replay identity.
+
+    Two runs of the same scenario with the same algorithm version but different
+    model sets must not share a fingerprint.  A gate that ignored the model set
+    could not detect a silent version substitution during reconciliation.
+    """
+    result = _replay_once("T01")
+    assert _result_fingerprint(result, "mset-v1") != _result_fingerprint(result, "mset-v2")
