@@ -16,6 +16,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 from .const import (
     CONFIDENCE_TIERS,
+    ESTIMATE_STATUSES,
+    IDENTIFIABILITY_STATUSES,
     MODEL_STATES,
     QUALITY_STATES,
     REDACTED,
@@ -317,8 +319,17 @@ def device_entities_available(
     return not is_stale(result_timestamp, now=now, stale_after=stale_after)
 
 
-def device_is_running(power_w: Any, source: Any) -> bool:
-    """Running heuristic.  ``unknown`` sources never assert "running"."""
+def device_is_running(power_w: Any, source: Any, estimate_status: Any = None) -> bool:
+    """Running heuristic.  Unknown/allocated estimates never assert "running".
+
+    The v3 path publishes ``power_w`` only for a trustworthy point (see
+    :func:`_publishable_point`), but a legacy result may still carry a number
+    with an UNKNOWN status, so the guard is defence in depth: a value the engine
+    cannot stand behind must never turn a binary "running" sensor on.
+    """
+    status = str(estimate_status or "").strip().lower()
+    if status in ("unknown", "allocated"):
+        return False
     if str(source or "").strip().lower() == "unknown":
         return False
     power = as_float(power_w)
@@ -494,6 +505,241 @@ def coerce_snapshot(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         "results_by_id": {item["device_id"]: item for item in results},
         "quality": coerce_quality(quality_raw) if isinstance(quality_raw, Mapping) else None,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Contract-3.0 snapshot coercion (D4 ``GET /snapshot?v=3`` -> entity values)
+# --------------------------------------------------------------------------- #
+
+#: Ids of a v3 payload: a v3 snapshot has a ``snapshot_id`` and a ``versions``
+#: object; the legacy one has ``results``/``reconciliation.main_power_w``.  The
+#: coordinator uses payload shape only, for the duration of the integration
+#: branch (Z1 removes v2 handling).
+def is_v3_snapshot(raw: Any) -> bool:
+    """Feature-detect a v3 snapshot by payload shape (no version header)."""
+    if not isinstance(raw, Mapping):
+        return False
+    if "device_estimates" in raw or "group_estimates" in raw:
+        return True
+    if isinstance(raw.get("versions"), Mapping) and "snapshot_id" in raw:
+        return True
+    return False
+
+
+def _coerce_enum(raw: Any, options: tuple[str, ...], default: str) -> str:
+    value = str(raw or "").strip().lower()
+    return value if value in options else default
+
+
+def coerce_v3_estimate(raw: Any) -> dict[str, Any] | None:
+    """Normalise one ``DeviceEstimate`` (v3 JSON) into entity values.
+
+    Returns ``None`` for a malformed row so one bad device cannot break the
+    whole snapshot.  The raw estimate is preserved under ``raw_estimate`` so
+    the sensor layer can attach status/identifiability/bounds/versions as
+    attributes without re-parsing.
+    """
+    if not isinstance(raw, Mapping):
+        return None
+    subject_id = raw.get("subject_id")
+    if not isinstance(subject_id, str) or not subject_id.strip():
+        return None
+
+    bounds = raw.get("bounds") if isinstance(raw.get("bounds"), Mapping) else {}
+    versions = raw.get("versions") if isinstance(raw.get("versions"), Mapping) else {}
+    status = _coerce_enum(raw.get("status"), ESTIMATE_STATUSES, "unknown")
+    ident = _coerce_enum(
+        raw.get("identifiability"), IDENTIFIABILITY_STATUSES, "insufficient_evidence"
+    )
+    point = as_float(raw.get("point_w"))
+
+    return {
+        "device_id": subject_id.strip(),
+        "timestamp": parse_datetime(raw.get("updated_at")),
+        # The single rule that keeps HA honest (design §11, DEC-25):
+        # publish the point only for MEASURED, or ESTIMATED+IDENTIFIABLE.
+        "power_w": _publishable_point(point, status, ident),
+        "raw_point_w": point,
+        "energy_kwh": None,
+        "source": "direct_measured" if status == "measured" else "inferred",
+        "confidence": None,
+        "confidence_pct": None,
+        "confidence_tier": "tier_0_unknown",
+        "tier_reasons": [],
+        "model_id": None,
+        "model_version": None,
+        "operating_stage": None,
+        "stage_status": "identified" if ident == "identifiable" else "unknown",
+        "sample_count": 0,
+        "quality_status": "good",
+        "measurement_age_seconds": None,
+        "supporting_ct_channels": [
+            str(item) for item in raw.get("source_reader_ids") or [] if isinstance(item, str)
+        ],
+        "explanation": [],
+        "provenance": {},
+        "estimate_status": status,
+        "identifiability": ident,
+        "lower_w": as_float(bounds.get("lower_w")),
+        "upper_w": as_float(bounds.get("upper_w")),
+        "bounds_basis": bounds.get("basis"),
+        "group_id": raw.get("group_id") if isinstance(raw.get("group_id"), str) else None,
+        "provisional": bool(raw.get("provisional", False)),
+        "topology_version_id": versions.get("topology_version_id"),
+        "mapping_version_id": versions.get("mapping_version_id"),
+        "model_version_id": raw.get("model_version_id")
+        if isinstance(raw.get("model_version_id"), str)
+        else None,
+        "method": raw.get("method") if isinstance(raw.get("method"), str) else None,
+        "raw_estimate": raw,
+    }
+
+
+def _publishable_point(point: float | None, status: str, ident: str) -> float | None:
+    """The watt value HA may publish, or ``None`` (unknown).
+
+    DEC-25 / design §11: a device power sensor state is ``point_w`` iff the
+    status is MEASURED, or ESTIMATED and IDENTIFIABLE.  Every other combination
+    — including ALLOCATED group shares and any non-identifiable member — stays
+    ``None`` with justified bounds as attributes (HB §8.4).
+    """
+    if point is None:
+        return None
+    if status == "measured":
+        return point
+    if status == "estimated" and ident == "identifiable":
+        return point
+    return None
+
+
+def coerce_v3_group(raw: Any) -> dict[str, Any] | None:
+    """Normalise one ``DeviceGroupEstimate`` (v3 JSON) into a group sensor value."""
+    if not isinstance(raw, Mapping):
+        return None
+    group_id = raw.get("group_id")
+    if not isinstance(group_id, str) or not group_id.strip():
+        return None
+    bounds = raw.get("bounds") if isinstance(raw.get("bounds"), Mapping) else {}
+    versions = raw.get("versions") if isinstance(raw.get("versions"), Mapping) else {}
+    return {
+        "group_id": group_id.strip(),
+        "timestamp": parse_datetime(raw.get("updated_at")),
+        "point_w": as_float(raw.get("point_w")),
+        "lower_w": as_float(bounds.get("lower_w")),
+        "upper_w": as_float(bounds.get("upper_w")),
+        "bounds_basis": bounds.get("basis"),
+        "identifiability": _coerce_enum(
+            raw.get("identifiability"), IDENTIFIABILITY_STATUSES, "insufficient_evidence"
+        ),
+        "member_ids": [str(m) for m in raw.get("member_ids") or [] if isinstance(m, str)],
+        "topology_version_id": versions.get("topology_version_id"),
+        "mapping_version_id": versions.get("mapping_version_id"),
+        "raw_group": raw,
+    }
+
+
+def coerce_v3_snapshot(raw: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Normalise a whole v3 ``InferenceSnapshot`` JSON payload.
+
+    Never raises.  The result uses the same top-level keys as
+    :func:`coerce_snapshot` (``results``/``results_by_id``/``reconciliation``/
+    ``quality``/``timestamp``) so every existing entity keeps working, plus two
+    new keys: ``groups`` (keyed by stable ``group_id``) and ``v3_versions``.
+    """
+    if not isinstance(raw, Mapping):
+        raw = {}
+
+    results: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    raw_results = raw.get("device_estimates")
+    if isinstance(raw_results, Iterable) and not isinstance(raw_results, (str, bytes)):
+        for item in raw_results:
+            coerced = coerce_v3_estimate(item)
+            if coerced is None or coerced["device_id"] in seen:
+                continue
+            seen.add(coerced["device_id"])
+            results.append(coerced)
+
+    groups: dict[str, dict[str, Any]] = {}
+    raw_groups = raw.get("group_estimates")
+    if isinstance(raw_groups, Iterable) and not isinstance(raw_groups, (str, bytes)):
+        for item in raw_groups:
+            coerced_group = coerce_v3_group(item)
+            if coerced_group is not None:
+                groups[coerced_group["group_id"]] = coerced_group
+
+    # Reconciliation v3 uses ``*_w`` keys for every term.  Map them onto the
+    # legacy names the global sensors already publish; absent stays None.
+    recon_raw = raw.get("reconciliation") if isinstance(raw.get("reconciliation"), Mapping) else {}
+    legacy_recon: dict[str, Any] = {
+        "present": bool(recon_raw),
+        "main_power_w": as_float(recon_raw.get("main_w")),
+        "inferred_w": as_float(recon_raw.get("identified_w")),
+        "unknown_residual_w": as_float(recon_raw.get("unknown_w")),
+        "quality_status": "good" if recon_raw else "missing",
+        "topology_confirmed": False,
+    }
+    timestamp = parse_datetime(raw.get("observed_at")) or parse_datetime(raw.get("computed_at"))
+    versions = raw.get("versions") if isinstance(raw.get("versions"), Mapping) else {}
+
+    quality_raw = raw.get("system_quality")
+    return {
+        "timestamp": timestamp,
+        "reconciliation": coerce_reconciliation(legacy_recon),
+        "results": results,
+        "results_by_id": {item["device_id"]: item for item in results},
+        "quality": coerce_quality(quality_raw) if isinstance(quality_raw, Mapping) else None,
+        "groups": groups,
+        "v3_versions": dict(versions),
+        "stale_sources": [
+            str(item) for item in raw.get("stale_sources") or [] if isinstance(item, str)
+        ],
+        "unresolved_events": [
+            str(item) for item in raw.get("unresolved_events") or [] if isinstance(item, str)
+        ],
+    }
+
+
+def estimate_state_from_sources(
+    estimate: Mapping[str, Any],
+    *,
+    stale_sources: Iterable[str] = (),
+) -> str:
+    """The HA state string for a v3 estimate, honouring silent readers.
+
+    This is the HA half of AT-17: when a source reader of an estimate is stale
+    or missing, the estimate cannot be trusted and its power sensor must read
+    ``unknown`` — never a held 0 W.  The engine already publishes ``None`` for
+    such estimates; this helper is the defence-in-depth check the sensor layer
+    can apply when it also knows which readers went silent.
+    """
+    stale = set(stale_sources)
+    sources = estimate.get("supporting_ct_channels") or []
+    if stale.intersection(str(item) for item in sources):
+        return "unknown"
+    if estimate.get("power_w") is None:
+        return "unknown"
+    return "known"
+
+
+def group_still_retained(
+    last_seen: datetime | None,
+    *,
+    now: datetime | None = None,
+    retain_after_s: float,
+) -> bool:
+    """Whether a disappeared group's entity should still exist (H1 step 4).
+
+    A group that stops being published goes *unavailable*, not deleted, for
+    ``retain_after_s`` (7 days) after its last sighting.  A group never seen has
+    no retention, so a brand-new install cannot publish phantom entities.
+    """
+    if last_seen is None:
+        return False
+    age = age_seconds(last_seen, now=now)
+    if age is None:
+        return False
+    return age <= float(retain_after_s)
 
 
 # --------------------------------------------------------------------------- #

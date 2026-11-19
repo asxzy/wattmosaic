@@ -46,8 +46,10 @@ from .state_links import (
 )
 from .util import (
     coerce_snapshot,
+    coerce_v3_snapshot,
     device_entities_available,
     is_engine_unavailable,
+    is_v3_snapshot,
     sanitize_text,
     utcnow,
 )
@@ -66,10 +68,19 @@ class WattMosaicData:
     engine_available: bool = False
     last_error: str | None = None
     devices: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: Contract-3.0 group estimates, keyed by stable ``group_id`` (H1 step 4).
+    groups: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: When a group was last seen, so a disappeared group can stay available
+    #: (but valueless) for 7 days instead of being deleted.
+    group_last_seen: dict[str, datetime] = field(default_factory=dict)
 
     @property
     def results(self) -> dict[str, dict[str, Any]]:
         return self.snapshot.get("results_by_id", {})
+
+    @property
+    def group_estimates(self) -> dict[str, dict[str, Any]]:
+        return self.groups
 
     @property
     def reconciliation(self) -> dict[str, Any]:
@@ -122,6 +133,7 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
         self.entry = entry
         self._last: WattMosaicData = WattMosaicData()
         self._device_meta: dict[str, dict[str, Any]] = {}
+        self._group_last_seen: dict[str, datetime] = {}
         self._poll_count: int = 0
         self.topology_push = TopologyPushState()
         #: Set once ``async_setup_entry`` has run the first replay check.  Polls
@@ -385,6 +397,36 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
             return None
         return self.data.device(device_id)
 
+    def visible_groups(self, *, now: datetime | None = None) -> dict[str, dict[str, Any]]:
+        """Groups that still deserve an entity, with their availability.
+
+        A group currently in the snapshot is available.  One that disappeared
+        stays *unavailable* (not deleted) until its 7-day retention lapses, so a
+        transient publication gap cannot orphan the entity's statistics.
+        """
+        from .const import GROUP_RETAIN_AFTER_DISAPPEAR_S
+        from .util import group_still_retained
+
+        data = self.data
+        published = data.groups if data is not None else {}
+        last_seen = (data.group_last_seen if data is not None else {}) or {}
+        result: dict[str, dict[str, Any]] = {}
+        for group_id, value in published.items():
+            result[group_id] = {**value, "available": True}
+        for group_id, seen_at in last_seen.items():
+            if group_id in result:
+                continue
+            if group_still_retained(
+                seen_at, now=now, retain_after_s=GROUP_RETAIN_AFTER_DISAPPEAR_S
+            ):
+                result[group_id] = {
+                    "group_id": group_id,
+                    "available": False,
+                    "point_w": None,
+                    "member_ids": [],
+                }
+        return result
+
     def device_available(self, device_id: str, *, now: datetime | None = None) -> bool:
         """Whether a per-device *current measurement* may be published."""
         result = self.device_result(device_id)
@@ -413,10 +455,22 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
         snapshot_raw: Any = None
 
         snapshot_result, health_result = await asyncio.gather(
-            self.client.snapshot(),
+            self.client.snapshot_v3(),
             self.client.health(),
             return_exceptions=True,
         )
+
+        # Feature-detect v3 by payload shape only, for the duration of the
+        # integration branch (Z1 removes v2 handling).  An older engine ignores
+        # ``?v=3`` and answers with the legacy snapshot; a transient error from
+        # the v3 path also falls back before we give up on this poll.
+        if isinstance(snapshot_result, Exception) or not is_v3_snapshot(snapshot_result):
+            try:
+                legacy_result = await self.client.snapshot()
+            except Exception:  # noqa: BLE001 - keep the original error below
+                pass
+            else:
+                snapshot_result = legacy_result
 
         if isinstance(health_result, Exception):
             _LOGGER.debug("WattMosaic health probe failed: %s", health_result)
@@ -441,6 +495,8 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
                     engine_available=False,
                     last_error=error_text,
                     devices=self._device_meta,
+                    groups=self._last.groups,
+                    group_last_seen=self._last.group_last_seen,
                 )
                 raise UpdateFailed(f"engine unavailable: {error_text}")
             # Transient: keep the previous data, but do not refresh timestamps
@@ -453,11 +509,23 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
                 engine_available=True,
                 last_error=error_text,
                 devices=self._device_meta,
+                groups=self._last.groups,
+                group_last_seen=self._last.group_last_seen,
             )
             _LOGGER.warning("WattMosaic snapshot poll failed (using cached data): %s", error_text)
             return self._last
 
-        snapshot = coerce_snapshot(snapshot_raw)
+        if is_v3_snapshot(snapshot_raw):
+            snapshot = coerce_v3_snapshot(snapshot_raw)
+            groups = snapshot.get("groups", {})
+            # Remember when each group was last published.  A group that
+            # disappears keeps its last_seen so the sensor layer can keep the
+            # entity unavailable (not deleted) for the retention window.
+            for group_id in groups:
+                self._group_last_seen[group_id] = now
+        else:
+            snapshot = coerce_snapshot(snapshot_raw)
+            groups = {}
 
         # Device metadata (names/areas) changes rarely; refresh it periodically
         # rather than on every poll, and never let it break an update.
@@ -482,6 +550,8 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
             engine_available=True,
             last_error=None,
             devices=self._device_meta,
+            groups=groups,
+            group_last_seen=dict(self._group_last_seen),
         )
 
         # Re-check the stored topology declaration against the revision the
