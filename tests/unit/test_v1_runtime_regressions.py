@@ -330,6 +330,8 @@ def test_default_candidate_mapping_keeps_the_current_edges() -> None:
 
     svc = VersionService.from_hb17(build_hb17(17, minutes=2).observation_view())
     view = svc.mapping_view(svc.current().mapping_version_id)
-    assert {e.subject_id for e in view.edges()} == {"tv", "lights", "fridge"}
+    assert {e.subject_id for e in view.edges()} == {"tv", "lights"}
+    # HB §17: the refrigerator has no HA entity, so Circuit B declares no subject.
+    assert view.subjects_on("ct_b") == ()
     workflow = ConfigurationWorkflow(svc, clock=lambda: T0)
-    assert {e.subject_id for e in workflow._current_mapping_edges()} == {"tv", "lights", "fridge"}
+    assert {e.subject_id for e in workflow._current_mapping_edges()} == {"tv", "lights"}

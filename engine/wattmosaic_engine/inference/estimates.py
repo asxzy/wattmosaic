@@ -386,6 +386,18 @@ def assemble_status_estimates(
             and bounds.lower_w == bounds.upper_w
         )
         if (
+            direct is not None
+            and point is not None
+            and str(getattr(status, "value", status)) == EstimateStatus.MEASURED.value
+            and not (is_point and bounds.lower_w == point)
+        ):
+            # A MEASURED estimate *is* its direct reading (HB §8.5): its interval
+            # is that reading, whatever the absolute solve's posterior said.  A
+            # steady solve can return a [0, 0] posterior for a plug reading 3 W;
+            # publishing that interval would not bracket the published point.
+            bounds = Bounds._point(float(point), bounds.basis or "posterior")  # type: ignore[arg-type]
+            is_point = True
+        if (
             is_point
             and point is not None
             and bounds.basis is not None

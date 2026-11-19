@@ -519,6 +519,8 @@ class GroupingEngine:
         # they never re-insert a row (which would violate the PK).  A REVISED
         # group has revision+1 and is therefore persisted as a new row.
         self._persisted: set[tuple[str, int]] = set()
+        self._lifecycle: dict[tuple[str, int], tuple[str, datetime | None]] = {}
+        self._update_lifecycle = getattr(repository, "update_group_lifecycle", None)
 
     # -- introspection ----------------------------------------------------- #
     def groups(self, status: EventGroupStatus | None = None) -> list[EventGroup]:
@@ -543,10 +545,17 @@ class GroupingEngine:
 
     def _persist(self, group: EventGroup) -> None:
         key = (group.group_id, group.revision)
+        lifecycle = (str(getattr(group.status, "value", group.status)), group.closed_at)
         if key in self._persisted:
+            # Same revision, new lifecycle state (MATCHING -> PROVISIONAL ->
+            # CONFIRMED with closed_at): record the transition, never re-insert.
+            if self._lifecycle.get(key) != lifecycle and self._update_lifecycle is not None:
+                self._update_lifecycle(group)
+                self._lifecycle[key] = lifecycle
             return
         self._put_group(group)
         self._persisted.add(key)
+        self._lifecycle[key] = lifecycle
         # DEC-17: when a group first becomes evidence, persist the ring-held
         # unlinked HA events it references (linked events are persisted by P1).
         if self.ring is not None and self.persist_ha_event is not None:
@@ -755,7 +764,9 @@ class GroupingEngine:
             and self._all_closed(entry, now)
             and (now - entry.last_activity) >= timedelta(seconds=self.config.quiet_s)
         ):
-            entry.group = entry.group.model_copy(update={"status": EventGroupStatus.CONFIRMED})
+            entry.group = entry.group.model_copy(
+                update={"status": EventGroupStatus.CONFIRMED, "closed_at": now}
+            )
             self._persist(entry.group)
         return entry.group
 
@@ -921,7 +932,9 @@ class GroupingEngine:
             group = entry.group
             quiet_enough = (now - entry.last_activity) >= timedelta(seconds=self.config.quiet_s)
             if group.status == EventGroupStatus.MATCHING and self._all_closed(entry, now) and quiet_enough:
-                entry.group = group.model_copy(update={"status": EventGroupStatus.CONFIRMED})
+                entry.group = group.model_copy(
+                    update={"status": EventGroupStatus.CONFIRMED, "closed_at": now}
+                )
                 self._persist(entry.group)
                 changed.append(entry.group)
             elif group.status in (EventGroupStatus.DETECTED, EventGroupStatus.PROVISIONAL) and quiet_enough:

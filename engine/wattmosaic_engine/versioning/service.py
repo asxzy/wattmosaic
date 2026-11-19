@@ -930,11 +930,14 @@ class VersionService:
 
         # Seed v3 mapping edges.  The tv's current mapping is ct_a (pre-move);
         # step 9 of the HB §17 truth moves it to ct_c, which the AT-15 event
-        # applies.  A single-subject plug endpoint maps tv on ct_plug.
+        # applies.  The refrigerator is *not* declared: HB §17 says it is not
+        # connected to HA, so nothing observable names it, and Circuit B's scope
+        # is its unknown-load scope (step 7).  Seeding ``fridge -> ct_b`` as a
+        # DIRECT edge made Circuit B a single-subject endpoint and published the
+        # fridge as MEASURED from a circuit that also carries 200 W of other load.
         device_endpoints = dict(devices) if devices is not None else {
             "tv": "ct_a",
             "lights": "ct_a",
-            "fridge": "ct_b",
         }
         map_edges = [
             MappingEdge(

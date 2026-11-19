@@ -196,6 +196,66 @@ class EvidenceRepository(Repository):
                 self._conn.execute("ROLLBACK")
                 raise
 
+    def update_group_lifecycle(self, group: EventGroup) -> None:
+        """Record a lifecycle transition of an already-stored revision.
+
+        Only the lifecycle columns (``status``, ``closed_at``) move: a revision's
+        sub-events, reader deltas, grouping reasons and versions are immutable
+        and a *content* change is always a new revision (``put_group_revision``).
+        Without this, a group written at DETECTED/MATCHING stayed so on disk
+        forever, ``closed_at`` was never set, and I4's history query
+        (CONFIRMED/REVISED with ``closed_at``) could never see it.
+        """
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute(
+                    "UPDATE event_groups SET status=?, closed_at=? WHERE group_id=? AND revision=?",
+                    (
+                        enum_value(group.status),
+                        iso(group.closed_at) if group.closed_at is not None else None,
+                        str(group.group_id),
+                        int(group.revision),
+                    ),
+                )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    def put_group_subjects(
+        self,
+        group_id: str,
+        revision: int,
+        members: list[tuple[str, str, float | None, float | None, str | None]],
+    ) -> int:
+        """Record the subjects that took part in a stored group revision.
+
+        ``members`` are ``(subject_kind, subject_id, delta_w, sigma_w,
+        reader_id)``.  The reader evidence rows written by
+        :meth:`put_group_revision` stay; these rows are what lets
+        :meth:`history_rows_for_identifiability` answer "which subjects did this
+        independent event touch" for I4.  Idempotent (``INSERT OR IGNORE``).
+        """
+        written = 0
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                for kind, subject_id, delta_w, sigma_w, reader_id in members:
+                    cur = self._conn.execute(
+                        """INSERT OR IGNORE INTO event_group_members(group_id, revision,
+                        subject_kind, subject_id, delta_w, sigma_w, reader_id)
+                        VALUES(?,?,?,?,?,?,?)""",
+                        (str(group_id), int(revision), str(kind), str(subject_id),
+                         delta_w, sigma_w, reader_id),
+                    )
+                    written += cur.rowcount
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+        return written
+
     def latest_group(self, group_id: str) -> EventGroup | None:
         """The highest stored revision of ``group_id``, or ``None``."""
         with self._lock:

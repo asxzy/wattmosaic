@@ -374,9 +374,15 @@ class WindowCollector:
         # two samples; otherwise extend backwards until we have them ("30 s, or
         # >= 2 samples, whichever is longer").
         if len(ring) < min_pre:
-            earlier = self.store.window(
-                event.reader_id, event.onset_lo - timedelta(days=1), pre_start
-            )
+            # Same ``(observed_at, power)`` shape as ``ring``: the store returns
+            # ``WindowSample`` objects, and mixing them in made ``ring[0][0]``
+            # raise for every sparse pre-window (the window never opened).
+            earlier = [
+                (s.observed_at, s.active_power_w)
+                for s in self.store.window(
+                    event.reader_id, event.onset_lo - timedelta(days=1), pre_start
+                )
+            ]
             ring = [*earlier, *ring]
             if len(ring) > min_pre:
                 ring = ring[-min_pre:]

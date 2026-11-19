@@ -351,6 +351,12 @@ class RuntimeMixin:
         self.infer_steady_calls = 0
         self.heartbeats = 0
         self._last_steady_at: dict[str, datetime] = {}
+        self._last_direct_w: dict[str, float] = {}
+        #: Groups I4 published as GROUP_IDENTIFIABLE (history-backed): group id
+        #: -> member subject ids.  The steady pass measures an exclusive
+        #: group's sum from its reader (DEC-22 established structure).
+        self._established_groups: dict[str, tuple[str, ...]] = {}
+        self._group_off_level: dict[str, float] = {}
         self._last_heartbeat_wall = time.monotonic()
 
     def _wire_v3_services(self) -> None:
@@ -881,6 +887,25 @@ class RuntimeMixin:
                 self._publish_v3_snapshot()
             except Exception:  # noqa: BLE001
                 log.exception("snapshot publish failed")
+        # 3b. Evidence the result cites must stay resolvable (HB §18): every HA
+        # event of the group is persisted, and a CONFIRMED group records the
+        # subjects it touched so I4 history can count it as an independent event.
+        self._persist_group_evidence(group, bundle)
+        # 3c. An event result's group identified by I4 (history-backed) becomes
+        # established structure; what exclusive readers measure is then
+        # re-published as current levels, replacing the event's deltas.
+        if getattr(result, "event_group_id", None) is not None:
+            for estimate in result.group_estimates:
+                ident = str(getattr(estimate.identifiability, "value", estimate.identifiability))
+                if estimate.point_w is not None and ident == "group_identifiable":
+                    self._established_groups[str(estimate.group_id)] = tuple(
+                        sorted(str(m) for m in estimate.member_ids)
+                    )
+            try:
+                self._note_group_off_levels(group)
+                self._refresh_measured_readers([d.reader_id for d in group.reader_deltas])
+            except Exception:  # noqa: BLE001 - a refresh must not stop the publish
+                log.exception("measured-reader refresh failed")
         # 4. Learning job only for CONFIRMED groups (L4/L6 gate).
         if str(getattr(result.status, "value", result.status)) == "confirmed" and self.learning_worker is not None:
             try:
@@ -890,6 +915,73 @@ class RuntimeMixin:
                 self.learning_worker.schedule()
             except Exception:  # noqa: BLE001
                 log.exception("learning submit failed")
+
+    def _persist_group_evidence(self, group: EventGroup, bundle: Mapping[str, Any]) -> None:
+        """Persist a published group's HA events; record a CONFIRMED group's subjects.
+
+        I4's history (:class:`EvidenceHistory`) reads closed CONFIRMED/REVISED
+        groups and the subjects stored for them.  The subjects of an event are
+        the ones its HA changes are linked to (``ha_entity_links``, resolved in
+        the bundle) — direct evidence that those subjects transitioned in this
+        independent event.  Each is stored with the step seen on its most
+        specific reader (absent stays ``None`` and then is not counted).
+        """
+        engine = self.grouping_engine
+        if engine is None or engine.current(group.group_id) is None:
+            return
+        for event in engine.ha_events(group.group_id):
+            self._persist_ha_event(event)
+        if str(getattr(group.status, "value", group.status)) != EventGroupStatus.CONFIRMED.value:
+            return
+        ha_subjects = bundle.get("ha_subjects") or {}
+        subjects = sorted({s for linked in ha_subjects.values() for s in linked})
+        if not subjects or self.version_service is None:
+            return
+        versions = group.versions or self.version_service.current()
+        try:
+            map_view = self.version_service.mapping_view(versions.mapping_version_id)
+        except Exception:  # noqa: BLE001 - a missing view records nothing
+            return
+        deltas = {d.reader_id: d for d in group.reader_deltas}
+        members: list[tuple[str, str, float | None, float | None, str | None]] = []
+        for kind, subject_id in subjects:
+            reader = map_view.most_specific_reader((kind, subject_id))
+            delta = deltas.get(reader) if reader is not None else None
+            if delta is None or delta.delta_w is None:
+                continue
+            members.append((kind, subject_id, delta.delta_w, delta.sigma_w, reader))
+        if not members:
+            return
+        try:
+            self.db.repos.evidence.put_group_subjects(group.group_id, group.revision, members)
+        except Exception:  # noqa: BLE001 - evidence bookkeeping must not stop publish
+            log.exception("failed to record group subjects")
+
+    def ha_event_record(self, event_id: str) -> HAEvent | None:
+        """A persisted HA event by id (``ha_events_v3``), for provenance."""
+        try:
+            with self.db._lock:  # noqa: SLF001 - storage seam
+                row = self.db._conn.execute(  # noqa: SLF001
+                    "SELECT * FROM ha_events_v3 WHERE event_id=?", (str(event_id),)
+                ).fetchone()
+        except Exception:  # noqa: BLE001
+            return None
+        if row is None:
+            return None
+        data = dict(row)
+        return HAEvent(
+            event_id=str(data["event_id"]),
+            entity_id=str(data["entity_id"]),
+            observed_at=datetime.fromisoformat(str(data["observed_at"])),
+            received_at=datetime.fromisoformat(str(data["received_at"])),
+            from_state=data.get("from_state"),
+            to_state=data.get("to_state"),
+            attributes_delta=json.loads(data.get("attributes_delta_json") or "{}"),
+            context_id=data.get("context_id"),
+            context_parent_id=data.get("context_parent_id"),
+            context_user_id=data.get("context_user_id"),
+            linked=bool(data.get("linked")),
+        )
 
     def _learning_observations(self, result: JointInferenceResult) -> list[Any]:
         """Derive valid L4 observations from a CONFIRMED result.
@@ -964,6 +1056,39 @@ class RuntimeMixin:
             finally:
                 self._record_latency("background", (time.monotonic() - started) * 1000.0)
 
+    def _single_subject_of(
+        self, reader: str, map_view: Any, parents: set[str]
+    ) -> tuple[tuple[str, str], ...]:
+        """``(subject,)`` when ``reader`` is a declared single-subject endpoint.
+
+        DEC-05: a single-subject scope is a property the *endpoint declares*
+        (a smart plug, an appliance monitor) and a circuit CT never gets it
+        automatically.  So the S13 endpoint must declare
+        ``scope=single_subject`` (not rejected) naming the subject, that subject
+        must be the one mapped on the reader, and the reader must contain no
+        other reader.  Any other reader gets no subjects in the steady pass:
+        its absolute level also carries loads no subject explains, so solving
+        it in absolute mode would attribute them (DEC-14 / HB §8.5).
+        """
+        if reader in parents:
+            return ()
+        entities = getattr(getattr(self.db, "repos", None), "entities", None)
+        try:
+            endpoint = entities.get_endpoint(reader) if entities is not None else None
+        except Exception:  # noqa: BLE001 - no endpoint registry: nothing is declared
+            endpoint = None
+        if not endpoint or str(endpoint.get("scope")) != "single_subject":
+            return ()
+        if str(endpoint.get("scope_status")) == "rejected":
+            return ()
+        subject_id = endpoint.get("scope_subject_id")
+        subjects = tuple(map_view.subjects_on(reader))
+        if len(subjects) != 1 or subjects[0][1] != subject_id:
+            return ()
+        if map_view.most_specific_reader(subjects[0]) != reader:
+            return ()
+        return subjects
+
     def tick_groups(self, now: datetime | None = None) -> list[EventGroup]:
         """Advance P5's group lifecycle on the injected clock (HB §12.3).
 
@@ -980,38 +1105,160 @@ class RuntimeMixin:
                 self.on_group_ready(group)
         return changed
 
-    def _steady_pass(self) -> None:
-        """Run one steady pass: group lifecycle, >3σ level changes, heartbeat."""
-        now = self._clock()
-        self.tick_groups(now)
+    def _steady_views(self) -> tuple[Any, Any, Any, set[str]] | None:
         if self.version_service is None:
-            return
+            return None
         versions = self.version_service.current()
         topo_view = self.version_service.topology_view(versions.topology_version_id)
         map_view = self.version_service.mapping_view(versions.mapping_version_id)
+        parents = {
+            str(e.source_endpoint_id)
+            for e in topo_view.edges()
+            if str(getattr(e.relation, "value", e.relation)) == "contains"
+        }
+        return versions, topo_view, map_view, parents
+
+    def _steady_target(
+        self, reader: str, map_view: Any, parents: set[str]
+    ) -> tuple[tuple[tuple[str, str], ...], str | None]:
+        """What an exclusive reader *measures*: ``(subjects, group_id)``.
+
+        * a single-subject DIRECT endpoint (a smart plug) measures its subject;
+        * a reader whose mapped subjects are exactly the members of one
+          established group (and on no other reader) measures that group's sum
+          — the HB §21.7 group estimate, live, for two loads on one CT.
+
+        Any other reader returns ``((), None)``: its absolute level also carries
+        loads no subject explains (DEC-14 / HB §8.5).
+        """
+        single = self._single_subject_of(reader, map_view, parents)
+        if single:
+            return single, None
+        if reader in parents:
+            return (), None
+        subjects = tuple(map_view.subjects_on(reader))
+        if len(subjects) < 2:
+            return (), None
+        ids = {sid for _kind, sid in subjects}
+        for group_id, members in self._established_groups.items():
+            if set(members) == ids and all(
+                map_view.most_specific_reader(s) == reader for s in subjects
+            ):
+                return subjects, group_id
+        return (), None
+
+    def _steady_publish(
+        self,
+        reader: str,
+        reading: Any,
+        subjects: tuple[tuple[str, str], ...],
+        group_id: str | None,
+        views: tuple[Any, Any, Any, set[str]],
+        now: datetime,
+    ) -> None:
+        versions, topo_view, map_view, _parents = views
+        operator = build_observation_operator(topo_view, map_view, None, (reader,), subjects, now)
+        if group_id is not None:
+            # The group's current sum is the exclusive reader's level above the
+            # level it had with the group off (other loads on the reader are
+            # never attributed to the group).  Unknown off-level: no claim.
+            off = self._group_off_level.get(group_id)
+            if off is None:
+                return
+            members = self._established_groups[group_id]
+            # Within the reader's noise of the off level the group is off: its
+            # sum is floored at that noise σ (design §3, σ_min = 1 W) — never a
+            # negative sum and never an exact 0 W, which would pin the
+            # unidentified members to a zero-width [0, 0] interval.
+            sigma = self.reader_state.sigma(reader) or 1.0
+            current = max(float(reading.value) - off, float(sigma))
+            established: Any = _LiveEstablished({group_id: members}, {group_id: current})
+        else:
+            established = _StaticEstablished()
+        result = infer_steady(
+            {reader: reading}, operator, self.model_registry_v3, self.unknown_prior,
+            established, versions, self._clock,
+        )
+        self.infer_steady_calls += 1
+        if subjects:
+            self._last_direct_w[reader] = float(reading.value)
+        self._last_steady_at[reader] = now
+        self._publish_group_result(_steady_group(result, now), result, {"operator": operator})
+
+    def _note_group_off_levels(self, group: EventGroup) -> None:
+        """Record, per established group, its exclusive reader's group-off level.
+
+        An event moves the reader by the group's step: after an ON step
+        (``delta > 0``) the off level is the held level minus the step; after an
+        OFF step it is the held level itself.
+        """
+        views = self._steady_views()
+        if views is None:
+            return
+        now = self._clock()
+        for delta in group.reader_deltas:
+            if delta.delta_w is None:
+                continue
+            _subjects, group_id = self._steady_target(delta.reader_id, views[2], views[3])
+            if group_id is None:
+                continue
+            held = self.reader_state.held(delta.reader_id, now).value
+            if held is None:
+                continue
+            step = float(delta.delta_w)
+            self._group_off_level[group_id] = float(held) - step if step > 0 else float(held)
+
+    def _refresh_measured_readers(self, readers: Sequence[str]) -> None:
+        """After an event result, re-publish what exclusive readers measure.
+
+        Event inference publishes *deltas* (I3 delta mode); for a subject or
+        group that an exclusive reader measures, the snapshot's current value is
+        the reader's held level, so it is re-published from the steady solve
+        right away instead of waiting for the next heartbeat.
+        """
+        views = self._steady_views()
+        if views is None:
+            return
+        now = self._clock()
+        for reader in dict.fromkeys(readers):
+            subjects, group_id = self._steady_target(reader, views[2], views[3])
+            if not subjects:
+                continue
+            reading = self.reader_state.held(reader, now)
+            if reading.value is None:
+                continue
+            self._steady_publish(reader, reading, subjects, group_id, views, now)
+
+    def _steady_pass(self) -> None:
+        """Run one steady pass: group lifecycle, measured readers, >3σ changes."""
+        now = self._clock()
+        self.tick_groups(now)
+        views = self._steady_views()
+        if views is None:
+            return
         for reader in self.reader_state.readers():
             reading = self.reader_state.held(reader, now)
             sigma = self.reader_state.sigma(reader)
             baseline = self.reader_state.baseline(reader)
             if reading.value is None or sigma is None or baseline is None:
                 continue
+            subjects, group_id = self._steady_target(reader, views[2], views[3])
+            if subjects:
+                # An exclusive reader *measures* its subject (or group): publish
+                # it when never published or when its level moved by more than
+                # 3σ since — a steady device (the HB §17 TV in standby) never
+                # steps, so the >3σ-from-baseline gate would never publish it.
+                last_value = self._last_direct_w.get(reader)
+                if last_value is not None and abs(reading.value - last_value) <= 3.0 * sigma:
+                    continue
+                self._steady_publish(reader, reading, subjects, group_id, views, now)
+                continue
             if abs(reading.value - baseline) <= 3.0 * sigma:
                 continue
             last = self._last_steady_at.get(reader)
             if last is not None and (now - last).total_seconds() < self.config.steady_heartbeat_s:
                 continue
-            self._last_steady_at[reader] = now
-            operator = build_observation_operator(
-                topo_view, map_view, None, (reader,), (), now
-            )
-            held = {reader: reading}
-            established = _StaticEstablished()
-            result = infer_steady(
-                held, operator, self.model_registry_v3, self.unknown_prior,
-                established, versions, self._clock,
-            )
-            self.infer_steady_calls += 1
-            self._publish_group_result(_steady_group(result, now), result, {"operator": operator})
+            self._steady_publish(reader, reading, (), None, views, now)
 
         # Heartbeat publishes staleness only (DEC-14); no full solve.
         self.heartbeats += 1
@@ -1314,6 +1561,7 @@ class RuntimeMixin:
                     # A distinct token per detector cycle is what lets the T7
                     # threshold count several independent observations (HB §14).
                     source=f"detector:{change.kind}:observation-{count}",
+                    candidate_mapping_edges=self._relocation_candidate_mapping(change),
                 )
                 if str(getattr(confirmed.status, "value", confirmed.status)) == "confirmed":
                     self._publish_confirmed_configuration(confirmed, change)
@@ -1322,6 +1570,81 @@ class RuntimeMixin:
         except Exception:  # noqa: BLE001 - a detector cycle must not kill the worker
             log.exception("self-healing detector cycle failed")
             return ()
+
+    def _relocation_subjects(self, change: Any, map_view: Any) -> tuple[tuple[str, str], ...]:
+        """The subjects a relocated endpoint measures, from evidence only.
+
+        A plug relocation's detector subject is the plug reader
+        (``plug:<reader>``).  The subjects it measures are those mapped on the
+        plug reader itself, or else the subjects the HA changes in the plug's
+        own event groups are linked to (``ha_entity_links``) — restricted to
+        subjects mapped on the reader the matches vanished from.
+        """
+        raw = str(getattr(change, "subject", ""))
+        reader = raw.split(":", 1)[1] if raw.startswith("plug:") else raw
+        from_id = getattr(change, "from_id", None)
+        on_old = set(map_view.subjects_on(from_id)) if from_id else set()
+        direct = set(map_view.subjects_on(reader)) & on_old
+        if direct:
+            return tuple(sorted(direct))
+        linked: set[tuple[str, str]] = set()
+        engine = self.grouping_engine
+        if engine is not None:
+            for group in engine.groups():
+                if any(d.reader_id == reader for d in group.reader_deltas):
+                    for subjects in self._ha_subjects(group).values():
+                        linked.update(subjects)
+        return tuple(sorted(linked & on_old))
+
+    def _relocation_candidate_mapping(self, change: Any) -> list[Any] | None:
+        """T7's proposal for a relocation: move the measured subjects to ``to_id``.
+
+        HB §17 step 9: the old mapping is retired from the candidate version and
+        a new PROVISIONAL mapping candidate ``subject -> to_id`` is created.
+        ``None`` (the workflow's default: current edges) when the change is not
+        a relocation or no subject can be resolved from evidence.
+        """
+        from ..contracts import (
+            ConfigurationChangeKind,
+            EdgeEvidence,
+            EdgeLifecycleV3,
+            MappingEdge,
+            Observability,
+        )
+
+        relocations = {
+            ConfigurationChangeKind.SMART_PLUG_RELOCATION.value,
+            ConfigurationChangeKind.CT_READER_RELOCATION.value,
+        }
+        kind = str(getattr(change.kind, "value", change.kind))
+        from_id, to_id = getattr(change, "from_id", None), getattr(change, "to_id", None)
+        versions = self.version_service
+        if kind not in relocations or not from_id or not to_id or versions is None:
+            return None
+        map_view = versions.mapping_view(versions.current().mapping_version_id)
+        edges = list(getattr(map_view, "edges", lambda: ())())
+        moved = set(self._relocation_subjects(change, map_view))
+        if not moved:
+            return None
+        candidate = [
+            e for e in edges
+            if not ((e.subject_kind, e.subject_id) in moved and e.endpoint_id == from_id)
+        ]
+        for subject_kind, subject_id in sorted(moved):
+            candidate.append(
+                MappingEdge(
+                    mapping_edge_id=f"me::{subject_id}->{to_id}",
+                    subject_kind=subject_kind,  # type: ignore[arg-type]
+                    subject_id=subject_id,
+                    endpoint_id=to_id,
+                    observability=Observability.DIRECT,
+                    lifecycle=EdgeLifecycleV3.PROVISIONAL,
+                    declared_by="inference",
+                    evidence=EdgeEvidence(),
+                    valid_from=self._clock(),
+                )
+            )
+        return candidate
 
     def _enqueue_reconciliation(self, payload: Any) -> None:
         """T7 promotion sink: enqueue L7 ``Reconciler`` off the event loop."""
@@ -1564,6 +1887,23 @@ class EvidenceHistory:
                 )
             )
         return out
+
+
+class _LiveEstablished:
+    """An ``EstablishedStructure`` for one steady solve of an exclusive reader."""
+
+    def __init__(self, groups: Mapping[str, tuple[str, ...]], sums: Mapping[str, float]) -> None:
+        self._groups = dict(groups)
+        self._sums = dict(sums)
+
+    def groups(self) -> Mapping[str, tuple[str, ...]]:
+        return self._groups
+
+    def group_sums(self) -> Mapping[str, float]:
+        return self._sums
+
+    def identities(self) -> Mapping[tuple[str, str], float]:
+        return {}
 
 
 class _StaticEstablished:

@@ -186,12 +186,13 @@ class SnapshotAssembler:
     snapshot or the new one, never a half-updated object.
     """
 
-    __slots__ = ("_store", "_clock", "_current")
+    __slots__ = ("_store", "_clock", "_current", "_current_digest")
 
     def __init__(self, store: SnapshotStore, clock: Any) -> None:
         self._store = store
         self._clock = clock
         self._current: InferenceSnapshot | None = None
+        self._current_digest: str | None = None
 
     # -- publication -------------------------------------------------------- #
     @property
@@ -334,9 +335,24 @@ class SnapshotAssembler:
             "stale_sources": stale,
             "unresolved_events": unresolved,
         }
-        snapshot_id = inputs.snapshot_id or "snap-" + hashlib.sha256(
+        content_digest = hashlib.sha256(
             json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest()[:16]
+        ).hexdigest()
+        if inputs.snapshot_id:
+            snapshot_id = inputs.snapshot_id
+        elif base is not None and self._current_digest == content_digest:
+            # Unchanged state: the same snapshot, the same id (S17 dedups it).
+            snapshot_id = base.snapshot_id
+        elif base is not None:
+            # A changed state.  Chain the id to its predecessor: content that
+            # returns to an *earlier* state (A -> B -> A) would otherwise reuse
+            # A's id, violate S17's UNIQUE(snapshot_id) and silently keep B
+            # published (the snapshot never swapped).
+            snapshot_id = "snap-" + hashlib.sha256(
+                (content_digest + base.snapshot_id).encode("utf-8")
+            ).hexdigest()[:16]
+        else:
+            snapshot_id = "snap-" + content_digest[:16]
 
         snapshot = InferenceSnapshot(
             snapshot_id=snapshot_id,
@@ -358,6 +374,7 @@ class SnapshotAssembler:
         self._store.put_snapshot(snapshot)
         # Copy-on-write: replace the reference, never mutate the published model.
         self._current = snapshot
+        self._current_digest = content_digest
         return snapshot
 
 
@@ -432,6 +449,31 @@ class SnapshotMixin:
                 return group
         raise NotFound(f"group {group_id!r} not found in the v3 snapshot")
 
+    def _provenance_lookup(self, snapshot: InferenceSnapshot) -> Any:
+        """Snapshot lookup plus the persisted HA events the snapshot cites.
+
+        An estimate names the HA changes of its event group as ``ha_event``
+        refs; the snapshot itself holds no HA events, so they are resolved from
+        the S16 ``ha_events_v3`` rows the runtime persists for every published
+        group (HB §18 "which event associations contributed?").
+        """
+        from ..provenance.resolver import SnapshotEvidenceLookup
+
+        extra: dict[str, Any] = {}
+        getter = getattr(self, "ha_event_record", None)
+        if callable(getter):
+            for estimate in (*snapshot.device_estimates, *snapshot.group_estimates):
+                for ref in getattr(estimate, "evidence_refs", ()) or ():
+                    if getattr(ref, "kind", None) != "ha_event":
+                        continue
+                    key = f"ha_event:{ref.id}"
+                    if key in extra:
+                        continue
+                    record = getter(ref.id)
+                    if record is not None:
+                        extra[key] = record
+        return SnapshotEvidenceLookup(snapshot, extra=extra)
+
     def provenance(self, kind: str, identifier: str) -> Any:
         """Answer the HB §18 provenance questions for an estimate or evidence ref.
 
@@ -444,7 +486,7 @@ class SnapshotMixin:
         snapshot = self._v3_snapshot()
         if snapshot is None:
             raise NotFound("no v3 inference snapshot has been published")
-        resolver = ProvenanceResolver(snapshot)
+        resolver = ProvenanceResolver(snapshot, lookup=self._provenance_lookup(snapshot))
         if kind in ("device", "component"):
             return resolver.for_device(self.device_v3(identifier))
         if kind == "group":
