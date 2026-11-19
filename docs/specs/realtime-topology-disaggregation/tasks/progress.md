@@ -88,7 +88,7 @@
 | H2 | 4 | VERIFIED |  |  | partial: async_migrate_entry hook -> H1; v2 forms removal -> Z2 |
 | U2 | 4 | VERIFIED |  | AT-20 | AT-20 closed |
 | P6 | 4 | VERIFIED |  |  | AT-17 closed; P6b live wiring; P6c real T7 detection (harness scaffolding removed) |
-| Z2 | 5 | VERIFIED |  |  | Z2b deleted electrical models/nesting/panel_tree; configuration renamed + legacy mapping kept -> Z1 must-port |
+| Z2 | 5 | VERIFIED |  |  | Z2b/Z2c/Z2d merged; topology_confirm button -> Z1 |
 | Z1 | 5 | NOT_STARTED | | | |
 | L7 | 5 | VERIFIED |  | AT-19 | AT-19 closed |
 | D5 | 5 | VERIFIED |  |  | v021 supersedes link; P6 must pass supersedes_evidence_id |
