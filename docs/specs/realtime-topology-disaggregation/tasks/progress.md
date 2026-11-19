@@ -89,7 +89,7 @@
 | U2 | 4 | VERIFIED |  | AT-20 | AT-20 closed |
 | P6 | 4 | VERIFIED |  |  | AT-17 closed; P6b live wiring; P6c real T7 detection (harness scaffolding removed) |
 | Z2 | 5 | VERIFIED |  |  | Z2b/Z2c/Z2d merged; topology_confirm button -> Z1 |
-| Z1 | 5 | IN_PROGRESS |  |  | partial merged (3.0.0 bump, schemas, v025 helper); Z1c routes/HA/schemas + Z1d engine port running; Z1e contracts last |
+| Z1 | 5 | VERIFIED |  |  | complete: ZC deleted legacy contracts/paths; gate green at c6a48f2 |
 | L7 | 5 | VERIFIED |  | AT-19 | AT-19 closed |
 | D5 | 5 | VERIFIED |  |  | v021 supersedes link; P6 must pass supersedes_evidence_id |
 | X09 | 5 | NOT_STARTED | | | |
