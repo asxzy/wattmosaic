@@ -8,10 +8,9 @@ from __future__ import annotations
 
 import pytest
 
-pytestmark = [
-    pytest.mark.acceptance,
-    pytest.mark.xfail(strict=True, reason="closed by T5"),
-]
+CLOSED_BY = "T5"
+
+pytestmark = [pytest.mark.acceptance]
 
 
 def test_parent_only_steps_do_not_weaken_containment(hb17) -> None:

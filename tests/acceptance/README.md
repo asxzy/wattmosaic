@@ -32,7 +32,7 @@ directory), so collection always succeeds and the test xfails strictly.
 | File | Requirement (HB §21) | Closes (remove xfail) | State |
 |---|---|---|---|
 | `test_at01_nested_no_double_count.py` | Nested readers, no double counting | M1 | open |
-| `test_at02_parent_residual_not_containment.py` | Parent residual ≠ child containment evidence | T5 | open |
+| `test_at02_parent_residual_not_containment.py` | Parent residual ≠ child containment evidence | T5 | **closed** (CLOSED_BY = "T5") |
 | `test_at03_nonzero_standby_modeled.py` | Stable non-zero standby is modeled | L2 | **closed** (CLOSED_BY = "L2") |
 | `test_at04_unknown_without_ha.py` | Unknown devices detected without HA | T6 | open |
 | `test_at05_response_delays_matched.py` | Matching handles different response delays | I2 | open |

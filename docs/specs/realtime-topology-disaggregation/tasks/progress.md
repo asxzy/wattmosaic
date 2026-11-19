@@ -75,7 +75,7 @@
 | I5 | 4 | VERIFIED |  | AT-14 | AT-14 closed (snapshot single-count); V1 must also check matrix physical total |
 | I6 | 4 | VERIFIED |  | AT-18 | AT-18 closed; record read index in-memory (persisted via S16) |
 | I7 | 4 | NOT_STARTED | | | |
-| T5 | 4 | IN_PROGRESS |  | AT-02 |  |
+| T5 | 4 | VERIFIED |  | AT-02 | AT-02 closed; user CONFIRMED edges never auto-CONFLICTED -> fixed in T7; replay_nesting score needs operator DB (V2) |
 | T6 | 4 | NOT_STARTED | | AT-04 | |
 | T7 | 4 | NOT_STARTED | | AT-15, 16 | |
 | M2 | 4 | VERIFIED |  | AT-11 | AT-11 closed |
