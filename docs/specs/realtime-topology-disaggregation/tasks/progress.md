@@ -93,7 +93,7 @@
 | L7 | 5 | VERIFIED |  | AT-19 | AT-19 closed |
 | D5 | 5 | VERIFIED |  |  | v021 supersedes link; P6 must pass supersedes_evidence_id |
 | X09 | 5 | VERIFIED |  |  | docs+release notes 3.0; routes/settings cross-checked |
-| V1 | 6 | VERIFIED | | all 20 (0 xfail in tests/acceptance) | V1: empty HB17 output root-caused (harness cold start/bound-method result/end-only event loop/no truth; engine grouping, stale ready group, _v3_snapshot shadow, no P5 tick, steady ValidationError, bare repo as I4 history, HA refs unresolved, M2 point bounds, from_hb17 edges outside a version, empty T7 candidate). V1b: group lifecycle + subjects persisted (I4 history live), relocation proposes subject->to_id candidate, steady pass measures declared single-subject endpoints and exclusive established groups, HA-event provenance, fridge undeclared, I5 MEASURED bounds pinned, snapshot-id chain, P4 sparse pre-window. Walkthrough 13 pass / accuracy 10 pass, 0 xfail; lab_shared group 0.104445 kWh |
+| V1 | 6 | VERIFIED |  | all 20 (0 xfail in tests/acceptance) | V1b: live groups, relocation, measured endpoints; 0 xfail; gate green at 50c7fd9 |
 | V2 | 6 | NOT_STARTED | | | |
 | L8 | 6 | NOT_STARTED | | | optional |
 | S00 | ? | VERIFIED | | | seam added by orchestrator: migration numbering, fresh-DB backup |
