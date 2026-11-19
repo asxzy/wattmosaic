@@ -1168,8 +1168,10 @@ class AuditPass:
             occurred_at = _as_datetime(row.get("occurred_at"))
             if occurred_at is None:
                 continue
-            if row.get("received_at") is None:
-                row["received_at"] = occurred_at
+            # Do NOT fabricate ``received_at`` from ``occurred_at``: they are
+            # different observations (when the event happened vs. when the
+            # engine saw it).  Conflating them silently destroys latency/skew
+            # evidence, so a missing reception time stays None (HB §18, D3).
             self._pending_events.append(row)
         # Hold for the *longest* configured window, not the global one: an event
         # whose device has a wider override would otherwise be analysed before

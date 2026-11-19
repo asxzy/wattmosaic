@@ -10,6 +10,7 @@ import asyncio
 import logging
 import time
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
@@ -19,6 +20,7 @@ from ..backend.loader import InferenceBackendUnavailable, load_inference_backend
 from ..contracts import DataQualityReport, Measurement, Reconciliation, Topology
 from ..device_links import device_for_entity, state_entity_for_device
 from ..ingestion.correlation import level_from_attributes
+from ..quality.engine import excluded_readers
 from ..synchronization.aligner import (
     AlignedChannel,
     AlignedWindow,
@@ -35,6 +37,38 @@ SAMPLE_BATCH_SIZE = 100
 SAMPLE_FLUSH_INTERVAL_S = 2.0
 #: How often housekeeping (retention, integrity cache) runs.
 MAINTENANCE_INTERVAL_S = 60.0
+
+
+def filter_excluded_from_window(window: Any, excluded: Mapping[str, str]) -> tuple[Any, dict[str, str]]:
+    """Drop excluded readers from a coerced window, returning (window, excluded).
+
+    Pure: neither reads a clock nor mutates its inputs.  ``excluded`` maps a
+    reader id to the reason it was excluded (from
+    :func:`wattmosaic_engine.quality.engine.excluded_readers`).  Only readers
+    actually present in the window are reported as dropped; the rest are stale
+    topology entries and are ignored here.
+    """
+    # CoercedWindow exposes ``readings``; the aligner's AlignedWindow (used by
+    # the legacy loop) exposes ``channels``.  Support both so the one-line hook
+    # works in production and in the pure unit test.
+    key = "readings" if hasattr(window, "readings") else "channels"
+    readings = dict(getattr(window, key, {}) or {})
+    dropped = {reader: reason for reader, reason in excluded.items() if reader in readings}
+    if not dropped:
+        return window, {}
+    for reader in dropped:
+        readings.pop(reader, None)
+    return replace(window, **{key: readings}), dropped
+
+
+def stale_sources_from_quality(report: DataQualityReport | None) -> list[str]:
+    """Present excluded readers as ``reader: reason`` strings.
+
+    These become the ``stale_sources`` entries an excluded reader is reported
+    under (HB §6.1 / AT-17): a silent or bad reader appears with the concrete
+    reason, never as a fabricated ``0 W`` estimate.
+    """
+    return [f"{reader}: {reason}" for reader, reason in excluded_readers(report).items()]
 
 
 class RuntimeMixin:
@@ -490,6 +524,17 @@ class RuntimeMixin:
             return {"skipped": "no topology configured"}
         self._topology_skip_logged = False
         window = self._power_window(topology)
+        # ONE-LINE QUALITY HOOK (D3, coordinated with P6): a bad/degraded/stale/
+        # missing reader must never reach the solver.  P2/P6 will consume
+        # ``excluded_readers`` directly; until then the legacy loop gates here and
+        # records each excluded reader in ``stale_sources`` with its reason.
+        window, self._excluded_this_cycle = (
+            filter_excluded_from_window(window, excluded_readers(self.latest_quality))
+            if self.latest_quality is not None
+            else (window, {})
+        )
+        if self._excluded_this_cycle:
+            self._stale_sources = stale_sources_from_quality(self.latest_quality)
         # Per-cycle context the disaggregation engine reads back off the window.
         # Built in one dict so the frozen window is replaced once.
         #
