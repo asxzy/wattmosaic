@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 from wattmosaic_engine import contracts
-from wattmosaic_engine.contracts import legacy, matrix, topology
+from wattmosaic_engine.contracts import matrix, topology
 from wattmosaic_engine.contracts.matrix import (
     CellDetail,
     CellEvents,
@@ -216,12 +216,6 @@ def _samples() -> dict[type, Any]:
 # --------------------------------------------------------------------------- #
 # Naming / export consistency (contract-task rules, Wave 1).
 # --------------------------------------------------------------------------- #
-
-
-def test_no_public_name_collides_with_legacy() -> None:
-    legacy_names = set(dir(legacy))
-    collisions = sorted(name for name in matrix.__all__ if name in legacy_names)
-    assert collisions == [], f"matrix __all__ names shadow legacy: {collisions}"
 
 
 def test_every_exported_model_is_in_all_and_schema_exports() -> None:

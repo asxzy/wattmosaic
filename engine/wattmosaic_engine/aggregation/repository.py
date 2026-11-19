@@ -87,8 +87,10 @@ class DeviceRunRepository:
                         stage.status.value if hasattr(stage.status, "value") else str(stage.status),
                         iso(run.started_at),
                         iso(run.ended_at),
-                        float(stage.power_mean_w),
-                        float(
+                        None if stage.power_mean_w is None else float(stage.power_mean_w),
+                        None
+                        if stage.power_mean_w is None
+                        else float(
                             max(0.0, stage.power_mean_w)
                             * max(0.0, (stage.max_duration_s or run.runtime_s))
                             / 3_600_000.0

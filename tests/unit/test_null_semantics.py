@@ -3,7 +3,7 @@
 An absent measurement/estimate is ``None``, never ``0.0``.  This module pins
 the three behaviours the sweep changes:
 
-1. DB rehydration keeps NULL as ``None`` rather than coercing it to a number;
+1. the v3 reconciliation contract keeps an absent term as ``None``;
 2. an aligned window with no recorded age reports ``age_s is None`` (an unknown
    age is not a fresh, zero-second-old sample), and a row with too few readings
    has ``noise is None`` (unknown noise is not zero noise);
@@ -26,19 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from wattmosaic_engine.contracts import (
-    CTChannel,
-    CTType,
-    DataQualityReport,
-    Topology,
-)
-from wattmosaic_engine.core.rows import (
-    _safe_float,
-    rehydrated_measurement,
-    row_to_inference_result,
-    row_to_reconciliation,
-)
-from wattmosaic_engine.disaggregation.audit import _event_row
+from wattmosaic_engine.contracts import DataQualityReport
 from wattmosaic_engine.electrical.window import ChannelReading, coerce_window
 from wattmosaic_engine.ingestion.correlation import estimate_row_noise
 from wattmosaic_engine.quality.engine import excluded_readers
@@ -50,144 +38,18 @@ T0 = datetime(2026, 11, 18, 12, 0, 0, tzinfo=UTC)
 
 
 # --------------------------------------------------------------------------- #
-# 1. Rehydration keeps NULL as None (AT-17: "a NULL row round-trips as None")
+# 1. Absent reconciliation terms stay None (AT-17)
 # --------------------------------------------------------------------------- #
 
 
-def test_safe_float_returns_none_for_null_and_non_finite() -> None:
-    assert _safe_float(None) is None
-    assert _safe_float("") is None
-    assert _safe_float("NaN") is None
-    assert _safe_float("Infinity") is None
-    assert _safe_float("7.5") == pytest.approx(7.5)
-
-
-def test_inference_result_row_with_null_measurements_rehydrates_as_none() -> None:
-    row = {
-        "device_id": "lamp",
-        "timestamp": T0.isoformat(),
-        "power_w": None,
-        "confidence": None,
-        "measurement_age_seconds": None,
-        "energy_kwh": None,
-    }
-    result = row_to_inference_result(row)
-    # NULL survives rehydration as None through the model and into API JSON —
-    # never an invented zero.  The legacy contract (removed in Z1) still
-    # declares these fields non-optional, so the helper builds without validation.
-    assert result.power_w is None
-    assert result.confidence is None
-    assert result.measurement_age_seconds is None
-    assert result.energy_kwh is None
-    assert result.device_id == "lamp"
-    import json
-
-    payload = json.loads(result.model_dump_json())
-    assert payload["power_w"] is None
-    assert payload["confidence"] is None
-    assert payload["measurement_age_seconds"] is None
-
-
-def test_inference_result_row_with_finite_values_round_trips() -> None:
-    row = {
-        "device_id": "lamp",
-        "timestamp": T0.isoformat(),
-        "power_w": 12.5,
-        "confidence": 0.8,
-        "measurement_age_seconds": 3.5,
-    }
-    result = row_to_inference_result(row)
-    assert result.device_id == "lamp"
-    assert result.power_w == pytest.approx(12.5)
-    assert result.confidence == pytest.approx(0.8)
-    assert result.measurement_age_seconds == pytest.approx(3.5)
-
-
-def test_reconciliation_row_with_null_terms_rehydrates_as_none() -> None:
-    row = {
-        "timestamp": T0.isoformat(),
-        "topology_version": 3,
-        "main_power_w": None,
-        "direct_measured_w": None,
-        "inferred_w": None,
-        "unknown_residual_w": None,
-        "unmonitored_w": None,
-        "meter_disagreement_w": None,
-        "meter_spread_w": None,
-    }
-    rec = row_to_reconciliation(row)
-    assert rec.timestamp == T0
-    assert rec.topology_version == 3
-    # The honest rehydration of every NULL term is None (AT-17).  The legacy
-    # Reconciliation model (removed in Z1) still holds 0.0 defaults for the
-    # non-optional fields, so the helper exposes the None directly.
-    for name in (
-        "main_power_w",
-        "direct_measured_w",
-        "inferred_w",
-        "unknown_residual_w",
-        "unmonitored_w",
-        "meter_disagreement_w",
-        "meter_spread_w",
-    ):
-        assert rehydrated_measurement(row, name) is None, name
-    # The v3 nullable contract, by contrast, holds the None straight through.
+def test_reconciliation_v3_with_null_terms_holds_none() -> None:
+    # The v3 nullable contract holds an absent term as None straight through.
     from wattmosaic_engine.contracts import ReconciliationV3
 
     v3 = ReconciliationV3(main_w=None, identified_w=None, group_w=None, unknown_w=None)
     assert v3.main_w is None
     assert v3.identified_w is None
     assert v3.balance_error_w is None
-
-
-def test_reconciliation_absent_row_uses_the_clock() -> None:
-    rec = row_to_reconciliation(None, clock=lambda: T0)
-    assert rec.timestamp == T0
-
-
-def test_null_power_round_trips_through_db_and_api_json(tmp_path: Path) -> None:
-    """AT-17 end to end: a NULL estimate in the DB stays null in API JSON.
-
-    A NULL ``power_w`` row is rehydrated by :func:`row_to_inference_result` with
-    ``power_w is None``; serializing it through the response contract yields a
-    JSON ``null``, never ``0.0``.
-    """
-    import json
-
-    from wattmosaic_engine.contracts import SnapshotResponse
-    from wattmosaic_engine.storage.database import Database
-
-    db = Database(tmp_path / "null.db")
-    try:
-        db._conn.execute(
-            """INSERT INTO inference_results(device_id, timestamp, power_w, source,
-               confidence, quality_status, measurement_age_seconds,
-               supporting_ct_channels_json, explanation_json, provenance_json,
-               confidence_tier, monitoring_level, power_behavior, tier_reasons_json,
-               sample_count, stage_status)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                "silent_device", T0.isoformat(), None, "unknown", 0.0, "stale",
-                0.0, "[]", "[]", "{}", "tier_0_unknown", "unknown", "unknown",
-                "[]", 0, "unknown",
-            ),
-        )
-        row = db._conn.execute(
-            "SELECT * FROM inference_results WHERE device_id='silent_device'"
-        ).fetchone()
-        assert row is not None
-        assert row["power_w"] is None
-
-        result = row_to_inference_result(dict(row))
-        assert result.power_w is None
-        assert result.quality_status == "stale"
-
-        response = SnapshotResponse(timestamp=T0, reconciliation=row_to_reconciliation(None),
-                                    results=[result])
-        payload = json.loads(response.model_dump_json())
-        assert payload["results"][0]["power_w"] is None
-    finally:
-        db.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -279,22 +141,11 @@ def test_a_bad_quality_reader_never_reaches_the_solver(tmp_path: Path) -> None:
     """
     from wattmosaic_engine.core.runtime import filter_excluded_from_window
 
-    topology = Topology(
-        version=3,
-        channels=[
-            CTChannel(ct_id="good", entity_id="sensor.good", ct_type=CTType.BRANCH, enabled=True),
-            CTChannel(ct_id="bad", entity_id="sensor.bad", ct_type=CTType.BRANCH, enabled=True),
-        ],
-    )
     window = coerce_window(
-        {
-            channel.ct_id: {"value_w": 50.0 if channel.ct_id == "good" else 9999.0}
-            for channel in topology.channels
-        },
+        {"good": {"value_w": 50.0}, "bad": {"value_w": 9999.0}},
         at=T0,
     )
-    report = _report({channel.ct_id: "good" if channel.ct_id == "good" else "bad"
-                      for channel in topology.channels})
+    report = _report({"good": "good", "bad": "bad"})
 
     kept, excluded = filter_excluded_from_window(window, excluded_readers(report))
     assert set(kept.readings) == {"good"}
@@ -340,19 +191,7 @@ def test_dependent_estimate_is_unknown_with_null_power_through_db_and_json() -> 
 
 
 # --------------------------------------------------------------------------- #
-# 5. Audit: never fabricate received_at
-# --------------------------------------------------------------------------- #
-
-
-def test_audit_does_not_fabricate_received_at() -> None:
-    raw = {"occurred_at": T0.isoformat(), "device_id": "lamp"}
-    row = _event_row(raw)
-    # _event_row normalises the dict but must not invent a reception timestamp.
-    assert "received_at" not in row or row.get("received_at") is None
-
-
-# --------------------------------------------------------------------------- #
-# 6. Grep gate: no zero-coercion in the null-sensitive packages
+# 5. Grep gate: no zero-coercion in the null-sensitive packages
 # --------------------------------------------------------------------------- #
 
 GREP_PACKAGES = ("core", "realtime", "inference", "mapping", "residual")

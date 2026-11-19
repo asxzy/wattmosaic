@@ -22,6 +22,7 @@ What is proven here:
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from wattmosaic_engine.aggregation import (
@@ -30,7 +31,20 @@ from wattmosaic_engine.aggregation import (
     EnergyBucket,
     run_from_row,
 )
-from wattmosaic_engine.contracts import InferenceResult, OperatingStage, Source, StageStatus
+from wattmosaic_engine.aggregation.models import RunSource
+from wattmosaic_engine.contracts import (
+    Bounds,
+    ConfidenceVectorV3,
+    DeviceEstimate,
+    EstimateStatus,
+    EventGroupStatus,
+    IdentifiabilityStatus,
+    InferenceMethod,
+    JointInferenceResult,
+    OperatingStage,
+    StageStatus,
+    VersionTriple,
+)
 from wattmosaic_engine.storage import Database
 
 T0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
@@ -45,13 +59,58 @@ def db(tmp_db_path):
         database.close()
 
 
-def _result(device_id: str, power_w: float, at: datetime | None = None) -> InferenceResult:
-    return InferenceResult(
+def _result(device_id: str, power_w: float, at: datetime | None = None) -> SimpleNamespace:
+    """A result in the duck-typed shape ``EnergyAggregator.add_result`` reads.
+
+    The legacy ``InferenceResult`` contract was removed in 3.0.0; the aggregator
+    takes any object with these attributes (its own replay uses the same shape).
+    """
+    return SimpleNamespace(
         device_id=device_id,
         timestamp=at or T0,
         power_w=power_w,
-        source=Source.INFERRED,
-        confidence=1.0,
+        source=RunSource.INFERRED.value,
+        quality_status=None,
+        provenance={},
+    )
+
+
+_VERSIONS = VersionTriple(
+    topology_version_id="topo-1", mapping_version_id="map-1", model_set_id="mset-1"
+)
+
+
+def _store_history(db: Database, device_id: str, points: list[tuple[datetime, float]]) -> None:
+    """Persist the integrated history through the v3 ``inference_results`` writer."""
+    estimates = [
+        DeviceEstimate(
+            subject_kind="device",
+            subject_id=device_id,
+            point_w=power,
+            bounds=Bounds(),
+            status=EstimateStatus.ESTIMATED,
+            identifiability=IdentifiabilityStatus.IDENTIFIABLE,
+            method=InferenceMethod.JOINT_DELTA,
+            confidence=ConfidenceVectorV3(identifiability=1.0),
+            source_reader_ids=["reader-1"],
+            evidence_refs=[],
+            versions=_VERSIONS,
+            updated_at=at,
+        )
+        for at, power in points
+    ]
+    db.repos.inference.put_estimates(
+        JointInferenceResult(
+            status=EventGroupStatus.CONFIRMED,
+            device_estimates=estimates,
+            group_estimates=[],
+            unknown_estimates=[],
+            candidates=[],
+            matches={},
+            residual_w_by_reader={},
+            versions=_VERSIONS,
+            computed_at=T0,
+        )
     )
 
 
@@ -138,7 +197,7 @@ def test_power_statistics_are_carried_on_the_bucket(db: Database) -> None:
     assert bucket.min_power_w == pytest.approx(100.0)
     assert bucket.max_power_w == pytest.approx(400.0)
     assert bucket.sample_count == 3
-    assert bucket.source == Source.INFERRED.value
+    assert bucket.source == RunSource.INFERRED.value
 
 
 def test_bucket_is_split_at_the_boundary(db: Database) -> None:
@@ -330,7 +389,7 @@ def test_current_total_survives_a_restart(db: Database) -> None:
     assert expected == pytest.approx(270 * 1000 / 3_600_000)
 
     # Stored history is what makes crash recovery possible.
-    db.insert_inference_results([_result("dev", power, at) for at, power in points])
+    _store_history(db, "dev", points)
 
     restarted = EnergyAggregator(db, bucket_sizes=(300,), stale_after_s=120)
     restarted.recompute_incomplete_buckets(now=T0 + timedelta(seconds=290), lookback_hours=24)
@@ -399,7 +458,7 @@ def test_restart_recovery_repairs_a_corrupt_bucket_without_double_counting(
 
     # The engine must persist the raw inferences it integrated (it does this in
     # production); recovery replays exactly this history.
-    db.insert_inference_results([_result("dev", 1200.0, at) for at, _ in points])
+    _store_history(db, "dev", [(at, 1200.0) for at, _ in points])
 
     expected = aggregator_total = first.energy_total("dev")
     assert aggregator_total == pytest.approx(600 * 1200 / 3_600_000)
@@ -426,7 +485,7 @@ def test_restart_recovery_is_idempotent(db: Database) -> None:
     points = _constant("dev", 900.0, 900)
     _feed(first, "dev", points)
     first.flush(now=T0 + timedelta(seconds=1000))
-    db.insert_inference_results([_result("dev", 900.0, at) for at, _ in points])
+    _store_history(db, "dev", [(at, 900.0) for at, _ in points])
     expected = first.energy_total("dev")
 
     for _ in range(3):
@@ -606,7 +665,7 @@ def test_repository_save_run_upserts_and_replaces_stages(db: Database) -> None:
             "energy_kwh": 0.25,
             "peak_power_w": 1000.0,
             "mean_power_w": 500.0,
-            "source": Source.INFERRED.value,
+            "source": RunSource.INFERRED.value,
             "stages": [
                 OperatingStage(
                     name="high",
@@ -661,7 +720,7 @@ def test_energy_bucket_and_device_run_row_shapes() -> None:
         max_power_w=1400.0,
         sample_count=20,
         complete=True,
-        source=Source.INFERRED.value,
+        source=RunSource.INFERRED.value,
     )
     data = bucket.as_dict()
     assert data["bucket_start"] == T0.isoformat()

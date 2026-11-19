@@ -40,11 +40,6 @@ from wattmosaic_engine.contracts import (
     VersionTriple,
 )
 from wattmosaic_engine.inference.joint import solve_joint_detailed
-from wattmosaic_engine.models.residual_power import (
-    ResidualScope,
-    baseline_and_dynamic,
-    signed_residual_w,
-)
 from wattmosaic_engine.residual import (
     DEFAULT_PENALTY_SCALE,
     INITIAL_PENALTY_SCALE_FRACTION,
@@ -58,6 +53,8 @@ from wattmosaic_engine.residual import (
 from wattmosaic_engine.residual.reader_residual import (
     AssignmentDiagnostics,
     UnexplainedStep,
+    baseline_and_dynamic,
+    signed_residual_w,
 )
 from wattmosaic_engine.runtime.fakes import (
     HB17_TREE,
@@ -202,9 +199,9 @@ def test_signed_identity_is_never_clamped() -> None:
     assert points["Circuit C"].residual_w == pytest.approx(400.0 - 400.0)
 
 
-def test_baseline_reused_from_residual_power_and_missing_point_is_none() -> None:
-    # The baseline/dynamic split is the same robust code the legacy residual
-    # module uses; absent residuals stay None (never a fabricated 0 W).
+def test_baseline_and_dynamic_split_and_missing_point_is_none() -> None:
+    # The robust baseline/dynamic split; absent residuals stay None (never a
+    # fabricated 0 W).
     assert baseline_and_dynamic(None, (1.0, 2.0)) == (None, None)
     baseline, dynamic = baseline_and_dynamic(50.0, (10.0, 20.0, 30.0))
     assert baseline == pytest.approx(20.0)
@@ -311,9 +308,6 @@ def test_noise_residual_and_profile_are_three_distinct_objects() -> None:
     assert profile.scope_endpoint_id != point.reader_id or profile.profile_id
     assert point.noise_sigma_w != point.residual_w
     assert not hasattr(point, "profile_id")
-    # A ResidualScope's noise metadata is additive and independent too.
-    scope = ResidualScope(scope_id="s", ct_id="Circuit A", noise_w=1.5)
-    assert scope.noise_w == pytest.approx(1.5)
 
 
 def test_persistence_goes_through_s19_batch_sink() -> None:

@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 from wattmosaic_engine import contracts
-from wattmosaic_engine.contracts import legacy, measurement
+from wattmosaic_engine.contracts import measurement
 from wattmosaic_engine.contracts.foundation import EvidenceRef, VersionTriple
 from wattmosaic_engine.contracts.measurement import (
     EventEvidence,
@@ -163,12 +163,6 @@ def _event_group(**overrides: object) -> EventGroup:
 # --------------------------------------------------------------------------- #
 # Naming / export invariants.
 # --------------------------------------------------------------------------- #
-
-
-def test_no_public_name_collides_with_legacy() -> None:
-    legacy_names = set(dir(legacy))
-    collisions = sorted(name for name in measurement.__all__ if name in legacy_names)
-    assert collisions == [], f"measurement __all__ names shadow legacy: {collisions}"
 
 
 def test_every_exported_name_is_in_all() -> None:

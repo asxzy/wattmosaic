@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import TypeAdapter, ValidationError
 from wattmosaic_engine import contracts
-from wattmosaic_engine.contracts import legacy, power_models
+from wattmosaic_engine.contracts import power_models
 from wattmosaic_engine.contracts.power_models import (
     SPEC_SCHEMA_VERSION,
     AdjustableSpec,
@@ -39,12 +39,6 @@ AT = datetime(2026, 1, 1, tzinfo=UTC)
 # --------------------------------------------------------------------------- #
 # Naming: no public name may collide with the legacy surface.
 # --------------------------------------------------------------------------- #
-
-
-def test_no_public_name_collides_with_legacy() -> None:
-    legacy_names = set(dir(legacy))
-    collisions = sorted(name for name in power_models.__all__ if name in legacy_names)
-    assert collisions == [], f"power_models __all__ names shadow legacy: {collisions}"
 
 
 def test_power_level_v3_keeps_off_idle_standby_distinct() -> None:

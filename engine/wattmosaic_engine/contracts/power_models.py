@@ -77,8 +77,8 @@ class StageStatus(str, Enum):
 class OperatingStage(Model):
     name: str
     status: StageStatus = StageStatus.UNKNOWN
-    power_mean_w: float = 0.0
-    power_std_w: float = 0.0
+    power_mean_w: float | None = None
+    power_std_w: float | None = None
     min_duration_s: float | None = None
     max_duration_s: float | None = None
     notes: list[str] = Field(default_factory=list)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 from wattmosaic_engine import contracts
-from wattmosaic_engine.contracts import foundation, legacy
+from wattmosaic_engine.contracts import foundation
 from wattmosaic_engine.contracts.foundation import (
     Bounds,
     ConfidenceVectorV3,
@@ -28,12 +28,6 @@ SCHEMA_MODELS = [model for _name, model in foundation.SCHEMA_EXPORTS]
 # --------------------------------------------------------------------------- #
 # Naming: no public name may collide with the legacy surface.
 # --------------------------------------------------------------------------- #
-
-
-def test_no_public_name_collides_with_legacy() -> None:
-    legacy_names = set(dir(legacy))
-    collisions = sorted(name for name in foundation.__all__ if name in legacy_names)
-    assert collisions == [], f"foundation __all__ names shadow legacy: {collisions}"
 
 
 def test_every_exported_name_is_in_all() -> None:

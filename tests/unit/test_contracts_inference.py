@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 from wattmosaic_engine import contracts
-from wattmosaic_engine.contracts import inference, legacy
+from wattmosaic_engine.contracts import inference
 from wattmosaic_engine.contracts.foundation import (
     Bounds,
     ConfidenceVectorV3,
@@ -33,7 +33,11 @@ from wattmosaic_engine.contracts.inference import (
     ReconciliationV3,
     UnknownEstimate,
 )
-from wattmosaic_engine.contracts.measurement import EventGroupStatus, ReaderMeasurement
+from wattmosaic_engine.contracts.measurement import (
+    DataQualityReport,
+    EventGroupStatus,
+    ReaderMeasurement,
+)
 from wattmosaic_engine.contracts.power_models import PowerLevelV3
 from wattmosaic_engine.contracts.topology import ReaderResidualPoint
 
@@ -163,12 +167,6 @@ def _reconciliation(**overrides: object) -> ReconciliationV3:
 # --------------------------------------------------------------------------- #
 
 
-def test_no_public_name_collides_with_legacy() -> None:
-    legacy_names = set(dir(legacy))
-    collisions = sorted(name for name in inference.__all__ if name in legacy_names)
-    assert collisions == [], f"inference __all__ names shadow legacy: {collisions}"
-
-
 def test_every_exported_name_is_in_all() -> None:
     for model in SCHEMA_MODELS:
         assert model.__name__ in inference.__all__
@@ -224,7 +222,7 @@ def test_exported_model_round_trips_through_json(model: type) -> None:
             group_estimates=[_group()],
             residual_estimates=[],
             reconciliation=_reconciliation(),
-            system_quality=legacy.DataQualityReport(),
+            system_quality=DataQualityReport(),
             stale_sources=[],
             unresolved_events=[],
         ),
@@ -505,7 +503,7 @@ def test_snapshot_round_trip_preserves_nulls() -> None:
         group_estimates=[_group(point_w=None, identifiability=IdentifiabilityStatus.NON_IDENTIFIABLE)],
         residual_estimates=[],
         reconciliation=_reconciliation(main_w=None, identified_w=None),
-        system_quality=legacy.DataQualityReport(),
+        system_quality=DataQualityReport(),
         stale_sources=["reader-9"],
         unresolved_events=["eg-2"],
     )

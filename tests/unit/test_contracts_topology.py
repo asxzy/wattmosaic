@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 from wattmosaic_engine import contracts
-from wattmosaic_engine.contracts import legacy, topology
+from wattmosaic_engine.contracts import topology
 from wattmosaic_engine.contracts.topology import (
     ConfigurationEvent,
     EdgeEvidence,
@@ -34,12 +34,6 @@ T2 = T0 + timedelta(hours=2)
 # --------------------------------------------------------------------------- #
 # Naming / export invariants (contract-task rule).
 # --------------------------------------------------------------------------- #
-
-
-def test_no_public_name_collides_with_legacy() -> None:
-    """None of our ``__all__`` names may shadow a name in contracts.legacy."""
-    collisions = sorted(name for name in topology.__all__ if name in set(dir(legacy)))
-    assert collisions == [], f"topology __all__ names shadow legacy: {collisions}"
 
 
 def test_every_exported_model_is_in_all() -> None:
@@ -77,8 +71,6 @@ def test_edge_lifecycle_v3_is_the_new_seven_state_enum() -> None:
         "rejected",
         "retired",
     }
-    # It is a distinct type from the legacy one, which is left untouched.
-    assert EdgeLifecycleV3 is not legacy.EdgeLifecycle
     assert "under_review" not in {m.value for m in EdgeLifecycleV3}
 
 
@@ -277,25 +269,25 @@ def test_mapping_device_subject_is_not_restricted_by_observability() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Reused legacy enums.
+# Configuration-change enums (moved from the legacy module).
 # --------------------------------------------------------------------------- #
 
 
-def test_configuration_event_reuses_legacy_change_enums() -> None:
+def test_configuration_event_uses_change_enums() -> None:
     ev = ConfigurationEvent(
         event_id="cfg-1",
-        kind=legacy.ConfigurationChangeKind.CALIBRATION_CHANGE,
-        detection=legacy.ChangeDetection.INFERRED,
-        status=legacy.ChangeStatus.SUSPECTED,
+        kind=topology.ConfigurationChangeKind.CALIBRATION_CHANGE,
+        detection=topology.ChangeDetection.INFERRED,
+        status=topology.ChangeStatus.SUSPECTED,
         created_at=T0,
     )
-    assert ev.kind == legacy.ConfigurationChangeKind.CALIBRATION_CHANGE.value
-    assert ev.detection == legacy.ChangeDetection.INFERRED.value
-    assert ev.status == legacy.ChangeStatus.SUSPECTED.value
+    assert ev.kind == topology.ConfigurationChangeKind.CALIBRATION_CHANGE.value
+    assert ev.detection == topology.ChangeDetection.INFERRED.value
+    assert ev.status == topology.ChangeStatus.SUSPECTED.value
 
 
 def test_configuration_event_detection_has_declared_and_inferred() -> None:
-    values = {m.value for m in legacy.ChangeDetection}
+    values = {m.value for m in topology.ChangeDetection}
     assert {"declared", "inferred"} <= values
 
 

@@ -36,9 +36,9 @@ from wattmosaic_engine.contracts import (
     ResponseKernelSpec,
 )
 from wattmosaic_engine.models.prediction import predict_with_spec
-from wattmosaic_engine.models.serde import SchemaVersionError
 from wattmosaic_engine.models.spec import (
     SPEC_SCHEMA_VERSION,
+    SchemaVersionError,
     decode_spec,
     encode_spec,
 )

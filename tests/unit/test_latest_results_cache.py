@@ -1,6 +1,6 @@
 """The cached latest-inference-results read: correctness, invalidation, speed.
 
-``Database.latest_inference_results()`` used to run a full-table GROUP BY over
+``InferenceRepository.latest_inference_results()`` (``db.repos.inference``) used to run a full-table GROUP BY over
 ``inference_results`` on every call.  The panel fires it from both ``/snapshot``
 and ``/devices`` in a single poll and the overview repeats that every 8 s, so the
 same 343k-row scan ran several times per refresh.  It is now cached until the
@@ -14,8 +14,9 @@ Two kinds of evidence live here:
 * a measured before/after timing comparison on a synthetic >=20k-row table, with
   a generous margin so CI jitter cannot turn it into a false failure.
 
-``InferenceResult`` is the production contract model, so a stale cache that
-shadowed a newer write would be caught by the correctness assertions below.
+Rows are written through the production v3 writer (``put_estimates`` of a
+``JointInferenceResult``), so a stale cache that shadowed a newer write would be
+caught by the correctness assertions below.
 """
 
 from __future__ import annotations
@@ -25,7 +26,17 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from wattmosaic_engine.contracts import InferenceResult, Source
+from wattmosaic_engine.contracts import (
+    Bounds,
+    ConfidenceVectorV3,
+    DeviceEstimate,
+    EstimateStatus,
+    EventGroupStatus,
+    IdentifiabilityStatus,
+    InferenceMethod,
+    JointInferenceResult,
+    VersionTriple,
+)
 from wattmosaic_engine.storage.database import Database
 
 BASE = datetime(2026, 11, 13, 12, 0, tzinfo=UTC)
@@ -34,13 +45,44 @@ RAW_QUERY = """SELECT * FROM inference_results WHERE id IN
 (SELECT MAX(id) FROM inference_results GROUP BY device_id) ORDER BY device_id"""
 
 
-def _result(device_id: str, power_w: float, offset: int = 0) -> InferenceResult:
-    return InferenceResult(
-        device_id=device_id,
-        timestamp=BASE + timedelta(seconds=offset),
-        power_w=power_w,
-        source=Source.DIRECT_MEASURED,
-        confidence=0.8,
+VERSIONS = VersionTriple(
+    topology_version_id="topo-1", mapping_version_id="map-1", model_set_id="mset-1"
+)
+
+
+def _estimate(
+    device_id: str, power_w: float, offset: int = 0, *, at: datetime | None = None
+) -> DeviceEstimate:
+    return DeviceEstimate(
+        subject_kind="device",
+        subject_id=device_id,
+        point_w=power_w,
+        bounds=Bounds(),
+        status=EstimateStatus.MEASURED,
+        identifiability=IdentifiabilityStatus.IDENTIFIABLE,
+        method=InferenceMethod.DIRECT_READING,
+        confidence=ConfidenceVectorV3(identifiability=0.8),
+        source_reader_ids=[f"reader-{device_id}"],
+        evidence_refs=[],
+        versions=VERSIONS,
+        updated_at=at or BASE + timedelta(seconds=offset),
+    )
+
+
+def _insert(db: Database, estimates: list[DeviceEstimate]) -> None:
+    """Write one joint result (one transaction, rows in list order)."""
+    db.repos.inference.put_estimates(
+        JointInferenceResult(
+            status=EventGroupStatus.CONFIRMED,
+            device_estimates=estimates,
+            group_estimates=[],
+            unknown_estimates=[],
+            candidates=[],
+            matches={},
+            residual_w_by_reader={},
+            versions=VERSIONS,
+            computed_at=BASE,
+        )
     )
 
 
@@ -60,15 +102,15 @@ def test_returns_newest_result_per_device(tmp_path: Path) -> None:
     try:
         # device A: 10 W then 30 W; device B: 5 W only.  Insert order, not
         # timestamp, decides "newest" because id is the autoincrement key.
-        db.insert_inference_results(
+        _insert(db, 
             [
-                _result("dev_a", 10.0, 0),
-                _result("dev_b", 5.0, 1),
-                _result("dev_a", 30.0, 2),
-                _result("dev_a", 20.0, 3),  # older timestamp, newer id -> newest
+                _estimate("dev_a", 10.0, 0),
+                _estimate("dev_b", 5.0, 1),
+                _estimate("dev_a", 30.0, 2),
+                _estimate("dev_a", 20.0, 3),  # older timestamp, newer id -> newest
             ]
         )
-        rows = db.latest_inference_results()
+        rows = db.repos.inference.latest_inference_results()
         by_device = {r["device_id"]: r for r in rows}
         assert set(by_device) == {"dev_a", "dev_b"}
         assert by_device["dev_a"]["power_w"] == 20.0
@@ -87,15 +129,15 @@ def test_returns_newest_result_per_device(tmp_path: Path) -> None:
 def test_new_write_is_not_shadowed_by_stale_cache(tmp_path: Path) -> None:
     db = Database(tmp_path / "invalidation.db")
     try:
-        db.insert_inference_results([_result("dev_a", 1.0, 0)])
-        first = db.latest_inference_results()
+        _insert(db, [_estimate("dev_a", 1.0, 0)])
+        first = db.repos.inference.latest_inference_results()
         assert {r["device_id"]: r["power_w"] for r in first} == {"dev_a": 1.0}
         # Serve a second read from the cache so we know a snapshot is held.
-        assert db.latest_inference_results() == first
+        assert db.repos.inference.latest_inference_results() == first
 
         # A newer result for the same device must replace the cached one.
-        db.insert_inference_results([_result("dev_a", 99.0, 1)])
-        after = db.latest_inference_results()
+        _insert(db, [_estimate("dev_a", 99.0, 1)])
+        after = db.repos.inference.latest_inference_results()
         assert {r["device_id"]: r["power_w"] for r in after} == {"dev_a": 99.0}
     finally:
         db.close()
@@ -104,11 +146,11 @@ def test_new_write_is_not_shadowed_by_stale_cache(tmp_path: Path) -> None:
 def test_a_new_device_appears_after_write(tmp_path: Path) -> None:
     db = Database(tmp_path / "new_device.db")
     try:
-        db.insert_inference_results([_result("dev_a", 1.0, 0)])
-        assert {r["device_id"] for r in db.latest_inference_results()} == {"dev_a"}
+        _insert(db, [_estimate("dev_a", 1.0, 0)])
+        assert {r["device_id"] for r in db.repos.inference.latest_inference_results()} == {"dev_a"}
 
-        db.insert_inference_results([_result("dev_b", 2.0, 1)])
-        assert {r["device_id"] for r in db.latest_inference_results()} == {
+        _insert(db, [_estimate("dev_b", 2.0, 1)])
+        assert {r["device_id"] for r in db.repos.inference.latest_inference_results()} == {
             "dev_a",
             "dev_b",
         }
@@ -120,22 +162,20 @@ def test_prune_and_reset_invalidate_the_cache(tmp_path: Path) -> None:
     db = Database(tmp_path / "lifecycle.db")
     try:
         # Old row is outside the 1-day raw horizon; new row is current.
-        old = _result("dev_old", 1.0, 0)
-        old.timestamp = BASE.replace(year=2020)
-        current = _result("dev_new", 2.0, 1)
-        current.timestamp = datetime.now(UTC)
-        db.insert_inference_results([old, current])
-        before = {r["device_id"] for r in db.latest_inference_results()}
+        old = _estimate("dev_old", 1.0, at=BASE.replace(year=2020))
+        current = _estimate("dev_new", 2.0, at=datetime.now(UTC))
+        _insert(db, [old, current])
+        before = {r["device_id"] for r in db.repos.inference.latest_inference_results()}
         assert before == {"dev_old", "dev_new"}
 
         # Prune removes the only row for dev_old; its cached entry must vanish.
         db.prune(raw_days=1)
-        after_prune = {r["device_id"] for r in db.latest_inference_results()}
+        after_prune = {r["device_id"] for r in db.repos.inference.latest_inference_results()}
         assert after_prune == {"dev_new"}
 
         # Reset wipes the database: nothing may be served from the old cache.
         db.reset()
-        assert db.latest_inference_results() == []
+        assert db.repos.inference.latest_inference_results() == []
     finally:
         db.close()
 
@@ -148,7 +188,7 @@ def test_prune_and_reset_invalidate_the_cache(tmp_path: Path) -> None:
 def test_many_reads_scan_only_once_until_a_write(tmp_path: Path) -> None:
     db = Database(tmp_path / "miss_count.db")
     try:
-        db.insert_inference_results([_result("dev_a", 1.0, 0)])
+        _insert(db, [_estimate("dev_a", 1.0, 0)])
 
         original_reader = db._reader  # noqa: SLF001
         opens = 0
@@ -160,12 +200,12 @@ def test_many_reads_scan_only_once_until_a_write(tmp_path: Path) -> None:
 
         db._reader = counting_reader  # type: ignore[method-assign]  # noqa: SLF001
         for _ in range(25):
-            assert {r["device_id"] for r in db.latest_inference_results()} == {"dev_a"}
+            assert {r["device_id"] for r in db.repos.inference.latest_inference_results()} == {"dev_a"}
         assert opens == 1, "repeated reads must be served from the cache"
 
         # One write -> exactly one more scan on the next read.
-        db.insert_inference_results([_result("dev_a", 2.0, 1)])
-        db.latest_inference_results()
+        _insert(db, [_estimate("dev_a", 2.0, 1)])
+        db.repos.inference.latest_inference_results()
         assert opens == 2, "a committed write must invalidate the cache"
     finally:
         db.close()
@@ -188,22 +228,22 @@ def test_cached_read_is_faster_than_full_scan(tmp_path: Path) -> None:
         rows_per_device = 1000
         devices = 30
         payload = [
-            _result(f"dev_{i % devices:03d}", float(i), i)
+            _estimate(f"dev_{i % devices:03d}", float(i), i)
             for i in range(rows_per_device * devices)
         ]
-        db.insert_inference_results(payload)
+        _insert(db, payload)
         assert db._conn.execute("SELECT COUNT(*) FROM inference_results").fetchone()[0] >= 20_000  # noqa: SLF001
 
         # "Before": time the raw full-table query directly, best of 5.
         scan_best = min(_time_it(lambda: _scan_uncached(db), runs=5))
 
         # "After": prime the cache, then time the public cached read, best of 5.
-        db.latest_inference_results()
-        cached_best = min(_time_it(db.latest_inference_results, runs=5))
+        db.repos.inference.latest_inference_results()
+        cached_best = min(_time_it(db.repos.inference.latest_inference_results, runs=5))
 
         # Correctness is not sacrificed for speed: the cached answer is the same
         # newest-per-device map the raw query returns.
-        assert {r["device_id"]: r["power_w"] for r in db.latest_inference_results()} == {
+        assert {r["device_id"]: r["power_w"] for r in db.repos.inference.latest_inference_results()} == {
             r["device_id"]: r["power_w"] for r in _scan_uncached(db)
         }
         assert cached_best * 5 < scan_best, (

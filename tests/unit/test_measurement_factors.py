@@ -156,7 +156,7 @@ def test_open_ended_intervals_overlap_everything_after_them() -> None:
 def test_factor_round_trips_through_storage(tmp_path) -> None:
     db = Database(tmp_path / "f.db")
     try:
-        db.insert_measurement_factor(
+        db.repos.factors.insert_measurement_factor(
             _factor(
                 effective_from=T0,
                 effective_to=T0 + timedelta(days=30),
@@ -182,10 +182,10 @@ def test_factor_round_trips_through_storage(tmp_path) -> None:
 def test_factors_for_ct_are_ordered_by_effective_from(tmp_path) -> None:
     db = Database(tmp_path / "order.db")
     try:
-        db.insert_measurement_factor(
+        db.repos.factors.insert_measurement_factor(
             _factor(multiplier=1.0, effective_from=T0 + timedelta(days=30))
         )
-        db.insert_measurement_factor(
+        db.repos.factors.insert_measurement_factor(
             _factor(
                 multiplier=2.0,
                 effective_from=T0,
@@ -214,11 +214,11 @@ def test_a_second_overlapping_factor_for_one_ct_is_refused(tmp_path) -> None:
     """Storage is the last line of defence for the interval invariant."""
     db = Database(tmp_path / "overlap.db")
     try:
-        db.insert_measurement_factor(
+        db.repos.factors.insert_measurement_factor(
             _factor(effective_from=T0, effective_to=T0 + timedelta(days=30))
         )
         with pytest.raises(ValueError):
-            db.insert_measurement_factor(
+            db.repos.factors.insert_measurement_factor(
                 _factor(
                     effective_from=T0 + timedelta(days=1),
                     effective_to=T0 + timedelta(days=60),

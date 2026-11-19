@@ -1,13 +1,15 @@
-"""X01: contracts.py is now a package facade with a stable public surface.
+"""X01: ``wattmosaic_engine.contracts`` is a v3-only package facade.
 
-The split is a pure refactor: every name importable from the old single-file
-module must remain importable from ``wattmosaic_engine.contracts``.  New
-contracts are discovered through each submodule's ``SCHEMA_EXPORTS`` list.
+Contract 3.0.0 deleted the legacy single-file surface.  The facade now exposes
+exactly the ``__all__`` names of its v3 submodules (plus the submodules
+themselves), and new contracts are discovered through each submodule's
+``SCHEMA_EXPORTS`` list.
 """
 
 from __future__ import annotations
 
 import importlib
+import importlib.util
 from types import ModuleType
 
 import pytest
@@ -19,197 +21,131 @@ from wattmosaic_engine.contracts import (
     matrix,
     measurement,
     power_models,
+    service,
     topology,
 )
 
-# Snapshot of ``dir(wattmosaic_engine.contracts)`` on the unmodified tree
-# (contracts.py at 27373aa).  A package adds a handful of inherent attributes
-# (``__path__`` and the submodule names); every *other* name must be present.
-LEGACY_PUBLIC_NAMES = frozenset(
-    (
-        "Any",
-        "BaseModel",
-        "CONTRACT_VERSION",
-        "CTChannel",
-        "CTType",
-        "ChangeDetection",
-        "ChangeStatus",
-        "Circuit",
-        "CircuitClass",
-        "ConfidenceDimension",
-        "ConfidenceTier",
-        "ConfidenceVector",
-        "ConfigDict",
-        "ConfigurationChangeEvent",
-        "ConfigurationChangeKind",
-        "ControllerConfiguration",
-        "ControllerStateMapping",
-        "ControllerStateRole",
-        "DataQualityReport",
-        "DeviceConfiguration",
-        "DeviceConfigurationSet",
-        "DeviceEvent",
-        "DeviceModelParameters",
-        "DeviceModelVersion",
-        "DeviceReaderMappingCell",
-        "DeviceState",
-        "DeviceTopology",
-        "DeviceType",
-        "ENGINE_VERSION",
-        "EdgeLifecycle",
-        "Enum",
-        "ErrorResponse",
-        "EventEvidenceRecord",
-        "EventIsolation",
-        "ExpectedPower",
-        "Field",
-        "HaConnectivity",
-        "HaEntityBinding",
-        "HaEntityRole",
-        "HealthResponse",
-        "InferenceRecord",
-        "InferenceResult",
-        "IsolationStatus",
-        "Iterable",
-        "LearningSample",
-        "LightConfiguration",
-        "LightType",
-        "Literal",
-        "LoadShape",
-        "MappingCellStatus",
-        "MappingObservability",
-        "Measurement",
-        "MeasurementBasis",
-        "MeasurementFactor",
-        "Model",
-        "ModelStatus",
-        "ModelType",
-        "MonitoringLevel",
-        "OperatingStage",
-        "Phase",
-        "Polarity",
-        "PowerBehavior",
-        "PowerLevel",
-        "PowerState",
-        "QualityStatus",
-        "Reconciliation",
-        "RelationKind",
-        "ResidualBaselineChange",
-        "ResidualDecompositionRecord",
-        "ResidualKind",
-        "ResidualPower",
-        "SampleRejection",
-        "ServiceCommand",
-        "ServiceResult",
-        "SnapshotResponse",
-        "Source",
-        "StageStatus",
-        "StorageHealthReport",
-        "TIER_RANK",
-        "Topology",
-        "TopologyEdge",
-        "TopologyRelation",
-        "TopologyStatus",
-        "TopologyVersion",
-        "UTC",
-        "UnknownLoadLifecycle",
-        "UnknownLoadProfile",
-        "UnknownResidualEvent",
-        "annotations",
-        "datetime",
-        "derived_residual_kind",
-        "field_validator",
-        "model_validator",
-        "power_state_for",
-        "utcnow",
-        "validate_factor_intervals",
-    )
+V3_MODULES: tuple[ModuleType, ...] = (
+    foundation,
+    entities,
+    measurement,
+    topology,
+    inference,
+    matrix,
+    power_models,
+    service,
 )
 
-# Private names that tests import directly.
-LEGACY_PRIVATE_NAMES = frozenset({"_document", "_reject_parent_cycle"})
+V3_MODULE_NAMES = frozenset(m.__name__.rsplit(".", 1)[-1] for m in V3_MODULES)
 
-# Dunder names present in both the old module and the package.
-MODULE_DUNDER_NAMES = frozenset(
-    {
-        "__annotations__",
-        "__builtins__",
-        "__cached__",
-        "__doc__",
-        "__file__",
-        "__loader__",
-        "__name__",
-        "__package__",
-        "__spec__",
-    }
-)
-
-# Attributes that a package necessarily has but the old module did not.
-PACKAGE_ONLY_NAMES = frozenset(
-    {
-        "__path__",
-        "entities",
-        "foundation",
-        "inference",
-        "legacy",
-        "matrix",
-        "measurement",
-        "power_models",
-        "topology",
-    }
+# Names that were removed in the 3.0.0 cutover and must not come back.
+REMOVED_LEGACY_NAMES = (
+    "Topology",
+    "CTChannel",
+    "DeviceTopology",
+    "InferenceResult",
+    "Reconciliation",
+    "Source",
+    "PowerState",
+    "ConfidenceTier",
+    "TopologyStatus",
+    "RelationKind",
+    "Measurement",
+    "DeviceEvent",
+    "LearningSample",
+    "DeviceModelVersion",
+    "DeviceModelParameters",
+    "ModelType",
+    "ModelStatus",
+    "ExpectedPower",
+    "DeviceConfiguration",
+    "DeviceConfigurationSet",
+    "Circuit",
+    "CircuitClass",
+    "TopologyRelation",
+    "EventIsolation",
+    "InferenceRecord",
+    "ResidualPower",
+    "ResidualKind",
+    "HaEntityBinding",
+    "MonitoringLevel",
+    "PowerBehavior",
+    "DeviceType",
+    "Phase",
+    "Polarity",
+    "CTType",
+    "SnapshotResponse",
+    "ConfidenceVector",
+    "PowerLevel",
+    "TIER_RANK",
 )
 
 
-def test_every_legacy_name_is_importable_from_the_package() -> None:
-    """Every name in the old module's ``dir()`` is still available."""
-    for name in LEGACY_PUBLIC_NAMES | LEGACY_PRIVATE_NAMES:
-        assert hasattr(contracts, name), f"contracts facade lost {name!r}"
+def _public_names(module: ModuleType) -> set[str]:
+    return {name for name in dir(module) if not name.startswith("_")}
 
 
-def test_package_surface_extras_come_only_from_v3_submodules() -> None:
-    """Facade extras are exactly the v3 submodule exports (K00..K06).
+def test_legacy_module_is_gone() -> None:
+    assert importlib.util.find_spec("wattmosaic_engine.contracts.legacy") is None
+    assert not hasattr(contracts, "legacy")
 
-    X01 wrote this as "no extras"; that held only while the submodules were
-    empty seams.  As the wave-1 contract tasks fill them, their ``__all__``
-    names are star-imported here by design.  The stronger invariant is that
-    *every* extra name is declared by a v3 submodule -- nothing appears by
-    accident -- and no v3 name shadows a legacy name.
-    """
-    allowed = (
-        LEGACY_PUBLIC_NAMES
-        | LEGACY_PRIVATE_NAMES
-        | MODULE_DUNDER_NAMES
-        | PACKAGE_ONLY_NAMES
-    )
+
+@pytest.mark.parametrize("name", REMOVED_LEGACY_NAMES)
+def test_removed_legacy_names_are_not_exported(name: str) -> None:
+    assert not hasattr(contracts, name), f"legacy name {name!r} resurfaced"
+
+
+def test_facade_surface_is_exactly_the_v3_exports() -> None:
+    """Every public facade name is a v3 submodule or a v3 ``__all__`` export."""
     v3_names: set[str] = set()
-    for module in (foundation, entities, measurement, topology, inference, matrix, power_models):
+    for module in V3_MODULES:
         v3_names.update(module.__all__)
-    extras = frozenset(dir(contracts)) - allowed
-    assert extras == v3_names, (
-        f"facade extras {sorted(extras)} do not match v3 exports {sorted(v3_names)}"
-    )
-    assert not (v3_names & LEGACY_PUBLIC_NAMES), "a v3 export shadows a legacy name"
+    # ``annotations`` is the facade's own ``from __future__ import annotations``.
+    assert _public_names(contracts) - V3_MODULE_NAMES - {"annotations"} == v3_names
 
 
-def test_legacy_private_names_are_the_real_objects() -> None:
-    from wattmosaic_engine.contracts import legacy
+def test_v3_exports_do_not_collide_across_submodules() -> None:
+    seen: dict[str, str] = {}
+    for module in V3_MODULES:
+        for name in module.__all__:
+            assert name not in seen, (
+                f"{name!r} exported by both {seen[name]} and {module.__name__}"
+            )
+            seen[name] = module.__name__
 
-    assert contracts._document is legacy._document
-    assert contracts._reject_parent_cycle is legacy._reject_parent_cycle
+
+def test_facade_names_are_the_submodule_objects() -> None:
+    for module in V3_MODULES:
+        for name in module.__all__:
+            assert getattr(contracts, name) is getattr(module, name), name
 
 
-@pytest.mark.parametrize(
-    "module",
-    [foundation, entities, measurement, topology, inference, matrix, power_models],
-)
+def test_shared_types_moved_to_their_v3_homes() -> None:
+    homes = {
+        foundation: ("Model", "utcnow", "CONTRACT_VERSION"),
+        entities: ("LoadShape", "HaEntityRole"),
+        measurement: (
+            "MeasurementBasis",
+            "QualityStatus",
+            "DataQualityReport",
+            "MeasurementFactor",
+            "validate_factor_intervals",
+        ),
+        topology: ("ConfigurationChangeKind", "ChangeDetection", "ChangeStatus"),
+        power_models: ("OperatingStage", "StageStatus"),
+        service: ("HealthResponse", "ErrorResponse", "ServiceCommand", "ServiceResult"),
+    }
+    for module, names in homes.items():
+        for name in names:
+            assert name in module.__all__, f"{name} not exported by {module.__name__}"
+            obj = getattr(module, name)
+            if isinstance(obj, type):
+                assert obj.__module__ == module.__name__, name
+
+
+@pytest.mark.parametrize("module", V3_MODULES, ids=lambda m: m.__name__)
 def test_submodule_exports_are_self_consistent(module: ModuleType) -> None:
-    """``__all__`` names resolve; exported models are registered in SCHEMA_EXPORTS.
-
-    Written generically so wave-1 tasks can fill their seam (K00..K06) without
-    ever editing this test: an empty seam passes trivially, a filled one must be
-    internally consistent.  The facade-surface test above enforces that no v3
-    export shadows a legacy name.
-    """
+    """``__all__`` names resolve; exported models are registered in SCHEMA_EXPORTS."""
     for name in module.__all__:
         assert hasattr(module, name), f"{module.__name__}.__all__ lists missing {name!r}"
     for _stem, model in module.SCHEMA_EXPORTS:

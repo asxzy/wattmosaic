@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 from wattmosaic_engine import contracts
-from wattmosaic_engine.contracts import entities, legacy
+from wattmosaic_engine.contracts import entities, measurement
 from wattmosaic_engine.contracts.entities import (
     EndpointConfigRevision,
     EndpointKind,
@@ -35,7 +35,7 @@ def _device(device_id: str = "dev_ct_07") -> PhysicalDevice:
         device_id=device_id,
         name="Living-room lights",
         device_type="light",
-        load_shape=legacy.LoadShape.UNKNOWN,
+        load_shape=entities.LoadShape.UNKNOWN,
         ha_device_id=None,
         area_id="living_room",
         origin="migration",
@@ -75,7 +75,7 @@ def _link(entity_id: str, target_id: str, target_kind: str = "device") -> HaEnti
         entity_id=entity_id,
         target_kind=target_kind,
         target_id=target_id,
-        role=legacy.HaEntityRole.LOAD_STATE,
+        role=entities.HaEntityRole.LOAD_STATE,
         valid_from=T0,
         valid_until=None,
         declared_by="user",
@@ -111,12 +111,6 @@ def _revision(
 # --------------------------------------------------------------------------- #
 # Naming / export hygiene (contract-task rules).
 # --------------------------------------------------------------------------- #
-
-
-def test_no_public_name_collides_with_legacy() -> None:
-    legacy_names = set(dir(legacy))
-    collisions = sorted(name for name in entities.__all__ if name in legacy_names)
-    assert collisions == [], f"entities __all__ names shadow legacy: {collisions}"
 
 
 def test_every_exported_model_is_in_all_and_schema_exports() -> None:
@@ -230,7 +224,7 @@ def test_one_device_to_several_components() -> None:
             component_id=f"lc_{i}",
             device_id=device.device_id,
             name=f"Component {i}",
-            load_shape=legacy.LoadShape.UNKNOWN,
+            load_shape=entities.LoadShape.UNKNOWN,
         )
         for i in range(3)
     ]
@@ -396,7 +390,7 @@ def test_a_circuit_ct_never_auto_receives_single_subject() -> None:
             entity_id="light.x",
             target_kind="device",
             target_id="dev_x",
-            role=legacy.HaEntityRole.UNKNOWN,
+            role=entities.HaEntityRole.UNKNOWN,
             valid_from=T0,
             valid_until=T0,
             declared_by="user",
@@ -430,7 +424,7 @@ def test_legacy_device_id_is_accepted_verbatim() -> None:
     assert component.device_id == "dev_ct_07"
 
 
-def test_reused_legacy_enums_are_the_real_objects() -> None:
-    assert entities.LoadShape is legacy.LoadShape
-    assert entities.HaEntityRole is legacy.HaEntityRole
-    assert entities.MeasurementBasis is legacy.MeasurementBasis
+def test_shared_enums_are_the_facade_objects() -> None:
+    assert contracts.LoadShape is entities.LoadShape
+    assert contracts.HaEntityRole is entities.HaEntityRole
+    assert contracts.MeasurementBasis is measurement.MeasurementBasis

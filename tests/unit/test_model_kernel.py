@@ -135,11 +135,8 @@ def test_expected_window_matches_l1_handoff() -> None:
 
 def test_declared_delay_step_mirrors_device_profile() -> None:
     """The fallback is device_profile's declared delay step (223-227)."""
-    profile = DevicePowerProfile.from_expected(
-        "compressor",
-        __import__("wattmosaic_engine.contracts", fromlist=["ExpectedPower"]).ExpectedPower(
-            on_w=1500.0, standby_w=5.0
-        ),
+    profile = DevicePowerProfile.from_mapping(
+        "compressor", {"on_w": 1500.0, "standby_w": 5.0}
     ).with_response_delay(HVAC_DELAY_S)
     kernel = KernelModel.declared(
         profile.standby_w, profile.operating_w(), delay_s=profile.response_delay_s

@@ -21,6 +21,7 @@ from wattmosaic_engine.contracts import (
     matrix,
     measurement,
     power_models,
+    service,
     topology,
 )
 
@@ -32,6 +33,7 @@ V3_MODULES: tuple[ModuleType, ...] = (
     inference,
     matrix,
     power_models,
+    service,
 )
 
 
@@ -99,5 +101,6 @@ def test_all_v3_modules_are_importable() -> None:
         "inference",
         "matrix",
         "power_models",
+        "service",
     ):
         importlib.import_module(f"wattmosaic_engine.contracts.{name}")

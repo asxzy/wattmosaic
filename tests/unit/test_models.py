@@ -12,7 +12,7 @@ building blocks and the declared-device profile adapter that survived into v3.
 from __future__ import annotations
 
 import pytest
-from wattmosaic_engine.contracts import ExpectedPower, PowerLevelV3
+from wattmosaic_engine.contracts import PowerLevelV3
 from wattmosaic_engine.models import (
     DevicePowerProfile,
     enforce_monotonic,
@@ -69,9 +69,8 @@ def test_power_after_pure_helper_neutral_and_malformed_cases() -> None:
 
 
 def test_always_on_has_no_off_state() -> None:
-    profile = DevicePowerProfile.from_expected(
-        "always-on",
-        ExpectedPower(standby_w=10.0, on_w=100.0),
+    profile = DevicePowerProfile.from_mapping(
+        "always-on", {"standby_w": 10.0, "on_w": 100.0}
     ).with_always_on(True)
     assert off_w(10.0, 100.0, always_on=True) == pytest.approx(100.0)
     assert off_w(10.0, 100.0, always_on=False) == pytest.approx(10.0)
@@ -79,10 +78,7 @@ def test_always_on_has_no_off_state() -> None:
 
 
 def test_declared_profile_round_trips_through_mapping() -> None:
-    profile = DevicePowerProfile.from_expected(
-        "dev",
-        ExpectedPower(standby_w=8.0, on_w=60.0),
-    )
+    profile = DevicePowerProfile.from_mapping("dev", {"standby_w": 8.0, "on_w": 60.0})
     restored = DevicePowerProfile.from_mapping("dev", profile.as_dict())
     assert restored.standby_w == pytest.approx(8.0)
     assert restored.active_w == pytest.approx(60.0)
