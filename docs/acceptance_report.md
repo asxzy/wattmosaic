@@ -52,7 +52,7 @@ hour because its requirement, a group estimate for two loads on one CT
 | `hb17_co_switched` | 162 | 238 | 11.76 | 0.000000 | 0.008330 | 1.0000 | 0 | 156 | 0.228 / 0.228 |
 | `hb17_solo_switches` | 162 | 238 | 11.76 | 0.000000 | 0.008330 | 1.0000 | 0 | 156 | 0.228 / 0.228 |
 | `lab_dedicated` | 24 | 72 | 96.09 | 0.000000 | 0.000000 | 0.9583 | 0 | 71 | 1.556 / 2.286 |
-| `lab_shared` (live runtime) | 240 | 550 | 49.23 | 0.104445 | 0.071016 | 0.9708 | 0 | 236 | 0.313 / 0.500 |
+| `lab_shared` (live runtime) | 240 | 550 | 54.03 | 0.161975 | 0.347380 | 0.9833 | 0 | 236 | 0.256 / 0.420 |
 | `lab_ambiguous_pair` | 160 | 480 | 0.01 | 0.000000 | 0.000000 | 1.0000 | 0 | 160 | 0.058 / 0.075 |
 | `lab_automation_burst` | 24 | 888 | 73.34 | 0.000000 | 0.000000 | 0.9583 | 0 | 574 | 5.923 / 88.202 |
 
@@ -91,10 +91,10 @@ Reading the table:
 - **`lab_shared` (HB §21.7).** After two CONFIRMED co-switches of utility_1 and
   utility_2 are in history, I4 publishes their GROUP_IDENTIFIABLE sum and the
   steady pass keeps it current from the shared CT: about 2.4 kW while both run
-  and the CT's noise floor when off (51 group points, 0.104445 kWh). The members
+  and the CT's noise floor when off (61 group points, 0.161975 kWh). The members
   are never given a number. utility_3, alone on its CT, is MEASURED
-  (MAE 0.313 W). Co-switches before the group is history-backed stay UNKNOWN,
-  which is why attributed % is 49.23 rather than higher.
+  (MAE 0.256 W). Co-switches before the group is history-backed stay UNKNOWN,
+  which is why attributed % is 54.03 rather than higher.
 - `lab_automation_burst` RMSE (88 W) and max (1.49 kW) come from a handful of
   transition-instant samples; the MAE is the regression gate.
 

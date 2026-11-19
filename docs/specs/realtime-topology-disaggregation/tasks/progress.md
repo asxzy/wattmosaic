@@ -94,7 +94,7 @@
 | D5 | 5 | VERIFIED |  |  | v021 supersedes link; P6 must pass supersedes_evidence_id |
 | X09 | 5 | VERIFIED |  |  | docs+release notes 3.0; routes/settings cross-checked |
 | V1 | 6 | VERIFIED |  | all 20 (0 xfail in tests/acceptance) | V1b: live groups, relocation, measured endpoints; 0 xfail; gate green at 50c7fd9 |
-| V2 | 6 | NOT_STARTED | | | |
+| V2 | 6 | VERIFIED | | | gates met (healthz p99 42.5/31.2ms, fast p99 0.058/0.051ms); rehearsal 11->26->11 PASS + main engine opens restored backup; verification-report.md; perf harness fixed (jobs were failing); real-data replay OPERATOR-PENDING (no local DB; replay_nesting.py removed in ZC); version string not bumped (R1) |
 | L8 | 6 | NOT_STARTED | | | optional |
 | S00 | ? | VERIFIED | | | seam added by orchestrator: migration numbering, fresh-DB backup |
 | ZF | ? | VERIFIED | | | quality from ReaderStateStore, v022 nullable confidence; ratio fixed to |balance_error|/main |
