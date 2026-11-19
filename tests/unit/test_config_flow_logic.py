@@ -1,14 +1,21 @@
-"""Unit tests for the per-device configuration flow helpers.
+"""Unit tests for the v3 config-flow helpers (Z2d).
 
 ``flow_logic`` is deliberately pure Python (no Home Assistant import), so it is
 loaded here through a synthetic package the same way
 ``tests/integration/test_ha_integration.py`` does: importing
 ``custom_components/wattmosaic/__init__.py`` would pull in Home Assistant, which
 is not a test dependency of this repository.
+
+The v2 per-device nine-field forms, the per-CT channel wizard and the blanket
+topology-confirmation path were removed in Z2d.  The remaining setup flow is
+connection -> endpoints -> done, posting only user-declared edges and scope
+confirmations.  A static gate at the bottom of this file enforces that no setup
+code reintroduces a v2 topology write.
 """
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import importlib
 import importlib.util
@@ -621,5 +628,94 @@ def test_commit_log_posts_accepted_parent_edge() -> None:
             },
         )
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Z2d static gate — no v2 setup paths remain
+# --------------------------------------------------------------------------- #
+
+#: The two steps that made up the retired v2 setup/options wizard.  Both were
+#: replaced by the single ``endpoints`` -> ``done`` v3 flow; keeping either one
+#: reachable would let a user write the destructive v2 topology shape again.
+_REMOVED_FLOW_STEPS = (
+    "async_step_channels",
+    "async_step_confirm",
+    "async_step_device_config",
+    "async_step_device_config_details",
+)
+
+
+def test_no_v2_topology_paths_in_the_setup_flow() -> None:
+    """Neither the flow nor its pure decision module may reference a v2 write.
+
+    The v3 flow posts only user-declared edges (``/topology/edges``) and scope
+    confirmations (``/endpoints/{id}/scope``).  A ``PUT /topology`` or a blanket
+    topology confirmation would reintroduce the destructive v2 shape Z2d removes.
+    """
+    for name in ("config_flow.py", "flow_logic.py"):
+        source = (PACKAGE_DIR / name).read_text()
+        assert "/topology/confirm" not in source, name
+        # A literal PUT request to /topology is the v2 form's write primitive.
+        assert '"PUT"' not in source, name
+
+
+def test_setup_flow_has_only_v3_steps() -> None:
+    """The config/options flows expose connection, endpoints and done only."""
+    source = (PACKAGE_DIR / "config_flow.py").read_text()
+    tree = ast.parse(source)
+    steps = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name.startswith("async_step_")
+    }
+    for removed in _REMOVED_FLOW_STEPS:
+        assert removed not in steps, f"v2 setup step {removed} is still defined"
+    # The v3 steps are present on the shared wizard.
+    assert "async_step_endpoints" in steps
+    assert "async_step_done" in steps
+
+
+def test_v3_setup_plan_never_contains_a_v2_topology_write() -> None:
+    """The only write paths are per-edge, per-scope and entity links."""
+    endpoints = flow.normalise_endpoints(_endpoints_payload())
+    choices = flow.endpoint_choices(
+        endpoints,
+        {
+            "sub_l1": {"parent_endpoint_id": "main_l1", "parent_accepted": True},
+            "plug_kettle": {"scope_subject_id": "dev_kettle"},
+        },
+    )
+    plan = flow.build_endpoint_setup_plan(choices)
+    for item in plan:
+        assert item["path"] in (
+            "/topology/edges",
+            "/endpoints/plug_kettle/scope",
+            "/entity-links",
+        )
+        assert "confirm" not in item["path"]
+        assert item.get("body", {}).get("relation") != "CONTAINS" or item["body"].get(
+            "declared_by"
+        ) == "user"
+
+
+def test_options_flow_does_not_reference_removed_device_forms() -> None:
+    """The options flow edits endpoints/parents only; devices are automatic."""
+    source = (PACKAGE_DIR / "config_flow.py").read_text()
+    tree = ast.parse(source)
+    options_flow = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "WattMosaicOptionsFlow"
+    )
+    body = ast.dump(options_flow)
+    for removed in (
+        "async_step_device_config",
+        "async_step_device_config_details",
+        "_ct_options",
+        "_stored_monitored_cts",
+        "_link_candidates",
+    ):
+        assert removed not in body, f"options flow still references {removed}"
 
 
