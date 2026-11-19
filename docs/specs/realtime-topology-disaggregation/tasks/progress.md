@@ -79,11 +79,11 @@
 | T6 | 4 | IN_PROGRESS |  | AT-04 |  |
 | T7 | 4 | IN_PROGRESS |  | AT-15, 16 |  |
 | M2 | 4 | VERIFIED |  | AT-11 | AT-11 closed |
-| M3 | 4 | VERIFIED |  |  | facade served empty column/row trees -> M3b |
+| M3 | 4 | VERIFIED |  |  | M3b follow-up: real column/row trees in /matrix |
 | L4 | 4 | VERIFIED |  |  |  |
-| L5 | 4 | IN_PROGRESS |  |  |  |
+| L5 | 4 | VERIFIED |  |  | DEF-03 fixed |
 | L6 | 4 | NOT_STARTED | | | |
-| D4 | 4 | IN_PROGRESS |  |  |  |
+| D4 | 4 | VERIFIED |  |  |  |
 | H1 | 4 | NOT_STARTED | | | |
 | H2 | 4 | VERIFIED |  |  | partial: async_migrate_entry hook -> H1; v2 forms removal -> Z2 |
 | U2 | 4 | IN_PROGRESS |  | AT-20 |  |
