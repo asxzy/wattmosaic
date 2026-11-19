@@ -102,8 +102,10 @@ __all__ = [
     "ResidualNotComputed",
     "ResidualScope",
     "ResidualTrend",
+    "baseline_and_dynamic",
     "bases_are_compatible",
     "persist",
+    "signed_residual_w",
 ]
 
 #: Tolerance for "explained completely".  A residual is a float difference of
@@ -317,14 +319,37 @@ class ResidualScope:
 # --------------------------------------------------------------------------- #
 # Arithmetic: one place, no clamp
 # --------------------------------------------------------------------------- #
-def _signed_residual(circuit_power_w: float, known_load_w: float) -> float:
+def signed_residual_w(circuit_power_w: float, known_load_w: float) -> float:
     """``CircuitPower - KnownLoads``, sign preserved.
 
-    This is the only subtraction in the module.  It must never be wrapped in
-    ``max(0.0, ...)``, ``abs(...)`` or a near-zero epsilon: a negative residual
-    means accounted power exceeds the measured total, which is information.
+    This is the single place the residual difference is formed (T3 reuses it for
+    the per-reader residual).  It must never be wrapped in ``max(0.0, ...)``,
+    ``abs(...)`` or a near-zero epsilon: a negative residual means accounted
+    power exceeds the measured total, which is information.
     """
     return float(circuit_power_w) - float(known_load_w)
+
+
+# Private alias kept so the rest of this module keeps its original vocabulary.
+_signed_residual = signed_residual_w
+
+
+def baseline_and_dynamic(residual_w: float | None, window: Sequence[float]) -> tuple[float | None, float | None]:
+    """Robust baseline plus the moving part for one signed residual (T3).
+
+    ``baseline`` is the median of the recent residual observations (oldest
+    first), and ``dynamic = residual_w - baseline`` so the two always add back
+    to the total.  With no window there is no dynamic claim: the baseline is the
+    current residual and ``dynamic`` is ``0.0``.  A missing (``None``) residual
+    is honest absence, never a fabricated ``0.0`` baseline/dynamic pair.
+    """
+    if residual_w is None:
+        return None, None
+    values = [float(value) for value in window if math.isfinite(float(value))]
+    if not values:
+        return residual_w, 0.0
+    baseline = float(median(values))
+    return baseline, residual_w - baseline
 
 
 def _median(values: Sequence[float]) -> float:
