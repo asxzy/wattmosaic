@@ -27,7 +27,8 @@ REQUIRED_CHECKS = (
     "panel",
     "migrations",
     "residuals",
-    "mapping",
+    "matrix",
+    "snapshot",
     "topology",
     "devices",
     "metrics",
@@ -70,7 +71,12 @@ def test_smoke_registers_every_required_check_and_fails_on_any() -> None:
     # just the gateway's /healthz liveness endpoint.
     assert "/api/v1/health" in script
     assert "/api/v1/residuals" in script
-    assert "/api/v1/mapping" in script
+    assert "/api/v1/matrix" in script
+    assert "/api/v1/snapshot" in script
+    assert "/api/v1/topology/v3" in script
+    # The legacy routes were removed at the 3.0 cutover.
+    assert "/api/v1/mapping" not in script
+    assert "/api/v1/topology/tree" not in script
     assert "/api/v1/metrics" in script
 
 
@@ -83,8 +89,9 @@ class _StubHandler(BaseHTTPRequestHandler):
             "/api/v1/status": ("application/json", b'{"status":"ok"}'),
             "/": ("text/html", b"<!doctype html><html>WattMosaic panel</html>"),
             "/api/v1/residuals": ("application/json", b"{}"),
-            "/api/v1/mapping": ("application/json", b"{}"),
-            "/api/v1/topology/tree": ("application/json", b"{}"),
+            "/api/v1/matrix": ("application/json", b"{}"),
+            "/api/v1/snapshot": ("application/json", b'{"device_estimates":[]}'),
+            "/api/v1/topology/v3": ("application/json", b"{}"),
             "/api/v1/devices": ("application/json", b"[]"),
             "/api/v1/metrics": ("text/plain", b"wattmosaic_queue_depth 0\n"),
         }

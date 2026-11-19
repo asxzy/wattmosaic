@@ -9,7 +9,7 @@
 # This is deliberately NOT the App watchdog probe (addon/healthcheck.py probes
 # /healthz only). The smoke test covers the full post-deploy surface: the
 # gateway/engine health, status, the ingress panel, applied migrations, the
-# residual/mapping/topology/devices endpoints and the metrics scrape.
+# residual/matrix/snapshot/topology/devices endpoints and the metrics scrape.
 #
 # Usage:
 #   scripts/smoke_test.sh [BASE_URL]
@@ -147,23 +147,45 @@ check_residuals() {
   rm -f "${body}"; pass residuals
 }
 
-check_mapping() {
-  local url="${BASE_URL}/api/v1/mapping" body
-  if ! body="$(fetch "${url}")"; then fail mapping "GET ${url} failed"; return; fi
+check_matrix() {
+  # The v3 measurement matrix (subjects x readers) replaced the legacy /mapping.
+  local url="${BASE_URL}/api/v1/matrix" body
+  if ! body="$(fetch "${url}")"; then fail matrix "GET ${url} failed"; return; fi
   if ! json_ok "${body}" "isinstance(data, dict)"; then
-    fail mapping "unexpected mapping payload: $(head -c 200 "${body}")"; rm -f "${body}"; return
+    fail matrix "unexpected matrix payload: $(head -c 200 "${body}")"; rm -f "${body}"; return
   fi
-  rm -f "${body}"; pass mapping
+  rm -f "${body}"; pass matrix
+}
+
+check_snapshot() {
+  # The v3 InferenceSnapshot. A freshly started engine that has not published a
+  # snapshot yet answers 404 by contract ("not yet computed"); that is reachable
+  # and correct, so it passes. Any other HTTP error or a malformed body fails.
+  local url="${BASE_URL}/api/v1/snapshot" body code
+  body="$(mktemp "${TMPDIR:-/tmp}/wm-smoke.XXXXXX")"
+  local opts=(-sS --connect-timeout 5 --max-time 15)
+  if [[ -n "${TOKEN}" ]]; then opts+=(-H "X-API-Token: ${TOKEN}"); fi
+  if ! code="$(curl "${opts[@]}" -o "${body}" -w '%{http_code}' "${url}")"; then
+    rm -f "${body}"; fail snapshot "GET ${url} failed"; return
+  fi
+  if [[ "${code}" == "404" ]]; then
+    rm -f "${body}"; pass snapshot; return
+  fi
+  if [[ "${code}" != "200" ]]; then
+    rm -f "${body}"; fail snapshot "GET ${url} returned HTTP ${code}"; return
+  fi
+  if ! json_ok "${body}" "isinstance(data, dict) and 'device_estimates' in data"; then
+    fail snapshot "unexpected snapshot payload: $(head -c 200 "${body}")"; rm -f "${body}"; return
+  fi
+  rm -f "${body}"; pass snapshot
 }
 
 check_topology() {
-  # "one known device value / panel reachability": the topology tree is the
-  # panel's device data source. A reachable, well-formed tree proves a known
-  # device value path responded after deploy.
-  local url="${BASE_URL}/api/v1/topology/tree" body
+  # The v3 topology read: lifecycle-tagged edges plus the active version.
+  local url="${BASE_URL}/api/v1/topology/v3" body
   if ! body="$(fetch "${url}")"; then fail topology "GET ${url} failed"; return; fi
-  if ! json_ok "${body}" "isinstance(data, (dict, list))"; then
-    fail topology "unexpected topology tree payload: $(head -c 200 "${body}")"; rm -f "${body}"; return
+  if ! json_ok "${body}" "isinstance(data, dict)"; then
+    fail topology "unexpected topology payload: $(head -c 200 "${body}")"; rm -f "${body}"; return
   fi
   rm -f "${body}"; pass topology
 }
@@ -194,7 +216,8 @@ main() {
   check_panel
   check_migrations
   check_residuals
-  check_mapping
+  check_matrix
+  check_snapshot
   check_topology
   check_devices
   check_metrics
