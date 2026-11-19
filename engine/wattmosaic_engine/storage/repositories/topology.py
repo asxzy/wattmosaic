@@ -14,14 +14,16 @@ from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
-from ...contracts import Circuit, CTChannel, DeviceTopology, Topology, TopologyStatus, utcnow
+from wattmosaic_engine.electrical._declared_shapes import ChannelDecl, DeclaredTree, DeviceDecl, EdgeState
+
+from ...contracts import Circuit, utcnow
 from ..payload import encode_if_worthwhile
 from ..repositories import Repository, enum_value, iso
 
 
 class TopologyRepository(Repository):
     @staticmethod
-    def _insertion_order(channels: Iterable[CTChannel]) -> list[CTChannel]:
+    def _insertion_order(channels: Iterable[ChannelDecl]) -> list[ChannelDecl]:
         """Order channels so a parent is always written before its children.
 
         ``ct_channels.parent_ct_id`` is a self-referencing foreign key and
@@ -38,7 +40,7 @@ class TopologyRepository(Repository):
         channel whose parent never becomes insertable is appended in its
         original order.
         """
-        ordered: list[CTChannel] = []
+        ordered: list[ChannelDecl] = []
         pending = {ch.ct_id: ch for ch in channels}
         emitted: set[str] = set()
         progress = True
@@ -53,7 +55,7 @@ class TopologyRepository(Repository):
         ordered.extend(pending.values())
         return ordered
 
-    def save_topology(self, topology: Topology, note: str = "") -> int:
+    def save_topology(self, topology: DeclaredTree, note: str = "") -> int:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
@@ -105,7 +107,7 @@ class TopologyRepository(Repository):
                 self._conn.execute("ROLLBACK")
                 raise
 
-    def load_topology(self) -> Topology | None:
+    def load_topology(self) -> DeclaredTree | None:
         with self._lock:
             chans = self._conn.execute("SELECT * FROM ct_channels").fetchall()
             devs = self._conn.execute("SELECT * FROM devices").fetchall()
@@ -127,25 +129,25 @@ class TopologyRepository(Repository):
         # user-confirmed topology that reloaded as ``candidate`` would have every
         # learning sample rejected as ``ambiguous_topology`` forever, so a
         # restart would silently disable learning.
-        status = TopologyStatus.CANDIDATE
+        status = EdgeState.CANDIDATE
         created_at = utcnow()
         if latest is not None:
             try:
-                status = TopologyStatus(str(latest["status"]))
+                status = EdgeState(str(latest["status"]))
             except ValueError:
-                status = TopologyStatus.CANDIDATE
+                status = EdgeState.CANDIDATE
             raw_created = latest["created_at"]
             if raw_created:
                 try:
                     created_at = datetime.fromisoformat(str(raw_created))
                 except ValueError:
                     created_at = utcnow()
-        return Topology(
+        return DeclaredTree(
             version=int(latest["version"]) if latest else 1,
             created_at=created_at,
             status=status,
             channels=[
-                CTChannel(
+                ChannelDecl(
                     ct_id=r["ct_id"], entity_id=r["entity_id"], name=r["name"], ct_type=r["ct_type"],
                     phase=r["phase"], parent_ct_id=r["parent_ct_id"], polarity=r["polarity"],
                     device_id=r["device_id"], paired_ct_id=r["paired_ct_id"],
@@ -167,7 +169,7 @@ class TopologyRepository(Repository):
                 for r in chans
             ],
             devices=[
-                DeviceTopology(
+                DeviceDecl(
                     device_id=r["device_id"], name=r["name"],
                     branch_ct_ids=json.loads(r["branch_ct_ids_json"]), phase=r["phase"],
                     double_pole=bool(r["double_pole"]), parent_device_id=r["parent_device_id"],

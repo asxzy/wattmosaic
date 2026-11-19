@@ -12,9 +12,12 @@ from collections.abc import Iterable, Mapping
 from datetime import timedelta
 from typing import Any
 
+from wattmosaic_engine.electrical._declared_shapes import DeclaredTree
+
 from ..api.facade import InvalidRequest, maybe_await
 from ..api.timeouts import HISTORY_TIMEOUT_BASE_S, HISTORY_TIMEOUT_PER_HOUR_S
-from ..contracts import CTType, Topology
+from ..contracts import CTType
+from ..disaggregation.auto_placement import mapping_edges_for_plan
 from ..ingestion.discovery import (
     devices_for_candidate_endpoints,
     discover_candidate_endpoints,
@@ -211,7 +214,7 @@ class DiscoveryApiMixin:
     def _candidate_state_entities(
         states: Iterable[Mapping[str, Any]],
         registries: Mapping[str, Any] | None,
-        topology: Topology,
+        topology: DeclaredTree,
     ) -> tuple[list[Any], dict[str, str]]:
         """The entities this run may reason about, from states + registries.
 
@@ -763,6 +766,34 @@ class DiscoveryApiMixin:
         self.db.save_device_configurations(merged)
         self.db.save_topology(projected, note="auto placement from observed co-movement")
         self.topology_cache = projected
+        # Contract 3.0: an applied auto placement also publishes its inference
+        # as v3 mapping edges (S15).  The version service owns the append-only
+        # write and the version bump; the CT id is the v3 endpoint id.  A
+        # transport-only deployment has no version service and simply keeps the
+        # declared-device/topology write it always had.
+        versions = getattr(self, "version_service", None)
+        if versions is not None:
+            # Auto placements are replaced wholesale on each run.  Keep every
+            # declared/user edge from the active version, drop only the previous
+            # auto-placement edges, then append this run's proposals.
+            active_id = versions.mapping_version_id()
+            persisted: list[Any] = []
+            if active_id:
+                from ..versioning.service import _map_edge_contract
+
+                persisted = [
+                    edge
+                    for edge in (
+                        _map_edge_contract(row)
+                        for row in self.db.repos.mapping.mapping_edges(active_id)
+                    )
+                    if getattr(edge, "declared_by", None) != "auto_placement"
+                ]
+            edges = (*persisted, *mapping_edges_for_plan(plan, valid_from=self._clock()))
+            if edges:
+                version_id = versions.propose_mapping(edges, None)
+                versions.promote_mapping(version_id, "auto placement")
+                result["mapping_version_id"] = version_id
         self.db.log_system_event(
             "info",
             "configuration",

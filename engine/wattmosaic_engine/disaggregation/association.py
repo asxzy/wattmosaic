@@ -3,7 +3,7 @@
 The gap this closes
 -------------------
 Before this module a device's association to a CT lived in three unrelated
-fields (``CTChannel.device_id``, ``DeviceTopology.dedicated_ct_ids``,
+fields (``ChannelDecl.device_id``, ``DeviceDecl.dedicated_ct_ids``,
 ``DeviceConfiguration.monitored_by_ct_ids``).  None of them carried evidence,
 none carried a validity interval, and the last write won.  "Which CT observes
 this device?" was therefore unanswerable after the fact — you could see the
@@ -66,7 +66,7 @@ What each evidence rule enforces, and why
    conductor / one appliance.  Both associations are emitted — both CTs really
    do observe the device — and the pair is marked as not summable.  No
    independent device load is invented.
-8. **Ambiguity is named.**  ``TopologyStatus`` has no ``AMBIGUOUS`` member
+8. **Ambiguity is named.**  ``EdgeState`` has no ``AMBIGUOUS`` member
    (only ``CANDIDATE`` / ``CONFIRMED`` / ``REJECTED``), so ambiguity is
    encoded in ``evidence["verdict"] = "ambiguous"`` / ``"split"`` with the
    competing device ids, and confidence is multiplied by
@@ -129,11 +129,10 @@ from wattmosaic_engine.contracts import (
     EdgeLifecycle,
     IsolationStatus,
     MeasurementBasis,
-    RelationKind,
     TopologyRelation,
-    TopologyStatus,
     utcnow,
 )
+from wattmosaic_engine.electrical._declared_shapes import EdgeState, RelationKindDecl
 from wattmosaic_engine.electrical.factors import FactorRegistry
 
 #: ``1.4826 * MAD`` is the normal-consistent scale of the median absolute
@@ -165,9 +164,9 @@ APPLIANCE_TOTAL_BASES = frozenset(
     {MeasurementBasis.FACTOR_ADJUSTED.value, MeasurementBasis.MONITOR_REPORTED.value}
 )
 
-#: The product-facing readings of ``RelationKind`` (spec 04 §2, REQ-TOPO-001).
+#: The product-facing readings of ``RelationKindDecl`` (spec 04 §2, REQ-TOPO-001).
 #:
-#: A **single-valued** map: every ``RelationKind`` has exactly one name and no
+#: A **single-valued** map: every ``RelationKindDecl`` has exactly one name and no
 #: name names two kinds, so a reader can render the product vocabulary from the
 #: stored kind without a second lookup table that could drift.  It is *not* a
 #: second kind axis and is never consulted to choose, combine or promote a kind:
@@ -184,25 +183,25 @@ APPLIANCE_TOTAL_BASES = frozenset(
 #: not carry (phase for ``PAIRED_LEG``, coincidence-only for ``CORRELATED``);
 #: that is gap ``G-TOPO-003``, out of scope here, and is not invented as a
 #: second kind.  ``CONTAINS`` cannot imply ``SHARED_LOAD`` by derivation.
-RELATION_KIND_NAMES: dict[RelationKind, str] = {
-    RelationKind.ELECTRICAL_PARENT_CHILD: "CONTAINS",
-    RelationKind.CT_MEASUREMENT_OVERLAP: "SHARED_LOAD",
-    RelationKind.DEVICE_CT_ASSOCIATION: "PAIRED_LEG",
-    RelationKind.CIRCUIT_MEMBERSHIP: "CIRCUIT_MEMBERSHIP",
+RELATION_KIND_NAMES: dict[RelationKindDecl, str] = {
+    RelationKindDecl.ELECTRICAL_PARENT_CHILD: "CONTAINS",
+    RelationKindDecl.CT_MEASUREMENT_OVERLAP: "SHARED_LOAD",
+    RelationKindDecl.DEVICE_CT_ASSOCIATION: "PAIRED_LEG",
+    RelationKindDecl.CIRCUIT_MEMBERSHIP: "CIRCUIT_MEMBERSHIP",
 }
 
 
-def relation_kind_name(kind: RelationKind | str) -> str:
+def relation_kind_name(kind: RelationKindDecl | str) -> str:
     """Resolve one edge to exactly one product-facing relation name.
 
-    ``relation_kind_name(kind) -> str`` takes a :class:`RelationKind` (or its
+    ``relation_kind_name(kind) -> str`` takes a :class:`RelationKindDecl` (or its
     stored string value) and returns the single product-facing name of
     REQ-TOPO-001 for it: ``CONTAINS``, ``SHARED_LOAD``, ``PAIRED_LEG`` or
     ``CIRCUIT_MEMBERSHIP``.  It is a *rendering* of the stored ``kind``, never
     a second kind axis: it chooses nothing, combines nothing and promotes
     nothing, and the four kinds stay non-implying.
 
-    Raises ``KeyError`` for a value outside ``RelationKind``, which is the
+    Raises ``KeyError`` for a value outside ``RelationKindDecl``, which is the
     contract's own refusal rather than a silent fallback -- an unknown kind
     must not be rendered as a name it does not have.
 
@@ -211,7 +210,7 @@ def relation_kind_name(kind: RelationKind | str) -> str:
     distinct kind (see :data:`RELATION_KIND_NAMES`); a consumer that needs the
     weaker reading must ask the evidence, not this function.
     """
-    return RELATION_KIND_NAMES[RelationKind(kind)]
+    return RELATION_KIND_NAMES[RelationKindDecl(kind)]
 
 VERDICT_SUPPORTED = "supported"
 VERDICT_SPLIT = "split"
@@ -1194,10 +1193,10 @@ class AssociationFinder:
             relation_id=_relation_id(
                 candidate.device_id, candidate.ct_id, self.config.algorithm_version
             ),
-            kind=RelationKind.DEVICE_CT_ASSOCIATION,
+            kind=RelationKindDecl.DEVICE_CT_ASSOCIATION,
             subject_id=candidate.device_id,
             object_id=candidate.ct_id,
-            status=TopologyStatus.CANDIDATE,
+            status=EdgeState.CANDIDATE,
             # Explicit, never the default: an inferred edge is a proposal, and
             # the lifecycle says so independently of ``status``.
             lifecycle=EdgeLifecycle.CANDIDATE,
@@ -1262,7 +1261,7 @@ class AssociationFinder:
             kind=relation.kind,
             subject_id=relation.subject_id,
             object_id=relation.object_id,
-            status=TopologyStatus.REJECTED,
+            status=EdgeState.REJECTED,
             # A withdrawn edge is terminal on the lifecycle axis too, so a
             # reader filtering on ``lifecycle`` excludes it rather than
             # re-deriving that from ``status``.

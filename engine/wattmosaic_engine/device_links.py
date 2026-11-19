@@ -4,7 +4,7 @@ Why this module exists
 ----------------------
 Home Assistant events arrive keyed by ``entity_id`` (``switch.pump``), while
 every inference and learning contract is keyed by WattMosaic's
-``DeviceTopology.device_id``.  Without an explicit, declared link:
+``DeviceDecl.device_id``.  Without an explicit, declared link:
 
 * ``EngineCore.device_states`` is keyed by raw entity ids, so the
   disaggregation engine's ``_state_text(device_states, device_id)`` lookup
@@ -16,9 +16,9 @@ every inference and learning contract is keyed by WattMosaic's
 The link is **declarative, never inferred**.  A device owns:
 
 1. its CT channels (``branch_ct_ids``) — the entity id
-   on each :class:`~wattmosaic_engine.contracts.CTChannel` is a *power* entity;
+   on each :class:`~wattmosaic_engine.contracts.ChannelDecl` is a *power* entity;
 2. zero or more state entities listed in
-   ``DeviceTopology.metadata["state_entity_ids"]`` — the ``switch``/``climate``/
+   ``DeviceDecl.metadata["state_entity_ids"]`` — the ``switch``/``climate``/
    ``binary_sensor`` entities whose state describes whether the device is on;
 3. zero or more state entities the *user* declared in configuration, kept under
    ``metadata["config_load_entity_ids"]`` so they never overwrite the
@@ -60,7 +60,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from .contracts import DeviceTopology, Topology
+from wattmosaic_engine.electrical._declared_shapes import DeclaredTree, DeviceDecl
 
 #: Metadata key holding the HA entities that describe a device's own state, as
 #: derived from mapping *evidence*.  Evidence-owned: configuration never rewrites
@@ -99,7 +99,7 @@ def _as_sequence(value: Any) -> list[str]:
     return []
 
 
-def state_entity_ids(device: DeviceTopology | Mapping[str, Any]) -> list[str]:
+def state_entity_ids(device: DeviceDecl | Mapping[str, Any]) -> list[str]:
     """Declared state entities for one device (metadata, contract-validated)."""
     metadata = (
         device.get("metadata") if isinstance(device, Mapping) else getattr(device, "metadata", None)
@@ -109,7 +109,7 @@ def state_entity_ids(device: DeviceTopology | Mapping[str, Any]) -> list[str]:
     return _as_sequence(metadata.get(STATE_ENTITIES_KEY))
 
 
-def config_load_entity_ids(device: DeviceTopology | Mapping[str, Any]) -> list[str]:
+def config_load_entity_ids(device: DeviceDecl | Mapping[str, Any]) -> list[str]:
     """Runtime entities the *user* declared in configuration (ADR-0011)."""
     metadata = (
         device.get("metadata") if isinstance(device, Mapping) else getattr(device, "metadata", None)
@@ -119,7 +119,7 @@ def config_load_entity_ids(device: DeviceTopology | Mapping[str, Any]) -> list[s
     return _as_sequence(metadata.get(CONFIG_LOAD_ENTITIES_KEY))
 
 
-def link_state_entity_ids(device: DeviceTopology | Mapping[str, Any]) -> list[str]:
+def link_state_entity_ids(device: DeviceDecl | Mapping[str, Any]) -> list[str]:
     """Runtime state entities resolved from a Home Assistant device link.
 
     A ``device_links`` entry stores an HA *device* id, which is not an entity.
@@ -136,7 +136,7 @@ def link_state_entity_ids(device: DeviceTopology | Mapping[str, Any]) -> list[st
     return _as_sequence(metadata.get(LINK_STATE_ENTITIES_KEY))
 
 
-def runtime_state_entities(device: DeviceTopology | Mapping[str, Any]) -> list[str]:
+def runtime_state_entities(device: DeviceDecl | Mapping[str, Any]) -> list[str]:
     """Entities whose *state* may be written into ``device_states``.
 
     This is the union of evidence-derived, configuration-declared and
@@ -160,13 +160,13 @@ def runtime_state_entities(device: DeviceTopology | Mapping[str, Any]) -> list[s
     )
 
 
-def _ct_ids(device: DeviceTopology | Mapping[str, Any]) -> list[str]:
+def _ct_ids(device: DeviceDecl | Mapping[str, Any]) -> list[str]:
     if isinstance(device, Mapping):
         return [*_as_sequence(device.get("branch_ct_ids"))]
     return [*device.branch_ct_ids]
 
 
-def entity_links(topology: Topology | None) -> dict[str, tuple[str, tuple[str, ...]]]:
+def entity_links(topology: DeclaredTree | None) -> dict[str, tuple[str, tuple[str, ...]]]:
     """``entity_id -> (device_id, supporting ct_ids)`` from the topology alone.
 
     Both a device's runtime state entities and the entities of its CT channels
@@ -258,7 +258,7 @@ def entity_links_from_links(
     return out
 
 
-def ambiguous_entities(topology: Topology | None) -> dict[str, list[str]]:
+def ambiguous_entities(topology: DeclaredTree | None) -> dict[str, list[str]]:
     """Backward-compatible adapter: report entities claimed by many devices.
 
     DEC-08 changed one-to-many from an error into a diagnostic.  The legacy
@@ -283,7 +283,7 @@ def ambiguous_entities(topology: Topology | None) -> dict[str, list[str]]:
 
 
 def device_for_entity(
-    topology: Topology | None, entity_id: str | None
+    topology: DeclaredTree | None, entity_id: str | None
 ) -> tuple[str, tuple[str, ...]] | None:
     """Link one entity id, or ``None`` when no device declares it."""
     if not entity_id:
@@ -292,7 +292,7 @@ def device_for_entity(
 
 
 def state_key(
-    topology: Topology | None, entity_id: str | None, state: Any
+    topology: DeclaredTree | None, entity_id: str | None, state: Any
 ) -> tuple[str, Any]:
     """Return ``(key, state)`` suitable for ``device_states``.
 
@@ -315,13 +315,13 @@ def state_key(
     return (device_id, state)
 
 
-def supporting_ct_ids(topology: Topology | None, entity_id: str | None) -> tuple[str, ...]:
+def supporting_ct_ids(topology: DeclaredTree | None, entity_id: str | None) -> tuple[str, ...]:
     link = device_for_entity(topology, entity_id)
     return () if link is None else link[1]
 
 
 def state_entity_for_device(
-    topology: Topology | None, device_id: str, entity_id: str | None
+    topology: DeclaredTree | None, device_id: str, entity_id: str | None
 ) -> bool:
     """True when ``entity_id`` may be written as ``device_id``'s runtime state.
 

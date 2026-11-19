@@ -73,12 +73,11 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from wattmosaic_engine.contracts import (
-    CTChannel,
     MeasurementBasis,
     MeasurementFactor,
-    RelationKind,
     validate_factor_intervals,
 )
+from wattmosaic_engine.electrical._declared_shapes import ChannelDecl, RelationKindDecl
 
 # --------------------------------------------------------------------------- #
 # Confidence constants
@@ -727,7 +726,7 @@ class FactorOwnership:
     confidence: float = ESTABLISHED_CONFIDENCE
     conflict: bool = False
     double_application_risk: bool = False
-    relation: RelationKind | None = None
+    relation: RelationKindDecl | None = None
     reason_code: str = NO_FACTOR_DECLARED
     reason: str = ""
 
@@ -762,7 +761,7 @@ _UNESTABLISHED = (
 def resolve_factor_ownership(
     ct_id: str,
     factors: Iterable[MeasurementFactor | Mapping[str, Any]],
-    channels: Iterable[CTChannel],
+    channels: Iterable[ChannelDecl],
     double_pole_pairs: Iterable[tuple[str, str]] = (),
     *,
     timestamp: datetime,
@@ -897,7 +896,7 @@ def resolve_factor_ownership(
         confidence=confidence,
         conflict=conflict,
         double_application_risk=double_risk,
-        relation=RelationKind.CT_MEASUREMENT_OVERLAP if peer_ids else None,
+        relation=RelationKindDecl.CT_MEASUREMENT_OVERLAP if peer_ids else None,
         reason_code=reason_code,
         reason=reason,
     )

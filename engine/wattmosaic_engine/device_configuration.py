@@ -8,7 +8,7 @@ without a solver.
 
 Projection, not a second source of truth
 ---------------------------------------
-``Topology`` is already persisted, versioned and threaded through ingestion,
+``DeclaredTree`` is already persisted, versioned and threaded through ingestion,
 inference and learning.  Adding a parallel configuration channel would let the
 two disagree — a device could be "shared" for the solver and "monitored" for the
 event intake.  So the resolved configuration is **projected into the device
@@ -65,7 +65,6 @@ from wattmosaic_engine.contracts import (
     CTType,
     DeviceConfiguration,
     DeviceConfigurationSet,
-    DeviceTopology,
     DeviceType,
     ExpectedPower,
     HaConnectivity,
@@ -74,9 +73,8 @@ from wattmosaic_engine.contracts import (
     MonitoringLevel,
     Phase,
     PowerBehavior,
-    Topology,
-    TopologyStatus,
 )
+from wattmosaic_engine.electrical._declared_shapes import DeclaredTree, DeviceDecl, EdgeState
 from wattmosaic_engine.entity_evidence import classify_entity
 from wattmosaic_engine.models.device_profile import DevicePowerProfile
 
@@ -126,7 +124,7 @@ WINDOW_SOURCE_CONFIGURED = "configured"
 
 @dataclass(slots=True)
 class _AttributionView:
-    """Pure attribution view built directly from a :class:`Topology` contract.
+    """Pure attribution view built directly from a :class:`DeclaredTree` contract.
 
     This is the v3 replacement for the pointer-based ``TopologyGraph`` the
     configuration projection used to import.  It answers exactly the three
@@ -135,7 +133,7 @@ class _AttributionView:
     legacy pointer fields.
     """
 
-    topology: Topology
+    topology: DeclaredTree
 
     @property
     def channels(self) -> dict[str, Any]:
@@ -155,7 +153,7 @@ class _AttributionView:
         )
 
 
-def _build_attribution(topology: Topology | None) -> _AttributionView | None:
+def _build_attribution(topology: DeclaredTree | None) -> _AttributionView | None:
     return _AttributionView(topology) if topology is not None else None
 
 
@@ -206,7 +204,7 @@ class EffectiveConfig:
     #: so the label stays ``shared`` and this flag records that nothing else
     #: draws on the circuit.
     sole_occupant: bool = False
-    #: Reasons surfaced in ``InferenceResult.tier_reasons``.
+    #: Reasons surfaced in ``AttributedValue.tier_reasons``.
     notes: tuple[str, ...] = ()
 
     @property
@@ -239,10 +237,10 @@ class EffectiveConfig:
 
 
 def derive_monitoring(
-    device: DeviceTopology | None,
+    device: DeviceDecl | None,
     graph: _AttributionView | None,
     *,
-    topology: Topology | None = None,
+    topology: DeclaredTree | None = None,
     declared: MonitoringLevel = MonitoringLevel.UNKNOWN,
 ) -> MonitoringLevel:
     """Monitoring level, honouring an explicit declaration over the CT graph.
@@ -267,10 +265,10 @@ def derive_monitoring(
 
 
 def is_sole_occupant(
-    device: DeviceTopology | None,
+    device: DeviceDecl | None,
     graph: _AttributionView | None,
     *,
-    topology: Topology | None = None,
+    topology: DeclaredTree | None = None,
 ) -> bool:
     """True when no other topology device shares this device's attribution rows.
 
@@ -414,9 +412,9 @@ def _coerce_load_shape(value: Any) -> LoadShape:
 def effective_config(
     device_id: str,
     *,
-    topology: Topology | None = None,
+    topology: DeclaredTree | None = None,
     graph: _AttributionView | None = None,
-    device: DeviceTopology | None = None,
+    device: DeviceDecl | None = None,
 ) -> EffectiveConfig:
     """Resolve one device's usable configuration from the topology metadata.
 
@@ -581,7 +579,7 @@ def effective_config(
             # then caps it, and the surplus stays unexplained instead of being
             # credited to a lamp that may not have drawn it.
             #
-            # Topology-only devices (no configuration) keep the old behaviour, so
+            # DeclaredTree-only devices (no configuration) keep the old behaviour, so
             # a discovered row shared by two placeholders is unchanged.
             shared_unmodelled = bool(observed) and (
                 not siblings
@@ -631,7 +629,7 @@ def _metadata_entities(value: Any) -> list[str]:
 
 
 def effective_configs(
-    topology: Topology | None,
+    topology: DeclaredTree | None,
     *,
     graph: _AttributionView | None = None,
 ) -> dict[str, EffectiveConfig]:
@@ -676,7 +674,7 @@ def _phase_for_cts(
 
 
 def cts_claimed_by_dedicated(
-    topology: Topology, ct_ids: Iterable[str]
+    topology: DeclaredTree, ct_ids: Iterable[str]
 ) -> tuple[str, str] | None:
     """``(device_id, ct_id)`` of a device that already owns one of these rows.
 
@@ -710,7 +708,7 @@ def cts_claimed_by_dedicated(
 
 
 def materialisation_blockers(
-    topology: Topology,
+    topology: DeclaredTree,
     configurations: Iterable[DeviceConfiguration],
 ) -> dict[str, str]:
     """Configurations the topology cannot honour, with the reason why.
@@ -751,10 +749,10 @@ def _materialise_device(
     device_id: str,
     config: DeviceConfiguration,
     channels: Mapping[str, Any],
-    topology: Topology | None = None,
+    topology: DeclaredTree | None = None,
     *,
     name: str | None = None,
-) -> DeviceTopology | None:
+) -> DeviceDecl | None:
     """Create the topology row for a device that only a declaration defines.
 
     A fixture behind a circuit has no channel of its own, so discovery never
@@ -787,11 +785,11 @@ def _materialise_device(
         # Creating this row would put a second claim on a dedicated measurement
         # and count the circuit twice.  Refuse; the caller reports the conflict.
         return None
-    return DeviceTopology(
+    return DeviceDecl(
         device_id=device_id,
         name=name or device_id,
         phase=_phase_for_cts(cts, channels),
-        topology_status=TopologyStatus.CANDIDATE,
+        topology_status=EdgeState.CANDIDATE,
         metadata={
             MATERIALISED_KEY: str(config.configured_by),
             "note": "created from a device configuration; no discovered channel owned it",
@@ -800,11 +798,11 @@ def _materialise_device(
 
 
 def project_configuration(
-    topology: Topology,
+    topology: DeclaredTree,
     configurations: DeviceConfigurationSet | Iterable[DeviceConfiguration],
     *,
     display_names: Mapping[str, str] | None = None,
-) -> Topology:
+) -> DeclaredTree:
     """Return a copy of ``topology`` with configuration projected into metadata.
 
     The input topology is not mutated: callers persist the result through the
@@ -832,7 +830,7 @@ def project_configuration(
     # configuration entirely: the user saved it, the version bumped, and nothing
     # changed.  Materialise those rows first so they take the normal path.
     known = {device.device_id for device in topology.devices}
-    extra: list[DeviceTopology] = []
+    extra: list[DeviceDecl] = []
     for device_id, config in by_id.items():
         if device_id in known:
             continue
@@ -842,7 +840,7 @@ def project_configuration(
         if created is not None:
             extra.append(created)
 
-    devices: list[DeviceTopology] = []
+    devices: list[DeviceDecl] = []
     for device in [*topology.devices, *extra]:
         config = by_id.get(device.device_id)
         metadata = dict(device.metadata or {})
@@ -902,7 +900,7 @@ def project_configuration(
             else:
                 metadata.pop("monitored_by_ct_ids", None)
             # A declaration is not just metadata: the measurement matrix reads
-            # ``DeviceTopology.branch_ct_ids`` and ``TopologyGraph`` derives
+            # ``DeviceDecl.branch_ct_ids`` and ``TopologyGraph`` derives
             # every attribution row from them.  Writing only
             # ``metadata["monitored_by_ct_ids"]`` left the graph unchanged, so
             # declaring "this CT measures that device" produced no attribution
@@ -1025,7 +1023,7 @@ def is_mode_only(config: EffectiveConfig) -> bool:
     return bool(config.mode_entity_ids) and not config.load_entity_ids
 
 
-def has_ct_type(topology: Topology | None, ct_id: str, ct_type: CTType) -> bool:
+def has_ct_type(topology: DeclaredTree | None, ct_id: str, ct_type: CTType) -> bool:
     if topology is None:
         return False
     channel = topology.channel_map().get(ct_id)

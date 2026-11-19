@@ -4,7 +4,7 @@ This module owns ``detect_configuration_changes`` and its helpers.  It was moved
 verbatim out of :mod:`wattmosaic_engine.electrical.topology` (which keeps a
 re-export until Z2); the function stays **pure**: it compares a declared current
 topology against an observed topology and emits typed, SUSPECTED
-``ConfigurationChangeEvent`` contracts.  It never promotes a change, advances a
+``ConfigEventDecl`` contracts.  It never promotes a change, advances a
 version or reads a wall clock (``occurred_at`` is injected).  The workflow that
 turns these SUSPECTED events into promoted versions lives in
 :mod:`wattmosaic_engine.versioning.workflow`.
@@ -23,12 +23,10 @@ from typing import Any
 from wattmosaic_engine.contracts import (
     ChangeDetection,
     ChangeStatus,
-    ConfigurationChangeEvent,
     ConfigurationChangeKind,
 )
 
 from .topology import (
-    Topology,
     TopologyVersionRecord,
     diff_topologies,
 )
@@ -41,6 +39,8 @@ __all__: list[str] = [
 
 
 from dataclasses import dataclass  # noqa: E402 - kept near the new detector types
+
+from wattmosaic_engine.electrical._declared_shapes import ConfigEventDecl, DeclaredTree
 
 
 @dataclass(frozen=True)
@@ -231,20 +231,20 @@ def _bounded_confidence(value: float | None, base: float) -> float:
 def detect_configuration_changes(
     *,
     current_version: TopologyVersionRecord,
-    current_topology: Topology,
-    observed_topology: Topology,
+    current_topology: DeclaredTree,
+    observed_topology: DeclaredTree,
     occurred_at: datetime | None = None,
     reported_by: str = "scheduler",
     evidence_event_ids: Sequence[str] = (),
     base_confidence: float = 0.5,
-) -> tuple[ConfigurationChangeEvent, ...]:
+) -> tuple[ConfigEventDecl, ...]:
     """Compare an observed topology against the current version and report changes.
 
     The deterministic :func:`diff_topologies` is the backbone for relation-level
     changes; the typed channel/device/circuit snapshots are compared as well,
     because polarity, calibration, phase and scope live on those objects and not
     on a relation.  Every finding becomes a **typed, SUSPECTED**
-    :class:`ConfigurationChangeEvent` carrying an observed confidence, the
+    :class:`ConfigEventDecl` carrying an observed confidence, the
     current ``topology_version`` and its supporting evidence ids.
 
     This function is pure: it never mutates ``current_topology``,
@@ -441,7 +441,7 @@ def detect_configuration_changes(
             notes=f"edge {change.kind} changed: {','.join(change.changed_fields)}",
         )
 
-    events: list[ConfigurationChangeEvent] = []
+    events: list[ConfigEventDecl] = []
     for (kind, entity), (
         event_reader_id,
         event_device_id,
@@ -451,7 +451,7 @@ def detect_configuration_changes(
         notes,
     ) in sorted(found.items(), key=lambda item: (item[0][0].value, item[0][1])):
         events.append(
-            ConfigurationChangeEvent(
+            ConfigEventDecl(
                 change_id=_change_event_id(kind, entity, version),
                 kind=kind,
                 detection=ChangeDetection.INFERRED,
@@ -472,7 +472,7 @@ def detect_configuration_changes(
 
 
 def _relation_change_kind(relation_kind: str) -> ConfigurationChangeKind:
-    """Map one ``RelationKind`` to the contract's change-kind vocabulary."""
+    """Map one ``RelationKindDecl`` to the contract's change-kind vocabulary."""
     if relation_kind == "device_ct_association":
         return ConfigurationChangeKind.SMART_PLUG_RELOCATION
     if relation_kind == "electrical_parent_child":

@@ -22,7 +22,7 @@ association layer already produced, and it carries three separate things:
     re-derived rather than trusted;
 ``classification_confidence``
     a **circuit-classification** confidence in its own right, also exposed as a
-    :class:`~wattmosaic_engine.contracts.ConfidenceVector` with exactly that
+    :class:`~wattmosaic_engine.contracts.EvidenceVector` with exactly that
     dimension populated.  It is never blended with power, topology or residual
     confidence -- a reader that wants one number must say which dimension.
 
@@ -102,12 +102,9 @@ from pydantic import BaseModel
 from wattmosaic_engine.contracts import (
     Circuit,
     CircuitClass,
-    ConfidenceVector,
     MeasurementBasis,
-    RelationKind,
     ResidualPower,
     TopologyRelation,
-    TopologyStatus,
     utcnow,
 )
 from wattmosaic_engine.disaggregation.association import (
@@ -116,6 +113,7 @@ from wattmosaic_engine.disaggregation.association import (
     VERDICT_SPLIT,
     VERDICT_SUPPORTED,
 )
+from wattmosaic_engine.electrical._declared_shapes import EdgeState, EvidenceVector, RelationKindDecl
 from wattmosaic_engine.electrical.factors import FactorRegistry
 
 __all__ = [
@@ -414,7 +412,7 @@ class CircuitClassifier:
         rows = [
             relation
             for relation in relations
-            if RelationKind(_value(relation.kind)) is RelationKind.DEVICE_CT_ASSOCIATION
+            if RelationKindDecl(_value(relation.kind)) is RelationKindDecl.DEVICE_CT_ASSOCIATION
         ]
 
         # One scope is one *connected set* of conductors.  A device observed by
@@ -480,7 +478,7 @@ class CircuitClassifier:
                     name=None,
                     panel_id=None,
                     classification=CircuitClass.UNKNOWN,
-                    classification_status=TopologyStatus.CANDIDATE,
+                    classification_status=EdgeState.CANDIDATE,
                     parent_circuit_id=None,
                     ct_ids=ct_ids,
                     device_ids=sorted(group["devices"]),
@@ -535,7 +533,7 @@ class CircuitClassifier:
         scoped = [
             relation
             for relation in relations
-            if RelationKind(_value(relation.kind)) is RelationKind.DEVICE_CT_ASSOCIATION
+            if RelationKindDecl(_value(relation.kind)) is RelationKindDecl.DEVICE_CT_ASSOCIATION
             and canonical(relation.object_id) in scope
         ]
 
@@ -655,7 +653,7 @@ class CircuitClassifier:
             "algorithm_version": self.config.algorithm_version,
             "config": self.config.as_metadata(),
             "classification_confidence": confidence,
-            "confidence": ConfidenceVector(
+            "confidence": EvidenceVector(
                 circuit_classification=confidence,
                 method=self.config.algorithm_version,
             ),
@@ -715,7 +713,7 @@ class CircuitClassifier:
             panel_id=circuit.panel_id,
             classification=classification,
             classification_status=(
-                TopologyStatus.CONFIRMED if confirmed else TopologyStatus.CANDIDATE
+                EdgeState.CONFIRMED if confirmed else EdgeState.CANDIDATE
             ),
             parent_circuit_id=circuit.parent_circuit_id,
             ct_ids=list(circuit.ct_ids),
