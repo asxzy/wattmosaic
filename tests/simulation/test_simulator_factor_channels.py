@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 
 import pytest
-from wattmosaic_engine.contracts import Phase
 
 from tools.simulator import HouseholdScenario, SimulatorConfig
 from tools.simulator.behavior import (
@@ -27,6 +26,7 @@ from tools.simulator.factors import FactorEpoch, FactorOwner, FactorTimeline, Re
 from tools.simulator.frames import find_ground_truth_keys
 from tools.simulator.sensors import QualityLevel
 from tools.simulator.topology import (
+    Phase,
     SimChannel,
     SimDevice,
     SimDeviceType,

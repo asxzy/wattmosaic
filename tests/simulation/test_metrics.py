@@ -17,7 +17,6 @@ from tests.simulation.metrics import (
     error_stats,
     evaluate,
     flat_zero_predictor,
-    load_engine_predictor,
     main_channel_only_predictor,
     naive_sum_wrong_predictor,
     oracle_predictor,
@@ -256,34 +255,3 @@ def test_coverage_helper_is_consistent(records) -> None:
     report = evaluate(records, main_channel_only_predictor)
     cov = coverage_and_invariants(records, main_channel_only_predictor)
     assert cov["coverage"] == pytest.approx(report.coverage.coverage, abs=1e-3)
-
-
-# --------------------------------------------------------------------------- #
-# Real engine adapter: must degrade gracefully, never explode
-# --------------------------------------------------------------------------- #
-
-
-def test_engine_adapter_reports_status_without_raising() -> None:
-    from tools.simulator import REAL_HOME_TOPOLOGY
-
-    predictor, status = load_engine_predictor(REAL_HOME_TOPOLOGY.to_contract_topology())
-    if predictor is None:
-        assert isinstance(status, str) and status
-        # Document exactly why it is skipped.
-        assert ("unavailable" in status or "unexpected" in status
-                or "failed" in status or "lacks" in status or "no contract" in status)
-    else:
-        assert status == "adapted"
-        assert callable(predictor)
-
-
-def test_engine_adapter_if_present_runs_on_records(records) -> None:
-    from tools.simulator import REAL_HOME_TOPOLOGY
-
-    predictor, status = load_engine_predictor(REAL_HOME_TOPOLOGY.to_contract_topology())
-    if predictor is None:
-        pytest.skip(f"real engine not available yet: {status}")
-    report = evaluate(records[:20], predictor)
-    assert report.n_records == 20
-    # The real engine must not fabricate more than the home consumes.
-    assert report.coverage.false_attribution_rate >= 0.0

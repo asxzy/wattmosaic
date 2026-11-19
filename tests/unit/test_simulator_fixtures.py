@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from wattmosaic_engine.contracts import Phase, validate_factor_intervals
+from wattmosaic_engine.contracts import validate_factor_intervals
 
 from tests.fixtures.labhouse import (
     MATRIX_STRATA,
@@ -64,6 +64,7 @@ from tools.simulator.labhouse import (
     build_scenario,
     validate_strata,
 )
+from tools.simulator.topology import Phase
 
 # --------------------------------------------------------------------------- #
 # A. Every named stratum builds
