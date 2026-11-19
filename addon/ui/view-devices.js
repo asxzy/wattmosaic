@@ -5,7 +5,7 @@
    under /api/hassio_ingress/<token>/.  No build step, no network beyond origin.
    ========================================================================== */
 
-import { TIER_ORDER, ago, badge, card, clear, clock, describeError, duration, el, emptyState, fetchDevice, get, kWh, kv, label, notify, num, percent, sourceTone, statCard, state, statusBadge, tierBadge, tierInfo, titleCase, toneFor, watts } from './core.js';
+import { TIER_ORDER, ago, badge, card, clear, clock, describeError, duration, el, emptyState, fetchDevice, get, kWh, kv, label, notify, num, percent, post, sourceTone, statCard, state, statusBadge, tierBadge, tierInfo, titleCase, toneFor, watts } from './core.js';
 
 /* --- Devices ---------------------------------------------------------- */
 
@@ -217,6 +217,13 @@ async function renderDevice(root, signal) {
   const { device, models } = await fetchDevice(deviceId, signal);
   if (signal.aborted) return;
 
+  // U2: additive v3 data — inference records, the matrix row drill and the
+  // endpoint list.  A backend without these routes simply renders an honest
+  // empty state; nothing here writes on render.
+  const v3data = await fetchDeviceV3(deviceId, signal);
+  if (signal.aborted) return;
+  const model = v3DeviceModel(device, v3data.cells, v3data.records, models, v3data.endpoints);
+
   const result = device.latest_result || null;
   const topology = device.topology || null;
 
@@ -252,6 +259,13 @@ async function renderDevice(root, signal) {
   mainCol.append(deviceHero(device, result));
   mainCol.append(deviceHistoryCard(device));
   mainCol.append(deviceEvidenceCard(result));
+  // U2 v3: status / identifiability / bounds / group / provisional, the
+  // "Observed by readers" row drill, and mapping/model history.
+  mainCol.append(v3DeviceEstimateCard(model));
+  mainCol.append(observedByReadersCard(model));
+  mainCol.append(v3HistoryCard(model));
+  const scopeCard = endpointScopeCard(model);
+  if (scopeCard) mainCol.append(scopeCard);
   // Additive B4-UIb: this device's model versions come from the /models payload
   // this view already fetches, so no extra request is needed.
   mainCol.append(versionHistoryCard(topology, models, null));
@@ -954,7 +968,200 @@ function eventEvidenceCard(diagnostics, isolation) {
   });
 }
 
+/* ====================================================================== *
+ *  U2 — v3 device detail model (pure, node-testable).
+ * ---------------------------------------------------------------------- *
+ *  A device detail carries its estimate status, identifiability, bounds,
+ *  group and provisional flag, the readers that observe it, its mapping/model
+ *  history and any candidate single-subject endpoint scope.  Every value is
+ *  taken from a published payload; an UNKNOWN or group member never renders a
+ *  measured watt, and absent values are null (never 0.0).
+ * ====================================================================== */
+
+const _absent = (value) => value === null || value === undefined;
+const _str = (value) => (_absent(value) || value === '' ? null : String(value));
+
+// From a v3 device estimate (D4 /devices/{id}) plus its matrix cells, build the
+// honest detail the panel shows.  ``device`` may carry ``latest_result`` in the
+// legacy shape or a v3 ``estimate``; both are read without inventing values.
+function v3DeviceModel(device, cells, records, models, endpoints) {
+  const d = device || {};
+  const estimate = d.estimate || (d.latest_result || {});
+  const foundCells = Array.isArray(cells) ? cells : [];
+  const status = _str(estimate.status) || _str(estimate.measurement_status) || 'unknown';
+  const ident = _str(estimate.identifiability)
+    || (Array.isArray(estimate.group_members) && estimate.group_members.length
+      ? 'non_identifiable' : 'unknown');
+  const bounds = estimate.bounds || {};
+  const low = bounds.lower_w !== undefined ? bounds.lower_w : estimate.min_w;
+  const high = bounds.upper_w !== undefined ? bounds.upper_w : estimate.max_w;
+  const hasNumber = !_absent(estimate.point_w)
+    || (!_absent(estimate.power_w) && !estimate.power_w_is_placeholder
+        && ident !== 'non_identifiable');
+  const point = !_absent(estimate.point_w) ? estimate.point_w
+    : (hasNumber ? estimate.power_w : null);
+  const observedBy = foundCells.map((c) => ({
+    reader_id: _str(c && c.reader_id),
+    status: _str((c && c.mapping || {}).mapping_status),
+    observability: _str((c && c.mapping || {}).observability),
+    drill: `/matrix/cells/${encodeURIComponent(_str(c && c.row_id) || _str(d.device_id) || 'row')}/${encodeURIComponent(_str(c && c.reader_id) || 'reader')}`,
+  })).filter((r) => r.reader_id);
+  return {
+    device_id: _str(d.device_id),
+    name: _str(d.name) || _str(d.device_id),
+    status,
+    identifiability: ident,
+    point_w: hasNumber ? point : null,
+    bounds: { lower_w: _absent(low) ? null : low, upper_w: _absent(high) ? null : high },
+    group_id: _str(estimate.group_id)
+      || (Array.isArray(estimate.group_members) ? 'group' : null),
+    provisional: estimate.provisional === true || status === 'provisional',
+    observed_by: observedBy,
+    records: Array.isArray(records) ? records : [],
+    models: Array.isArray(models) ? models : ((models && models.versions) || []),
+    endpoint_scope: _endpointScope(endpoints),
+  };
+}
+
+function _endpointScope(endpoints) {
+  const list = Array.isArray(endpoints) ? endpoints : [];
+  const candidate = list.find((e) => e && (e.scope_status === 'candidate' || e.scope === 'candidate'));
+  if (!candidate) return null;
+  return {
+    endpoint_id: _str(candidate.endpoint_id) || _str(candidate.id),
+    subject_id: _str(candidate.subject_id),
+    status: 'candidate',
+    confirm_path: `/endpoints/${encodeURIComponent(_str(candidate.endpoint_id) || _str(candidate.id))}/scope`,
+  };
+}
+
+// The "Observed by readers" card reuses the v3 row drill per reader: each row
+// names the reader and links to the cell evidence, never a fabricated watt.
+function observedByReadersCard(model) {
+  const rows = (model && model.observed_by) || [];
+  return card('Observed by readers', rows.length ? rows.map((r) =>
+    el('div', { class: 'device-observer-row' }, [
+      el('span', { class: 'chip chip-ct' }, r.reader_id),
+      r.status ? badge(label(r.status), 'info') : null,
+      r.observability ? badge(label(r.observability), 'mute') : null,
+      el('a', { class: 'v3-provenance', href: `#${r.drill}` }, 'Evidence'),
+    ])
+  ) : [el('p', { class: 'stat-hint' }, 'No matrix cell observes this device yet.')], {
+    foot: 'A reader is an observation, not a device. Shared conductors are shown with their bounds, never a per-device watt.',
+  });
+}
+
+// The v3 estimate card: status, identifiability, bounds, group, provisional.
+function v3DeviceEstimateCard(model) {
+  const m = model || {};
+  const bounds = m.bounds || {};
+  return card('Estimate (v3)', [
+    kv([
+      ['Status', badge(label(m.status || 'unknown'), m.provisional ? 'warn' : 'info')],
+      ['Identifiability', badge(label(m.identifiability || 'unknown'), 'warn')],
+      ['Point', _absent(m.point_w) ? '—' : watts(m.point_w)],
+      ['Bounds', `${_absent(bounds.lower_w) ? '—' : watts(bounds.lower_w)} – ${_absent(bounds.upper_w) ? '—' : watts(bounds.upper_w)}`],
+      ['Group', m.group_id || '—'],
+      ['Provisional', m.provisional ? badge('PROVISIONAL', 'warn') : badge('No', 'mute')],
+    ]),
+    m.identifiability === 'non_identifiable'
+      ? el('p', { class: 'stat-hint', style: 'margin-top:10px' },
+          'This load is not identifiable on its own. Only the group sum has an honest value; no per-device watt is published.')
+      : null,
+  ], { foot: 'Status, identifiability and bounds are published by the engine, not inferred by this panel.' });
+}
+
+// Mapping/model history from /devices/{id}/records and /matrix/rows/{id}, plus
+// the L1 /models/{id} version list.  A candidate scope is never auto-confirmed.
+function v3HistoryCard(model) {
+  const m = model || {};
+  const recordRows = (m.records || []).slice(0, 12).map((r) => [
+    _str(r && (r.record_id || r.id)) || '—',
+    label(_str((r && r.reason) || (r && r.status)) || 'unknown'),
+    r && r.created_at ? ago(r.created_at) : '—',
+  ]);
+  const cellRows = (m.observed_by || []).map((r) => [r.reader_id, r.status || '—', r.observability || '—']);
+  const modelRows = (m.models || []).map((v) => [
+    _str(v && v.version) || '—',
+    label(_str((v && v.status) || 'unknown')),
+    _str(v && v.model_type) || '—',
+  ]);
+  const table = (headings, rows, empty) => rows.length
+    ? el('div', { class: 'table-wrap' }, [el('table', { class: 'data' }, [
+        el('thead', {}, el('tr', {}, headings.map((h) => el('th', {}, h)))),
+        el('tbody', {}, rows.map((cells) => el('tr', {}, cells.map((c) => el('td', {}, c))))),
+      ])])
+    : el('p', { class: 'stat-hint' }, empty);
+  return card('Mapping & model history', [
+    el('div', { class: 'stat-label' }, 'Inference records'),
+    table(['Record', 'Reason', 'When'], recordRows, 'No event inference records published.'),
+    el('div', { class: 'stat-label', style: 'margin-top:14px' }, 'Mapping cells'),
+    table(['Reader', 'Status', 'Observability'], cellRows, 'No mapping cells published.'),
+    el('div', { class: 'stat-label', style: 'margin-top:14px' }, 'Model versions'),
+    table(['Version', 'Status', 'Type'], modelRows, 'No model versions published.'),
+  ], { foot: 'History is append-only. A rejected or candidate version is never shown as active.' });
+}
+
+// Endpoint scope review (D2, DEC-05/06): confirm or reject a candidate
+// single-subject scope.  These are the only writes and happen on user action.
+async function confirmEndpointScope(endpointId, http = post) {
+  if (_absent(endpointId)) return null;
+  return http(`/endpoints/${encodeURIComponent(String(endpointId))}/scope`, { decision: 'confirm' });
+}
+
+async function rejectEndpointScope(endpointId, http = post) {
+  if (_absent(endpointId)) return null;
+  return http(`/endpoints/${encodeURIComponent(String(endpointId))}/scope`, { decision: 'reject' });
+}
+
+function endpointScopeCard(model) {
+  const scope = model && model.endpoint_scope;
+  if (!scope) return null;
+  return card('Endpoint scope review', [
+    kv([
+      ['Endpoint', scope.endpoint_id || '—'],
+      ['Subject', scope.subject_id || '—'],
+      ['Status', badge('CANDIDATE', 'warn')],
+    ]),
+    el('div', { style: 'margin-top:12px;display:flex;gap:8px' }, [
+      el('button', {
+        class: 'btn btn-sm', type: 'button',
+        onclick: () => confirmEndpointScope(scope.endpoint_id).then(
+          () => notify('Scope confirmed', 'This endpoint is now a single-subject measurement.'),
+          (err) => notify('Could not confirm scope', describeError(err), 'bad')
+        ),
+      }, 'Confirm scope'),
+      el('button', {
+        class: 'btn btn-sm btn-ghost', type: 'button',
+        onclick: () => rejectEndpointScope(scope.endpoint_id).then(
+          () => notify('Scope rejected', 'The candidate scope was rejected.'),
+          (err) => notify('Could not reject scope', describeError(err), 'bad')
+        ),
+      }, 'Reject scope'),
+    ]),
+  ], { foot: 'A single-subject endpoint measures one load. Only an operator may confirm its scope.' });
+}
+
+// Wire the v3 cards into the device detail view.  Called by renderDevice with
+// data from the payloads it already fetches plus the additive v3 routes.
+async function fetchDeviceV3(deviceId, signal) {
+  const [records, cells, endpoints] = await Promise.all([
+    get(`/devices/${encodeURIComponent(deviceId)}/records`, signal).catch(() => []),
+    get(`/matrix/rows/${encodeURIComponent(deviceId)}`, signal).catch(() => []),
+    get('/endpoints', signal).catch(() => []),
+  ]);
+  return { records, cells, endpoints };
+}
+
 export {
+  v3DeviceModel,
+  observedByReadersCard,
+  v3DeviceEstimateCard,
+  v3HistoryCard,
+  endpointScopeCard,
+  confirmEndpointScope,
+  rejectEndpointScope,
+  fetchDeviceV3,
   renderDevices,
   deviceSummary,
   deviceToolbar,

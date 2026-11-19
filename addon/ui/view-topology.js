@@ -84,7 +84,7 @@ async function renderTopology(root, signal) {
   //    a 12-hour window and can take tens of seconds; putting it in this
   //    Promise.all is what made the whole tab wait for it.  /status is cheap
   //    and carries the learning state the banner needs, so it joins here.
-  const [topology, treeResult, status] = await Promise.all([
+  const [topology, treeResult, status, topologyV3] = await Promise.all([
     get('/topology', signal).catch((err) => {
       if (err && err.status === 404) return null;
       throw err;
@@ -94,6 +94,9 @@ async function renderTopology(root, signal) {
       (err) => ({ ok: false, data: null, err })
     ),
     get('/status', signal).catch(() => null),
+    // U2: the v3 typed-edge payload (T4).  A backend without it renders an
+    // explicit unavailable state; the rest of the topology view stays intact.
+    get('/topology/v3', signal).catch(() => null),
   ]);
   if (signal.aborted) return;
 
@@ -129,6 +132,15 @@ async function renderTopology(root, signal) {
   // payloads already fetched for this view (/topology and /status).
   root.append(versionHistoryCard(topology, null, null));
   root.append(suspectedChangesCard(status, null));
+
+  // U2: v3 typed edges with their lifecycle, PROVISIONAL accept/reject (writes
+  // only on user action) and a link to the matching matrix columns.
+  root.append(topologyV3
+    ? v3EdgesCard(v3TopologyModel(topologyV3))
+    : emptyState(
+        'Typed topology edges unavailable',
+        'GET /api/v1/topology/v3 returned no payload. The hierarchy above is still usable; no edge is promoted or written in the meantime.'
+      ));
 
   // Placement discovery renders into its own slot; it is only populated when
   // the user asks for it (or when a previous answer is cached in state).
@@ -1047,7 +1059,117 @@ async function confirmTopology() {
   }
 }
 
+/* ====================================================================== *
+ *  U2 — v3 typed-edge topology (pure view helpers).
+ * ---------------------------------------------------------------------- *
+ *  GET /topology (T4) publishes typed edges with a lifecycle state.  Only a
+ *  user action writes: accepting a PROVISIONAL suggestion POSTs /pin, rejecting
+ *  POSTs /reject.  Nothing here mutates on render.  Each edge can link to the
+ *  matching matrix columns for its reader(s).
+ * ====================================================================== */
+
+const _absent = (value) => value === null || value === undefined;
+const _edgeText = (value) => (_absent(value) || value === '' ? null : String(value));
+
+// Normalise a T4 topology edge into the fields the panel renders.  Lifecycle
+// is published verbatim; an absent lifecycle is 'candidate', never promoted.
+function v3EdgeView(edge) {
+  const e = edge || {};
+  const lifecycle = _edgeText(e.lifecycle)
+    || _edgeText(e.status)
+    || (e.confirmed === true ? 'confirmed' : 'candidate');
+  const edgeType = _edgeText(e.edge_type) || _edgeText(e.type) || 'unknown';
+  const readers = Array.isArray(e.reader_ids)
+    ? e.reader_ids.filter(Boolean).map(String)
+    : [e.reader_id].filter((v) => !_absent(v)).map(String);
+  return {
+    edge_id: _edgeText(e.edge_id) || _edgeText(e.id),
+    edge_type: edgeType,
+    lifecycle: String(lifecycle).toLowerCase(),
+    parent_id: _edgeText(e.parent_id) || _edgeText(e.parent_device_id),
+    child_id: _edgeText(e.child_id) || _edgeText(e.child_device_id),
+    reader_ids: readers,
+    provisional: String(lifecycle).toLowerCase() === 'provisional',
+    matrix_drill: readers.length
+      ? `/matrix/readers/${encodeURIComponent(readers[0])}`
+      : '/matrix',
+  };
+}
+
+// Build the typed-edge model from a /topology payload.  Edges with a published
+// lifecycle are all kept; nothing is promoted past CANDIDATE by this panel.
+function v3TopologyModel(payload) {
+  const data = payload || {};
+  const edges = Array.isArray(data.edges)
+    ? data.edges
+    : Array.isArray(data.topology_edges) ? data.topology_edges : [];
+  const views = edges.map(v3EdgeView);
+  return {
+    edges: views,
+    provisional: views.filter((e) => e.provisional),
+    byType: views.reduce((acc, e) => {
+      (acc[e.edge_type] ||= []).push(e);
+      return acc;
+    }, {}),
+  };
+}
+
+// The ONLY writes in the topology view: a user clicking Accept or Reject.  A
+// PROVISIONAL edge accept POSTs /pin; a reject POSTs /reject.  No render path
+// calls these (HB §16: one event never promotes an edge past CANDIDATE).
+async function acceptProvisionalEdge(edgeId, http = post) {
+  if (!_edgeText(edgeId)) return null;
+  return http(`/topology/edges/${encodeURIComponent(String(edgeId))}/pin`, {});
+}
+
+async function rejectProvisionalEdge(edgeId, http = post) {
+  if (!_edgeText(edgeId)) return null;
+  return http(`/topology/edges/${encodeURIComponent(String(edgeId))}/reject`, {});
+}
+
+// Render the typed-edge card.  Accept/Reject buttons are wired to the user
+// actions above; PROVISIONAL edges are soft and always show a lifecycle badge.
+function v3EdgesCard(model) {
+  const m = model || v3TopologyModel(null);
+  const rows = m.edges.map((edge) =>
+    el('div', { class: 'topo-v3-edge', dataset: { lifecycle: edge.lifecycle, type: edge.edge_type } }, [
+      badge(label(edge.edge_type), 'info'),
+      badge(label(edge.lifecycle), edge.provisional ? 'warn' : 'mute'),
+      el('span', {}, `${edge.parent_id || '—'} → ${edge.child_id || '—'}`),
+      el('a', { class: 'v3-provenance', href: `#${edge.matrix_drill}` }, 'Matrix columns'),
+      edge.provisional
+        ? el('span', { class: 'topo-v3-actions' }, [
+            el('button', {
+              class: 'btn btn-sm', type: 'button',
+              onclick: () => acceptProvisionalEdge(edge.edge_id).then(
+                () => notify('Edge accepted', 'The provisional edge was pinned.'),
+                (err) => notify('Could not accept edge', describeError(err), 'bad')
+              ),
+            }, 'Accept'),
+            el('button', {
+              class: 'btn btn-sm btn-ghost', type: 'button',
+              onclick: () => rejectProvisionalEdge(edge.edge_id).then(
+                () => notify('Edge rejected', 'The provisional edge was rejected.'),
+                (err) => notify('Could not reject edge', describeError(err), 'bad')
+              ),
+            }, 'Reject'),
+          ])
+        : null,
+    ])
+  );
+  return card('Typed topology edges (v3)', rows.length ? rows : [
+    el('p', { class: 'stat-hint' }, 'No typed edges published by the topology service.'),
+  ], {
+    foot: 'Lifecycle comes from the topology service. Only an operator Accept or Reject writes; a single event never promotes an edge past candidate.',
+  });
+}
+
 export {
+  v3EdgeView,
+  v3TopologyModel,
+  acceptProvisionalEdge,
+  rejectProvisionalEdge,
+  v3EdgesCard,
   TREE_PATH,
   CT_TONES,
   ctTone,
