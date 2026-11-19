@@ -44,6 +44,8 @@ from wattmosaic_engine.realtime.windows import (
     DEFAULT_PRE_S,
     DEFAULT_REQUIRED_PRE_SAMPLES,
     INSUFFICIENT_PRE,
+    OP_FINALIZE,
+    OP_SUPERSEDE,
     SUPERSEDES_KEY,
     EvidenceBatch,
     ResolvedWindowConfig,
@@ -114,7 +116,12 @@ def event(
 
 
 class Sink:
-    """Batches evidence into a real S16 repository, recording metadata too."""
+    """Batches evidence into a real S16 repository, recording metadata too.
+
+    Mirrors the production ``_persist_evidence_batch`` operation dispatch so the
+    unit tests exercise the same one-live-row semantics (Z8): revise/finalize
+    update in place, supersede appends a new row and thins the predecessor.
+    """
 
     def __init__(self, repo: EvidenceRepository) -> None:
         self.repo = repo
@@ -123,7 +130,18 @@ class Sink:
 
     def put(self, batch: Sequence[EvidenceBatch]) -> None:
         for item in batch:
-            self.repo.put_evidence(item.evidence)  # real duplicate-id rule
+            op = item.op
+            if op == OP_FINALIZE:
+                self.repo.finalize_evidence(item.evidence)
+            elif op == OP_SUPERSEDE:
+                self.repo.put_evidence(
+                    item.evidence, supersedes_evidence_id=item.supersedes
+                )
+                clear_id = item.metadata.get("clear_samples_of")
+                if clear_id is not None:
+                    self.repo.clear_evidence_samples(clear_id)
+            else:
+                self.repo.upsert_evidence(item.evidence)
             self.metadata[item.evidence.evidence_id] = dict(item.metadata)
         self.batches.append(list(batch))
 
@@ -259,27 +277,31 @@ def test_provisional_then_final_batched_and_callbacks(repo: EvidenceRepository) 
     window = collector.open(event(), at=T0 + timedelta(seconds=CADENCE_S))
     assert window is not None and window.evidence.finalized is False
 
-    # First post-sample flips the window to PROVISIONAL: a new immutable record
-    # with a distinct id, persisted as one row.  Further post-samples snapshot
-    # new records but do not re-announce PROVISIONAL.
+    # First post-sample flips the window to PROVISIONAL: the SAME live row is
+    # revised in place (Z8).  Further post-samples revise that row again but do
+    # not re-announce PROVISIONAL, and never append a new row.
     first = collector.on_sample("Main", T0 + timedelta(seconds=2 * CADENCE_S), 250.0)
     assert provisional and provisional[-1].finalized is False
     assert provisional[-1].evidence_id == first.evidence_id
-    assert provisional[-1].evidence_id != window.evidence.evidence_id
+    assert provisional[-1].evidence_id == window.evidence.evidence_id
     assert sink.batches == [[sink.batches[0][0]]]
     assert len(sink.batches[0]) == 1
     second = collector.on_sample("Main", T0 + timedelta(seconds=3 * CADENCE_S), 251.0)
     assert len(provisional) == 1  # announced only at the first post-sample
-    assert second is not None and second.evidence_id != first.evidence_id
+    assert second is not None and second.evidence_id == first.evidence_id
     assert len(sink.batches) == 2
 
-    # Post-window expiry FINALIZES a new immutable record; the provisional one
-    # is untouched on disk.
+    # Post-window expiry FINALIZES the SAME live row (no new record).
     final = collector.tick(T0 + timedelta(seconds=131 * CADENCE_S))
     assert len(final) == 1 and final[0].finalized is True
     assert finals[-1].evidence_id == final[0].evidence_id
+    assert final[0].evidence_id == window.evidence.evidence_id
     assert len(sink.batches) == 3
-    assert repo.evidence(provisional[-1].evidence_id) is not None
+    # One live row only, finalized, carrying both post-samples.
+    stored = repo.evidence(final[0].evidence_id)
+    assert stored is not None and stored.finalized is True
+    assert len(stored.samples) == 2
+    assert len(repo.evidence_for_event("mev-1")) == 1
 
 
 def test_close_finalizes_without_post_samples(repo: EvidenceRepository) -> None:

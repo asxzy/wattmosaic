@@ -104,6 +104,7 @@ RESERVED_VERSIONS: frozenset[int] = frozenset({12})
 #: gap in this range must therefore not be read as "a migration is missing".
 # 21 is no longer spare: D5 allocated it to ``v021_evidence_supersedes``.
 # 22 is no longer spare: ZF allocated it to ``v022_nullable_confidence``.
+# 26 is no longer spare: Z8 allocated it to ``v026_evidence_revision``.
 SPARE_VERSIONS: frozenset[int] = frozenset(range(23, 25))
 
 #: Human-readable reasons, keyed by reserved number, used only by discovery's

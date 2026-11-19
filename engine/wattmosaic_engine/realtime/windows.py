@@ -6,10 +6,11 @@ Stage 5 of the real-time pipeline.  When P3 emits a
 * snapshots the pre-window from the P2
   :class:`~wattmosaic_engine.realtime.reader_state.ReaderStateStore` ring and
   keeps a post-window open until its configured expiry;
-* publishes :class:`~wattmosaic_engine.contracts.EventEvidence` in three
-  immutable steps: a PROVISIONAL record at the first post-sample, a FINAL record
-  at close, and a *superseding* record whose metadata names the old id when a
-  late sample arrives after FINAL;
+* maintains **one live** :class:`~wattmosaic_engine.contracts.EventEvidence`
+  row per ``(measurement event, reader)``: the open window revises that row in
+  place (``upsert``) as post-samples arrive, then marks it FINAL when the window
+  closes.  Only a *late* sample after FINAL creates a superseding row (with the
+  old row's samples cleared so the payload is never duplicated);
 * batches writes through a caller-supplied sink (S16 ``put_evidence`` via the
   persist queue in P6; a plain callback before then);
 * exposes ``on_provisional(evidence)`` and ``on_final(evidence)`` for P5.
@@ -19,7 +20,7 @@ samples, whichever is longer; the post-window is 120 s per load class, resolved
 global -> class -> device like :class:`~wattmosaic_engine.disaggregation.isolation.IsolationConfig`.
 Baseline and σ come from P2 (long-run per-reader statistics), **never** from the
 two samples inside the 30 s pre-window.  A late sample creates a new evidence
-record with ``supersedes=<old id>`` in metadata; the old record is never edited.
+record that ``supersedes=<old id>``; the old summary stays as the audit record.
 
 The module is **pure**: it has no database access and no wall clock.  Every
 "now" is an explicit argument.  Production code never imports
@@ -27,9 +28,10 @@ The module is **pure**: it has no database access and no wall clock.  Every
 
 A note on ``metadata``: the K02 ``EventEvidence`` contract has no ``metadata``
 field and forbids extra fields, so supersession metadata is carried *alongside*
-the record in the :class:`EvidenceBatch` handoff — an item pairs an immutable
-evidence record with its metadata.  This keeps the contract untouched (no
-cross-task edit) while still making ``supersedes`` queryable by the consumer.
+the record in the :class:`EvidenceBatch` handoff — an item pairs an evidence
+record with its metadata.  This keeps the contract untouched (no cross-task
+edit) while still making ``supersedes`` / revise-finalize queryable by the
+consumer.
 """
 
 from __future__ import annotations
@@ -55,6 +57,10 @@ __all__ = [
     "DEFAULT_PRE_S",
     "DEFAULT_REQUIRED_PRE_SAMPLES",
     "INSUFFICIENT_PRE",
+    "OP_FINALIZE",
+    "OP_KEY",
+    "OP_REVISE",
+    "OP_SUPERSEDE",
     "SUPERSEDES_KEY",
     "EvidenceBatch",
     "EventWindow",
@@ -74,6 +80,12 @@ DEFAULT_REQUIRED_PRE_SAMPLES = 2
 BATCH_SIZE = 64
 #: Metadata key of the supersession link (task step 3).
 SUPERSEDES_KEY = "supersedes"
+#: Operation keys on an ::class:`EvidenceBatch`: an open window revises its one
+#: live row in place; closing sets ``finalized``; late data supersedes.
+OP_KEY = "op"
+OP_REVISE = "revise"
+OP_FINALIZE = "finalize"
+OP_SUPERSEDE = "supersede"
 #: A window-collection flag (not a K02 measurement QualityFlag), carried in the
 #: window's / batch's metadata (``EventEvidence.quality_flags`` is a closed enum).
 INSUFFICIENT_PRE = "insufficient_pre"
@@ -200,6 +212,11 @@ class EvidenceBatch:
     def supersedes(self) -> str | None:
         value = self.metadata.get(SUPERSEDES_KEY)
         return None if value is None else str(value)
+
+    @property
+    def op(self) -> str:
+        """The persistence operation: revise / finalize / supersede / insert."""
+        return str(self.metadata.get(OP_KEY, "insert"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -467,35 +484,33 @@ class WindowCollector:
         at: datetime,
         value_w: float | None,
     ) -> EventEvidence | None:
-        """Add an in-window post-sample; the first one publishes PROVISIONAL."""
+        """Add an in-window post-sample by revising the one live evidence row.
+
+        Z8: the evidence id is the deterministic one minted at :meth:`open`, so
+        every post-sample rewrites the *same* row (its bounded window samples
+        replaced, not duplicated).  Only the first post-sample announces
+        PROVISIONAL to P5 (design §4); subsequent samples keep its id.
+        """
         at = _aware(at)
         window = self._windows.get(reader_id)
         if window is None or not (window.evidence.window_start <= at <= window.close_at):
             return None
         if any(existing_at == at for existing_at, _ in window.evidence.samples):
             return None
-        prior_count = len(window.evidence.samples)
-        is_first = prior_count == 0
-        if is_first:
-            # First post-sample opens the PROVISIONAL window as its own immutable
-            # record (distinct id from the initial open record).
-            new_id = _stage_id(window.evidence.evidence_id, "prov")
-        else:
-            new_id = _stage_id(window.evidence.evidence_id, f"p{prior_count}")
+        is_first = len(window.evidence.samples) == 0
         evidence = window.evidence.model_copy(
             update={
                 "samples": [
                     *window.evidence.samples,
                     (at, None if value_w is None else float(value_w)),
                 ],
-                "evidence_id": new_id,
             }
         )
         window = replace(window, evidence=evidence)
         self._windows[reader_id] = window
-        # Persist every immutable post-window snapshot, but only the *first*
-        # post-sample opens (and announces) the PROVISIONAL window (design §4).
-        self._enqueue(evidence, window.metadata, provisional=is_first)
+        metadata = dict(window.metadata)
+        metadata[OP_KEY] = OP_REVISE
+        self._enqueue(evidence, metadata, provisional=is_first)
         return evidence
 
     def tick(self, now: datetime) -> list[EventEvidence]:
@@ -517,17 +532,19 @@ class WindowCollector:
         window = self._windows.pop(reader_id, None)
         if window is None:
             return None
-        # FINAL is a *new* immutable record: a distinct id so S16's
-        # append-only ``put_evidence`` accepts both PROVISIONAL and FINAL.
+        # FINAL sets ``finalized`` on the SAME live row (Z8): no new row is
+        # created just because the window closed.  The id stays stable so P4's
+        # sub-events and every evidence ref keep resolving.
         evidence = window.evidence.model_copy(
             update={
                 "finalized": True,
                 "window_end": window.close_at,
-                "evidence_id": _stage_id(window.evidence.evidence_id, "final"),
             }
         )
-        self._enqueue(evidence, window.metadata, provisional=False)
-        self._closed[reader_id] = EvidenceBatch(evidence, window.metadata)
+        metadata = dict(window.metadata)
+        metadata[OP_KEY] = OP_FINALIZE
+        self._enqueue(evidence, metadata, provisional=False)
+        self._closed[reader_id] = EvidenceBatch(evidence, metadata)
         return evidence
 
     # -- late samples / revisions ----------------------------------------- #
@@ -557,8 +574,20 @@ class WindowCollector:
         reason: str,
         sample: tuple[datetime, float | None] | None = None,
     ) -> EventEvidence:
-        """Create a new immutable revision that supersedes ``previous``."""
-        metadata = {SUPERSEDES_KEY: previous.evidence_id, "reason": reason}
+        """Create a late-data revision that supersedes ``previous``.
+
+        HB requires an audit trail but DEC-30 forbids duplicating the window
+        samples.  The predecessor's *summary* row (Δ, baseline, σ, quality,
+        bounds) stays → ``supersedes_evidence_id`` still resolves → but its
+        ``samples_json`` is reduced to a bounded first/last pair via an in-place
+        ``clear_samples`` handoff.  The new row carries the full revised samples.
+        """
+        metadata = {
+            SUPERSEDES_KEY: previous.evidence_id,
+            "reason": reason,
+            OP_KEY: OP_SUPERSEDE,
+            "clear_samples_of": previous.evidence_id,
+        }
         samples = list(previous.samples)
         if sample is not None:
             at, value = sample

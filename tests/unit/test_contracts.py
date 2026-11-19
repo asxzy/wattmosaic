@@ -138,7 +138,7 @@ def test_migration_versions_are_sequential() -> None:
     the old ``list(range(1, N + 1))`` rule breaks as soon as any one of them is
     added.  The real invariant is: 1-11 exist and are contiguous, 12 is never a
     migration (it is the payload-encoding marker), and every later version is
-    unique and at most 25.
+    unique and at most the registry's latest (v026 after Z8).
     """
     versions = [m.version for m in MIGRATIONS]
     assert versions == sorted(versions)
@@ -148,9 +148,10 @@ def test_migration_versions_are_sequential() -> None:
     reserved = set(migrations_module.RESERVED_VERSIONS)
     spare = set(migrations_module.SPARE_VERSIONS)
     assert reserved == {12}
-    assert spare == set(range(23, 25))  # 21 D5, 22 ZF (nullable confidence)
+    assert spare == set(range(23, 25))  # 21 D5, 22 ZF (nullable confidence); 26 Z8
     assert 12 not in versions
-    assert all(13 <= version <= 25 for version in versions if version > 11)
+    # Upper bound is the registry's own latest (Z8 added v026 after Z1's v025).
+    assert all(13 <= version <= migrations_module.LATEST_VERSION for version in versions if version > 11)
     assert not reserved & set(versions)
     assert not spare & set(versions)
 

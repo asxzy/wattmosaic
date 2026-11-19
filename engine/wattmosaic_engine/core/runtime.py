@@ -561,20 +561,38 @@ class RuntimeMixin:
             return MatrixStore(clock=self._clock)
 
     def _persist_evidence_batch(self, batch: Sequence[Any]) -> None:
-        """P4 → S16 sink: persist immutable event evidence through the DB seam.
+        """P4 → S16 sink: persist event evidence through the DB seam.
 
-        D5: when P4's ``EvidenceBatch.supersedes`` is set (a late sample produced
-        a superseding revision), persist the immutable link through
-        ``put_evidence(..., supersedes_evidence_id=...)``.  The contract record
-        itself never gains a metadata field.
+        Z8: one live row per ``(measurement event, reader)``.  An open window
+        revises that row in place (``upsert_evidence``), closing marks it FINAL
+        (``finalize_evidence``), and only a late-data revision appends a new row
+        with ``supersedes_evidence_id`` set and the predecessor's samples thinned
+        so the window payload is never duplicated.  The contract record itself
+        never gains a metadata field.
         """
+        from ..realtime.windows import (  # noqa: PLC0415 - local to keep runtime import light
+            OP_FINALIZE,
+            OP_SUPERSEDE,
+        )
+
         repository = self.db.repos.evidence
         for item in batch:
             evidence = getattr(item, "evidence", item)
-            supersedes = getattr(item, "supersedes", None)
+            op = getattr(item, "op", "insert")
             try:
-                repository.put_evidence(evidence, supersedes_evidence_id=supersedes)
-            except Exception:  # noqa: BLE001 - duplicate revisions are benign
+                if op == OP_FINALIZE:
+                    repository.finalize_evidence(evidence)
+                elif op == OP_SUPERSEDE:
+                    supersedes = getattr(item, "supersedes", None)
+                    repository.put_evidence(
+                        evidence, supersedes_evidence_id=supersedes
+                    )
+                    clear_id = getattr(item, "metadata", {}).get("clear_samples_of")
+                    if clear_id is not None:
+                        repository.clear_evidence_samples(clear_id)
+                else:  # open/revise (and any legacy bare record)
+                    repository.upsert_evidence(evidence)
+            except Exception:  # noqa: BLE001 - evidence bookkeeping must not stop ingestion
                 log.debug("evidence write skipped", exc_info=True)
 
     def _persist_ha_event(self, event: HAEvent) -> None:
@@ -1274,6 +1292,18 @@ class RuntimeMixin:
         engine = self.grouping_engine
         if engine is None or engine.current(group.group_id) is None:
             return
+        # Z8: a CONFIRMED/UNRESOLVED group closes its readers' evidence windows.
+        # Finalize their single live rows (no new row) so retention sees durable
+        # evidence even when the group closes before the 120 s post-window ends.
+        status = str(getattr(group.status, "value", group.status))
+        if status in (EventGroupStatus.CONFIRMED.value, EventGroupStatus.UNRESOLVED.value):
+            for delta in group.reader_deltas:
+                try:
+                    # ``close`` enqueues an OP_FINALIZE to the P4 sink, which
+                    # marks the single live row FINAL in place.
+                    self.window_collector.close(delta.reader_id)
+                except Exception:  # noqa: BLE001 - bookkeeping must not stop publish
+                    log.debug("evidence finalize on group close failed", exc_info=True)
         for event in engine.ha_events(group.group_id):
             self._persist_ha_event(event)
         if str(getattr(group.status, "value", group.status)) != EventGroupStatus.CONFIRMED.value:
@@ -1464,9 +1494,17 @@ class RuntimeMixin:
         loop so the published result carries the confirmed status (and the L6
         learning gate, which only accepts CONFIRMED results, can open).
         """
+        tick_at = now if now is not None else self._clock()
+        # P4 window close (Z8): a window whose post-window expired is FINAL, so
+        # its one live evidence row is marked finalized.  Without this tick the
+        # evidence row stayed PROVISIONAL forever (finalized=0 on every row).
+        try:
+            self.window_collector.tick(tick_at)
+        except Exception:  # noqa: BLE001 - window bookkeeping must not stop groups
+            log.debug("window close tick failed", exc_info=True)
         if self.grouping_engine is None:
             return []
-        changed = self.grouping_engine.tick(now if now is not None else self._clock())
+        changed = self.grouping_engine.tick(tick_at)
         for group in changed:
             if group.status == EventGroupStatus.CONFIRMED:
                 self.on_group_ready(group)
@@ -2225,29 +2263,51 @@ class RuntimeMixin:
         """Hook kept for stage-boundary instrumentation (no-op by default)."""
 
     def _prune_evidence(self) -> None:
-        """Background job: bound the new L2 evidence/L1 raw tables (DEC-30).
+        """Background job: bound the L2 evidence and L1 raw tables (DEC-30).
 
-        Runs on the single background executor, never the event loop.  Absent
-        horizons mean "keep everything" — an explicit operator action bounds
-        evidence, never a fabricated default.
+        Uses the shared :func:`apply_evidence_retention` decision layer so the
+        two independent clocks are honoured: evidence rows (and their Δ/σ/
+        baseline summary) live ``WM_EVIDENCE_RETENTION_DAYS``; the high-resolution
+        points inside ``samples_json`` are thinned after
+        ``WM_EVIDENCE_RAW_RETENTION_DAYS``.  Superseded rows still referenced by a
+        newer revision are protected.  Raw ``ct_samples`` are pruned on the same
+        raw horizon.  Runs on the single background executor, never the loop.
         """
+        from ..storage.tiers import (  # noqa: PLC0415 - local to keep runtime import light
+            apply_evidence_retention,
+        )
+
         db = self.db
         cfg = self.config
-        cutoff_days = cfg.evidence_retention_days
+        now = self._clock()
+        evidence_days = cfg.evidence_retention_days
         raw_days = cfg.evidence_raw_retention_days
+        if evidence_days is None and raw_days is None:
+            return
         with db._lock:  # noqa: SLF001 - single-writer storage seam
-            for table, days in (("event_evidence", cutoff_days), ("ha_events_v3", raw_days)):
-                if days is None:
-                    continue
-                cutoff = (self._clock() - timedelta(days=days)).isoformat()
+            try:
+                apply_evidence_retention(
+                    db._conn,
+                    now=now,
+                    evidence_days=evidence_days or 400,
+                    sample_days=raw_days or 30,
+                )
+            except Exception:  # noqa: BLE001 - table may not exist yet
+                log.debug("evidence retention prune skipped", exc_info=True)
+            # Raw measurement samples are bounded by the raw-evidence horizon.
+            if raw_days is not None:
                 try:
+                    columns = {
+                        str(row[1])
+                        for row in db._conn.execute("PRAGMA table_info(ct_samples)").fetchall()
+                    }
+                    col = "observed_at" if "observed_at" in columns else "received_at"
                     db._conn.execute(  # noqa: SLF001 - storage seam
-                        f"DELETE FROM {table} WHERE window_start < ?" if table == "event_evidence"
-                        else f"DELETE FROM {table} WHERE observed_at < ?",
-                        (cutoff,),
+                        f"DELETE FROM ct_samples WHERE {col} < ?",  # noqa: S608 - fixed names
+                        ((now - timedelta(days=raw_days)).isoformat(),),
                     )
                 except Exception:  # noqa: BLE001 - table may not exist yet
-                    log.debug("evidence prune skipped for %s", table, exc_info=True)
+                    log.debug("ct_samples evidence prune skipped", exc_info=True)
 
     async def _self_heal_loop(self) -> None:
         """T7 detectors on the background executor every 15 minutes."""

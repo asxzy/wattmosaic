@@ -37,7 +37,8 @@ def test_perf_runtime_quick_report_shape(tmp_path: Path) -> None:
     # Every reported section is present and well-formed.
     assert set(report) >= {
         "scale", "fast_path_us_per_sample", "event_loop_ms", "healthz_ms",
-        "background_jobs", "db_growth_bytes_per_day", "matrix", "gates",
+        "background_jobs", "db_growth_bytes_per_day",
+        "db_growth_by_table_bytes_per_day", "matrix", "gates",
     }
     scale = report["scale"]
     assert scale["readers"] == 40
@@ -45,6 +46,13 @@ def test_perf_runtime_quick_report_shape(tmp_path: Path) -> None:
     assert scale["events_per_s"] == 30.0
     assert scale["duration_s"] == 60.0
     assert scale["samples"] > 0 and scale["event_cycles"] > 0
+    # Z8: evidence rows stay bounded, never one per delivered sample, and
+    # windows that closed are finalized in place.
+    assert scale["event_evidence_rows"] < scale["samples"] / 10
+    # A 60 s quick run may end before the 120 s post-window closes, so the count
+    # may be 0 here; finalization-on-close is asserted in the unit/integration
+    # tests instead.
+    assert 0 <= scale["event_evidence_finalized_rows"] <= scale["event_evidence_rows"]
 
     fast = report["fast_path_us_per_sample"]
     assert set(fast) >= {"p50_us", "p95_us", "p99_us", "p50_ms", "p95_ms", "p99_ms"}
@@ -57,6 +65,10 @@ def test_perf_runtime_quick_report_shape(tmp_path: Path) -> None:
 
     assert isinstance(report["background_jobs"], dict)
     assert report["db_growth_bytes_per_day"] >= 0
+    # Per-table growth is measured after the matrix seed (fixture, not growth).
+    per_table = report["db_growth_by_table_bytes_per_day"]
+    assert isinstance(per_table, dict)
+    assert all(isinstance(v, (int, float)) and v >= 0 for v in per_table.values())
 
     matrix = report["matrix"]
     assert matrix["devices"] == 500 and matrix["readers"] == 100
