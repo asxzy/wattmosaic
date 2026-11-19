@@ -84,12 +84,7 @@ async def topology_endpoint_config(request: web.Request) -> web.Response:
 
 
 def register(router: web.UrlDispatcher, base: str, deps: object) -> None:
-    # The legacy API surface is snapshotted byte-for-byte (X04's
-    # ``test_routes_discovery``) until Z1.  These additive v3 routes are only
-    # mounted when the caller opts in through ``deps``; the default app factory
-    # passes ``None`` and keeps the snapshot intact.
-    if deps is None:
-        return
+    # Additive v3 routes, always mounted; the legacy topology routes stay until Z1.
     router.add_get(f"{base}/topology/v3", topology_v3_get)
     router.add_post(f"{base}/topology/edges", topology_edges_post)
     router.add_post(f"{base}/topology/edges/{{edge_id}}/pin", topology_edge_pin)
