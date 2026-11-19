@@ -27,8 +27,13 @@ Consumers.  ``GET /status`` reads :func:`table_tiers` for the tier vocabulary
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import json
+import sqlite3
+from collections.abc import Iterable, Iterator
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
+from ..contracts import utcnow
 from .migrations import migration_tier_tables
 
 #: The tier vocabulary, in order.  Exactly these four names are valid
@@ -287,6 +292,226 @@ PRUNABLE_TABLES: dict[str, tuple[str, str]] = {
 }
 
 
+# --------------------------------------------------------------------------- #
+# D5 -- re-tiering and DEC-30 retention declarations
+# --------------------------------------------------------------------------- #
+
+#: The legacy raw event log that ``ha_events_v3``/``event_evidence`` supersede.
+#: P6 stops writing it in favour of those tables (step 2 of the task) and Z1
+#: renames it to ``device_events_legacy``; until then it stays writable and keeps
+#: its shipped raw-horizon prune.  Declared here so the re-tiering is visible in
+#: one place rather than inferred from Z1's future rename.
+LEGACY_EVENT_TABLES: tuple[str, ...] = ("device_events",)
+
+#: The canonical, immutable event-evidence table that replaces the legacy log.
+CANONICAL_EVIDENCE_TABLE = "event_evidence"
+
+
+def canonical_evidence_table() -> str:
+    """The table new (v3) event evidence is written to."""
+    return CANONICAL_EVIDENCE_TABLE
+
+
+def never_pruned_tables() -> tuple[str, ...]:
+    """Every registered table the retention pass must never delete from.
+
+    DEC-30 keeps topology, mapping, model and matrix-cell *versions* forever;
+    they are small and are the history a replay resolves against.  Derived from
+    the registry (L4 tables plus the version/evidence tables of lower tiers)
+    rather than a second hand-written list, so a newly registered table is
+    exempt by default and the "history is exempt" statement stays true.
+    """
+    exempt = {
+        table
+        for table in TABLE_TIERS
+        if table not in PRUNABLE_TABLES
+        or table.endswith("_versions")
+        or table.endswith("_versions_v3")
+    }
+    return tuple(table for table in TABLE_TIERS if table in exempt)
+
+
+#: Storage tiers for which a user-facing "growth per day" measurement makes
+#: sense.  A versioned (L4) table is immutable history, so growth is reported as
+#: ``None`` rather than a fabricated ``0`` (HB §18).
+_GROWTH_TIERS = frozenset({"L1", "L2", "L3"})
+
+#: Age key of each table whose health is reported, by its declared tier.  The
+#: time column of a versioned table is metadata, not a prune horizon; ``None``
+#: means the table has no meaningful single age key.
+_TABLE_TIME_COLUMNS: dict[str, str | None] = {
+    "ct_samples": "received_at",
+    "device_events": "occurred_at",
+    "device_state_samples": "received_at",
+    "inference_results": "timestamp",
+    "reconciliation_results": "timestamp",
+    "data_quality_events": "timestamp",
+    "system_events": "timestamp",
+    "power_aggregates": "bucket_start",
+    "energy_aggregates": "bucket_start",
+    "event_evidence": "window_start",
+    "event_groups": "opened_at",
+    "event_group_members": None,
+    "event_inference_records": "created_at",
+    "ha_events_v3": "observed_at",
+    "inference_snapshots": "created_at",
+    "device_group_estimates": "at",
+    "reader_residual_series": "at",
+    "unknown_load_profiles": "first_seen",
+    "topology_versions_v3": "created_at",
+    "mapping_versions": "created_at",
+    "matrix_cell_versions": "updated_at",
+    "power_model_versions_v3": "created_at",
+    "configuration_events": "created_at",
+    "learning_observations": "created_at",
+}
+for _table, (_col, _horizon) in PRUNABLE_TABLES.items():
+    _TABLE_TIME_COLUMNS.setdefault(_table, _col)
+
+
+def time_column_of(table: str) -> str | None:
+    """The age key of ``table`` for storage-health measurement, or ``None``.
+
+    A table with no single meaningful age key (e.g. the group-member join table)
+    reports ``None`` rather than a zero sentinel (HB §18).
+    """
+    return _TABLE_TIME_COLUMNS.get(table)
+
+
+def has_growth(tier: str) -> bool:
+    """Whether a tier's tables are expected to grow (L1-L3, not versioned L4)."""
+    return tier in _GROWTH_TIERS
+
+
+# --------------------------------------------------------------------------- #
+# DEC-30 -- event-evidence retention (two independent clocks)
+# --------------------------------------------------------------------------- #
+
+#: The immutable summary (Δ, baseline, σ, quality, window bounds) lives this long.
+DEFAULT_EVIDENCE_RETENTION_DAYS = 400
+#: High-resolution points inside ``samples_json`` are thinned after this long.
+DEFAULT_SAMPLES_RETENTION_DAYS = 30
+#: Points kept when a window is thinned: first + last + min + max.
+_SUMMARY_POINT_LIMIT = 2
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _parse_iso(value: str) -> datetime:
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return _as_utc(parsed)
+
+
+def referenced_evidence_ids(conn: sqlite3.Connection) -> frozenset[str]:
+    """Ids named by another evidence row's ``supersedes_evidence_id``.
+
+    A superseded record is immutable and older than the revision that replaces
+    it; pruning must never drop it while the newer record still points at it.
+    Returns an empty set on a database created before migration 21.
+    """
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(event_evidence)")}
+    if "supersedes_evidence_id" not in columns:
+        return frozenset()
+    rows = conn.execute(
+        "SELECT DISTINCT supersedes_evidence_id FROM event_evidence "
+        "WHERE supersedes_evidence_id IS NOT NULL"
+    ).fetchall()
+    return frozenset(str(row[0]) for row in rows)
+
+
+def _thin_samples(raw: str) -> tuple[list[list[Any]], int]:
+    """Reduce a ``samples_json`` payload to a bounded summary.
+
+    Returns the new list and the number of points dropped.  ``None`` sample
+    values (data gaps) stay ``None`` -- never turned into ``0.0``.  Idempotent:
+    thinning an already-thin list drops nothing.
+    """
+    try:
+        samples = json.loads(raw or "[]")
+    except (TypeError, ValueError):
+        return [], 0
+    if not isinstance(samples, list) or len(samples) <= _SUMMARY_POINT_LIMIT:
+        return samples if isinstance(samples, list) else [], 0
+
+    kept: list[list[Any]] = [list(samples[0]), list(samples[-1])]
+    numeric = [
+        sample
+        for sample in samples
+        if len(sample) == 2 and isinstance(sample[1], (int, float)) and sample[1] is not None
+    ]
+    if numeric:
+        for extreme in (min(numeric, key=lambda s: s[1]), max(numeric, key=lambda s: s[1])):
+            record = list(extreme)
+            if not any(record == existing for existing in kept):
+                kept.append(record)
+    kept.sort(key=lambda s: str(s[0]))
+    return kept, len(samples) - len(kept)
+
+
+def apply_evidence_retention(
+    conn: sqlite3.Connection,
+    *,
+    now: datetime | None = None,
+    evidence_days: int = DEFAULT_EVIDENCE_RETENTION_DAYS,
+    sample_days: int = DEFAULT_SAMPLES_RETENTION_DAYS,
+    active_reference_ids: Iterable[str] = (),
+) -> dict[str, int]:
+    """Thin old raw samples and delete unreferenced, expired evidence rows.
+
+    Returns ``{"rows_thinned", "samples_dropped", "rows_deleted",
+    "rows_protected"}``.  ``now`` is injected so a fixed clock is deterministic;
+    it defaults to :func:`utcnow` at the call site only.  ``active_reference_ids``
+    are evidence ids cited by an active derived run (L7) that must outlive the
+    evidence horizon.  Single transaction; no wall clock and no reimplementation
+    of the repository layer.
+    """
+    current = _as_utc(now) if now is not None else utcnow()
+    sample_cutoff = current - timedelta(days=int(sample_days))
+    evidence_cutoff = current - timedelta(days=int(evidence_days))
+    protected = referenced_evidence_ids(conn) | frozenset(
+        str(value) for value in active_reference_ids
+    )
+
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(event_evidence)")}
+    if "window_start" not in columns or "samples_json" not in columns:
+        return {"rows_thinned": 0, "samples_dropped": 0, "rows_deleted": 0, "rows_protected": 0}
+
+    counts = {"rows_thinned": 0, "samples_dropped": 0, "rows_deleted": 0, "rows_protected": 0}
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        rows = conn.execute(
+            "SELECT evidence_id, window_start, samples_json FROM event_evidence"
+        ).fetchall()
+        for row in rows:
+            evidence_id = str(row["evidence_id"])
+            window_start = _parse_iso(row["window_start"])
+            if window_start <= sample_cutoff:
+                kept, dropped = _thin_samples(row["samples_json"])
+                if dropped:
+                    conn.execute(
+                        "UPDATE event_evidence SET samples_json=? WHERE evidence_id=?",
+                        (json.dumps(kept, default=str), evidence_id),
+                    )
+                    counts["rows_thinned"] += 1
+                    counts["samples_dropped"] += dropped
+
+            if window_start <= evidence_cutoff:
+                if evidence_id in protected:
+                    counts["rows_protected"] += 1
+                else:
+                    conn.execute(
+                        "DELETE FROM event_evidence WHERE evidence_id=?", (evidence_id,)
+                    )
+                    counts["rows_deleted"] += 1
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    return counts
+
+
 def partition_decision() -> str:
     """The recorded partitioning decision and the measurement behind it.
 
@@ -322,6 +547,10 @@ RAW_RETENTION_ENV = "WM_RETENTION_DAYS_RAW"
 __all__ = [
     "AGGREGATE_HORIZON",
     "BASE_TIER_TABLES",
+    "CANONICAL_EVIDENCE_TABLE",
+    "DEFAULT_EVIDENCE_RETENTION_DAYS",
+    "DEFAULT_SAMPLES_RETENTION_DAYS",
+    "LEGACY_EVENT_TABLES",
     "PRUNABLE_TABLES",
     "RAW_HORIZON",
     "RAW_RETENTION_ENV",
@@ -329,14 +558,20 @@ __all__ = [
     "TIERS",
     "TIER_TABLES",
     "TierError",
+    "apply_evidence_retention",
+    "canonical_evidence_table",
+    "has_growth",
     "is_prunable",
     "iter_tier_tables",
     "merge_tier_tables",
     "merged_tier_tables",
+    "never_pruned_tables",
     "partition_decision",
     "prunable_tables",
+    "referenced_evidence_ids",
     "table_tiers",
     "tables_of_tier",
     "tier_of",
     "tier_tables",
+    "time_column_of",
 ]

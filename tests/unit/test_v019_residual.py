@@ -19,6 +19,7 @@ from wattmosaic_engine.contracts import (
 )
 from wattmosaic_engine.storage.database import Database
 from wattmosaic_engine.storage.migrations import (
+    LATEST_VERSION,
     MIGRATIONS,
     apply_migrations,
     current_version,
@@ -87,7 +88,9 @@ def _profile(profile_id: str, scope: str = "reader-a") -> UnknownLoadProfileV3:
 
 def _open(path: Path) -> Database:
     db = Database(path)
-    assert db.schema_version == V019.version
+    # Later waves add migrations after v019; a fresh Database migrates to the
+    # latest schema, not to v019.  Assert at least v019 rather than equality.
+    assert db.schema_version >= V019.version
     return db
 
 
@@ -196,8 +199,9 @@ def test_apply_migrations_reaches_v019(tmp_path: Path) -> None:
     conn = sqlite3.connect(path)
     try:
         assert current_version(conn) == PRE_MIGRATION_VERSION
-        assert apply_migrations(conn) == 19
-        assert current_version(conn) == 19
+        # Later migrations (e.g. D5's v021) advance past v019.
+        assert apply_migrations(conn) == LATEST_VERSION
+        assert current_version(conn) == LATEST_VERSION
     finally:
         conn.close()
 

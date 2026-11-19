@@ -41,11 +41,18 @@ from ..repositories import Repository, as_utc, enum_value, iso
 
 class EvidenceRepository(Repository):
     # -- event evidence --------------------------------------------------- #
-    def put_evidence(self, evidence: EventEvidence) -> None:
+    def put_evidence(
+        self, evidence: EventEvidence, *, supersedes_evidence_id: str | None = None
+    ) -> None:
         """Append one immutable evidence record.  A colliding id raises.
 
         There is deliberately no ``ON CONFLICT`` clause: silently replacing an
         evidence row would break replay after raw samples expire (DEC-30).
+
+        ``supersedes_evidence_id`` persists the link P4 carries only in the
+        in-memory ``EvidenceBatch.metadata`` (migration 21).  A consumer hands it
+        in from ``batch.supersedes``; the immutable contract record itself is
+        never given a metadata field.  An absent link is stored as ``NULL``.
         """
         samples = [[iso(at), None if value is None else float(value)] for at, value in evidence.samples]
         flags = [enum_value(flag) for flag in evidence.quality_flags]
@@ -53,8 +60,8 @@ class EvidenceRepository(Repository):
             self._conn.execute(
                 """INSERT INTO event_evidence(evidence_id, reader_id, measurement_event_id,
                 window_start, window_end, samples_json, baseline_w, sigma_w, delta_w,
-                quality_flags_json, topology_version_id, finalized)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                quality_flags_json, topology_version_id, finalized, supersedes_evidence_id)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     evidence.evidence_id,
                     evidence.reader_id,
@@ -68,12 +75,17 @@ class EvidenceRepository(Repository):
                     json.dumps(flags),
                     evidence.topology_version_id,
                     int(bool(evidence.finalized)),
+                    None if supersedes_evidence_id is None else str(supersedes_evidence_id),
                 ),
             )
 
     @staticmethod
     def evidence_from_row(row: sqlite3.Row | dict[str, Any]) -> EventEvidence:
         data = dict(row)
+        # ``supersedes_evidence_id`` is provenance, not a contract field: the K02
+        # model forbids extra fields, so it is read through ``supersedes_evidence_id``
+        # below rather than passed to the model constructor.
+        data.pop("supersedes_evidence_id", None)
         samples = [
             (as_utc(at), None if value is None else float(value))
             for at, value in json.loads(data.pop("samples_json") or "[]")
@@ -99,6 +111,26 @@ class EvidenceRepository(Repository):
                 (measurement_event_id,),
             ).fetchall()
         return [self.evidence_from_row(row) for row in rows]
+
+    # -- supersession provenance (migration 21) ---------------------------- #
+    def supersedes_evidence_id(self, evidence_id: str) -> str | None:
+        """The immutable revision this record supersedes, or ``None``."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT supersedes_evidence_id FROM event_evidence WHERE evidence_id=?",
+                (str(evidence_id),),
+            ).fetchone()
+        return None if row is None or row[0] is None else str(row[0])
+
+    def referencing_evidence_ids(self, evidence_id: str) -> tuple[str, ...]:
+        """Ids of records that still reference ``evidence_id`` as superseded."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT evidence_id FROM event_evidence WHERE supersedes_evidence_id=? "
+                "ORDER BY evidence_id",
+                (str(evidence_id),),
+            ).fetchall()
+        return tuple(str(row[0]) for row in rows)
 
     # -- event groups ----------------------------------------------------- #
     @staticmethod
