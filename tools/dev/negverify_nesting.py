@@ -12,13 +12,17 @@ harness therefore does three things a naive version gets wrong:
 
 from __future__ import annotations
 
+import argparse
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path("/Users/asxzy/src/wattmosaic")
+# Parameterised (analysis C T10): derive the checkout root from this script's
+# location so running it from a worktree mutates and tests *that* worktree, not
+# the main checkout.  An explicit ``--root`` overrides it when needed.
+ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "engine/wattmosaic_engine/electrical/nesting.py"
 TEST_FILE = "tests/unit/test_nesting.py"
 
@@ -129,20 +133,20 @@ CASES = [
     ),
     (
         "node_sums_legs",
-        "total += float(raw)\n                    seen = True",
-        "total = float(raw)\n                    seen = True",
+        "total += np.where(finite, values, 0.0)",
+        "total = np.where(finite, values, 0.0)",
         "test_a_node_reading_is_the_sum_of_its_members",
     ),
     (
         "closure_skips_unknown",
-        "if not _finite(p) or not _finite(a):\n            continue",
-        "if not _finite(p):\n            continue\n        a = a if _finite(a) else 0.0",
+        "np.isfinite(parent_array) & np.isfinite(accounted_array) & (parent_array >= min_parent_w)",
+        "np.isfinite(parent_array) & (parent_array >= min_parent_w)",
         "test_closure_skips_instants_where_the_accounted_sum_is_unknown",
     ),
     (
         "containment_min_outer_floor",
-        "if o < min_outer_w:\n            continue",
-        "if False:\n            continue",
+        "comparable = np.isfinite(outer_array) & np.isfinite(inner_array) & (outer_array >= min_outer_w)",
+        "comparable = np.isfinite(outer_array) & np.isfinite(inner_array)",
         "test_containment_skips_instants_below_the_parent_floor",
     ),
 ]
@@ -184,6 +188,19 @@ STRUCTURAL: dict[str, str] = {}
 
 
 def main() -> int:
+    global ROOT, SRC, EXTRA_SRC
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=ROOT,
+        help="checkout root to mutate/test (default: this script's checkout)",
+    )
+    arguments = parser.parse_args()
+    ROOT = arguments.root.resolve()
+    SRC = ROOT / "engine/wattmosaic_engine/electrical/nesting.py"
+    EXTRA_SRC = ROOT / "custom_components/wattmosaic/flow_logic.py"
+
     original = SRC.read_text()
     results: list[tuple[str, str, str]] = []
     try:
