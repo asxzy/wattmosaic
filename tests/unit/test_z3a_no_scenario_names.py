@@ -429,21 +429,14 @@ def test_a5_reconciliation_residual_is_the_explicit_root_residual() -> None:
 
 ENGINE = Path(__file__).resolve().parents[2] / "engine" / "wattmosaic_engine"
 FORBIDDEN = ("ct_main", '"Main"', '"plug" not in', "_TV_STANDBY_W")
+#: Any spelling of the HB §17 reference house's name (``hb17``, ``HB17``,
+#: ``topo-hb17``, ``from_hb17``...) in code is scenario knowledge; Z3b moved
+#: every such seed/stand-in to ``tests/support`` or ``tools/simulator``.
+FORBIDDEN_CASEFOLD = ("hb17", "hb_17")
 
-#: TEMPORARY allowlist, owned by Z3b: the CLASS B scenario stand-ins Z3b
-#: removes.  Each entry is ``relative path -> (start marker, end marker)``;
-#: ``None`` markers mean the whole file.  Z3b must delete these entries as it
-#: replaces each stand-in; nothing new may be added here.
-Z3B_ALLOWLIST: dict[str, tuple[str | None, str | None]] = {
-    # build_snapshot and its helpers: from the stand-in banner to end of file.
-    "inference/estimates.py": ("# hb17 observation -> snapshot", None),
-    "models/learn.py": (None, None),
-    "core/at17.py": (None, None),
-    "replay.py": (None, None),
-    # VersionService.from_hb17 and its _seed_* helpers.
-    "versioning/service.py": ("    def from_hb17(", "    def _seed_mapping_edges("),
-    "runtime/fakes.py": (None, None),
-}
+#: Z3b emptied this allowlist (it held the CLASS B scenario stand-ins); nothing
+#: may be added back.  ``relative path -> (start marker, end marker)``.
+Z3B_ALLOWLIST: dict[str, tuple[str | None, str | None]] = {}
 
 
 def _code_lines(source: str) -> list[str]:
@@ -499,10 +492,32 @@ def test_no_scenario_literals_in_engine_code() -> None:
             for literal in FORBIDDEN:
                 if literal in line:
                     offenders.append(f"{rel}:{index + 1}: {literal!r}: {raw[index].strip()}")
+            folded = line.casefold()
+            for literal in FORBIDDEN_CASEFOLD:
+                if literal in folded:
+                    offenders.append(f"{rel}:{index + 1}: {literal!r}: {raw[index].strip()}")
     assert not offenders, "scenario literals in engine code:\n" + "\n".join(offenders)
+
+
+def test_z3b_allowlist_is_empty() -> None:
+    assert Z3B_ALLOWLIST == {}
+
+
+def test_class_b_stand_ins_are_gone_from_the_engine() -> None:
+    for rel in ("core/at17.py", "models/learn.py", "runtime/fakes.py"):
+        assert not (ENGINE / rel).exists(), rel
+    from wattmosaic_engine.inference import estimates
+    from wattmosaic_engine.versioning.service import VersionService
+
+    assert not hasattr(estimates, "build_snapshot")
+    for name in ("from_hb17", "snapshot_value_at", "set_observation_snapshot", "origin"):
+        assert not hasattr(VersionService, name), name
 
 
 def test_static_guard_sees_code_but_not_comments_or_docstrings() -> None:
     source = 'def f():\n    """ct_main in a docstring"""\n    x = 1  # ct_main in a comment\n    y = "ct_main"\n'
     lines = _code_lines(source)
     assert [i for i, line in enumerate(lines) if "ct_main" in line] == [3]
+    mixed = 'def g():\n    """HB17 in a docstring"""\n    return "topo-HB17"  # hb17\n'
+    folded = [i for i, line in enumerate(_code_lines(mixed)) if "hb17" in line.casefold()]
+    assert folded == [2]
