@@ -13,13 +13,76 @@ from ..contracts import DeviceConfiguration, DeviceConfigurationSet, ServiceComm
 class ModelsApiMixin:
     """Behaviour for one responsibility of :class:`EngineCore`."""
 
+    def _v3_registry(self) -> Any | None:
+        """Return the v3 model registry, constructing one lazily from the DB.
+
+        The v3 registry (L1) is separate from the legacy ``model_registry``
+        used by inference.  Building it here keeps the HTTP read path working
+        on a fresh ``EngineCore`` without changing composition in ``main.py``.
+        """
+        registry = getattr(self, "_model_registry_v3", None)
+        if registry is not None:
+            return registry
+        try:
+            from ..models.registry import DatabaseModelRepository, Registry
+
+            registry = Registry(DatabaseModelRepository(self.db), clock=self._clock)
+        except Exception:  # noqa: BLE001 - optional model layer
+            return None
+        self._model_registry_v3 = registry
+        return registry
+
+    def models_v3(self, subject_id: str) -> dict[str, Any]:
+        """Return a subject's append-only model versions and lifecycle events.
+
+        This backs ``GET /models/{subject_id}`` (interfaces §9).  A subject with
+        no versions is a 404 — never an empty 200 (contract rule).
+        """
+        registry = self._v3_registry()
+        if registry is None:
+            raise NotFound(f"no models for subject {subject_id!r}")
+        versions = registry.versions(subject_id)
+        if not versions:
+            raise NotFound(f"no models for subject {subject_id!r}")
+        active = registry.active_version(subject_id)
+        return {
+            "subject_id": subject_id,
+            "model_set_id": registry.model_set_id,
+            "active": self._model_dump(active) if active else None,
+            "versions": [self._model_dump(v) for v in versions],
+            "events": registry.events(subject_id),
+        }
+
     def models(self, device_id: str) -> dict[str, Any]:
         """Model versions come from the shared registry when it is available.
 
         The registry is created by the inference adapter, so this never
         constructs a second one; it only reuses ``self.model_registry``.  Falls
         back to the database for a facade used without a backend.
+
+        On the v3 path (L1) a subject with append-only v3 versions gets the v3
+        payload — ``PowerModelVersion[]`` plus its event log — so ``GET
+        /models/{subject_id}`` is the single model-read endpoint.  Legacy
+        devices with only old rows keep the original shape until Z2.
         """
+        v3 = self._v3_registry()
+        if v3 is not None:
+            try:
+                versions_v3 = v3.versions(device_id)
+            except Exception:  # noqa: BLE001
+                versions_v3 = []
+            if versions_v3:
+                active_v3 = v3.active_version(device_id)
+                return {
+                    "subject_id": device_id,
+                    "model_set_id": v3.model_set_id,
+                    "active": self._model_dump(active_v3) if active_v3 else None,
+                    "versions": [self._model_dump(v) for v in versions_v3],
+                    "events": v3.events(device_id),
+                    # Legacy client keys, preserved so existing panel code keeps
+                    # working during the staged rollout (removed at Z1).
+                    "device_id": device_id,
+                }
         registry = self.model_registry
         try:
             if registry is not None:
