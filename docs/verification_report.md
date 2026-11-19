@@ -1,22 +1,23 @@
 # Verification Report
 
-Generated: `2026-11-11T23:02:33.227847+00:00`
+Generated: `2026-11-19T18:11:38.498820+00:00`
 
-**Required gates passed: 12/12**
+**Required gates passed: 13/13**
 
 | Gate | Status | Duration (s) | Notes |
 | --- | --- | --- | --- |
-| contract_schema_sync | **PASS** | 0.16 |  |
-| secret_scan | **PASS** | 0.45 |  |
-| lint | **PASS** | 0.06 |  |
-| unit_tests | **PASS** | 10.5 |  |
-| integration_tests | **PASS** | 3.59 |  |
-| simulation_tests | **PASS** | 42.6 |  |
-| end_to_end_tests | **PASS** | 73.14 |  |
-| manifest_valid | **PASS** | 0.07 |  |
-| release_valid | **PASS** | 0.05 |  |
-| docs_fresh | **PASS** | 0.42 |  |
-| deployment_valid | **PASS** | 2.1 |  |
+| contract_schema_sync | **PASS** | 0.22 |  |
+| spec_status | **PASS** | 0.05 |  |
+| secret_scan | **PASS** | 1.15 |  |
+| lint | **PASS** | 0.05 |  |
+| unit_tests | **PASS** | 56.51 |  |
+| integration_tests | **PASS** | 29.84 |  |
+| simulation_tests | **PASS** | 21.21 |  |
+| end_to_end_tests | **PASS** | 6.37 |  |
+| manifest_valid | **PASS** | 0.06 |  |
+| release_valid | **PASS** | 0.03 |  |
+| docs_fresh | **PASS** | 0.44 |  |
+| deployment_valid | **PASS** | 3.15 |  |
 | hacs_valid | **PASS** | 0.03 |  |
 | config_valid | **FAIL** | 0.59 | requires HA_TOKEN in environment |
 
@@ -25,26 +26,30 @@ Generated: `2026-11-11T23:02:33.227847+00:00`
 ### config_valid (exit 2)
 
 ```text
-{
-  "ok": false,
-  "problems": [
-    "HA token is not configured (HA_TOKEN)"
-  ],
-  "config": {
-    "ha_url": "<redacted-url>",
-    "ha_token": "",
-    "api_host": "<redacted-ip>",
-    "api_port": 8787,
-    "api_token": "",
-    "database_path": "data/wattmosaic.db",
-    "learning_enabled": true,
-    "auto_placement": false,
-    "stale_after_s": 120.0,
-    "inference_interval_s": 5.0,
-    "log_level": "INFO"
+    "evidence_retention_days": 400,
+    "evidence_raw_retention_days": 30,
+    "log_level": "INFO",
+    "history_lookback_s": 86400.0,
+    "audit_enabled": true,
+    "audit_isolation_enabled": true,
+    "audit_association_enabled": true,
+    "audit_circuits_enabled": true,
+    "audit_residual_enabled": true,
+    "audit_hierarchy_enabled": true,
+    "audit_records_enabled": true,
+    "analysis_offset_s": 0.0,
+    "isolation_window_s": 30.0,
+    "isolation_power_window_s": 60.0,
+    "isolation_by_class": {},
+    "isolation_by_device": {},
+    "isolation_device_classes": {},
+    "audit_algorithm_version": "disagg@2.0",
+    "reanalysis_interval_s": 0.0,
+    "reanalysis_lookback_s": 21600.0,
+    "train_interval_s": 0.0
   },
-  "contract_version": "1.5.0",
-  "engine_version": "0.2.1-dev.13"
+  "contract_version": "3.0.0",
+  "engine_version": "0.2.1-dev.42"
 }
 ```
 

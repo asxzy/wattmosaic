@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-11T23:02:33.227847+00:00",
+  "generated_at": "2026-11-19T18:11:38.498820+00:00",
   "gates": [
     {
       "name": "contract_schema_sync",
@@ -11,8 +11,24 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 0.16,
-      "output_tail": "{\n  \"contract_version\": \"1.5.0\",\n  \"schemas\": 19\n}",
+      "duration_s": 0.22,
+      "output_tail": "{\n  \"contract_version\": \"3.0.0\",\n  \"schemas\": 65\n}",
+      "notes": "",
+      "skipped_reason": ""
+    },
+    {
+      "name": "spec_status",
+      "command": [
+        "python",
+        "tools/dev/verify.py",
+        "--check-spec-status"
+      ],
+      "required": true,
+      "timeout": 900,
+      "status": "PASS",
+      "returncode": 0,
+      "duration_s": 0.05,
+      "output_tail": "spec_status: 59 specification files carry the status token",
       "notes": "",
       "skipped_reason": ""
     },
@@ -26,7 +42,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 0.45,
+      "duration_s": 1.15,
       "output_tail": "secret scan: clean",
       "notes": "",
       "skipped_reason": ""
@@ -44,7 +60,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 0.06,
+      "duration_s": 0.05,
       "output_tail": "All checks passed!",
       "notes": "",
       "skipped_reason": ""
@@ -62,8 +78,8 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 10.5,
-      "output_tail": "........................................................................ [  6%]\n........................................................................ [ 13%]\n........................................................................ [ 20%]\n........................................................................ [ 26%]\n........................................................................ [ 33%]\n........................................................................ [ 40%]\n........................................................................ [ 47%]\n........................................................................ [ 53%]\n........................................................................ [ 60%]\n........................................................................ [ 67%]\n........................................................................ [ 74%]\n........................................................................ [ 80%]\n........................................................................ [ 87%]\n........................................................................ [ 94%]\n............................................................             [100%]\n=============================== warnings summary ===============================\ntests/unit/test_panel.py: 11 warnings\n  <redacted-path>/gateway.py:354: NotAppKeyWarning: It is recommended to use web.AppKey instances for keys.\n  <redacted-url>\n    app[\"session\"] = ClientSession(auto_decompress=True)\n\n-- Docs: <redacted-url>",
+      "duration_s": 56.51,
+      "output_tail": "........................................................................ [ 81%]\n........................................................................ [ 84%]\n........................................................................ [ 88%]\n........................................................................ [ 92%]\n........................................................................ [ 95%]\n........................................................................ [ 99%]\n.......                                                                  [100%]\n=============================== warnings summary ===============================\ntests/unit/test_gateway_proxy.py: 6 warnings\ntests/unit/test_panel.py: 14 warnings\n  <redacted-path>/gateway.py:563: NotAppKeyWarning: It is recommended to use web.AppKey instances for keys.\n  <redacted-url>\n    app[\"session\"] = ClientSession(auto_decompress=True)\n\ntests/unit/test_gateway_proxy.py::test_an_upstream_timeout_is_not_reported_as_unreachable\ntests/unit/test_gateway_proxy.py::test_every_timeout_spelling_maps_to_upstream_timeout[server_timeout]\ntests/unit/test_gateway_proxy.py::test_every_timeout_spelling_maps_to_upstream_timeout[socket_timeout]\ntests/unit/test_gateway_proxy.py::test_every_timeout_spelling_maps_to_upstream_timeout[builtin_timeout]\ntests/unit/test_gateway_proxy.py::test_a_connect_timeout_still_blames_reachability\ntests/unit/test_gateway_proxy.py::test_a_reset_socket_still_blames_reachability\n  <redacted-path>/test_gateway_proxy.py:157: NotAppKeyWarning: It is recommended to use web.AppKey instances for keys.\n  <redacted-url>\n    app[\"session\"] = session\n\n-- Docs: <redacted-url>",
       "notes": "",
       "skipped_reason": ""
     },
@@ -80,8 +96,8 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 3.59,
-      "output_tail": "........................................................................ [ 10%]\n........................................................................ [ 20%]\n........................................................................ [ 30%]\n........................................................................ [ 40%]\n........................................................................ [ 50%]\n........................................................................ [ 61%]\n........................................................................ [ 71%]\n........................................................................ [ 81%]\n........................................................................ [ 91%]\n............................................................             [100%]",
+      "duration_s": 29.84,
+      "output_tail": "........................................................................ [ 10%]\n........................................................................ [ 20%]\n........................................................................ [ 31%]\n........................................................................ [ 41%]\n........................................................................ [ 51%]\n........................................................................ [ 62%]\n........................................................................ [ 72%]\n........................................................................ [ 82%]\n........................................................................ [ 93%]\n..............................................                           [100%]",
       "notes": "",
       "skipped_reason": ""
     },
@@ -98,8 +114,8 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 42.6,
-      "output_tail": ".......................................................sssssssss........ [ 66%]\n.....................................                                    [100%]",
+      "duration_s": 21.21,
+      "output_tail": "........x.....................................................sssssss... [ 43%]\n........................................................................ [ 87%]\n.....................                                                    [100%]",
       "notes": "",
       "skipped_reason": ""
     },
@@ -116,8 +132,8 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 73.14,
-      "output_tail": ".........................................................                [100%]",
+      "duration_s": 6.37,
+      "output_tail": "......x......x................                                           [100%]",
       "notes": "",
       "skipped_reason": ""
     },
@@ -131,7 +147,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 0.07,
+      "duration_s": 0.06,
       "output_tail": "manifest validation: ok",
       "notes": "",
       "skipped_reason": ""
@@ -146,8 +162,8 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 0.05,
-      "output_tail": "version: 0.2.1-dev.13\nrelease checks: clean",
+      "duration_s": 0.03,
+      "output_tail": "version: 0.2.1-dev.42\nrelease checks: clean",
       "notes": "",
       "skipped_reason": ""
     },
@@ -162,7 +178,7 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 0.42,
+      "duration_s": 0.44,
       "output_tail": "{\"status\": \"up_to_date\", \"files\": 4}",
       "notes": "",
       "skipped_reason": ""
@@ -178,8 +194,8 @@
       "timeout": 900,
       "status": "PASS",
       "returncode": 0,
-      "duration_s": 2.1,
-      "output_tail": "PASS  run.sh fails closed when no HA token is available\nPASS  healthcheck.py fails cleanly when the gateway is down\n\n== Add-on staging (build context) ==\nPASS  package_addon.sh stages a self-contained app\nPASS  staged config.yaml\nPASS  staged Dockerfile\nPASS  staged run.sh\nPASS  staged gateway.py\nPASS  staged healthcheck.py\nPASS  staged constraints.txt\nPASS  staged pyproject.toml\nPASS  staged README.md\nPASS  staged ui/index.html\nPASS  staged ui/app.css\nPASS  staged ui/app.js\nPASS  staged ui/mark.svg\nPASS  staged engine/wattmosaic_engine/main.py\n\n== Docker build ==\nSKIP  image build (--no-build)\n\n== Summary ==\npassed: 71  failed: 0  skipped: 3\nall checks passed",
+      "duration_s": 3.15,
+      "output_tail": "\n== Add-on staging (build context) ==\nPASS  package_addon.sh stages a self-contained app\nPASS  staged config.yaml\nPASS  staged Dockerfile\nPASS  staged run.sh\nPASS  staged gateway.py\nPASS  staged healthcheck.py\nPASS  staged constraints.txt\nPASS  staged pyproject.toml\nPASS  staged README.md\nPASS  staged ui/index.html\nPASS  staged ui/app.css\nPASS  staged ui/matrix.css\nPASS  staged ui/main.js\nPASS  staged ui/core.js\nPASS  staged ui/mark.svg\nPASS  staged engine/wattmosaic_engine/main.py\n\n== Docker build ==\nSKIP  image build (--no-build)\n\n== Summary ==\npassed: 87  failed: 0  skipped: 3\nall checks passed",
       "notes": "",
       "skipped_reason": ""
     },
@@ -211,13 +227,13 @@
       "status": "FAIL",
       "returncode": 2,
       "duration_s": 0.59,
-      "output_tail": "{\n  \"ok\": false,\n  \"problems\": [\n    \"HA token is not configured (HA_TOKEN)\"\n  ],\n  \"config\": {\n    \"ha_url\": \"<redacted-url>\",\n    \"ha_token\": \"\",\n    \"api_host\": \"<redacted-ip>\",\n    \"api_port\": 8787,\n    \"api_token\": \"\",\n    \"database_path\": \"data/wattmosaic.db\",\n    \"learning_enabled\": true,\n    \"auto_placement\": false,\n    \"stale_after_s\": 120.0,\n    \"inference_interval_s\": 5.0,\n    \"log_level\": \"INFO\"\n  },\n  \"contract_version\": \"1.5.0\",\n  \"engine_version\": \"0.2.1-dev.13\"\n}",
+      "output_tail": "    \"evidence_retention_days\": 400,\n    \"evidence_raw_retention_days\": 30,\n    \"log_level\": \"INFO\",\n    \"history_lookback_s\": 86400.0,\n    \"audit_enabled\": true,\n    \"audit_isolation_enabled\": true,\n    \"audit_association_enabled\": true,\n    \"audit_circuits_enabled\": true,\n    \"audit_residual_enabled\": true,\n    \"audit_hierarchy_enabled\": true,\n    \"audit_records_enabled\": true,\n    \"analysis_offset_s\": 0.0,\n    \"isolation_window_s\": 30.0,\n    \"isolation_power_window_s\": 60.0,\n    \"isolation_by_class\": {},\n    \"isolation_by_device\": {},\n    \"isolation_device_classes\": {},\n    \"audit_algorithm_version\": \"disagg@2.0\",\n    \"reanalysis_interval_s\": 0.0,\n    \"reanalysis_lookback_s\": 21600.0,\n    \"train_interval_s\": 0.0\n  },\n  \"contract_version\": \"3.0.0\",\n  \"engine_version\": \"0.2.1-dev.42\"\n}",
       "notes": "requires HA_TOKEN in environment",
       "skipped_reason": ""
     }
   ],
-  "required_total": 12,
-  "required_passed": 12,
+  "required_total": 13,
+  "required_passed": 13,
   "required_failed": [],
   "required_skipped": [],
   "all_required_pass": true

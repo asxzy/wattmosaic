@@ -93,7 +93,7 @@
 | L7 | 5 | VERIFIED |  | AT-19 | AT-19 closed |
 | D5 | 5 | VERIFIED |  |  | v021 supersedes link; P6 must pass supersedes_evidence_id |
 | X09 | 5 | VERIFIED |  |  | docs+release notes 3.0; routes/settings cross-checked |
-| V1 | 6 | NOT_STARTED | | all 20 | |
+| V1 | 6 | IN_REVIEW | | all 20 (0 xfail in tests/acceptance) | Empty HB17 output root-caused (harness: 12-min cold start < P3 64-sample warm-up, bound-method `result`, end-of-replay-only event loop, missing truth frame; engine: HA never grouped with reader steps, stale ready group, `_v3_snapshot` shadowed, P5 never ticked, steady publish ValidationError, bare repo as I4 history, HA refs never resolved to subjects, M2 point-bounds crash, from_hb17 edges outside any version, empty T7 candidate mapping) — all fixed with regressions. Walkthrough 11 pass + 2 strict xfail; accuracy harness grades live runtime. Not VERIFIED: group estimate unreachable live (no subject-level history persisted; lab_shared group kWh = 0 where HB §21.7 needs it) and relocation creates no new mapping candidate — strict xfails in test_hb17_walkthrough.py / test_accuracy_v3.py |
 | V2 | 6 | NOT_STARTED | | | |
 | L8 | 6 | NOT_STARTED | | | optional |
 | S00 | ? | VERIFIED | | | seam added by orchestrator: migration numbering, fresh-DB backup |

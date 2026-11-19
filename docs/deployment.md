@@ -164,7 +164,7 @@ WAL is copied consistently), `watchdog` on `/healthz`, and `ports: 8787/tcp: nul
 From the Home Assistant integration, use the container host name
 `http://<hostname>:8787`. The Supervisor names an installed app
 `{repository}_{slug}` and registers that hostname with `_` replaced by `-`
-(e.g. `f48de52e-wattmosaic-engine` or `local-wattmosaic-engine`). The app's own
+(e.g. `f48de52e-wattmosaic-engine`, or `local-wattmosaic-engine` for a local copy install). The app's own
 page shows **Hostname** under its info tab — that value is authoritative. Do not
 use `127.0.0.1` or the host IP: the app's port is not published.
 
