@@ -141,6 +141,11 @@ class MatrixStore:
         self._cells: dict[CellKey, _CellState] = {}
         self._history: list[_HistoryRow] = []
         self.audit_log: list[dict[str, Any]] = []
+        #: Keys removed from the current view by a reconciliation retirement.
+        #: ``cell(key)`` still resolves to the last (RETIRED) history version so
+        #: provenance and a direct lookup stay honest, but ``cells()`` (the
+        #: current sparse matrix) no longer includes them.
+        self._retired: set[CellKey] = set()
 
     # -- reads -------------------------------------------------------------- #
 
@@ -157,10 +162,19 @@ class MatrixStore:
         return self.key(cell) in self._cells
 
     def cell(self, cell: tuple[str, str, str] | MappingCell) -> MappingCell:
-        """The current state of one cell (a blank cell when it is unknown)."""
+        """The current state of one cell (a blank cell when it is unknown).
+
+        A retired cell is absent from ``cells()`` and the persisted current
+        view, but a direct lookup still resolves to its last (RETIRED) history
+        version so its provenance remains inspectable.
+        """
         key = self.key(cell)
         state = self._cells.get(key)
         if state is None:
+            if key in self._retired:
+                historical = [row.cell for row in self._history if self.key(row.cell) == key]
+                if historical:
+                    return historical[-1]
             stamp = self._clock()
             return _CellState(base=_blank_cell(key, stamp)).decorated(stamp)
         return state.decorated(self._clock())
@@ -224,6 +238,7 @@ class MatrixStore:
             )
             decorated = state.decorated(stamp)
             self._cells[key] = state
+            self._retired.discard(key)
             self._history.append(
                 _HistoryRow(stamp, decorated, reason, event_group_id)
             )
@@ -279,6 +294,7 @@ class MatrixStore:
         )
         decorated = state.decorated(stamp)
         self._cells[key] = state
+        self._retired.discard(key)
         self._history.append(
             _HistoryRow(stamp, decorated, "sample", event_group_id)
         )
@@ -298,16 +314,29 @@ class MatrixStore:
         at: datetime | None = None,
         reason: str = "reconcile",
         clear_power: bool = False,
+        restore_power: float | None = None,
     ) -> CellKey:
-        """Set a cell's mapping status (used by the reconciler)."""
+        """Set a cell's mapping status (used by the reconciler).
+
+        ``clear_power`` drops an estimate a retirement invalidated (HB §17 step
+        10); ``restore_power`` reinstates the last honest observation when a
+        rollback makes an edge current again.  Neither fabricates a value: an
+        absent power stays ``None`` (HB §18).
+        """
         stamp = at or self._clock()
         key = self.key(cell)
         previous = self._cells.get(key)
         if previous is None:
-            previous = _CellState(base=_blank_cell(key, stamp))
+            if key in self._retired:
+                historical = [row.cell for row in self._history if self.key(row.cell) == key]
+                previous = _CellState(base=historical[-1]) if historical else _CellState(base=_blank_cell(key, stamp))
+            else:
+                previous = _CellState(base=_blank_cell(key, stamp))
         power = previous.base.power
         if clear_power:
             power = power.model_copy(update={"estimated_power_w": None})
+        elif restore_power is not None:
+            power = power.model_copy(update={"estimated_power_w": restore_power})
         mapping = previous.base.mapping.model_copy(update={"mapping_status": status})
         base = previous.base.model_copy(update={"mapping": mapping, "power": power})
         state = _CellState(
@@ -319,6 +348,7 @@ class MatrixStore:
         )
         decorated = state.decorated(stamp)
         self._cells[key] = state
+        self._retired.discard(key)
         self._history.append(_HistoryRow(stamp, decorated, reason, None))
         if self._repo is not None:
             self._repo.upsert_cells(
@@ -331,6 +361,24 @@ class MatrixStore:
     def append_audit(self, row: dict[str, Any]) -> None:
         """Append one reconciliation audit row (never edit an earlier row)."""
         self.audit_log.append(dict(row))
+
+    def retire(self, cell: tuple[str, str, str] | MappingCell, *, reason: str = "reconcile") -> CellKey:
+        """Remove a retired cell from the *current* sparse view, keeping history.
+
+        HB §17 step 10: a cell whose mapping edge was retired by a promotion must
+        not appear in the ``/matrix`` payload, but its values remain in the
+        append-only history (``matrix_cell_versions``) for provenance and ``at=``
+        queries.  This is the inverse of :meth:`apply_cells` for the current view
+        only — no history row is written or edited.
+        """
+        key = self.key(cell)
+        self._cells.pop(key, None)
+        self._retired.add(key)
+        if self._repo is not None:
+            remover = getattr(self._repo, "remove_cells", None)
+            if callable(remover):
+                remover([key])
+        return key
 
 
 def _for_persistence(cell: MappingCell) -> dict[str, Any]:

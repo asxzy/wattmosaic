@@ -275,6 +275,29 @@ class MappingRepository(Repository):
                 raise
         return len(cells)
 
+    # -- current-view removal (HB §17 step 10) ----------------------------- #
+    def remove_cells(self, keys: Any) -> int:
+        """Delete current-view rows for retired cells, keeping their history.
+
+        A promotion retires a mapping edge, so the subject x reader cell it
+        justified must no longer appear in the ``/matrix`` payload.  The
+        append-only ``matrix_cell_versions`` rows are deliberately untouched, so
+        provenance and historical ``at=`` queries still resolve the old values.
+        Returns the number of current rows removed.
+        """
+        removed = 0
+        rows = [(str(item[0]), str(item[1]), str(item[2])) for item in keys]
+        if not rows:
+            return 0
+        with self._lock:
+            for key in rows:
+                cursor = self._conn.execute(
+                    "DELETE FROM matrix_cells WHERE row_kind=? AND row_id=? AND reader_id=?",
+                    key,
+                )
+                removed += cursor.rowcount
+        return removed
+
     # -- history / as-of reads -------------------------------------------- #
     def cell_history(
         self,
