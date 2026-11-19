@@ -1,26 +1,25 @@
-"""Startup topology discovery: a fresh install must not silently do nothing.
+"""Startup endpoint discovery: a fresh install must not silently do nothing.
 
-Defect #39.  The engine shipped a ``discover_candidate_topology`` function that
-the documentation promised (``docs/installation.md`` §5: "WattMosaic discovers CT
-channels and proposes device mappings") but which nothing ever called.  With no
-topology stored, ``run_inference_once`` returns ``{"skipped": "no topology
-configured"}``, that value was never logged, and ``/health`` reported ``ok``.  A
-real installation therefore looked healthy while emitting no device at all — the
-user saw only the global sensors and the CT-level entities.
+Defect #39.  The engine shipped a discovery function that the documentation
+promised (``docs/installation.md`` §5: "WattMosaic discovers CT channels and
+proposes device mappings") but which nothing ever called.  With nothing stored
+the engine inferred nothing, that was never logged, and ``/health`` reported
+``ok``.  A real installation therefore looked healthy while emitting no device
+at all.
 
 Two independent failures had to be fixed together, and both are covered here
 because either one alone leaves the product broken:
 
-1. **Nothing bootstrapped a topology.**  ``bootstrap_topology`` now runs once at
-   startup when the database has none, stores a *candidate*, and logs the
-   outcome.  Health reports ``topology.configured`` and degrades when it is false.
+1. **Nothing bootstrapped measurement endpoints.**  ``bootstrap_topology`` now
+   runs once at startup when the database has no
+   :class:`~wattmosaic_engine.contracts.MeasurementEndpoint`, persists
+   *candidate* endpoints through the v3 repositories, and logs the outcome.
+   Health reports ``topology.configured`` and degrades when it is false.
 
-2. **Discovery itself produced an unusable topology.**  Its role classifier
+2. **Discovery itself produced an unusable result.**  Its role classifier
    matched the substring ``"main"``, so every load whose name contained it was
    classified as an incoming service feed: on a real 36-channel installation it
-   emitted 21 mains.  It also emitted *zero* devices, which
-   ``_validate_topology`` rejects outright (``topology must contain at least one
-   device``), so even a wired-up call would have 400'd.
+   emitted 21 mains.
 
 The fixtures below are synthetic and installation-neutral.  They encode the
 *shape* of a real installation (a monitor with a feed pair, a double-pole load
@@ -33,10 +32,18 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-import pytest
 from wattmosaic_engine.config.settings import EngineConfig
-from wattmosaic_engine.contracts import CTType, Polarity, TopologyStatus
-from wattmosaic_engine.ingestion.discovery import discover_candidate_topology
+from wattmosaic_engine.contracts import (
+    EndpointKind,
+    EndpointScope,
+    MeasurementEndpoint,
+    ScopeStatus,
+)
+from wattmosaic_engine.ingestion.discovery import (
+    devices_for_candidate_endpoints,
+    discover_candidate_endpoints,
+    links_for_candidate_endpoints,
+)
 from wattmosaic_engine.ingestion.ha_source import ConnectionState
 from wattmosaic_engine.main import (
     TOPOLOGY_BOOTSTRAP_WAIT_S,
@@ -112,12 +119,16 @@ def _states() -> list[dict[str, Any]]:
     return [_power(entity_id) for entity_id in FIXTURE_ENTITY_IDS]
 
 
-def _discover() -> Any:
-    return discover_candidate_topology(_states(), _registries())
+def _discover() -> list[MeasurementEndpoint]:
+    return discover_candidate_endpoints(_states(), _registries())
+
+
+def _feeds(endpoints: list[MeasurementEndpoint]) -> list[MeasurementEndpoint]:
+    return [e for e in endpoints if e.scope == EndpointScope.PANEL_FEED]
 
 
 # --------------------------------------------------------------------------- #
-# Discovery must produce a *usable* topology
+# Discovery must produce *usable* endpoints
 # --------------------------------------------------------------------------- #
 
 
@@ -140,70 +151,29 @@ def test_discovery_never_treats_a_load_named_main_as_a_feed() -> None:
         ],
         "devices": [{"id": MONITOR_ID, "name": MONITOR_NAME}],
     }
-    topology = discover_candidate_topology(states, registries)
+    endpoints = discover_candidate_endpoints(states, registries)
 
-    mains = [c for c in topology.channels if c.ct_type == CTType.MAIN]
-    assert len(mains) == 2, (
-        "only the panel's own ct1/ct2 feed pair is a main; "
-        f"got {[(c.ct_id, c.ct_type) for c in topology.channels]}"
+    feeds = _feeds(endpoints)
+    assert len(feeds) == 2, (
+        "only the panel's own ct1/ct2 feed pair is a feed; "
+        f"got {[(e.endpoint_id, e.scope) for e in endpoints]}"
     )
-    assert {c.entity_id for c in mains} == {
+    assert {e.entity_id for e in feeds} == {
         "sensor.panel_ct1_power",
         "sensor.panel_ct2_power",
     }
     assert all(
-        c.ct_type != CTType.MAIN
-        for c in topology.channels
-        if "main_area" in c.entity_id
+        e.scope == EndpointScope.CIRCUIT
+        for e in endpoints
+        if "main_area" in (e.entity_id or "")
     ), "a load named 'main_area_*' was classified as a service feed"
 
 
-def test_discovery_emits_devices_so_the_topology_is_accepted() -> None:
-    """``_validate_topology`` rejects a topology with no devices.
-
-    Discovery used to return ``devices=[]``, so even a wired-up call would have
-    been refused by the API with HTTP 400.
-    """
-    topology = _discover()
-    assert topology.devices, "a topology without devices is rejected by the API"
-    device_ids = {d.device_id for d in topology.devices}
-    assert len(device_ids) == len(topology.devices), "duplicate device ids emitted"
-
-
-def test_every_non_main_channel_is_owned_by_a_device() -> None:
-    """A channel with no device is measured but never attributed.
-
-    This is the invariant that makes discovery *useful*: a CT that no device
-    claims still appears in the topology and still carries power, but the engine
-    has nothing to attribute it to, so no entity is produced for it.
-    """
-    topology = _discover()
-    owned = {
-        ct_id
-        for device in topology.devices
-        for ct_id in (*device.branch_ct_ids, *device.branch_ct_ids)
-    }
-    load_channels = {
-        c.ct_id for c in topology.channels if c.ct_type != CTType.MAIN
-    }
-    unowned = load_channels - owned
-    assert not unowned, f"load channels with no owning device: {sorted(unowned)}"
-
-    # Stated as a count too, so losing a whole class of devices is caught even
-    # when the remaining ones happen to cover their own channels.
-    assert len(topology.devices) == 5, (
-        "expected one device per load: water heater (2-pole), three separate "
-        f"lighting circuits, workshop plug; got {[d.device_id for d in topology.devices]}"
-    )
-
-
 def test_discovery_emits_exactly_one_feed_pair() -> None:
-    topology = _discover()
-    mains = [c for c in topology.channels if c.ct_type == CTType.MAIN]
-    assert len(mains) == 2
-    first, second = mains
-    assert first.paired_ct_id == second.ct_id
-    assert second.paired_ct_id == first.ct_id
+    feeds = _feeds(_discover())
+    assert len(feeds) == 2
+    assert {e.endpoint_id for e in feeds} == {"basement_panel_l1", "basement_panel_l2"}
+    assert all(e.kind == EndpointKind.CT for e in feeds)
 
 
 def test_discovery_emits_every_channel_exactly_once() -> None:
@@ -212,132 +182,68 @@ def test_discovery_emits_every_channel_exactly_once() -> None:
     Counting it would add a phantom channel equal to the panel total and
     double-count every other CT on the monitor.
     """
-    topology = _discover()
-    entity_ids = [c.entity_id for c in topology.channels]
+    entity_ids = [e.entity_id for e in _discover()]
     assert len(entity_ids) == len(set(entity_ids)), "a channel was emitted twice"
     assert "sensor.basement_panel_total_power" not in entity_ids, (
         "the monitor's own total was discovered as a circuit"
     )
     # Feed pair + water heater pair + lights ct1/ct2/ct3 + workshop plug
-    assert len(topology.channels) == 2 + 2 + 3 + 1
+    assert len(entity_ids) == 2 + 2 + 3 + 1
 
 
-def test_discovery_pairs_a_genuine_two_pole_load() -> None:
-    topology = _discover()
-    by_entity = {c.entity_id: c for c in topology.channels}
+def test_discovery_endpoint_ids_are_unique() -> None:
+    """Every discovered endpoint must have its own id, or persistence loses a leg."""
+    endpoint_ids = [e.endpoint_id for e in _discover()]
+    assert len(endpoint_ids) == len(set(endpoint_ids)), sorted(endpoint_ids)
+
+
+def test_discovery_keeps_both_legs_of_a_two_pole_load_as_circuits() -> None:
+    by_entity = {e.entity_id: e for e in _discover()}
     l1 = by_entity["sensor.basement_panel_water_heater_ct1_power"]
     l2 = by_entity["sensor.basement_panel_water_heater_ct2_power"]
-    assert l1.ct_type == CTType.BRANCH
-    assert l2.ct_type == CTType.BRANCH
-    assert l1.paired_ct_id == l2.ct_id
-    assert l2.paired_ct_id == l1.ct_id
-
-    heater = [d for d in topology.devices if len(d.branch_ct_ids) == 2]
-    assert len(heater) == 1, "the two-pole load must be one device owning both legs"
-    assert heater[0].double_pole is True
-
-
-def test_reversed_leg_of_a_two_pole_load_is_attributed_to_the_right_channel() -> None:
-    """The leg reading must follow the leg, not the loop iteration order.
-
-    A double-pole device is emitted from one entity's turn through the loop; if
-    the attributes were attached positionally, a reversed CT2 would be recorded
-    against CT1 and the wrong leg would be negated on every inference cycle.
-    """
-    states = [
-        _power("sensor.panel_ct1_power", "500.0"),
-        _power("sensor.panel_ct2_power", "480.0"),
-        _power("sensor.panel_water_heater_ct1_power", "900.0"),
-        _power("sensor.panel_water_heater_ct2_power", "-900.0"),
-        _power("sensor.panel_workshop_plug_power", "40.0"),
-    ]
-    registries = {
-        "entities": [
-            {"entity_id": s["entity_id"], "device_id": MONITOR_ID, "platform": "m"}
-            for s in states
-        ],
-        "devices": [{"id": MONITOR_ID, "name": MONITOR_NAME}],
-    }
-    topology = discover_candidate_topology(states, registries)
-    by_entity = {c.entity_id: c for c in topology.channels}
-
-    assert by_entity["sensor.panel_water_heater_ct1_power"].polarity == Polarity.NORMAL, (
-        "the positive leg was marked inverted"
-    )
-    assert by_entity["sensor.panel_water_heater_ct2_power"].polarity == Polarity.INVERTED, (
-        "the reversed leg was not detected; it will be clipped to 0 W"
-    )
+    assert l1.scope == EndpointScope.CIRCUIT
+    assert l2.scope == EndpointScope.CIRCUIT
+    assert l1.panel_id == l2.panel_id == "basement_panel"
 
 
 def test_discovery_does_not_fuse_three_separate_lighting_circuits() -> None:
     """Defect #28: ``circuit_ct1/ct2/ct3`` are three loads sharing a name stem.
 
-    Pairing the first two would fuse two unrelated circuits into one device and
-    leave the third colliding with it.
+    Pairing the first two would fuse two unrelated circuits into one endpoint
+    and leave the third colliding with it.
     """
-    topology = _discover()
-    lights = [
-        c for c in topology.channels if "circuit" in c.entity_id
-    ]
+    lights = [e for e in _discover() if "circuit" in (e.entity_id or "")]
     assert len(lights) == 3
-    assert all(c.paired_ct_id is None for c in lights), (
-        "three lighting circuits were treated as double-pole legs: "
-        f"{[(c.ct_id, c.paired_ct_id) for c in lights]}"
-    )
-    # A single CT measures one conductor, not one appliance.  ``dedicated_device``
-    # would assert exactly one device on the row, which discovery cannot know:
-    # three such rows in the reference installation each resolved several
-    # independent fixtures.  ``branch`` is the claim the evidence supports, and
-    # it is also what lets auto-placement consider the row at all.
-    assert all(c.ct_type == CTType.BRANCH for c in lights)
-    # Every lighting circuit keeps its own leg in the ct id, so ids stay distinct.
-    assert len({c.ct_id for c in lights}) == 3
+    # A single CT measures one conductor, not one appliance: a circuit CT is
+    # never auto single-subject (DEC-05).
+    assert all(e.scope == EndpointScope.CIRCUIT for e in lights)
+    assert all(e.scope_subject_id is None for e in lights)
+    # Every lighting circuit keeps its own leg in the id, so ids stay distinct.
+    assert len({e.endpoint_id for e in lights}) == 3
 
 
-def test_a_single_channel_circuit_is_not_declared_a_private_measurement() -> None:
-    """The misclassification that hid 14 placeable fixtures.
+def test_ct_endpoints_never_name_a_device_owner() -> None:
+    """A shared branch row must not name one device as its owner.
 
-    ``dedicated_device`` means "exactly one logical device".  Discovery's only
-    evidence against that is "this channel was not part of a ct1/ct2 pair", which
-    is equally true of every one-CT lighting circuit.  On the reference install
-    ``lights_ct1`` was declared dedicated while resolving **seven** independent
-    fixtures, and ``lights_ct2`` peaked at 221% of what its three claimants
-    summed to -- proof the row carried loads nobody had declared.
-
-    The consequence was not cosmetic: ``plan_placements`` refuses a
-    ``dedicated_device`` row as another device's measurement, so every accepted
-    candidate was refused and auto-placement could never create anything.
+    ``dedicated_device`` would assert exactly one device on the row, which
+    discovery cannot know; on the reference install a one-CT lighting circuit
+    resolved seven independent fixtures.  CT endpoints therefore stay circuits
+    with no subject, and they never mint a Physical Device (DEC-04).
     """
-    topology = _discover()
-    singles = [
-        c
-        for c in topology.channels
-        if c.ct_type not in (CTType.MAIN,)
-        and c.paired_ct_id is None
-        and "circuit" not in c.entity_id
-    ]
-    assert singles, "fixture should contain a single-channel non-pair load"
-    for channel in singles:
-        assert CTType(channel.ct_type) is CTType.BRANCH, (
-            f"{channel.ct_id} is a shared circuit but was declared "
-            f"{channel.ct_type}"
-        )
-        assert channel.device_id is None, (
-            "a shared branch row must not name one device as its owner"
-        )
-    owners = {d.device_id: d for d in topology.devices}
-    branch_rows = {
-        c.ct_id for c in topology.channels if CTType(c.ct_type) is CTType.BRANCH
-    }
-    for device in owners.values():
-        assert all(ct in branch_rows for ct in device.branch_ct_ids)
+    endpoints = _discover()
+    cts = [e for e in endpoints if e.kind == EndpointKind.CT]
+    assert cts
+    assert all(e.scope_subject_id is None for e in cts)
+    assert devices_for_candidate_endpoints(endpoints, _registries()) == []
+    assert links_for_candidate_endpoints(endpoints) == []
 
 
-def test_discovery_ignores_an_isolated_smart_plug() -> None:
+def test_discovery_never_turns_an_isolated_smart_plug_into_a_ct() -> None:
     """A smart plug is not CT hardware.
 
     Promoting ``sensor.washer_power`` to a CT channel would fabricate a circuit
-    the installation does not have.
+    the installation does not have; it is a candidate single-subject endpoint
+    whose ingestion stays off until the user confirms it.
     """
     states = [_power("sensor.washer_power")]
     registries = {
@@ -346,9 +252,10 @@ def test_discovery_ignores_an_isolated_smart_plug() -> None:
         ],
         "devices": [{"id": "plug1", "name": "Washer Plug"}],
     }
-    topology = discover_candidate_topology(states, registries)
-    assert topology.channels == []
-    assert topology.devices == []
+    endpoints = discover_candidate_endpoints(states, registries)
+    assert [e.kind for e in endpoints] == [EndpointKind.SMART_PLUG]
+    assert endpoints[0].scope == EndpointScope.SINGLE_SUBJECT
+    assert endpoints[0].enabled is False
 
 
 def test_discovery_ignores_energy_only_entities() -> None:
@@ -364,7 +271,7 @@ def test_discovery_ignores_energy_only_entities() -> None:
         ],
         "devices": [{"id": MONITOR_ID, "name": MONITOR_NAME}],
     }
-    assert discover_candidate_topology(states, registries).channels == []
+    assert discover_candidate_endpoints(states, registries) == []
 
 
 def test_discovery_never_proposes_wattmosaic_own_estimates() -> None:
@@ -384,58 +291,16 @@ def test_discovery_never_proposes_wattmosaic_own_estimates() -> None:
         ],
         "devices": [{"id": MONITOR_ID, "name": MONITOR_NAME}],
     }
-    topology = discover_candidate_topology(states, registries)
-    ids = {c.entity_id for c in topology.channels}
+    ids = {e.entity_id for e in discover_candidate_endpoints(states, registries)}
     assert "sensor.fridge_estimated_power" not in ids
     assert "sensor.panel_lights_estimated_power" not in ids
     assert "sensor.panel_ct1_power" in ids, "a real CT must still be discovered"
 
 
-def test_discovery_detects_a_reversed_ct_from_its_reading() -> None:
-    """A CT installed backwards must not be published as a clean zero.
-
-    With the default ``normal`` polarity a negative reading is clipped to zero
-    and reported as ``direct_measured`` 0 W with ``quality: good`` — a silent
-    lie that also hides that channel's whole share of the residual.  Discovery
-    therefore derives polarity from the observed sign and records the evidence.
-    """
-    states = [
-        _power("sensor.panel_ct1_power", "500.0"),
-        _power("sensor.panel_ct2_power", "480.0"),
-        _power("sensor.panel_water_heater_power", "-120.0"),
-        _power("sensor.panel_workshop_plug_power", "40.0"),
-    ]
-    registries = {
-        "entities": [
-            {"entity_id": s["entity_id"], "device_id": MONITOR_ID, "platform": "m"}
-            for s in states
-        ],
-        "devices": [{"id": MONITOR_ID, "name": MONITOR_NAME}],
-    }
-    topology = discover_candidate_topology(states, registries)
-    by_entity = {c.entity_id: c for c in topology.channels}
-
-    reversed_ct = by_entity["sensor.panel_water_heater_power"]
-    assert reversed_ct.polarity == Polarity.INVERTED, (
-        "a negative reading was accepted as normal polarity; it will be clipped "
-        "to 0 W and reported as a good measurement"
-    )
-    assert "polarity_evidence" in reversed_ct.metadata
-    # A positive channel must not be flipped.
-    assert by_entity["sensor.panel_workshop_plug_power"].polarity == Polarity.NORMAL
-    # Still a candidate: a single snapshot is not proof.
-    assert reversed_ct.topology_status == TopologyStatus.CANDIDATE
-
-
 def test_discovery_result_is_a_candidate_never_confirmed() -> None:
-    topology = _discover()
-    assert topology.status == TopologyStatus.CANDIDATE
-    assert all(c.topology_status == TopologyStatus.CANDIDATE for c in topology.channels)
-    assert all(d.topology_status == TopologyStatus.CANDIDATE for d in topology.devices)
-    assert all(
-        "state_entity_ids" not in (d.metadata or {})
-        for d in topology.devices
-    ), "discovery must not invent device state links"
+    endpoints = _discover()
+    assert endpoints
+    assert all(e.scope_status == ScopeStatus.CANDIDATE for e in endpoints)
 
 
 # --------------------------------------------------------------------------- #
@@ -496,6 +361,14 @@ def _core(tmp_path: Path) -> tuple[EngineCore, Database]:
     return EngineCore(config, db), db
 
 
+def _stored_endpoints(tmp_path: Path) -> list[dict[str, Any]]:
+    db = Database(tmp_path / "wm.db")
+    try:
+        return db.repos.entities.endpoints()
+    finally:
+        db.close()
+
+
 def _bootstrap(core: EngineCore, db: Database, tmp_path: Path) -> dict[str, Any]:
     core.hasource = _StubSource(_states(), _registries())  # type: ignore[assignment]
     try:
@@ -504,47 +377,35 @@ def _bootstrap(core: EngineCore, db: Database, tmp_path: Path) -> dict[str, Any]
         db.close()
 
 
-def test_bootstrap_stores_a_candidate_when_the_database_is_empty(tmp_path: Path) -> None:
+def test_bootstrap_stores_candidates_when_the_database_is_empty(tmp_path: Path) -> None:
     core, db = _core(tmp_path)
     result = _bootstrap(core, db, tmp_path)
 
     assert result.get("status") == "candidate", result
-    assert result["channels"] > 0 and result["devices"] > 0, result
+    assert result["discovered"] == 8 and result["ct"] == 8, result
 
-    stored = Database(tmp_path / "wm.db").load_topology()
-    assert stored is not None, "bootstrap did not persist a topology"
-    assert stored.status == TopologyStatus.CANDIDATE
-    assert len(stored.channels) == result["channels"]
-    assert len(stored.devices) == result["devices"]
+    stored = _stored_endpoints(tmp_path)
+    assert stored, "bootstrap did not persist any measurement endpoint"
+    assert all(str(row["scope_status"]) == ScopeStatus.CANDIDATE.value for row in stored)
+    assert {row["endpoint_id"] for row in stored} >= {"basement_panel_l1", "basement_panel_l2"}
 
 
-def test_bootstrap_never_overwrites_an_existing_topology(tmp_path: Path) -> None:
+def test_bootstrap_never_overwrites_existing_endpoints(tmp_path: Path) -> None:
     core, db = _core(tmp_path)
-    existing = discover_candidate_topology(_states(), _registries())
-    # A visible marker that survives the round-trip: bootstrap must leave this
-    # exact payload in place.
-    first = existing.devices[0]
-    existing = existing.model_copy(
-        update={
-            "devices": [
-                first.model_copy(update={"name": "operator-supplied device"}),
-                *existing.devices[1:],
-            ]
-        }
-    )
-    db.save_topology(existing)
+    existing = _discover()[0].model_copy(update={"display_name": "operator-supplied"})
+    db.repos.entities.upsert_endpoint(existing)
 
     result = _bootstrap(core, db, tmp_path)
-    assert result.get("skipped") == "topology already configured", result
+    assert result.get("skipped") == "measurement endpoints already configured", result
 
-    stored = Database(tmp_path / "wm.db").load_topology()
-    assert stored is not None
-    assert stored.devices[0].name == "operator-supplied device", (
-        "bootstrap replaced a topology that already existed"
+    stored = _stored_endpoints(tmp_path)
+    assert [row["endpoint_id"] for row in stored] == [existing.endpoint_id]
+    assert stored[0]["display_name"] == "operator-supplied", (
+        "bootstrap replaced an endpoint that already existed"
     )
 
 
-def test_bootstrap_distinguishes_a_monitor_with_no_circuits(tmp_path: Path) -> None:
+def test_bootstrap_accepts_a_monitor_with_only_its_feed_pair(tmp_path: Path) -> None:
     """A monitor exposing only its feed pair is not "no monitor installed"."""
     core, db = _core(tmp_path)
     feeds = ["sensor.panel_ct1_power", "sensor.panel_ct2_power"]
@@ -562,18 +423,17 @@ def test_bootstrap_distinguishes_a_monitor_with_no_circuits(tmp_path: Path) -> N
     finally:
         db.close()
 
-    assert "skipped" in result, result
-    reason = str(result["skipped"]).lower()
-    assert "no load circuits" in reason, reason
-    assert "no multi-channel energy monitor" not in reason
+    assert result.get("status") == "candidate", result
+    assert result["ct"] == 2
+    assert core.topology_bootstrap_error is None
 
 
 def test_bootstrap_reports_when_no_monitor_is_present(tmp_path: Path) -> None:
-    """No monitor is a real condition the user must be told about."""
+    """No metering hardware is a real condition the user must be told about."""
     core, db = _core(tmp_path)
-    core.hasource = _StubSource([_power("sensor.washer_power")], {  # type: ignore[assignment]
+    core.hasource = _StubSource([_energy("sensor.washer_energy")], {  # type: ignore[assignment]
         "entities": [
-            {"entity_id": "sensor.washer_power", "device_id": "plug1", "platform": "matter"}
+            {"entity_id": "sensor.washer_energy", "device_id": "plug1", "platform": "matter"}
         ],
         "devices": [{"id": "plug1", "name": "Washer Plug"}],
     })
@@ -602,8 +462,7 @@ def test_bootstrap_can_be_disabled_by_configuration(tmp_path: Path) -> None:
         db.close()
 
     assert result == {"skipped": "topology bootstrap disabled by configuration"}
-    assert core.topology_cache is None, "disabled bootstrap must not load a topology"
-
+    assert _stored_endpoints(tmp_path) == [], "disabled bootstrap must not store endpoints"
 
 
 def test_health_reports_a_missing_topology_as_degraded(tmp_path: Path) -> None:
@@ -611,8 +470,7 @@ def test_health_reports_a_missing_topology_as_degraded(tmp_path: Path) -> None:
 
     Everything else is made healthy here — backend attached, Home Assistant
     connected, database fine — so the *only* possible cause of a non-ok status is
-    the missing topology.  A weaker test passed because the backend happened to
-    be absent, which is not the condition being guarded.
+    the missing measurement endpoints.
     """
     core, db = _core(tmp_path)
     try:
@@ -621,7 +479,7 @@ def test_health_reports_a_missing_topology_as_degraded(tmp_path: Path) -> None:
         health = core.health()
         assert health.details["topology"]["configured"] is False
         assert health.status != "ok", (
-            "a topology-less engine reported healthy even though it has nothing "
+            "an endpoint-less engine reported healthy even though it has nothing "
             "to infer; that is the silent failure the defect was about"
         )
     finally:
@@ -629,25 +487,26 @@ def test_health_reports_a_missing_topology_as_degraded(tmp_path: Path) -> None:
 
 
 def test_health_reports_a_configured_topology(tmp_path: Path) -> None:
-    """Positive control: the same check must pass once a topology exists."""
+    """Positive control: the same check must pass once endpoints exist."""
     core, db = _core(tmp_path)
     try:
-        db.save_topology(discover_candidate_topology(_states(), _registries()))
-        core.topology_cache = None
+        for endpoint in _discover():
+            db.repos.entities.upsert_endpoint(endpoint)
         health = core.health()
         topology = health.details["topology"]
         assert topology["configured"] is True
         assert topology["status"] == "candidate"
-        assert topology["channels"] > 0
+        assert topology["endpoints"] > 0
     finally:
         db.close()
 
 
 def test_bootstrap_is_idempotent_across_restarts(tmp_path: Path) -> None:
-    """A restart must reuse the discovered topology, not duplicate it."""
+    """A restart must reuse the discovered endpoints, not duplicate them."""
     core, db = _core(tmp_path)
     first = _bootstrap(core, db, tmp_path)
     assert first.get("status") == "candidate"
+    before = _stored_endpoints(tmp_path)
 
     core2, db2 = _core(tmp_path)
     core2.hasource = _StubSource(_states(), _registries())  # type: ignore[assignment]
@@ -655,7 +514,8 @@ def test_bootstrap_is_idempotent_across_restarts(tmp_path: Path) -> None:
         second = asyncio.run(core2.bootstrap_topology())
     finally:
         db2.close()
-    assert second.get("skipped") == "topology already configured"
+    assert second.get("skipped") == "measurement endpoints already configured"
+    assert len(_stored_endpoints(tmp_path)) == len(before)
 
 
 def test_engine_start_runs_topology_bootstrap(tmp_path: Path) -> None:
@@ -669,12 +529,10 @@ def test_engine_start_runs_topology_bootstrap(tmp_path: Path) -> None:
     core.hasource = _StubSource(_states(), _registries())  # type: ignore[assignment]
     try:
         asyncio.run(core.start(start_loops=False))
-        stored = Database(tmp_path / "wm.db").load_topology()
-        assert stored is not None, (
-            "engine.start() never bootstrapped a topology; a fresh install would "
-            "ingest every sample and emit nothing"
+        assert _stored_endpoints(tmp_path), (
+            "engine.start() never bootstrapped measurement endpoints; a fresh "
+            "install would ingest every sample and emit nothing"
         )
-        assert stored.channels and stored.devices
     finally:
         db.close()
 
@@ -692,11 +550,9 @@ def test_engine_start_waits_for_the_connection_before_discovering(tmp_path: Path
     core.hasource = source  # type: ignore[assignment]
     try:
         asyncio.run(core.start(start_loops=False))
-        stored = Database(tmp_path / "wm.db").load_topology()
-        assert stored is not None, (
+        assert _stored_endpoints(tmp_path), (
             "engine.start() ran discovery before the first state snapshot arrived"
         )
-        assert stored.channels and stored.devices
         assert source.waited, "engine.start() never waited for the first connection"
         assert source.waited[0] > 0, "engine.start() waited for zero seconds"
     finally:
@@ -709,7 +565,7 @@ def test_bootstrap_waits_for_the_first_connection_before_discovering(tmp_path: P
     ``hasource.start()`` only schedules the connection and returns, so an
     immediate discovery call sees an empty cache.  Without the bounded wait and
     the deferred outcome, a genuine fresh install would report "no monitor" even
-    though one is configured, and would stay topology-less until a restart.
+    though one is configured, and would stay endpoint-less until a restart.
     """
     core, db = _core(tmp_path)
     core.hasource = _LateSource([], {})  # type: ignore[assignment]
@@ -721,7 +577,7 @@ def test_bootstrap_waits_for_the_first_connection_before_discovering(tmp_path: P
         db.close()
 
     assert result.get("status") == "candidate", result
-    assert result["channels"] > 0 and result["devices"] > 0
+    assert result["discovered"] > 0
     assert core.hasource.waited, "startup did not wait for the first connection"
 
 
@@ -745,30 +601,31 @@ def test_bootstrap_defers_instead_of_claiming_no_monitor(tmp_path: Path) -> None
     assert "home assistant" in str(result["deferred"]).lower()
 
 
-def test_inference_retries_discovery_once_the_connection_appears(tmp_path: Path) -> None:
-    """A topology must not be lost forever because startup lost the race.
+def test_discovery_is_retried_once_the_connection_appears(tmp_path: Path) -> None:
+    """Endpoints must not be lost forever because startup lost the race.
 
     The engine keeps serving while Home Assistant is down or slow.  Once states
-    become available, the inference cycle must bootstrap rather than return the
-    silent skip indefinitely.
+    become available, the maintenance retry must bootstrap rather than stay
+    silent indefinitely.
     """
     core, db = _core(tmp_path)
     # Startup: Home Assistant is not up yet, so discovery defers.
     core.hasource = _StubSource([], {})  # type: ignore[assignment]
     try:
         asyncio.run(core.bootstrap_topology(wait_connected_s=0.0))
-        assert core._active_topology() is None
+        assert db.repos.entities.endpoints() == []
         assert core.topology_bootstrap_error
 
-        # The connection comes up later; the next cycle must recover.
+        # The connection comes up later; the next retry must recover.
         core.hasource = _StubSource(_states(), _registries())  # type: ignore[assignment]
-        core._last_topology_attempt = 0.0  # bypass the rate limit for this cycle
-        result = asyncio.run(core.run_inference_once())
+        core._last_topology_attempt = -1e12  # bypass the rate limit for this retry
+        result = asyncio.run(core.maybe_bootstrap_topology())
 
-        assert result.get("skipped") != "no topology configured", result
-        stored = Database(tmp_path / "wm.db").load_topology()
-        assert stored is not None, "the engine never recovered after Home Assistant came up"
-        assert stored.channels and stored.devices
+        assert result is not None and result.get("status") == "candidate", result
+        assert db.repos.entities.endpoints(), (
+            "the engine never recovered after Home Assistant came up"
+        )
+        assert core.topology_bootstrap_error is None
     finally:
         db.close()
 
@@ -786,22 +643,11 @@ def test_discovery_retry_is_rate_limited(tmp_path: Path) -> None:
         db.close()
 
 
-def test_missing_topology_is_logged_not_silent(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    """``run_inference_once`` used to return a silent skip every interval."""
-    import logging
-
+def test_retry_is_a_no_op_once_endpoints_exist(tmp_path: Path) -> None:
     core, db = _core(tmp_path)
+    core.hasource = _StubSource(_states(), _registries())  # type: ignore[assignment]
     try:
-        with caplog.at_level(logging.WARNING, logger="wattmosaic.main"):
-            asyncio.run(core.run_inference_once())
-            asyncio.run(core.run_inference_once())
-        warnings = [
-            r for r in caplog.records
-            if "no topology configured" in r.getMessage().lower()
-        ]
-        assert warnings, "a missing topology produced no log line at all"
-        assert len(warnings) == 1, (
-            f"the warning must be emitted once, not every cycle (got {len(warnings)})"
-        )
+        db.repos.entities.upsert_endpoint(_discover()[0])
+        assert asyncio.run(core.maybe_bootstrap_topology()) is None
     finally:
         db.close()

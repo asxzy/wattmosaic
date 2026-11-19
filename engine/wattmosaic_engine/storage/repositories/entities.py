@@ -343,11 +343,24 @@ class EntitiesRepository(Repository):
             return [_row(row) for row in conn.execute(query, (ha_device_id,)).fetchall()]
 
     def add_entity_link(self, link: Any) -> None:
-        """Add one HA entity link (idempotent by its primary key)."""
+        """Add one HA entity link (idempotent by its primary key).
+
+        The linked :class:`HaEntity` row is created first when it is not known
+        yet (``ha_entity_links.entity_id`` references ``ha_entities``), seen at
+        the link's ``valid_from``; an existing entity row is left unchanged.
+        """
         data = _model_dict(link)
+        entity_id = str(data["entity_id"])
+        seen = iso(_coerce_time(data["valid_from"]))
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
+                self._conn.execute(
+                    """INSERT OR IGNORE INTO ha_entities(
+                        entity_id, domain, ha_device_id, first_seen, last_seen)
+                    VALUES(?,?,?,?,?)""",
+                    (entity_id, entity_id.split(".", 1)[0], None, seen, seen),
+                )
                 self._conn.execute(
                     """INSERT OR IGNORE INTO ha_entity_links(
                         entity_id, target_kind, target_id, role, valid_from, valid_until, declared_by)

@@ -21,9 +21,9 @@ from wattmosaic_engine.api import routes
 from wattmosaic_engine.api.server import create_app
 
 # Captured from ``create_app()`` on the unmodified tree (main@27373aa) before X04.
+# The 3.0 cutover removed GET /topology, /circuits and /isolation (legacy only).
 ROUTE_SNAPSHOT: frozenset[tuple[str, str]] = frozenset(
     {
-        ("GET", "/api/v1/circuits"),
         ("GET", "/api/v1/configuration-events"),
         ("GET", "/api/v1/devices"),
         ("GET", "/api/v1/devices/{device_id}"),
@@ -38,7 +38,6 @@ ROUTE_SNAPSHOT: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/v1/groups"),
         ("GET", "/api/v1/groups/{group_id}"),
         ("GET", "/api/v1/health"),
-        ("GET", "/api/v1/isolation"),
         ("GET", "/api/v1/matrix"),
         ("GET", "/api/v1/matrix/cells/{row_id}/{reader_id}"),
         ("GET", "/api/v1/matrix/readers/{id}"),
@@ -52,7 +51,6 @@ ROUTE_SNAPSHOT: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/v1/residuals"),
         ("GET", "/api/v1/snapshot"),
         ("GET", "/api/v1/status"),
-        ("GET", "/api/v1/topology"),
         ("GET", "/api/v1/topology/tree"),
         ("GET", "/api/v1/topology/v3"),
         ("GET", "/api/v1/topology/versions"),
@@ -89,7 +87,7 @@ EXPECTED_MODULES = frozenset(
         "models",
         "snapshot",
         "snapshot_v3",
-        "topology",
+        "topology_v3",
         "unknown_profiles",
     }
 )

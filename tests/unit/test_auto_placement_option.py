@@ -182,7 +182,8 @@ def test_refusal_names_the_app_option_not_the_integration_checkbox(
     assert result["applied"] is False
     assert result["accepted"], "the fixture must be proven, or this proves nothing"
     assert writes == []
-    assert db.load_device_configurations().devices == []
+    assert db.repos.entities.devices() == []
+    assert db.repos.entities.links() == []
 
     detail = result["detail"]
     assert "App option" in detail

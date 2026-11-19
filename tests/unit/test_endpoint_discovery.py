@@ -22,8 +22,8 @@ from wattmosaic_engine.contracts import (
     ScopeStatus,
 )
 from wattmosaic_engine.ingestion.discovery import (
+    devices_for_candidate_endpoints,
     discover_candidate_endpoints,
-    discover_candidate_topology,
 )
 
 
@@ -105,8 +105,6 @@ def test_plug_is_discovered_as_candidate_single_subject_endpoint():
     assert plug.enabled is False
     # Discovery created an endpoint, not a device: devices_for_candidate_endpoints
     # is the only path that creates a Physical Device, and only on demand.
-    from wattmosaic_engine.ingestion.discovery import devices_for_candidate_endpoints
-
     devices = devices_for_candidate_endpoints(endpoints, _plug_registry(), clock=_now)
     assert all(d.device_id.startswith("pd_") for d in devices)
     assert not any(d.device_id.startswith("dev_") for d in devices)
@@ -128,10 +126,10 @@ def test_ct_channels_become_ct_endpoints():
 
 
 def test_discovery_no_longer_mints_dev_ct_devices():
-    topo = discover_candidate_topology(_monitor_state(), _monitor_registry())
-    assert all(not d.device_id.startswith("dev_") for d in topo.devices), (
-        "discovery must not mint dev_<ct> devices (DEC-04)"
-    )
+    endpoints = discover_candidate_endpoints(_monitor_state(), _monitor_registry(), clock=_now)
+    assert endpoints, "the monitor's CT channels are still discovered"
+    devices = devices_for_candidate_endpoints(endpoints, _monitor_registry(), clock=_now)
+    assert devices == [], "CT endpoints must never mint dev_<ct> devices (DEC-04)"
 
 
 def test_legacy_dev_ct_device_survives_unchanged_via_device_service(tmp_path):
@@ -220,7 +218,9 @@ def test_circuit_ct_cannot_be_auto_single_subject():
 # --------------------------------------------------------------------------- #
 
 
-def test_one_ha_entity_linked_to_two_subjects_is_accepted():
+def test_one_ha_entity_linked_to_two_subjects_is_accepted(tmp_path):
+    from wattmosaic_engine.storage import Database
+
     links = [
         HaEntityLink(
             entity_id="light.hallway",
@@ -239,14 +239,27 @@ def test_one_ha_entity_linked_to_two_subjects_is_accepted():
             declared_by="user",
         ),
     ]
-    by_entity: dict[str, list[HaEntityLink]] = {}
-    for link in links:
-        by_entity.setdefault(link.entity_id, []).append(link)
-    assert len(by_entity["light.hallway"]) == 2
-    from wattmosaic_engine.device_links import ambiguous_entities_from_links
+    # One-to-many is legal: both links persist, neither is refused.
+    from wattmosaic_engine.contracts import HaEntity, LoadComponent
 
-    # One-to-many is legal: it is reported as a diagnostic, never refused.
-    assert ambiguous_entities_from_links(links) == ["light.hallway"]
+    db = Database(tmp_path / "links.db")
+    entities = db.repos.entities
+    entities.upsert_ha_entity(
+        HaEntity(entity_id="light.hallway", domain="light", first_seen=_now(), last_seen=_now())
+    )
+    entities.upsert_device(
+        PhysicalDevice(device_id="pd_hvac", name="HVAC", origin="user", created_at=_now())
+    )
+    entities.upsert_component(
+        LoadComponent(component_id="lc_fan", device_id="pd_hvac", name="Fan")
+    )
+    for link in links:
+        db.repos.entities.add_entity_link(link)
+    stored = db.repos.entities.links_for_entity("light.hallway")
+    assert {(row["target_kind"], row["target_id"]) for row in stored} == {
+        ("component", "lc_fan"),
+        ("device", "pd_hvac"),
+    }
 
 
 # Keep the runtime fake dependency exercised: the test depends only on the

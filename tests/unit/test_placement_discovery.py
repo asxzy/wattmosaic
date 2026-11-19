@@ -37,11 +37,13 @@ from wattmosaic_engine.api.facade import InvalidRequest, NullFacade
 from wattmosaic_engine.api.server import APIServer, create_app
 from wattmosaic_engine.config.settings import EngineConfig
 from wattmosaic_engine.contracts import (
-    CTChannel,
-    CTType,
-    Phase,
-    Topology,
-    TopologyStatus,
+    EndpointKind,
+    EndpointScope,
+    HaEntity,
+    HaEntityLink,
+    HaEntityRole,
+    MeasurementEndpoint,
+    ScopeStatus,
 )
 from wattmosaic_engine.ingestion.candidate_entities import (
     REASON_ALREADY_DECLARED,
@@ -166,18 +168,11 @@ def test_all_light_candidates_are_offered_when_none_are_declared() -> None:
 
 
 def test_a_declared_state_entity_is_not_re_offered() -> None:
-    topology = Topology(
-        channels=[],
-        devices=[
-            {
-                "device_id": "dev_island",
-                "metadata": {"state_entity_ids": ["light.with_device"]},
-            }
-        ],
-    )
     states = [_state("light.with_device"), _state("light.without_device")]
 
-    candidates, refused = candidate_state_entities(states, _registries(), topology)
+    candidates, refused = candidate_state_entities(
+        states, _registries(), {"light.with_device"}
+    )
 
     assert [c.entity_id for c in candidates] == ["light.without_device"]
     assert refused["light.with_device"] == REASON_ALREADY_DECLARED
@@ -541,26 +536,31 @@ class _WideSource:
         return {key: rows for key, rows in payload.items() if key in wanted}
 
 
-def _topology() -> Topology:
-    return Topology(
-        status=TopologyStatus.CONFIRMED,
-        version=1,
-        channels=[
-            CTChannel(
-                ct_id="main",
-                entity_id="sensor.main_power",
-                ct_type=CTType.MAIN,
-                phase=Phase.BOTH,
-            ),
-            CTChannel(
-                ct_id="ct1",
-                entity_id="sensor.ct1_power",
-                ct_type=CTType.BRANCH,
-                phase=Phase.L1,
-            ),
-        ],
-        devices=[],
-    )
+T0 = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def _endpoints() -> list[MeasurementEndpoint]:
+    """A panel main and one branch CT, as v3 measurement endpoints."""
+    return [
+        MeasurementEndpoint(
+            endpoint_id="main",
+            kind=EndpointKind.PANEL_MAIN,
+            entity_id="sensor.main_power",
+            scope=EndpointScope.PANEL_FEED,
+            scope_status=ScopeStatus.CONFIRMED,
+            enabled=True,
+            created_at=T0,
+        ),
+        MeasurementEndpoint(
+            endpoint_id="ct1",
+            kind=EndpointKind.CT,
+            entity_id="sensor.ct1_power",
+            scope=EndpointScope.CIRCUIT,
+            scope_status=ScopeStatus.CANDIDATE,
+            enabled=True,
+            created_at=T0,
+        ),
+    ]
 
 
 def _core(
@@ -575,25 +575,29 @@ def _core(
     core = EngineCore(config, db)
     source = _FakeSource()
     core.hasource = source  # type: ignore[assignment]
-    topology = _topology()
-    db.save_topology(topology, note="test")
-    core.topology_cache = topology
+    for endpoint in _endpoints():
+        db.repos.entities.upsert_endpoint(endpoint)
 
     writes: list[str] = []
-    original_save_configurations = db.save_device_configurations
-    original_save_topology = db.save_topology
+    repo = db.repos.entities
+    original_upsert_device = repo.upsert_device
+    original_add_link = repo.add_entity_link
 
-    def save_configurations(configurations: Any) -> None:
-        writes.append("save_device_configurations")
-        original_save_configurations(configurations)
+    def upsert_device(device: Any) -> None:
+        writes.append("upsert_device")
+        original_upsert_device(device)
 
-    def save_topology(stored: Any, note: str = "") -> int:
-        writes.append("save_topology")
-        return original_save_topology(stored, note=note)
+    def add_entity_link(link: Any) -> None:
+        writes.append("add_entity_link")
+        original_add_link(link)
 
-    db.save_device_configurations = save_configurations  # type: ignore[method-assign]
-    db.save_topology = save_topology  # type: ignore[method-assign]
+    repo.upsert_device = upsert_device  # type: ignore[method-assign]
+    repo.add_entity_link = add_entity_link  # type: ignore[method-assign]
     return core, db, source, writes
+
+
+def _discovered_links(db: Database) -> list[dict[str, Any]]:
+    return [row for row in db.repos.entities.links() if row["declared_by"] == "discovery"]
 
 
 def test_response_carries_every_frozen_key_and_groups_is_empty_without_group_fit(
@@ -863,7 +867,8 @@ def test_apply_true_without_the_opt_in_writes_nothing_and_explains_why(
     assert result["applied"] is False
     assert "disabled" in result["detail"]
     assert writes == []
-    assert db.load_device_configurations().devices == []
+    assert db.repos.entities.devices() == []
+    assert _discovered_links(db) == []
 
 
 def test_apply_and_opt_in_writes_and_reports_applied(tmp_path: Path) -> None:
@@ -873,11 +878,51 @@ def test_apply_and_opt_in_writes_and_reports_applied(tmp_path: Path) -> None:
 
     assert result["applied"] is True
     assert all(item["applied"] is True for item in result["accepted"])
-    assert "save_device_configurations" in writes
-    assert "save_topology" in writes
-    configurations = db.load_device_configurations().devices
-    assert [config.state_entity_ids[0] for config in configurations] == ["light.island"]
-    assert result["topology_version"] == 2
+    assert "upsert_device" in writes
+    assert "add_entity_link" in writes
+    devices = db.repos.entities.devices()
+    assert [row["device_id"] for row in devices] == ["dev_auto_island"]
+    assert devices[0]["name"] == "Island Lights"
+    links = _discovered_links(db)
+    assert [(row["entity_id"], row["target_id"]) for row in links] == [
+        ("light.island", "dev_auto_island")
+    ]
+    assert links[0]["role"] == HaEntityRole.LOAD_STATE.value
+
+
+def test_a_user_linked_entity_is_never_re_placed(tmp_path: Path) -> None:
+    """User declarations win: a person's link keeps the fixture out of the plan."""
+    core, db, _, _ = _core(tmp_path, auto_placement=True)
+    db.repos.entities.upsert_ha_entity(
+        HaEntity(entity_id="light.island", domain="light", first_seen=T0, last_seen=T0)
+    )
+    db.repos.entities.add_entity_link(
+        HaEntityLink(
+            entity_id="light.island",
+            target_kind="device",
+            target_id="dev_island",
+            role=HaEntityRole.LOAD_STATE,
+            valid_from=T0,
+            declared_by="user",
+        )
+    )
+
+    result = asyncio.run(core.discover_placements(lookback_hours=24, apply=True))
+
+    assert result["accepted"] == []
+    assert result["applied"] is False
+    assert result["stats"]["candidate_entities"] == 0
+    assert db.repos.entities.devices() == []
+
+
+def test_a_rerun_after_an_applied_placement_re_derives_it(tmp_path: Path) -> None:
+    """A discovery link is not a user's assertion and must not block a re-run."""
+    core, _, _, _ = _core(tmp_path, auto_placement=True)
+    first = asyncio.run(core.discover_placements(lookback_hours=24, apply=True))
+    second = asyncio.run(core.discover_placements(lookback_hours=24, apply=False))
+
+    assert [item["entity_id"] for item in first["accepted"]] == ["light.island"]
+    assert [item["entity_id"] for item in second["accepted"]] == ["light.island"]
 
 
 def test_a_candidate_counter_and_refusals_report_the_mode_entity(tmp_path: Path) -> None:
@@ -927,7 +972,6 @@ def test_blocked_learning_reports_the_rejection_facts_only(tmp_path: Path) -> No
     assert learning["remedy"] is None
     assert learning["topology_note"] is not None
     assert "No confirmation is required" in learning["topology_note"]
-    assert core._active_topology().status == TopologyStatus.CONFIRMED
 
 
 # --------------------------------------------------------------------------- #

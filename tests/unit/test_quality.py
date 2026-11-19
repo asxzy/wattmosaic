@@ -5,27 +5,50 @@ grouped overlaps, energy counter resets, and event logging.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from wattmosaic_engine.contracts import (
-    CTChannel,
-    CTType,
     DataQualityReport,
-    Measurement,
-    Phase,
-    Polarity,
+    EndpointKind,
+    EndpointScope,
     QualityStatus,
-    Reconciliation,
-    Topology,
+    ReconciliationV3,
 )
 from wattmosaic_engine.quality import DataQualityEngine, QualityThresholds, score_to_status
-from wattmosaic_engine.quality.engine import OVERLAP_EXPLANATION
+from wattmosaic_engine.quality.engine import (
+    OVERLAP_EXPLANATION,
+    ChannelConfig,
+    channel_config_from_endpoints,
+)
 from wattmosaic_engine.storage import Database
 from wattmosaic_engine.synchronization import SampleAligner
 
 T0 = datetime(2026, 11, 5, 12, 0, tzinfo=UTC)
+
+
+@dataclass(frozen=True)
+class _Sample:
+    """The duck-typed sample :meth:`SampleAligner.add` consumes."""
+
+    entity_id: str
+    ct_id: str
+    value: float
+    unit: str
+    value_w: float | None
+    state_timestamp: datetime
+    received_at: datetime
+    repeated: bool
+    quality: str
+    sequence: int
+
+    def effective_power_w(self) -> float:
+        if self.value_w is not None:
+            return self.value_w
+        return self.value * (1000.0 if self.unit == "kW" else 1.0)
 
 
 def _m(
@@ -37,18 +60,18 @@ def _m(
     unit: str = "W",
     quality: str = "good",
     sequence: int = 0,
-) -> Measurement:
+) -> _Sample:
     recv = T0 + timedelta(seconds=seconds)
-    return Measurement(
+    return _Sample(
         entity_id=f"sensor.{ct_id}",
         ct_id=ct_id,
         value=value,
-        unit=unit,  # type: ignore[arg-type]
+        unit=unit,
         value_w=value if unit in ("W", "kW") else None,
         state_timestamp=recv,
         received_at=recv,
         repeated=repeated,
-        quality=quality,  # type: ignore[arg-type]
+        quality=quality,
         sequence=sequence,
     )
 
@@ -65,8 +88,8 @@ def _evaluate(
     aligner: SampleAligner,
     *,
     db=None,
-    topology: Topology | None = None,
-    reconciliation: Reconciliation | None = None,
+    channels: dict[str, ChannelConfig] | None = None,
+    reconciliation: object | None = None,
     at_offset: float = 0.0,
     energy: bool = True,
 ):
@@ -81,7 +104,7 @@ def _evaluate(
     report = engine.evaluate(
         window,
         health,
-        topology=topology,
+        channels=channels,
         reconciliation=reconciliation,
         energy_window=energy_window,
         energy_health=energy_health,
@@ -180,18 +203,15 @@ def test_absent_entity_sensor_unavailable() -> None:
 
 def test_polarity_and_phase_penalties() -> None:
     aligner = _healthy_aligner({"l1": [50.0, 51.0, 50.0]})
-    topology = Topology(
-        channels=[
-            CTChannel(
-                ct_id="l1",
-                entity_id="sensor.l1",
-                ct_type=CTType.MAIN,
-                phase=Phase.UNKNOWN,
-                polarity=Polarity.INVERTED,
-            )
-        ]
-    )
-    _, report = _evaluate(aligner, topology=topology, at_offset=30)
+    channels = {
+        "l1": ChannelConfig(
+            entity_id="sensor.l1",
+            phase="unknown",
+            polarity="inverted",
+            role="main",
+        )
+    }
+    _, report = _evaluate(aligner, channels=channels, at_offset=30)
     issues = report.channels["l1"]["issues"]
     assert any("polarity_inconsistent" in i for i in issues)
     assert any("phase_unknown" in i for i in issues)
@@ -206,25 +226,22 @@ def test_a_load_row_declared_normal_but_negative_is_reported() -> None:
     about -1270 W while declared ``normal``.
     """
     aligner = _healthy_aligner({"heater": [-1271.0, -1270.0, -1271.0]})
-    topology = Topology(
-        channels=[
-            CTChannel(
-                ct_id="heater",
-                entity_id="sensor.heater",
-                ct_type=CTType.BRANCH,
-                phase=Phase.L1,
-                polarity=Polarity.NORMAL,
-            )
-        ]
-    )
-    _, report = _evaluate(aligner, topology=topology, at_offset=30)
+    channels = {
+        "heater": ChannelConfig(
+            entity_id="sensor.heater",
+            phase="l1",
+            polarity="normal",
+            role="branch",
+        )
+    }
+    _, report = _evaluate(aligner, channels=channels, at_offset=30)
     issues = report.channels["heater"]["issues"]
     assert any("polarity_inconsistent" in i for i in issues)
     assert any("negative" in i for i in issues)
 
 
-@pytest.mark.parametrize("ct_type", [CTType.BRANCH])
-def test_every_load_row_type_is_checked(ct_type: CTType) -> None:
+@pytest.mark.parametrize("role", ["branch"])
+def test_every_load_row_type_is_checked(role: str) -> None:
     """A negative reading on a load row is a defect, whatever the load role.
 
     The single-device role is retired, so ``branch`` is the only role a load row
@@ -232,18 +249,15 @@ def test_every_load_row_type_is_checked(ct_type: CTType) -> None:
     moment it is added.
     """
     aligner = _healthy_aligner({"row": [-50.0, -50.0, -50.0]})
-    topology = Topology(
-        channels=[
-            CTChannel(
-                ct_id="row",
-                entity_id="sensor.row",
-                ct_type=ct_type,
-                phase=Phase.L1,
-                polarity=Polarity.NORMAL,
-            )
-        ]
-    )
-    _, report = _evaluate(aligner, topology=topology, at_offset=30)
+    channels = {
+        "row": ChannelConfig(
+            entity_id="sensor.row",
+            phase="l1",
+            polarity="normal",
+            role=role,
+        )
+    }
+    _, report = _evaluate(aligner, channels=channels, at_offset=30)
     assert any("polarity_inconsistent" in i for i in report.channels["row"]["issues"])
 
 
@@ -254,18 +268,15 @@ def test_a_main_row_may_report_negative_power_without_a_polarity_penalty() -> No
     new check is scoped to load rows only.
     """
     aligner = _healthy_aligner({"main": [-900.0, -905.0, -900.0]})
-    topology = Topology(
-        channels=[
-            CTChannel(
-                ct_id="main",
-                entity_id="sensor.main",
-                ct_type=CTType.MAIN,
-                phase=Phase.L1,
-                polarity=Polarity.NORMAL,
-            )
-        ]
-    )
-    _, report = _evaluate(aligner, topology=topology, at_offset=30)
+    channels = {
+        "main": ChannelConfig(
+            entity_id="sensor.main",
+            phase="l1",
+            polarity="normal",
+            role="main",
+        )
+    }
+    _, report = _evaluate(aligner, channels=channels, at_offset=30)
     assert not any(
         "polarity_inconsistent" in i for i in report.channels["main"]["issues"]
     )
@@ -274,20 +285,59 @@ def test_a_main_row_may_report_negative_power_without_a_polarity_penalty() -> No
 def test_an_inverted_load_row_with_a_negative_value_is_not_flagged() -> None:
     """A correctly declared reversed CT must not be reported as a defect."""
     aligner = _healthy_aligner({"row": [-400.0, -401.0, -400.0]})
-    topology = Topology(
-        channels=[
-            CTChannel(
-                ct_id="row",
-                entity_id="sensor.row",
-                ct_type=CTType.BRANCH,
-                phase=Phase.L1,
-                polarity=Polarity.INVERTED,
-            )
-        ]
-    )
-    _, report = _evaluate(aligner, topology=topology, at_offset=30)
+    channels = {
+        "row": ChannelConfig(
+            entity_id="sensor.row",
+            phase="l1",
+            polarity="inverted",
+            role="branch",
+        )
+    }
+    _, report = _evaluate(aligner, channels=channels, at_offset=30)
     assert not any(
         "polarity_inconsistent" in i for i in report.channels["row"]["issues"]
+    )
+
+
+def test_channel_config_is_derived_from_v3_endpoints_and_latest_revision() -> None:
+    endpoints = [
+        {
+            "endpoint_id": "main",
+            "entity_id": "sensor.main",
+            "kind": EndpointKind.PANEL_MAIN.value,
+            "scope": EndpointScope.PANEL_FEED.value,
+            "revisions": [{"revision": 1, "phase": "l1", "polarity": "normal"}],
+        },
+        {
+            "endpoint_id": "heater",
+            "entity_id": "sensor.heater",
+            "kind": EndpointKind.CT.value,
+            "scope": EndpointScope.CIRCUIT.value,
+            "revisions": [
+                {"revision": 1, "phase": "l1", "polarity": "normal"},
+                {"revision": 2, "phase": "l2", "polarity": "inverted"},
+            ],
+        },
+        {
+            "endpoint_id": "plug",
+            "entity_id": "sensor.plug",
+            "kind": EndpointKind.SMART_PLUG.value,
+            "scope": EndpointScope.SINGLE_SUBJECT.value,
+        },
+        {"entity_id": "sensor.no_id", "kind": EndpointKind.CT.value},
+    ]
+    channels = channel_config_from_endpoints(endpoints)
+    assert set(channels) == {"main", "heater", "plug"}
+    assert channels["main"] == ChannelConfig(
+        entity_id="sensor.main", phase="l1", polarity="normal", role="main"
+    )
+    # The latest revision wins.
+    assert channels["heater"] == ChannelConfig(
+        entity_id="sensor.heater", phase="l2", polarity="inverted", role="branch"
+    )
+    # No revision: unknown phase, normal polarity, and not a load row.
+    assert channels["plug"] == ChannelConfig(
+        entity_id="sensor.plug", phase="unknown", polarity="normal", role="other"
     )
 
 
@@ -409,13 +459,11 @@ def test_duplicate_entity_binding_is_grouped() -> None:
     aligner = SampleAligner(max_age_s=10_000, stale_after_s=120)
     aligner.add(_m("dup_a", 6.42, seconds=0))
     aligner.add(_m("dup_b", 6.42, seconds=0))
-    topology = Topology(
-        channels=[
-            CTChannel(ct_id="dup_a", entity_id="sensor.same"),
-            CTChannel(ct_id="dup_b", entity_id="sensor.same"),
-        ]
-    )
-    _, report = _evaluate(aligner, topology=topology, at_offset=0)
+    channels = {
+        "dup_a": ChannelConfig(entity_id="sensor.same"),
+        "dup_b": ChannelConfig(entity_id="sensor.same"),
+    }
+    _, report = _evaluate(aligner, channels=channels, at_offset=0)
     dup = [i for i in report.issues if i.startswith("duplicate_entity")]
     assert len(dup) == 1
     assert "size=2" in dup[0]
@@ -440,12 +488,21 @@ def test_zero_values_are_not_overlap() -> None:
 
 def test_reconciliation_error_lowers_overall_score() -> None:
     aligner = _healthy_aligner({"l1": [100.0, 100.0, 100.0]})
-    good = Reconciliation(reconciliation_error_ratio=0.01)
+    good = SimpleNamespace(reconciliation_error_ratio=0.01)
     _, report_good = _evaluate(aligner, reconciliation=good, at_offset=30)
-    bad = Reconciliation(reconciliation_error_ratio=0.9)
+    bad = SimpleNamespace(reconciliation_error_ratio=0.9)
     _, report_bad = _evaluate(aligner, reconciliation=bad, at_offset=30)
     assert report_bad.overall_score < report_good.overall_score
     assert any("reconciliation_error" in i for i in report_bad.issues)
+
+
+def test_v3_reconciliation_without_an_error_ratio_is_not_penalised() -> None:
+    """The v3 reconciliation carries no ratio: absence is not a fabricated error."""
+    aligner = _healthy_aligner({"l1": [100.0, 100.0, 100.0]})
+    _, baseline = _evaluate(aligner, at_offset=30)
+    _, report = _evaluate(aligner, reconciliation=ReconciliationV3(), at_offset=30)
+    assert report.overall_score == baseline.overall_score
+    assert not any("reconciliation_error" in i for i in report.issues)
 
 
 # --------------------------------------------------------------------------- #

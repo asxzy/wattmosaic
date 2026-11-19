@@ -127,7 +127,15 @@ class MappingApiMixin:
             # The repository exposes the storage-only ``metadata_json`` column;
             # the contract forbids extra keys, so drop it before validation.
             data.pop("metadata_json", None)
-            data.setdefault("revisions", [])
+            # A confirmed single-subject CT validates only with its user-declared
+            # revision, so the revisions are loaded rather than defaulted away.
+            try:
+                data["revisions"] = [
+                    {k: v for k, v in dict(r).items() if k != "id"}
+                    for r in self.db.repos.entities.revisions(data["endpoint_id"])
+                ]
+            except Exception:  # noqa: BLE001 - no revision source -> none
+                data["revisions"] = []
             try:
                 out.append(MeasurementEndpoint(**data))
             except Exception:  # noqa: BLE001 - one bad row must not break the tree

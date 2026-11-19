@@ -1,6 +1,6 @@
-"""Discovery must never offer WattMosaic's own estimates as CT channels.
+"""Discovery must never offer WattMosaic's own estimates as CT endpoints.
 
-Topology discovery reads every power entity in Home Assistant.  The integration
+Endpoint discovery reads every power entity in Home Assistant.  The integration
 publishes ``sensor.<device>_estimated_power``, which is a power entity in watts,
 so without an explicit exclusion discovery proposes the engine's own answer back
 to the user as if it were an independent measurement of the same circuit.
@@ -11,7 +11,7 @@ fail if the exclusion is removed rather than merely restating it.
 
 from __future__ import annotations
 
-from wattmosaic_engine.ingestion.discovery import discover_candidate_topology
+from wattmosaic_engine.ingestion.discovery import discover_candidate_endpoints
 
 
 def _power_state(entity_id: str, value: str = "1.0") -> dict:
@@ -45,6 +45,10 @@ def _registry(entries: dict[str, str], *, device_id: str | None = None) -> dict:
     }
 
 
+def _ids(states: list[dict], registry: dict | None) -> set[str]:
+    return {e.entity_id for e in discover_candidate_endpoints(states, registry)}
+
+
 def test_discovery_excludes_own_estimate_channels() -> None:
     """A real CT is discovered; the engine's own estimate on the same monitor is not."""
     states = [
@@ -63,19 +67,36 @@ def test_discovery_excludes_own_estimate_channels() -> None:
         device_id="monitor",
     )
 
-    topology = discover_candidate_topology(states, registry)
-    ids = {c.entity_id for c in topology.channels}
+    ids = _ids(states, registry)
 
     assert "sensor.panel_ct1_power" in ids, "a real CT must still be discovered"
     assert "sensor.fridge_estimated_power" not in ids, (
-        "the engine's own estimate must never be proposed as a CT channel"
+        "the engine's own estimate must never be proposed as a CT endpoint"
     )
 
 
-def test_discovery_excludes_own_global_sensors_without_registry() -> None:
-    states = [_power_state("sensor.wattmosaic_engine_total_incoming_power")]
-    topology = discover_candidate_topology(states, None)
-    assert topology.channels == [], (
+def test_discovery_excludes_own_global_sensors_by_id() -> None:
+    """Engine-owned global sensors are excluded by id alone.
+
+    The registry attributes the sensor to an unrelated platform, so only the
+    id-prefix fallback can exclude it.
+    """
+    states = [
+        _power_state("sensor.panel_ct1_power"),
+        _power_state("sensor.panel_ct2_power"),
+        _power_state("sensor.wattmosaic_engine_total_incoming_power"),
+    ]
+    registry = _registry(
+        {
+            "sensor.panel_ct1_power": "some_monitor",
+            "sensor.panel_ct2_power": "some_monitor",
+            "sensor.wattmosaic_engine_total_incoming_power": "unknown",
+        },
+        device_id="monitor",
+    )
+    ids = _ids(states, registry)
+    assert "sensor.panel_ct1_power" in ids
+    assert "sensor.wattmosaic_engine_total_incoming_power" not in ids, (
         "engine-owned global sensors are identifiable from their id alone"
     )
 
@@ -101,5 +122,4 @@ def test_discovery_keeps_third_party_power_entities() -> None:
         },
         device_id="monitor",
     )
-    topology = discover_candidate_topology(states, registry)
-    assert {c.entity_id for c in topology.channels} == {s["entity_id"] for s in states}
+    assert _ids(states, registry) == {s["entity_id"] for s in states}

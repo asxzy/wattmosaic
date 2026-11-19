@@ -27,8 +27,7 @@ from wattmosaic_engine.contracts import (
     ErrorResponse,
     HealthResponse,
     MeasurementBasis,
-    ResidualKind,
-    ResidualPower,
+    ReaderResidualPoint,
     ServiceCommand,
     ServiceResult,
 )
@@ -201,7 +200,7 @@ def test_null_facade_returns_503_but_health_degrades() -> None:
 
 def test_status_snapshot_devices_quality_diagnostics() -> None:
     async def fn(session, base):
-        for path in ("status", "snapshot", "devices", "quality", "diagnostics", "topology"):
+        for path in ("status", "snapshot", "devices", "quality", "diagnostics", "topology/v3"):
             async with session.get(f"{base}/{path}", headers=HEADERS) as resp:
                 assert resp.status == 200, f"{path}: {await resp.text()}"
                 await resp.json()
@@ -316,8 +315,8 @@ def test_residual_history_route() -> None:
 
     The route already exists (``api/server.py`` registers it against
     ``residual_components``), so this verifies it rather than adding a second
-    one.  A real ``Database`` is written through ``insert_residual_power`` so
-    the round trip -- the component that has silently dropped fields before --
+    one.  A real ``Database`` is written through the per-reader residual
+    repository (``reader_residual_series``) so the round trip -- the component that has silently dropped fields before --
     is part of the assertion, and the negative value must survive the wire.
     """
 
@@ -350,8 +349,8 @@ def test_residual_history_route() -> None:
             assert row["baseline_w"] + row["dynamic_w"] == pytest.approx(
                 row["residual_w"], abs=1e-9
             )
-            assert row["resolved"] is False
-            assert row["unresolved_since"] is not None
+            assert row["reader_id"] in {"ct_a", "ct_b"}
+            assert row["topology_version_id"] == "topo-1"
         # The query parameters are bounded and honoured.
         async with session.get(f"{base}/residuals?limit=not-a-number", headers=HEADERS) as resp:
             assert resp.status == 400
@@ -363,28 +362,30 @@ def test_residual_history_route() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db = Database(Path(tmp) / "residuals.db")
         try:
-            db.insert_residual_power(
-                ResidualPower(
-                    residual_w=-125.0,
-                    kind=ResidualKind.NEGATIVE,
-                    resolved=False,
-                    unresolved_since=datetime.now(UTC),
-                    basis=MeasurementBasis.CT_MEASURED,
-                    baseline_w=-125.0,
-                    dynamic_w=0.0,
-                )
+            now = datetime.now(UTC)
+            written = db.repos.residual.put_points(
+                [
+                    ReaderResidualPoint(
+                        reader_id="ct_a",
+                        at=now,
+                        residual_w=-125.0,
+                        baseline_w=-125.0,
+                        dynamic_w=0.0,
+                        topology_version_id="topo-1",
+                        basis=MeasurementBasis.CT_MEASURED,
+                    ),
+                    ReaderResidualPoint(
+                        reader_id="ct_b",
+                        at=now,
+                        residual_w=800.0,
+                        baseline_w=800.0,
+                        dynamic_w=0.0,
+                        topology_version_id="topo-1",
+                        basis=MeasurementBasis.CT_MEASURED,
+                    ),
+                ]
             )
-            db.insert_residual_power(
-                ResidualPower(
-                    residual_w=800.0,
-                    kind=ResidualKind.POSITIVE,
-                    resolved=False,
-                    unresolved_since=datetime.now(UTC),
-                    basis=MeasurementBasis.CT_MEASURED,
-                    baseline_w=800.0,
-                    dynamic_w=0.0,
-                )
-            )
+            assert written == 2
             assert run(_with_server(ResidualFacade(db), fn))
         finally:
             db.close()
@@ -410,13 +411,14 @@ def test_residual_history_route_is_registered_once() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_topology_get_route_serves_v3_shape() -> None:
-    """GET /topology remains (T4); the declared-topology write path does not."""
+def test_topology_v3_routes_serve_the_v3_shape() -> None:
+    """GET /topology/v3 serves the v3 graph; the legacy GET /topology is gone."""
 
     async def fn(session, base):
-        async with session.get(f"{base}/topology", headers=HEADERS) as resp:
-            assert resp.status == 200
-            await resp.json()
+        async with session.get(f"{base}/topology/v3", headers=HEADERS) as resp:
+            assert resp.status == 200, await resp.text()
+            body = await resp.json()
+        assert set(body) >= {"active_version", "edges", "primary_tree"}
         return True
 
     assert run(_with_server(V3Facade(), fn))
@@ -428,6 +430,9 @@ def test_legacy_topology_and_mapping_routes_are_removed() -> None:
     async def fn(session, base):
         checks = [
             ("GET", "/mapping"),
+            ("GET", "/topology"),
+            ("GET", "/circuits"),
+            ("GET", "/isolation"),
             ("PUT", "/topology"),
             ("POST", "/topology/confirm"),
             ("GET", "/topology/nesting"),
@@ -638,8 +643,8 @@ def test_create_app_is_import_safe_and_routable() -> None:
         ("GET", "/api/v1/devices"),
         ("GET", "/api/v1/devices/{device_id}"),
         ("GET", "/api/v1/groups"),
-        ("GET", "/api/v1/topology"),
         ("GET", "/api/v1/topology/v3"),
+        ("GET", "/api/v1/topology/tree"),
         ("GET", "/api/v1/quality"),
         ("GET", "/api/v1/diagnostics"),
         ("GET", "/api/v1/models/{device_id}"),
@@ -659,7 +664,6 @@ def test_all_documented_endpoints_reachable() -> None:
             ("GET", "status", None),
             ("GET", "snapshot", None),
             ("GET", "devices", None),
-            ("GET", "topology", None),
             ("GET", "quality", None),
             ("GET", "diagnostics", None),
             ("GET", "metrics", None),

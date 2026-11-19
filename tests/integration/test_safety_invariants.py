@@ -226,54 +226,61 @@ def test_no_silent_clamping_of_negative_power_in_engine() -> None:
 
 
 def test_main_power_preserves_reverse_flow() -> None:
-    """A negative main reading (export) must survive summation unchanged."""
-    from wattmosaic_engine.contracts import CTChannel, CTType, Phase, Topology
+    """A negative main reading (export) must survive the v3 balance unchanged."""
+    from wattmosaic_engine.contracts import ReconciliationV3
 
-    topology = Topology(
-        channels=[
-            CTChannel(ct_id="m1", entity_id="sensor.m1", ct_type=CTType.MAIN, phase=Phase.L1),
-            CTChannel(ct_id="m2", entity_id="sensor.m2", ct_type=CTType.MAIN, phase=Phase.L2),
-        ]
+    balance = ReconciliationV3(
+        main_w=-1300.0, identified_w=200.0, group_w=0.0, unknown_w=0.0, residual_w=-1500.0
     )
-    from wattmosaic_engine.electrical import ElectricalModel
-
-    model = ElectricalModel(topology)
-    result = model.main_power_w({"m1": -1500.0, "m2": 200.0})
-    total = getattr(result, "total_w", None)
-    if total is None:
-        total = getattr(result, "power_w", None)
-    assert total == pytest.approx(-1300.0)
+    dumped = balance.model_dump(mode="json")
+    assert dumped["main_w"] == pytest.approx(-1300.0)
+    assert dumped["residual_w"] == pytest.approx(-1500.0)
+    assert balance.balance_error_w == pytest.approx(0.0)
 
 
 def test_measurement_contract_preserves_sign() -> None:
     from datetime import UTC, datetime
 
-    from wattmosaic_engine.contracts import Measurement
+    from wattmosaic_engine.contracts import MeasurementType, ReaderMeasurement
 
-    m = Measurement(entity_id="sensor.x", ct_id="c", value=-1234.5,
-                    state_timestamp=datetime.now(UTC))
-    assert m.effective_power_w() == -1234.5
+    now = datetime.now(UTC)
+    m = ReaderMeasurement(
+        reader_id="c",
+        observed_at=now,
+        received_at=now,
+        active_power_w=-1234.5,
+        phase="l1",
+        measurement_type=MeasurementType.INSTANTANEOUS,
+        calibration_version="v1",
+        measurement_basis="ct_measured",
+        sequence=1,
+    )
+    assert m.active_power_w == -1234.5
+    assert m.model_dump(mode="json")["active_power_w"] == -1234.5
 
 
 def test_reconciliation_schema_has_residual_field() -> None:
-    from wattmosaic_engine.contracts import Reconciliation
+    from wattmosaic_engine.contracts import ReconciliationV3
 
-    fields = Reconciliation.model_fields
-    assert "unknown_residual_w" in fields
-    assert "accounted_fraction" in fields
+    fields = ReconciliationV3.model_fields
+    assert "residual_w" in fields
+    assert "unknown_w" in fields
     # A residual must not be representable as a per-device distribution field.
     assert not any("redistribut" in name for name in fields)
+    # Absent terms are honest absence, never a fabricated zero balance.
+    assert ReconciliationV3().balance_error_w is None
 
 
 def test_learning_sample_requires_rejection_reason_when_rejected() -> None:
     """A rejected sample must be attributable to a documented reason code."""
-    from wattmosaic_engine.contracts import SampleRejection
+    from wattmosaic_engine.learning.sample_filter import GateRejection
 
-    codes = {item.value for item in SampleRejection}
-    assert "stale_measurement" in codes
-    assert "concurrent_events" in codes
-    assert "ambiguous_topology" in codes
-    assert "duplicate_state" in codes
+    codes = {item.value for item in GateRejection}
+    assert "measurement_quality" in codes
+    assert "not_independent" in codes
+    assert "non_identifiable" in codes
+    assert "group_not_confirmed" in codes
+    assert tuple(GateRejection.order()) == tuple(GateRejection)
 
 
 def test_stale_quality_exists_and_is_distinct_from_good() -> None:
@@ -285,23 +292,24 @@ def test_stale_quality_exists_and_is_distinct_from_good() -> None:
 
 
 def test_model_status_supports_lifecycle() -> None:
-    from wattmosaic_engine.contracts import ModelStatus
+    import typing
 
-    values = {m.value for m in ModelStatus}
-    for required in ("candidate", "active", "frozen", "rolled_back", "rejected"):
+    from wattmosaic_engine.contracts import PowerModelEvent
+
+    values = set(typing.get_args(PowerModelEvent.model_fields["event"].annotation))
+    for required in ("candidate", "activated", "frozen", "rolled_back", "rejected"):
         assert required in values
 
 
 def test_confidence_is_declared_uncalibrated_by_default() -> None:
-    from datetime import UTC, datetime
+    """Confidence is a vector of uncalibrated scores with no blended scalar."""
+    from wattmosaic_engine.contracts import ConfidenceVectorV3
 
-    from wattmosaic_engine.contracts import InferenceResult, Source
-
-    result = InferenceResult(
-        device_id="d", timestamp=datetime.now(UTC), power_w=1.0,
-        source=Source.INFERRED, confidence=0.99,
-    )
-    assert result.confidence_is_calibrated is False
+    vector = ConfidenceVectorV3(model_fit=0.99)
+    assert "uncalibrated" in (ConfidenceVectorV3.__doc__ or "")
+    assert "confidence" not in ConfidenceVectorV3.model_fields
+    with pytest.raises(TypeError):
+        float(vector)  # type: ignore[arg-type]
 
 
 def test_residual_is_never_redistributed() -> None:

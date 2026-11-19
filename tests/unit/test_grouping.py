@@ -34,7 +34,6 @@ from wattmosaic_engine.contracts import (
     StepClass,
     VersionTriple,
 )
-from wattmosaic_engine.disaggregation import isolation
 from wattmosaic_engine.realtime.grouping import (
     DEFAULT_QUIET_S,
     DEFAULT_TOLERANCE_S,
@@ -317,99 +316,6 @@ def test_late_sample_creates_revision_and_leaves_others_untouched(repo: Evidence
     assert repo.latest_group(g1.group_id).model_dump_json() == rev2.model_dump_json()
     assert [g for g in engine.groups() if g.group_id == g2.group_id][0].model_dump_json() == g2_bytes
     assert len(revised) == 1 and revised[0].group_id == g1.group_id
-
-
-# --------------------------------------------------------------------------- #
-# Isolation adaptation (Z2 keeps the old path working)
-# --------------------------------------------------------------------------- #
-
-
-def test_isolation_group_events_deprecated_but_working() -> None:
-    events = [
-        {
-            "device_id": "dev-a",
-            "entity_id": "light.a",
-            "occurred_at": T0,
-            "new_state": "on",
-            "attributes": {"automation_id": "automation.scene"},
-        },
-        {
-            "device_id": "dev-b",
-            "entity_id": "light.b",
-            "occurred_at": T0 + timedelta(seconds=2),
-            "new_state": "on",
-            "attributes": {"automation_id": "automation.scene"},
-        },
-    ]
-    assert isolation.group_events.__doc__ is not None
-    assert "deprecated" in isolation.group_events.__doc__.lower()
-    assert len(isolation.group_events(events)) == 1
-
-
-def test_isolation_consumes_v3_event_group() -> None:
-    from wattmosaic_engine.contracts import EventGroup, SubEvent, SubEventKind
-
-    sub = SubEvent(
-        sub_event_id="sub-1",
-        kind=SubEventKind.HA_STATE,
-        ref=evidence_ref("ha_event", ha_event("light.a", T0).event_id),
-        observed_at=T0,
-        timestamp_uncertainty_s=1.0,
-    )
-    group = EventGroup(
-        group_id="grp-x",
-        revision=1,
-        status=EventGroupStatus.DETECTED,
-        opened_at=T0,
-        sub_events=[sub],
-        reader_deltas=[],
-        versions=VERSIONS,
-    )
-    device_events = isolation.physical_device_events((group,))
-    # A v3 HA_STATE group carries no ``device_id``/``entity_id`` on the group
-    # object itself, so ``physical_device_events`` finds no physical device in
-    # it; the old path (plain dicts with device_id/entity_id) is unaffected.
-    assert device_events == []
-
-
-def test_reclassify_accepts_event_group_as_late_event(repo: EvidenceRepository) -> None:
-    from wattmosaic_engine.contracts import EventGroup, EventGroupStatus, SubEvent, SubEventKind
-
-    prev = isolation.EventIsolation(
-        status=isolation.IsolationStatus.ISOLATED,
-        event_id="ev-1",
-        device_id="dev-a",
-        entity_id="light.a",
-        occurred_at=T0,
-        received_at=T0,
-        analysis_offset_s=0.0,
-        isolation_window_s=30.0,
-        window_start=T0,
-        window_end=T0 + timedelta(seconds=30),
-        evidence={"power_window_s": 60.0},
-    )
-    sub = SubEvent(
-        sub_event_id="sub-2",
-        kind=SubEventKind.HA_STATE,
-        ref=evidence_ref("ha_event", "hae-late"),
-        observed_at=T0 + timedelta(seconds=5),
-        timestamp_uncertainty_s=1.0,
-    )
-    group = EventGroup(
-        group_id="grp-late",
-        revision=1,
-        status=EventGroupStatus.DETECTED,
-        opened_at=T0 + timedelta(seconds=5),
-        sub_events=[sub],
-        reader_deltas=[],
-        versions=VERSIONS,
-    )
-    revised = isolation.EventIsolator().reclassify(prev, group)
-    # An EventGroup late event carries the competing HA event's identity via
-    # its sub-events; it retroactively contaminates the previously ISOLATED
-    # verdict without touching it.
-    assert revised.status == isolation.IsolationStatus.CONTAMINATED
-    assert prev.status == isolation.IsolationStatus.ISOLATED
 
 
 # --------------------------------------------------------------------------- #

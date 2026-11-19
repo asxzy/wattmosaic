@@ -1,7 +1,6 @@
 """T7 — configuration change and self-healing workflow (HB §14).
 
 Covers:
-* the detector moved to ``electrical/topology_change.py`` (re-export intact);
 * the four pure inferred detectors of design §5;
 * the workflow: SUSPECTED → mark → promote after N events → reject/restore;
 * power models are never modified (L1 repository patched to raise on write);
@@ -25,7 +24,6 @@ from wattmosaic_engine.contracts import (
     TopologyEdgeV3,
     VersionTriple,
 )
-from wattmosaic_engine.electrical import topology as legacy_topology
 from wattmosaic_engine.electrical import topology_change
 from wattmosaic_engine.electrical.topology_inference import (
     DeltaObservation,
@@ -43,22 +41,7 @@ T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 # --------------------------------------------------------------------------- #
-# 1. Detector move / re-export.
-# --------------------------------------------------------------------------- #
-
-
-def test_detector_moved_with_reexport() -> None:
-    assert (
-        legacy_topology.detect_configuration_changes
-        is topology_change.detect_configuration_changes
-    )
-    assert topology_change.detect_configuration_changes.__module__ == (
-        "wattmosaic_engine.electrical.topology_change"
-    )
-
-
-# --------------------------------------------------------------------------- #
-# 2. Inferred detectors (design §5).
+# 1. Inferred detectors (design §5).
 # --------------------------------------------------------------------------- #
 
 
@@ -122,7 +105,7 @@ def test_reader_removal_ignores_recent_reader() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 3. Workflow: SUSPECTED -> mark -> promote -> reject/restore.
+# 2. Workflow: SUSPECTED -> mark -> promote -> reject/restore.
 # --------------------------------------------------------------------------- #
 
 
@@ -252,7 +235,7 @@ def test_workflow_does_not_reject_before_timeout() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 4. Power models are never touched.
+# 3. Power models are never touched.
 # --------------------------------------------------------------------------- #
 
 
@@ -282,7 +265,7 @@ def test_workflow_promotion_leaves_model_set_id_unchanged() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 5. DEC-10: user-declared CONFIRMED edge can move to CONFLICTED.
+# 4. DEC-10: user-declared CONFIRMED edge can move to CONFLICTED.
 # --------------------------------------------------------------------------- #
 
 

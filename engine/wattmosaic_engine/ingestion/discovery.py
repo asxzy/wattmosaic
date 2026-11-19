@@ -306,7 +306,10 @@ def discover_candidate_endpoints(
                     continue
                 stem, leg = _leg_stem(local) or (local, 0)
                 local_stem = stem or local
-                if stem and len(legs.get(stem) or {}) > 2 and leg:
+                if stem and len(legs.get(stem) or {}) >= 2 and leg:
+                    # Every leg of a multi-leg circuit is its own reader; one id
+                    # per leg keeps a two-pole load's second leg from being
+                    # written over the first.
                     local_stem = f"{stem}_ct{leg}"
                 consumed.add(entity_id)
                 endpoints.append(

@@ -41,28 +41,14 @@ Design rules, and the reason for each
    inference would double count, so only explicit evidence decides.
 
 4. **Every scaling site takes a raw value and applies the factor once.**
-   :func:`scale_reading` is the *public* scaler.  Two other call sites multiply
-   by :meth:`FactorRegistry.basis_for`'s ``applied_multiplier`` and are listed
-   here because "one place" would be a false claim:
+   :func:`scale_reading` is the one scaler: it multiplies a raw reading by
+   :meth:`FactorRegistry.basis_for`'s ``applied_multiplier`` exactly once.
 
-   * ``disaggregation/association.py::AssociationFinder._classify`` -- scales
-     the CT *delta* (a raw difference of two raw samples) once, records the
-     multiplier it used in the evidence, and never feeds the scaled value back;
-   * ``models/residual_power.py::ResidualAnalyzer._counted_contributions`` --
-     applies a declared per-device *unit conversion* (not a CT factor) once to
-     a raw contribution and records ``conversions`` so the single application
-     is checkable.
-
-   None of them accepts the output of another as input, and the registry never
-   mutates anything, so a value cannot be scaled twice by composition.  A caller
-   that *chooses* to hand an already-scaled number to :func:`scale_reading` is
+   The registry never mutates anything, so a value cannot be scaled twice by
+   composition.  A caller that *chooses* to hand an already-scaled number to :func:`scale_reading` is
    violating the function's raw-input contract; ``applied_multiplier`` being
    the only multiplication factor is what makes double application detectable
    (it is recorded on every artifact).
-
-5. **Two CTs on one appliance are an overlap, never two loads.**
-   :func:`resolve_factor_ownership` refuses to sum a factor-adjusted leg with
-   its sibling, and equal deltas never become a parent/child claim.
 """
 
 from __future__ import annotations

@@ -276,9 +276,7 @@ class RuntimeMixin:
         self.learning_active = bool(active and getattr(backend, "learning_active", True))
 
     # ------------------------------------------------------------------ #
-    # Three-loop runtime (P6, HB §5).  The default runtime is the three
-    # loop one; the legacy 5 s full solve stays available behind a flag
-    # until Z2 deletes it.
+    # Three-loop runtime (P6, HB §5): the only runtime.
     # ------------------------------------------------------------------ #
 
     def init_three_loop_state(self) -> None:

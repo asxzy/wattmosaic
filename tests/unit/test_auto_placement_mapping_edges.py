@@ -2,10 +2,9 @@
 
 Auto placement is an inference, not a user declaration.  The rows it writes
 must carry ``declared_by="auto_placement"`` and start at CANDIDATE — one event
-never promotes an edge past CANDIDATE (HB §4.3, DEC-10).  A CT id is the v3
-endpoint id for a CT reader, so the placement's monitored CT becomes the edge's
-``endpoint_id`` verbatim; a fixture without exactly one monitored CT is left
-unmapped rather than fabricated onto a feed.
+never promotes an edge past CANDIDATE (HB §4.3, DEC-10).  A placement names the
+measurement endpoint (reader) its fixture was observed on, so that reader id
+becomes the edge's ``endpoint_id`` verbatim.
 """
 
 from __future__ import annotations
@@ -13,11 +12,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from wattmosaic_engine.contracts import (
-    DeviceConfiguration,
     EdgeLifecycleV3,
-    HaConnectivity,
     MappingEdge,
-    MonitoringLevel,
     Observability,
 )
 from wattmosaic_engine.disaggregation.auto_placement import (
@@ -29,17 +25,12 @@ from wattmosaic_engine.disaggregation.auto_placement import (
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
 
-def _placement(entity_id: str, ct_id: str) -> Placement:
+def _placement(entity_id: str, reader_id: str) -> Placement:
     return Placement(
         device_id=f"dev_auto_{entity_id}",
-        configuration=DeviceConfiguration(
-            device_id=f"dev_auto_{entity_id}",
-            connectivity=HaConnectivity.CONNECTED,
-            monitoring=MonitoringLevel.SHARED,
-            state_entity_ids=[entity_id],
-            monitored_by_ct_ids=[ct_id],
-            configured_by="auto",
-        ),
+        entity_id=entity_id,
+        reader_id=reader_id,
+        on_w=20.0,
         evidence=("measured 20 W", "corroborated"),
     )
 
@@ -62,27 +53,8 @@ def test_mapping_edges_are_auto_placement_candidates() -> None:
     assert edge.evidence.independent_causes == 1
 
 
-def test_a_fixture_without_one_monitored_ct_is_not_fabricated() -> None:
-    def placement(entity_id: str, ct_ids: list[str]) -> Placement:
-        return Placement(
-            device_id=f"dev_auto_{entity_id}",
-            configuration=DeviceConfiguration(
-                device_id=f"dev_auto_{entity_id}",
-                connectivity=HaConnectivity.CONNECTED,
-                monitoring=MonitoringLevel.SHARED,
-                state_entity_ids=[entity_id],
-                monitored_by_ct_ids=ct_ids,
-                configured_by="auto",
-            ),
-            evidence=("measured 20 W",),
-        )
-
-    assert mapping_edges_for_plan(
-        PlacementPlan(
-            accepted=(placement("light.zero", []), placement("light.two", ["ct1", "ct2"]))
-        ),
-        valid_from=T0,
-    ) == ()
+def test_an_empty_plan_writes_no_edges() -> None:
+    assert mapping_edges_for_plan(PlacementPlan(), valid_from=T0) == ()
 
 
 def test_edges_are_deterministically_ordered() -> None:
@@ -119,6 +91,7 @@ def test_applied_placement_writes_mapping_edges_via_the_version_service(
     assert rows
     assert all(row["declared_by"] == "auto_placement" for row in rows)
     assert all(row["lifecycle"] == EdgeLifecycleV3.CANDIDATE.value for row in rows)
+    assert all(row["endpoint_id"] == "ct1" for row in rows)
     assert {row["subject_id"] for row in rows} == {
         helpers.auto_device_id("light.first"),
         helpers.auto_device_id("light.second"),

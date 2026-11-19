@@ -34,15 +34,14 @@ from typing import Any
 import pytest
 from wattmosaic_engine.config.settings import EngineConfig
 from wattmosaic_engine.contracts import (
-    CTChannel,
-    CTType,
-    DeviceTopology,
-    Phase,
+    EndpointKind,
+    EndpointScope,
+    MeasurementEndpoint,
+    ScopeStatus,
     ServiceCommand,
-    Topology,
-    TopologyStatus,
     utcnow,
 )
+from wattmosaic_engine.devices.service import DeviceService
 from wattmosaic_engine.disaggregation.auto_placement import auto_device_id
 from wattmosaic_engine.ingestion.ha_source import (
     HISTORY_BOUNDARY_NUDGE,
@@ -280,37 +279,39 @@ class _FakeSource:
 
 
 # --------------------------------------------------------------------------- #
-# Topology and core
+# Measurement endpoints and core
 # --------------------------------------------------------------------------- #
 
+T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
-def _topology() -> Topology:
-    """A confirmed topology with a main feed and one branch lighting circuit.
 
-    The devices deliberately declare **no** state entities: contract §2 makes a
-    declared entity ineligible for auto placement, and these tests are about the
-    fixtures the *state snapshot* offers as candidates, not about re-placing an
-    entity a person already linked.
-    """
-    return Topology(
-        status=TopologyStatus.CONFIRMED,
-        version=1,
-        channels=[
-            CTChannel(
-                ct_id="main",
-                entity_id="sensor.main_power",
-                ct_type=CTType.MAIN,
-                phase=Phase.BOTH,
-            ),
-            CTChannel(
-                ct_id="ct1",
-                entity_id="sensor.ct1_power",
-                ct_type=CTType.BRANCH,
-                phase=Phase.L1,
-            ),
-        ],
-        devices=[],  # type: ignore[arg-type]
+def _endpoint(
+    endpoint_id: str, entity_id: str, *, kind: EndpointKind = EndpointKind.CT
+) -> MeasurementEndpoint:
+    main = kind == EndpointKind.PANEL_MAIN
+    return MeasurementEndpoint(
+        endpoint_id=endpoint_id,
+        kind=kind,
+        entity_id=entity_id,
+        scope=EndpointScope.PANEL_FEED if main else EndpointScope.CIRCUIT,
+        scope_status=ScopeStatus.CONFIRMED if main else ScopeStatus.CANDIDATE,
+        enabled=True,
+        created_at=T0,
     )
+
+
+def _endpoints() -> list[MeasurementEndpoint]:
+    """A panel main and one branch lighting circuit.
+
+    No HA entity is linked to any device: contract §2 makes a declared entity
+    ineligible for auto placement, and these tests are about the fixtures the
+    *state snapshot* offers as candidates, not about re-placing an entity a
+    person already linked.
+    """
+    return [
+        _endpoint("main", "sensor.main_power", kind=EndpointKind.PANEL_MAIN),
+        _endpoint("ct1", "sensor.ct1_power"),
+    ]
 
 
 def _core(
@@ -318,7 +319,7 @@ def _core(
     *,
     payload: dict[str, list[dict]] | None = None,
     auto_placement: bool = False,
-    topology: Topology | None = None,
+    endpoints: list[MeasurementEndpoint] | None = None,
     leaky: bool = False,
     states: list[dict[str, Any]] | None = None,
     fail_history: bool = False,
@@ -339,10 +340,22 @@ def _core(
         fail_slice_at=fail_slice_at,
     )
     core.hasource = source  # type: ignore[assignment]
-    stored = topology if topology is not None else _topology()
-    db.save_topology(stored, note="test")
-    core.topology_cache = stored
+    service = DeviceService(db)
+    for endpoint in endpoints if endpoints is not None else _endpoints():
+        service.upsert_endpoint(endpoint)
     return core, db, source
+
+
+def _auto_devices(db: Database) -> dict[str, dict[str, Any]]:
+    return {
+        row["device_id"]: row
+        for row in db.repos.entities.devices()
+        if row["device_id"].startswith("dev_auto_")
+    }
+
+
+def _discovered_links(db: Database) -> list[dict[str, Any]]:
+    return [row for row in db.repos.entities.links() if row["declared_by"] == "discovery"]
 
 
 def _start() -> datetime:
@@ -367,14 +380,15 @@ def test_analysis_alone_writes_nothing(tmp_path: Path) -> None:
     result = asyncio.run(core.discover_placements(lookback_hours=24, apply=False))
 
     assert result["applied"] is False
-    assert db.load_device_configurations().devices == []
+    assert db.repos.entities.devices() == []
+    assert db.repos.entities.links() == []
     assert {item["entity_id"] for item in result["accepted"]} == {
         "light.first",
         "light.second",
     }
     # The frozen §3.3 shape always reports the version it analysed against; what
     # must *not* change is that nothing was written.
-    assert result["topology_version"] == 1
+    assert result["topology_version"] == core._matrix_versions()["topology_version_id"]
     assert all(item["applied"] is False for item in result["accepted"])
 
 
@@ -390,7 +404,7 @@ def test_apply_none_is_read_only_even_when_the_opt_in_is_on(tmp_path: Path) -> N
     result = asyncio.run(core.discover_placements(lookback_hours=24, apply=None))
 
     assert result["applied"] is False
-    assert db.load_device_configurations().devices == []
+    assert db.repos.entities.devices() == []
     assert "apply" in result["detail"].lower()
 
 
@@ -403,68 +417,46 @@ def test_a_disabled_opt_in_is_reported_rather_than_silent(tmp_path: Path) -> Non
     assert result["accepted"], "the analysis itself must still run"
     assert result["applied"] is False
     assert "disabled" in result["detail"]
-    assert db.load_device_configurations().devices == []
+    assert db.repos.entities.devices() == []
 
 
 def test_an_explicit_apply_writes_the_devices(tmp_path: Path) -> None:
-    """Writing needs the request's consent *and* the stored opt-in (contract §3.1)."""
+    """Writing needs the request's consent *and* the stored opt-in (contract §3.1).
+
+    An applied placement writes v3 rows only: one Physical Device per fixture and
+    a discovered ``load_state`` link from the fixture's entity to it.
+    """
     core, db, _ = _core(tmp_path, auto_placement=True)
 
     result = asyncio.run(core.discover_placements(lookback_hours=24, apply=True))
 
     assert result["applied"] is True
-    assert result["topology_version"] == 2
-    configurations = db.load_device_configurations().devices
-    assert {config.device_id for config in configurations} == {
+    assert set(_auto_devices(db)) == {
         auto_device_id("light.first"),
         auto_device_id("light.second"),
     }
-    assert all(config.configured_by == "auto" for config in configurations)
+    links = {(row["entity_id"], row["target_id"], row["role"]) for row in _discovered_links(db)}
+    assert links == {
+        ("light.first", auto_device_id("light.first"), "load_state"),
+        ("light.second", auto_device_id("light.second"), "load_state"),
+    }
     # The measured steps, not one shared average: the fixtures differ.  The
     # small tolerance is the poll jitter the fixture adds, which a real meter
     # also has.
-    steps = sorted(config.expected.on_w for config in configurations)
+    steps = sorted(item["on_w"] for item in result["accepted"])
     assert steps == pytest.approx([SECOND_W, FIXTURE_W], abs=0.05)
-
-
-def test_the_created_device_is_materialised_and_inherits_the_row_phase(
-    tmp_path: Path,
-) -> None:
-    """A fixture device absent from ``topology.devices`` must be created.
-
-    Defect #54: it was saved and silently ignored.  The phase must also come
-    from the CT row, because the fallback coefficient would double the row
-    (see PROJECT_STATUS §7r.6c).
-    """
-    core, db, _ = _core(tmp_path, auto_placement=True)
-
-    asyncio.run(core.discover_placements(lookback_hours=24, apply=True))
-
-    projected = db.load_topology()
-    assert projected is not None
-    created = {
-        device.device_id: device
-        for device in projected.devices
-        if device.device_id.startswith("dev_auto_")
-    }
-    assert set(created) == {
-        auto_device_id("light.first"),
-        auto_device_id("light.second"),
-    }
-    assert all(device.phase == Phase.L1 for device in created.values())
-    assert all(device.branch_ct_ids == ["ct1"] for device in created.values())
 
 
 def test_a_second_run_does_not_duplicate_or_withdraw(tmp_path: Path) -> None:
     core, db, _ = _core(tmp_path, auto_placement=True)
     asyncio.run(core.discover_placements(lookback_hours=24, apply=True))
-    before = db.load_device_configurations().devices
+    before = _auto_devices(db)
 
     asyncio.run(core.discover_placements(lookback_hours=24, apply=True))
-    after = db.load_device_configurations().devices
+    after = _auto_devices(db)
 
-    assert {c.device_id for c in after} == {c.device_id for c in before}
-    assert len(after) == len(before)
+    assert set(after) == set(before)
+    assert len(after) == len(before) == 2
 
 
 # --------------------------------------------------------------------------- #
@@ -472,43 +464,30 @@ def test_a_second_run_does_not_duplicate_or_withdraw(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_a_dimmer_records_a_curve_from_its_recorded_levels(tmp_path: Path) -> None:
-    """Brightness in history must become watts per level, not one number.
+def test_a_dimmer_is_reported_dimmable_from_its_recorded_levels(tmp_path: Path) -> None:
+    """Brightness in history must become a per-level curve, not one number.
 
-    The row moves by ``19.57 W × level``, so each cycle is a genuine point.
+    The row moves by ``19.57 W × level``, so each cycle is a genuine point and
+    the placement carries a dimming curve.
     """
     levels = (0.4, 0.7, 1.0)
-    core, db, _ = _core(
-        tmp_path, payload=_history(_start(), levels=levels), auto_placement=True
-    )
+    core, _, _ = _core(tmp_path, payload=_history(_start(), levels=levels))
 
-    asyncio.run(core.discover_placements(lookback_hours=24, apply=True))
+    result = asyncio.run(core.discover_placements(lookback_hours=24, apply=False))
 
-    configuration = next(
-        c
-        for c in db.load_device_configurations().devices
-        if c.device_id == auto_device_id("light.first")
-    )
-    assert configuration.light is not None
-    curve = configuration.light.dimming_curve
-    assert len(curve) == len(levels)
-    # Stored as a fraction of full-on; the watts are reconstructed once.
-    assert [round(level, 2) for level, _ in curve] == pytest.approx([0.4, 0.7, 1.0])
-    assert configuration.light.full_on_w() == pytest.approx(FIXTURE_W, abs=0.1)
+    by_entity = {item["entity_id"]: item for item in result["accepted"]}
+    assert by_entity["light.first"]["dimmable"] is True
+    assert by_entity["light.second"]["dimmable"] is False
 
 
 def test_a_switch_without_levels_gets_no_curve(tmp_path: Path) -> None:
     """No reported level is "no dimming evidence", never "full brightness"."""
-    core, db, _ = _core(tmp_path, auto_placement=True)
+    core, _, _ = _core(tmp_path)
 
-    asyncio.run(core.discover_placements(lookback_hours=24, apply=True))
+    result = asyncio.run(core.discover_placements(lookback_hours=24, apply=False))
 
-    configuration = next(
-        c
-        for c in db.load_device_configurations().devices
-        if c.device_id == auto_device_id("light.first")
-    )
-    assert configuration.light is None or not configuration.light.dimming_curve
+    assert result["accepted"]
+    assert all(item["dimmable"] is False for item in result["accepted"])
 
 
 # --------------------------------------------------------------------------- #
@@ -518,24 +497,13 @@ def test_a_switch_without_levels_gets_no_curve(tmp_path: Path) -> None:
 
 def test_a_main_row_is_never_a_placement_target(tmp_path: Path) -> None:
     """A feed measures the whole installation; crediting one switch is wrong."""
-    topology = _topology().model_copy(
-        update={
-            "channels": [
-                CTChannel(
-                    ct_id="ct1",
-                    entity_id="sensor.ct1_power",
-                    ct_type=CTType.MAIN,
-                    phase=Phase.BOTH,
-                )
-            ]
-        }
-    )
-    core, db, _ = _core(tmp_path, topology=topology, auto_placement=True)
+    endpoints = [_endpoint("ct1", "sensor.ct1_power", kind=EndpointKind.PANEL_MAIN)]
+    core, db, _ = _core(tmp_path, endpoints=endpoints, auto_placement=True)
 
     result = asyncio.run(core.discover_placements(lookback_hours=24, apply=True))
 
     assert result["accepted"] == []
-    assert db.load_device_configurations().devices == []
+    assert db.repos.entities.devices() == []
 
 
 def test_a_row_owned_by_a_dedicated_measurement_is_refused_with_the_remedy(
@@ -546,20 +514,9 @@ def test_a_row_owned_by_a_dedicated_measurement_is_refused_with_the_remedy(
     The message must name the conversion, because the user's only action is to
     turn that channel into a shared circuit.
     """
-    topology = _topology().model_copy(
-        update={
-            "devices": [
-                *(_topology().devices),
-                DeviceTopology(
-                    device_id="dev_lights",
-                    name="lights",
-                    phase=Phase.L1,
-                    branch_ct_ids=["ct1"],
-                ),
-            ]
-        }
-    )
-    core, db, _ = _core(tmp_path, topology=topology, auto_placement=True)
+    core, db, _ = _core(tmp_path, auto_placement=True)
+    # The user confirms ct1 as a dedicated (single-subject) measurement.
+    DeviceService(db).set_scope("ct1", "confirm", "dev_lights")
 
     result = asyncio.run(core.discover_placements(lookback_hours=24, apply=True))
 
@@ -569,7 +526,7 @@ def test_a_row_owned_by_a_dedicated_measurement_is_refused_with_the_remedy(
         "already owned by device" in reason.lower()
         for reason in result["refused"].values()
     )
-    assert db.load_device_configurations().devices == []
+    assert _auto_devices(db) == {}
 
 
 def test_no_history_is_reported_not_treated_as_a_clean_result(tmp_path: Path) -> None:
@@ -840,26 +797,8 @@ def test_a_main_row_is_never_correlated_even_when_it_tracks_a_switch(
     keeps the answer empty; without the filter this switch would be placed on
     the whole-installation row, which is the worst possible attribution.
     """
-    topology = _topology().model_copy(
-        update={
-            "channels": [
-                CTChannel(
-                    ct_id="main",
-                    entity_id="sensor.main_power",
-                    ct_type=CTType.MAIN,
-                    phase=Phase.BOTH,
-                ),
-                CTChannel(
-                    ct_id="ct1",
-                    entity_id="sensor.ct1_power",
-                    ct_type=CTType.BRANCH,
-                    phase=Phase.L1,
-                ),
-            ]
-        }
-    )
     payload = _only_row_moves(_start(), "sensor.main_power")
-    core, _, _ = _core(tmp_path, topology=topology, payload=payload)
+    core, _, _ = _core(tmp_path, payload=payload)
 
     result = asyncio.run(core.discover_placements(lookback_hours=24, apply=False))
 

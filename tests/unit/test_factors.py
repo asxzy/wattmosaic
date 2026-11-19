@@ -24,33 +24,23 @@ tests translate the fixture's *observable* declaration frame into contract
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 import pytest
 from wattmosaic_engine.contracts import (
-    CTChannel,
-    CTType,
-    DeviceTopology,
     MeasurementBasis,
     MeasurementFactor,
-    Phase,
-    RelationKind,
-    Topology,
 )
 from wattmosaic_engine.electrical.factors import (
     UNKNOWN_CONFIDENCE,
     FactorRegistry,
     classify_basis,
-    resolve_factor_ownership,
     scale_reading,
 )
-from wattmosaic_engine.electrical.topology import build_graph
 from wattmosaic_engine.storage.database import Database
 
 from tools.simulator.hot_tub import (
     CT_L1,
     CT_L2,
-    DEVICE_ID,
     HOT_TUB_VARIANTS,
     HotTubFixture,
     hot_tub,
@@ -133,77 +123,6 @@ def _ci_registry(fixture: HotTubFixture) -> tuple[FactorRegistry, dict[str, str]
     return registry, conflicts
 
 
-def _ci_channels(fixture: HotTubFixture) -> list[CTChannel]:
-    """Contract channels mirroring the fixture's *declared* wiring.
-
-    The legacy ``measurement_multiplier`` scalar is set the way production would
-    hold it: the user's factor when the user owns the multiplication, and 1.0
-    when the monitor already applied it.  That is what makes the
-    "scalar would re-apply a monitor factor" conflict detectable.
-    """
-    pairs = _ci_pairs(fixture)
-    partner = {a: b for a, b in pairs} | {b: a for a, b in pairs}
-    declarations = fixture.observations()["factor_declarations"]
-    channels: list[CTChannel] = []
-    for item in fixture.cts:
-        intervals = declarations[item.ct_id]["intervals"]
-        scalar = 1.0
-        if intervals:
-            first = intervals[0]
-            if first["applied_by"] == "user" and not first["published"]:
-                scalar = float(first["multiplier"])
-        channels.append(
-            CTChannel(
-                ct_id=item.ct_id,
-                entity_id=item.entity_id,
-                ct_type=CTType.BRANCH,
-                phase=item.leg,
-                device_id=DEVICE_ID,
-                paired_ct_id=partner.get(item.ct_id),
-                measurement_multiplier=scalar,
-            )
-        )
-    return channels
-
-
-def _ci_pairs(fixture: HotTubFixture) -> list[tuple[str, str]]:
-    """Double-pole pairs, from the fixture's declared role, never from phase."""
-    declarations = fixture.observations()["factor_declarations"]
-    legs = [
-        str(ct_id)
-        for ct_id, decl in declarations.items()
-        if decl["role"] == "leg_conductor"
-    ]
-    if len(legs) == 2:
-        return [(legs[0], legs[1])]
-    return []
-
-
-def _ci_ownership(
-    fixture: HotTubFixture,
-    *,
-    ct_id: str | None = None,
-    at_s: float,
-    evidence_conflict: str | None = None,
-) -> Any:
-    registry, _ = _ci_registry(fixture)
-    channels = _ci_channels(fixture)
-    first = fixture.cts[0].ct_id if ct_id is None else ct_id
-    return resolve_factor_ownership(
-        first,
-        registry.factors,
-        channels,
-        _ci_pairs(fixture),
-        timestamp=_t(at_s, fixture.start_time),
-        requires_factor=[c.ct_id for c in channels if _declares_leg(fixture, c.ct_id)],
-        evidence_conflict=evidence_conflict,
-    )
-
-
-def _declares_leg(fixture: HotTubFixture, ct_id: str) -> bool:
-    return fixture.observations()["factor_declarations"][ct_id]["role"] == "leg_conductor"
-
-
 # --------------------------------------------------------------------------- #
 # Interval resolution
 # --------------------------------------------------------------------------- #
@@ -279,21 +198,13 @@ def test_classify_basis_never_derives_from_phase_ct_type_or_name() -> None:
     Inferring a x2 here is exactly the reported double-count: the monitor
     "commonly" applies the multiplier itself and already publishes the load.
     """
-    channel = CTChannel(
-        ct_id="ct_hot_tub_240v",
-        entity_id="sensor.hot_tub_power",
-        name="Hot Tub 240 V Double Pole",
-        ct_type=CTType.BRANCH,
-        phase=Phase.BOTH,
-        nominal_voltage=240.0,
-        device_id="hot_tub",
-    )
+    ct_id = "ct_hot_tub_240v_double_pole"
     reg = FactorRegistry([])
     assert classify_basis(None) is MeasurementBasis.CT_MEASURED
-    assert reg.basis_at(channel.ct_id, _t(0)) is MeasurementBasis.CT_MEASURED
-    assert reg.describe(channel.ct_id, _t(0))["why"]
-    # The channel declaration alone never turns into a factor.
-    assert channel.measurement_multiplier == 1.0
+    assert reg.basis_at(ct_id, _t(0)) is MeasurementBasis.CT_MEASURED
+    assert reg.describe(ct_id, _t(0))["why"]
+    # A suggestive CT id alone never turns into a factor.
+    assert reg.applied_multiplier_at(ct_id, _t(0)) == 1.0
 
 
 def test_classify_basis_cannot_be_given_an_inference_hint() -> None:
@@ -403,40 +314,16 @@ def test_registry_classification_is_derived_from_the_same_facts_as_resolution() 
     assert reg.resolve("future", _t(0)).reason_code == "factor_not_yet_declared"
 
 
-def test_resolve_factor_ownership_requires_an_explicit_timestamp() -> None:
-    """D2: "the factor in force now" may never be the hidden default.
-
-    Resolving a historical sample against the wall clock is the retroactive
-    application this module forbids.  Making ``timestamp`` required and
-    keyword-only moves that decision into every call site.
-    """
-    import inspect
-
-    parameters = inspect.signature(resolve_factor_ownership).parameters
-    timestamp = parameters["timestamp"]
-    assert timestamp.kind is inspect.Parameter.KEYWORD_ONLY
-    assert timestamp.default is inspect.Parameter.empty
-
-    with pytest.raises(TypeError):
-        resolve_factor_ownership("ct_a", [], [], ())  # type: ignore[call-arg]
-
-
 def test_the_module_docstring_names_every_scaling_site() -> None:
-    """The "applied once" rule is only true if every site is listed.
+    """The "applied once" rule names :func:`scale_reading` as the public scaler.
 
-    Rule 4 used to name one site and say the factor is applied in one place,
-    which hid two real multiplications.  The docstring must name all three so a
-    reader auditing double application is not sent to a false location.
+    The legacy association/residual scaling sites were deleted with the
+    contract-3.0.0 cutover, so only the public scaler is pinned here.
     """
     import wattmosaic_engine.electrical.factors as factors_module
 
     text = factors_module.__doc__ or ""
-    for site in (
-        "scale_reading",
-        "AssociationFinder._classify",
-        "ResidualAnalyzer._counted_contributions",
-    ):
-        assert site in text, f"scaling site {site!r} is missing from the docstring"
+    assert "scale_reading" in text, "scaling site 'scale_reading' is missing from the docstring"
 
 
 def test_applied_and_reported_multipliers_depend_on_who_applied_the_factor() -> None:
@@ -488,8 +375,8 @@ def test_describe_is_a_complete_explainable_record() -> None:
 def test_registry_accepts_rows_from_the_database_helper(tmp_path) -> None:
     db = Database(tmp_path / "factors.db")
     try:
-        db.insert_measurement_factor(_factor(ct_id="ct_a", multiplier=2.0, applied_by="user"))
-        db.insert_measurement_factor(
+        db.repos.factors.insert_measurement_factor(_factor(ct_id="ct_a", multiplier=2.0, applied_by="user"))
+        db.repos.factors.insert_measurement_factor(
             _factor(
                 ct_id="ct_b",
                 multiplier=2.0,
@@ -597,114 +484,6 @@ def test_a_later_factor_change_never_rewrites_an_earlier_sample() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Factor ownership: the double-application hazard
-# --------------------------------------------------------------------------- #
-
-
-def _pair_channels(scalar: float = 1.0) -> list[CTChannel]:
-    return [
-        CTChannel(
-            ct_id="ct_l1",
-            entity_id="sensor.l1",
-            phase=Phase.L1,
-            device_id="tub",
-            paired_ct_id="ct_l2",
-            measurement_multiplier=scalar,
-        ),
-        CTChannel(
-            ct_id="ct_l2",
-            entity_id="sensor.l2",
-            phase=Phase.L2,
-            device_id="tub",
-            paired_ct_id="ct_l1",
-        ),
-    ]
-
-
-def test_two_factor_adjusted_legs_are_never_summed_as_independent_loads() -> None:
-    result = resolve_factor_ownership(
-        "ct_l1",
-        [_factor(ct_id="ct_l1", multiplier=2.0, applied_by="user")],
-        _pair_channels(),
-        [("ct_l1", "ct_l2")],
-        timestamp=T0,
-    )
-    assert result.summing_allowed is False
-    assert result.appliance_basis is MeasurementBasis.FACTOR_ADJUSTED
-    assert result.relation is RelationKind.CT_MEASUREMENT_OVERLAP
-    assert result.relation is not RelationKind.ELECTRICAL_PARENT_CHILD
-    assert "factor" in result.reason_code
-
-
-def test_two_plain_legs_may_be_summed() -> None:
-    result = resolve_factor_ownership(
-        "ct_l1",
-        [
-            _factor(ct_id="ct_l1", multiplier=1.0, applied_by="user"),
-            _factor(ct_id="ct_l2", multiplier=1.0, applied_by="user"),
-        ],
-        _pair_channels(),
-        [("ct_l1", "ct_l2")],
-        timestamp=T0,
-    )
-    assert result.summing_allowed is True
-    assert result.appliance_basis is MeasurementBasis.CT_MEASURED
-    assert result.explainable is True
-
-
-def test_a_monitor_factor_plus_the_legacy_scalar_is_a_double_application_conflict() -> None:
-    """Production-representable version of "incorrect metadata".
-
-    The factor row says the monitor already applied x2, while the channel's
-    legacy ``measurement_multiplier`` would apply x2 again on the read path.
-    Exactly one can be true, so the ownership is unverifiable.
-    """
-    result = resolve_factor_ownership(
-        "ct_l1",
-        [_factor(ct_id="ct_l1", multiplier=2.0, applied_by="monitor")],
-        _pair_channels(scalar=2.0),
-        [("ct_l1", "ct_l2")],
-        timestamp=T0,
-    )
-    assert result.double_application_risk is True
-    assert result.appliance_basis is MeasurementBasis.UNKNOWN
-    assert result.summing_allowed is False
-    assert result.explainable is False
-    assert result.reason_code
-
-
-def test_unknown_ownership_propagates_to_the_appliance_basis() -> None:
-    result = resolve_factor_ownership(
-        "ct_l1",
-        [_factor(ct_id="ct_l1", multiplier=2.0, applied_by="unknown")],
-        _pair_channels(),
-        [("ct_l1", "ct_l2")],
-        timestamp=T0,
-    )
-    assert result.basis is MeasurementBasis.UNKNOWN
-    assert result.appliance_basis is MeasurementBasis.UNKNOWN
-    assert result.summing_allowed is False
-    assert result.confidence < 1.0
-
-
-def test_ownership_exposes_the_peer_set_and_the_factor_owner() -> None:
-    result = resolve_factor_ownership(
-        "ct_l1",
-        [_factor(ct_id="ct_l1", multiplier=2.0, applied_by="user", declared_by="import")],
-        _pair_channels(),
-        [("ct_l1", "ct_l2")],
-        timestamp=T0,
-    )
-    assert result.ct_id == "ct_l1"
-    assert result.device_id == "tub"
-    # Peers are the *other* CTs of the same appliance, never the CT itself.
-    assert set(result.peer_ct_ids) == {"ct_l2"}
-    assert result.applied_by == "user"
-    assert result.declared_by == "import"
-    assert "ct_l2" in result.as_dict()["peer_ct_ids"]
-
-
-# --------------------------------------------------------------------------- #
 # The Hot Tub table (Group B, mandatory regression)
 # --------------------------------------------------------------------------- #
 
@@ -736,31 +515,11 @@ def test_hot_tub_table_leg_deltas_and_the_x2_estimate() -> None:
     assert naive != pytest.approx(fixture.ha_after_w - fixture.ha_before_w)
 
 
-def test_hot_tub_factor_two_legs_are_not_summed_as_independent_consumption() -> None:
-    fixture = hot_tub("factor_two")
-    result = _ci_ownership(fixture, at_s=720)
-    assert result.summing_allowed is False
-    assert result.explainable is True
-    assert result.appliance_basis is MeasurementBasis.FACTOR_ADJUSTED
-
-
-def test_hot_tub_equal_deltas_do_not_claim_a_parent_child_relation() -> None:
-    """250 W + 250 W does not make one CT the parent of the other."""
-    fixture = hot_tub("factor_two")
-    result = _ci_ownership(fixture, at_s=720)
-    assert result.relation is RelationKind.CT_MEASUREMENT_OVERLAP
-    assert result.relation is not RelationKind.ELECTRICAL_PARENT_CHILD
-    assert result.as_dict()["relation"] == RelationKind.CT_MEASUREMENT_OVERLAP.value
-
-
-def test_hot_tub_factor_one_allows_summing_and_invents_no_factor() -> None:
+def test_hot_tub_factor_one_invents_no_factor() -> None:
     fixture = hot_tub("factor_one")
     registry, _ = _ci_registry(fixture)
     assert registry.basis_at(CT_L1, _t(720, fixture.start_time)) is MeasurementBasis.CT_MEASURED
     assert registry.applied_multiplier_at(CT_L1, _t(720, fixture.start_time)) == 1.0
-    result = _ci_ownership(fixture, at_s=720)
-    assert result.summing_allowed is True
-    assert result.appliance_basis is MeasurementBasis.CT_MEASURED
 
 
 def test_hot_tub_monitor_published_is_not_multiplied_a_second_time() -> None:
@@ -773,9 +532,6 @@ def test_hot_tub_monitor_published_is_not_multiplied_a_second_time() -> None:
     assert basis is MeasurementBasis.MONITOR_REPORTED
     # And the published delta already equals the 500 W appliance step.
     assert fixture.published_table()[CT_L1]["delta_w"] == pytest.approx(500.0)
-    result = _ci_ownership(fixture, at_s=720)
-    assert result.summing_allowed is False
-    assert result.appliance_basis is MeasurementBasis.MONITOR_REPORTED
 
 
 def test_hot_tub_factor_missing_is_unknown_with_lower_confidence() -> None:
@@ -789,9 +545,6 @@ def test_hot_tub_factor_missing_is_unknown_with_lower_confidence() -> None:
     # 250 + 250 = 500 does not establish what either CT is clamped on.
     scaled, applied, _ = scale_reading(1250.0, CT_L1, at, registry)
     assert (scaled, applied) == (1250.0, 1.0)
-    result = _ci_ownership(fixture, at_s=720)
-    assert result.summing_allowed is False
-    assert result.explainable is False
 
 
 def test_hot_tub_incorrect_metadata_is_unknown_and_never_a_wrong_number() -> None:
@@ -807,12 +560,9 @@ def test_hot_tub_incorrect_metadata_is_unknown_and_never_a_wrong_number() -> Non
     scaled, applied, _ = scale_reading(2500.0, CT_L1, at, registry)
     # Neither 1000 W (applied) nor 250 W (skipped) is published as a total.
     assert (scaled, applied) == (2500.0, 1.0)
-    result = _ci_ownership(fixture, at_s=720)
-    assert result.explainable is False
-    assert result.summing_allowed is False
 
 
-def test_hot_tub_multiple_factor_cts_are_one_appliance_not_two_loads() -> None:
+def test_hot_tub_each_factor_ct_estimates_the_same_appliance() -> None:
     fixture = hot_tub("multiple_factor_cts")
     registry, _ = _ci_registry(fixture)
     at = _t(720, fixture.start_time)
@@ -821,26 +571,10 @@ def test_hot_tub_multiple_factor_cts_are_one_appliance_not_two_loads() -> None:
         assert registry.basis_at(ct_id, at) is MeasurementBasis.FACTOR_ADJUSTED
         scaled, _, _ = scale_reading(250.0, ct_id, at, registry)
         assert scaled == pytest.approx(500.0)
-    result = _ci_ownership(fixture, at_s=720)
-    assert result.summing_allowed is False
-    assert result.appliance_basis is MeasurementBasis.FACTOR_ADJUSTED
 
 
-def test_hot_tub_independent_physical_cts_may_be_summed() -> None:
-    fixture = hot_tub("independent_physical_cts")
-    result = _ci_ownership(fixture, at_s=720)
-    assert result.summing_allowed is True
-    assert result.appliance_basis is MeasurementBasis.CT_MEASURED
-    # Exactly the other leg: noise never fabricates a third member.
-    assert result.peer_ct_ids == (CT_L2,)
-
-
-def test_hot_tub_noisy_unbalanced_legs_sum_without_inventing_a_leg() -> None:
+def test_hot_tub_noisy_unbalanced_legs_stay_ct_measured() -> None:
     fixture = hot_tub("noisy_unbalanced_legs")
-    result = _ci_ownership(fixture, at_s=720)
-    assert result.summing_allowed is True
-    assert result.appliance_basis is MeasurementBasis.CT_MEASURED
-
     registry, _ = _ci_registry(fixture)
     start = fixture.start_time
     samples = fixture.samples()
@@ -856,26 +590,6 @@ def test_hot_tub_noisy_unbalanced_legs_sum_without_inventing_a_leg() -> None:
         # engine never "corrects" the split or fabricates a missing leg.
         assert delta == pytest.approx(250.0, abs=150.0)
         assert registry.basis_at(ct_id, _t(720, start)) is MeasurementBasis.CT_MEASURED
-    # The pair has exactly one peer each way: no leg is invented from noise.
-    assert result.peer_ct_ids == (CT_L2,)
-    reverse = _ci_ownership(fixture, ct_id=CT_L2, at_s=720)
-    assert reverse.peer_ct_ids == (CT_L1,)
-    assert reverse.summing_allowed is True
-
-
-def test_hot_tub_inconsistent_ha_vs_ct_refuses_a_total() -> None:
-    fixture = hot_tub("inconsistent_ha_vs_ct")
-    result = _ci_ownership(
-        fixture,
-        at_s=720,
-        evidence_conflict="ha_state_off_while_power_rises",
-    )
-    # The factor metadata alone would support x2; the conflicting state evidence
-    # forbids publishing a total on top of it.
-    assert result.appliance_basis is MeasurementBasis.UNKNOWN
-    assert result.summing_allowed is False
-    assert result.explainable is False
-    assert result.conflict
 
 
 def test_hot_tub_factor_change_midhistory_resolves_each_sample() -> None:
@@ -897,19 +611,6 @@ def test_hot_tub_factor_change_midhistory_resolves_each_sample() -> None:
     assert registry.basis_at(CT_L2, _t(900, start)) is MeasurementBasis.CT_MEASURED
 
 
-@pytest.mark.parametrize("variant", sorted(HOT_TUB_VARIANTS))
-def test_every_hot_tub_variant_matches_its_expected_interpretation(variant: str) -> None:
-    """The whole Group B matrix, against the fixture's own stated expectation."""
-    fixture = hot_tub(variant)
-    conflict = None
-    if fixture.state_after == "off" and fixture.ha_after_w > 0.0:
-        conflict = "ha_state_off_while_power_rises"
-    result = _ci_ownership(fixture, at_s=720, evidence_conflict=conflict)
-    assert result.appliance_basis.value == fixture.expected.basis, variant
-    assert result.summing_allowed is fixture.expected.summing_allowed, variant
-    assert result.explainable is fixture.expected.explainable, variant
-
-
 def test_every_hot_tub_sample_resolves_without_raising() -> None:
     for variant in sorted(HOT_TUB_VARIANTS):
         fixture = hot_tub(variant)
@@ -919,53 +620,3 @@ def test_every_hot_tub_sample_resolves_without_raising() -> None:
             timestamp = datetime.fromisoformat(sample["state_timestamp"])
             resolution = registry.resolve(ct_id, timestamp)
             assert resolution.basis in set(MeasurementBasis)
-
-
-# --------------------------------------------------------------------------- #
-# Topology delegation (minimal wiring)
-# --------------------------------------------------------------------------- #
-
-
-def _delegating_topology() -> Topology:
-    return Topology(
-        channels=[
-            CTChannel(
-                ct_id="ct_tub",
-                entity_id="sensor.tub",
-                ct_type=CTType.BRANCH,
-                phase=Phase.L1,
-                device_id="tub",
-                measurement_multiplier=2.0,
-            )
-        ],
-        devices=[
-            DeviceTopology(
-                device_id="tub",
-                branch_ct_ids=["ct_tub"],
-                phase=Phase.L1,
-                double_pole=True,
-            )
-        ],
-    )
-
-
-def test_topology_without_a_registry_keeps_the_legacy_scalar() -> None:
-    graph = build_graph(_delegating_topology())
-    assert graph.multiplier_for("ct_tub") == 2.0
-    assert graph.scale_w("ct_tub", 1100.0) == pytest.approx(2200.0)
-
-
-def test_topology_delegates_to_a_user_factor_registry() -> None:
-    registry = FactorRegistry([_factor(ct_id="ct_tub", multiplier=2.0, applied_by="user")])
-    graph = build_graph(_delegating_topology(), factors=registry)
-    assert graph.multiplier_for("ct_tub", _t(0)) == 2.0
-    assert graph.scale_w("ct_tub", 1100.0, _t(0)) == pytest.approx(2200.0)
-    # Scaling is applied on the way out only: the raw value is unchanged.
-    assert graph.scale_w("ct_tub", 1100.0, _t(0)) == pytest.approx(2200.0)
-
-
-def test_topology_does_not_scale_a_monitor_reported_value_again() -> None:
-    registry = FactorRegistry([_factor(ct_id="ct_tub", multiplier=2.0, applied_by="monitor")])
-    graph = build_graph(_delegating_topology(), factors=registry)
-    assert graph.multiplier_for("ct_tub", _t(0)) == 1.0
-    assert graph.scale_w("ct_tub", 1250.0, _t(0)) == 1250.0
