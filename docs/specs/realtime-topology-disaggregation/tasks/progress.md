@@ -87,7 +87,7 @@
 | H1 | 4 | VERIFIED |  |  | AT-17 HA-side helper done; AT-17 e2e closes with P6 |
 | H2 | 4 | VERIFIED |  |  | partial: async_migrate_entry hook -> H1; v2 forms removal -> Z2 |
 | U2 | 4 | VERIFIED |  | AT-20 | AT-20 closed |
-| P6 | 4 | IN_PROGRESS |  |  |  |
+| P6 | 4 | VERIFIED |  |  | AT-17 closed; T5/T7 live wiring + supersedes passthrough -> P6b |
 | Z2 | 5 | NOT_STARTED | | | |
 | Z1 | 5 | NOT_STARTED | | | |
 | L7 | 5 | VERIFIED |  | AT-19 | AT-19 closed |
