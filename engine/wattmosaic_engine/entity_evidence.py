@@ -34,8 +34,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from wattmosaic_engine.contracts import DeviceType
-
 #: Domains whose *state* describes a mode/setpoint rather than load.
 MODE_ONLY_DOMAINS = frozenset(
     {
@@ -87,12 +85,12 @@ LOAD_DEVICE_CLASSES = frozenset(
 #: Device types for which a climate-like entity is *expected* to be a mode.
 COMPLEX_DEVICE_TYPES = frozenset(
     {
-        DeviceType.HVAC_HEAT,
-        DeviceType.HVAC_COOL,
-        DeviceType.HVAC_COMBINED,
-        DeviceType.WATER_HEATER,
-        DeviceType.SAUNA,
-        DeviceType.HOT_TUB,
+        "hvac_heat",
+        "hvac_cool",
+        "hvac_combined",
+        "water_heater",
+        "sauna",
+        "hot_tub",
     }
 )
 

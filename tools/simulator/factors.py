@@ -50,7 +50,9 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
 
-from wattmosaic_engine.contracts import MeasurementFactor, Phase
+from wattmosaic_engine.contracts import MeasurementFactor
+
+from .topology import Phase
 
 
 class FactorOwner(str, Enum):

@@ -18,7 +18,6 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any
 
-from ..api.facade import maybe_await
 from ..backend.loader import InferenceBackendUnavailable, load_inference_backend
 from ..contracts import (
     ChangeStatus,
@@ -28,37 +27,22 @@ from ..contracts import (
     JointInferenceResult,
     MeasurementEvent,
     ReaderMeasurement,
-    ReconciliationV3,
     VersionTriple,
 )
-
-# ZI: the legacy read view (``_active_topology`` / ``on_sample``) still consumes
-# the shared legacy Topology/Measurement values until ZC removes them.  They are
-# reached through the legacy namespace so this area binds no legacy name.
-from ..contracts import legacy as _legacy
-from ..device_links import device_for_entity, state_entity_for_device
 from ..electrical.operator import build_observation_operator
 from ..inference.matching import MatchStore
 from ..inference.orchestrator import infer_group, infer_steady
 from ..inference.records import EventRecordStore
-from ..ingestion.correlation import level_from_attributes
 from ..ingestion.queue import BoundedQueue
 from ..mapping.updater import MatrixUpdater
 from ..models.registry import DatabaseModelRepository, Registry
-from ..quality.engine import excluded_readers
+from ..quality.engine import channel_config_from_endpoints, excluded_readers
 from ..realtime.candidate_ring import CandidateRing
 from ..realtime.detection import ChangeDetector
 from ..realtime.grouping import GroupingEngine
 from ..realtime.reader_state import ReaderStateStore
 from ..realtime.windows import WindowCollector
 from ..residual.reader_residual import UnknownPriorModel
-from ..synchronization.aligner import (
-    AlignedChannel,
-    AlignedWindow,
-    ChannelHealth,
-    EnergyChannel,
-    EnergyWindow,
-)
 from ..versioning.service import VersionService
 from .discovery_api import TOPOLOGY_BOOTSTRAP_WAIT_S
 from .executors import BackgroundExecutor
@@ -136,8 +120,6 @@ class RuntimeMixin:
         # the supervisor (not ``start``) owns the loop tasks.
         self._wire_v3_services()
         await self.hasource.start(
-            on_sample=self.on_sample,
-            on_event=self.on_event,
             on_reading=self.on_reading,
             on_ha_event=self.on_ha_event,
         )
@@ -213,107 +195,6 @@ class RuntimeMixin:
             self._persist_batch(batch)
             await asyncio.sleep(0)
 
-    async def on_sample(self, measurement: Any) -> None:
-        self.samples_ingested += 1
-        self.aligner.add(measurement)
-        self.persist_queue.put_nowait(("sample", measurement))
-
-    async def on_event(self, event: Any) -> None:
-        entity_id = getattr(event, "entity_id", None)
-        # Only entities the topology actually declares can produce attribution.
-        #
-        # HA emits ~30 state changes/second in a typical installation, but only 40
-        # entities are declared link targets.  Every undeclared entity used to be
-        # buffered for the learning pass and turned into a sample keyed by its
-        # raw entity id, which:
-        #   * filled the bounded buffer with noise (~2 000 events are needed to
-        #     cover the 68 s maturity window, against a 512-event cap, so the
-        #     buffer was permanently full and *every* event was evicted before
-        #     it could mature — so every sample was rejected);
-        #   * wrote ~100 000 `device_events` rows in 5 minutes for entities no
-        #     device owns.
-        # An unlinked entity is still a real observation, so it is counted — but
-        # it is **not** persisted.  Home Assistant emits ~30 state changes/second
-        # across ~500 entities in a typical installation, and only 40 are declared
-        # link targets.  Writing every undeclared change grew `device_events` at
-        # ~1.5 GB/day (99.98 % of all rows) for entities that no device owns and
-        # that nothing ever reads: `recent_device_events` is not consulted in
-        # production.  The spec requires avoiding unbounded growth, and a run
-        # left recording for days must not fill the disk with codebook noise.
-        # The counter is the audit signal: it still shows how much traffic the
-        # topology fails to explain.
-        topology = self._active_topology()
-        link = device_for_entity(topology, entity_id) if entity_id else None
-        self.events_ingested += 1
-        if link is None:
-            self.unlinked_events_ignored += 1
-            return
-        device_id, _ct_ids = link
-        # ``device_states`` is consumed by the disaggregation engine, which keys it
-        # by ``DeviceTopology.device_id`` — not by the HA entity id.  Storing the
-        # entity id made every state lookup miss, so state-transition inference was
-        # silently dead in production.
-        #
-        # Only a *runtime state* entity may write this slot.  A CT power entity
-        # (``sensor.water_heater_power``) is linked for measurement, but it is not the
-        # device's state: numeric readings never get here (``HASource`` consumes
-        # them as measurements), yet availability changes do.  Writing
-        # ``"unavailable"`` here replaced ``"off"``, and the next real ``"off"``
-        # then read as a transition — one bridge blip manufactured two phantom
-        # transitions.  The event is still persisted below; it just cannot claim
-        # to be the device's state.
-        if not state_entity_for_device(topology, device_id, entity_id):
-            self.power_events_not_state += 1
-            self.persist_queue.put_nowait(("event", event))
-            return
-        previous = self.device_states.get(device_id)
-        self.device_states[device_id] = event.new_state
-        # Record the measured output level alongside the state.  A dimmer's
-        # state stays ``on`` across a brightness change, so this is the only
-        # place the *amount* is known.  Absent brightness publishes nothing
-        # (rather than 100 %), which keeps a non-dimmable fixture indistinguishable
-        # from a dimmer that has not dimmed yet.
-        level = level_from_attributes(getattr(event, "attributes", None))
-        if level is None:
-            self.device_levels.pop(device_id, None)
-        else:
-            self.device_levels[device_id] = level
-        # Persist every declared event: the audit trail wants the observation even
-        # when it is not a transition.
-        self.persist_queue.put_nowait(("event", event))
-        if previous is None:
-            # First observation of this device in this process.  ``HASource``
-            # replays the whole current snapshot at startup, carrying each
-            # entity's *old* ``last_updated``; those entries are a state, not a
-            # transition.  Queueing them produced samples timestamped hours in
-            # the past whose baseline/event window had no CT readings at all, so
-            # every one was rejected ``missing_measurement``.  A restart must not
-            # invent a transition it did not observe.
-            return
-        if previous == event.new_state:
-            # Attribute churn: not a transition.  The level (above) still moves.
-            return
-        self._pending_transitions.append(
-            {
-                "device_id": device_id,
-                "previous_state": previous,
-                "new_state": event.new_state,
-                "occurred_at": _event_time(event),
-            }
-        )
-        # Buffer for the inference backend's learning pass.  Only declared links
-        # reach this point, so the buffer holds a handful of events rather than
-        # the whole house's noise, and each one can actually mature.
-        pending = getattr(self, "_pending_backend_events", None)
-        if pending is None:
-            pending = self._pending_backend_events = deque(maxlen=512)
-        if len(pending) >= (pending.maxlen or 0):
-            # The deque silently discards the oldest item.  Count it rather than
-            # losing the evidence: a full buffer means samples are being dropped
-            # and the status surface must say so.
-            self.events_evicted_before_maturity += 1
-        pending.append(event)
-
     async def _writer_loop(self) -> None:
         while not self._stopping:
             try:
@@ -337,189 +218,40 @@ class RuntimeMixin:
                     log.exception("failed to persist a batch of %d records", len(batch))
 
     def _persist_batch(self, batch: list[tuple[str, Any]]) -> None:
-        sample_rows: list[dict[str, Any]] = []
-        v3_readings: list[ReaderMeasurement] = []
-        events: list[Any] = []
-        for kind, payload in batch:
-            if kind == "reading":
-                # P1 canonical reading; persist every HB §2.1 field (v2 schema).
-                v3_readings.append(payload)
-            elif kind == "sample":
-                sample_rows.append(
-                    {
-                        "ct_id": payload.ct_id,
-                        "entity_id": payload.entity_id,
-                        "value_w": payload.effective_power_w(),
-                        "raw_value": payload.value,
-                        "unit": payload.unit,
-                        "state_timestamp": payload.state_timestamp,
-                        "received_at": payload.received_at,
-                        "physical_timestamp": payload.physical_timestamp,
-                        "quality": payload.quality,
-                        "repeated": payload.repeated,
-                        "sequence": payload.sequence,
-                    }
-                )
-            else:
-                events.append(payload)
-        if sample_rows:
-            self.samples_persisted += self.db.insert_ct_samples(sample_rows)
-        if v3_readings:
-            try:
-                self.samples_persisted += self.db.repos.samples.insert_readings(v3_readings)
-            except Exception:  # noqa: BLE001 - an optional v2 table may not exist
-                log.debug("failed to persist canonical readings", exc_info=True)
-        for event in events:
-            self.db.insert_device_event(
-                {
-                    "event_id": event.event_id,
-                    "device_id": event.device_id,
-                    "entity_id": event.entity_id,
-                    "event_type": event.event_type,
-                    "previous_state": event.previous_state,
-                    "new_state": event.new_state,
-                    "attributes": event.attributes,
-                    "occurred_at": event.occurred_at,
-                    "received_at": event.received_at,
-                }
-            )
-            self.events_persisted += 1
-
-    def _active_topology(self) -> _legacy.Topology | None:
-        if self.topology_cache is None:
-            self.topology_cache = self.db.load_topology()
-        return self.topology_cache
-
-    @staticmethod
-    def _aligner_key(channel: Any) -> str:
-        """Aligner buffer key for a topology channel (entity id without domain)."""
-        entity_id = str(getattr(channel, "entity_id", "") or "")
-        return entity_id.split(".", 1)[-1] if "." in entity_id else entity_id
-
-    @staticmethod
-    def _topology_energy_channel(channel: Any) -> bool:
-        """True when a topology channel carries a cumulative energy counter."""
-        metadata = getattr(channel, "metadata", None) or {}
-        unit = str(metadata.get("unit", "")) if isinstance(metadata, dict) else ""
-        if unit in ("kWh", "Wh"):
-            return True
-        ct_id = str(getattr(channel, "ct_id", "") or "")
-        return ct_id.endswith(("_energy", "_return_energy"))
-
-    def _power_window(self, topology: _legacy.Topology) -> AlignedWindow:
-        """Aligned power window keyed by topology ``ct_id``.
-
-        The aligner buffers are keyed by the Home Assistant entity id without its
-        domain prefix (``sensor.room_a_power`` → ``room_a_power``), while the topology
-        refers to channels by ``ct_id``.  This method joins the two so the
-        inference backend and the quality engine both see topology channel ids,
-        with the originating ``entity_id`` attached to each reading.
-
-        Energy counters are excluded: they live in :meth:`energy_window` and must
-        never be scored or solved as power.
-        """
-        energy_keys = set(self.aligner.energy_channels())
-        pairs = [
-            (channel.ct_id, self._aligner_key(channel))
-            for channel in topology.channels
-            if not self._topology_energy_channel(channel)
+        """Persist one drained batch of P1 canonical readings (v2 sample schema)."""
+        v3_readings: list[ReaderMeasurement] = [
+            payload for kind, payload in batch if kind == "reading"
         ]
-        pairs = [(ct_id, key) for ct_id, key in pairs if key not in energy_keys]
-        raw = self.aligner.window(
-            channels=[key for _, key in pairs], max_age_s=self.config.stale_after_s
-        )
-        channels: dict[str, AlignedChannel] = {}
-        for ct_id, key in pairs:
-            channel = raw.channels.get(key)
-            if channel is None:
-                continue
-            channels[ct_id] = replace(channel, channel=ct_id)
-        return AlignedWindow(at=raw.at, max_age_s=raw.max_age_s, channels=channels)
-
-    def _channel_health_for(self, topology: _legacy.Topology) -> dict[str, ChannelHealth]:
-        """Channel health keyed by topology ``ct_id`` (aligner uses entity names)."""
-        health = self.aligner.channel_health()
-        out: dict[str, ChannelHealth] = {}
-        for channel in topology.channels:
-            if self._topology_energy_channel(channel):
-                continue
-            key = self._aligner_key(channel)
-            entry = health.get(key)
-            if entry is not None:
-                out[channel.ct_id] = replace(entry, channel=channel.ct_id)
-        return out
-
-    def _channel_noise_floors(self) -> dict[str, float]:
-        """Measured innovation MAD per topology ``ct_id``, for CT step detection.
-
-        The quality layer already computes this for every channel
-        (``SampleAligner.channel_health().noise_mad_w``, a scaled MAD of
-        consecutive-sample differences).  Recomputing it here would be a second
-        definition of the same quantity and could disagree with the number the
-        quality report shows, so it is read back and only re-keyed from the
-        aligner's entity name to the topology's ``ct_id``.
-
-        A channel with no health entry is simply absent: the detector then uses
-        its configured scalar floor, which is the historical behaviour.
-        """
-        topology = self._active_topology()
-        if topology is None:
-            return {}
-        by_key = {
-            self._aligner_key(channel): channel.ct_id
-            for channel in topology.channels
-            if not self._topology_energy_channel(channel)
-        }
-        if not by_key:
-            return {}
-        floors: dict[str, float] = {}
-        for key, health in self.aligner.channel_health().items():
-            cid = by_key.get(key)
-            if cid is None or health.noise_mad_w is None:
-                continue
-            value = float(health.noise_mad_w)
-            if value >= 0.0 and value == value:  # finite, non-negative
-                floors[cid] = value
-        return floors
-
-    def _energy_window_for(
-        self, topology: _legacy.Topology | None, max_age_s: float
-    ) -> EnergyWindow:
-        """Energy window keyed by topology ``ct_id`` where a channel is known.
-
-        Energy stays in its own domain; this only fixes naming so quality output
-        uses the same identifiers as the topology.
-        """
-        raw = self.aligner.energy_window(max_age_s=max_age_s)
-        if topology is None:
-            return raw
-        by_key = {self._aligner_key(c): c.ct_id for c in topology.channels}
-        if not by_key:
-            return raw
-        channels: dict[str, EnergyChannel] = {}
-        for key, channel in raw.channels.items():
-            ct_id = by_key.get(key, key)
-            channels[ct_id] = replace(channel, channel=ct_id)
-        return EnergyWindow(at=raw.at, max_age_s=raw.max_age_s, channels=channels)
+        if v3_readings:
+            self.samples_persisted += self.db.repos.samples.insert_readings(v3_readings)
 
     def _evaluate_quality(self) -> DataQualityReport:
-        topology = self._active_topology()
-        if topology is not None:
-            window = self._power_window(topology)
-            health = self._channel_health_for(topology)
-        else:
-            window = self.aligner.window(max_age_s=self.config.stale_after_s)
-            health = self.aligner.channel_health()
-        energy_window = self._energy_window_for(topology, self.config.stale_after_s)
-        energy_health = self.aligner.energy_health()
+        """Score every aligned reader against its v3 endpoint declaration.
+
+        The aligner keys a reader by the entity object id, which is the reader
+        id P1 assigns, so the window, the health map and the declared
+        :class:`~wattmosaic_engine.quality.engine.ChannelConfig` share one key.
+        """
+        try:
+            endpoints = self.db.repos.entities.endpoints()
+            revisions = {
+                str(row["endpoint_id"]): self.db.repos.entities.revisions(row["endpoint_id"])
+                for row in endpoints
+            }
+            channels = channel_config_from_endpoints(
+                {**row, "revisions": revisions.get(str(row["endpoint_id"]), [])}
+                for row in endpoints
+            )
+        except Exception:  # noqa: BLE001 - quality must run without declarations
+            channels = {}
         report = self.quality_engine.evaluate(
-            window,
-            health,
-            topology=topology,
+            self.aligner.window(max_age_s=self.config.stale_after_s),
+            self.aligner.channel_health(),
+            channels=channels,
             reconciliation=self.latest_reconciliation,
             unavailable=self.hasource.unavailable_entities,
-            energy_window=energy_window,
-            energy_health=energy_health,
+            energy_window=self.aligner.energy_window(max_age_s=self.config.stale_after_s),
+            energy_health=self.aligner.energy_health(),
         )
         self.latest_quality = report
         return report
@@ -538,130 +270,6 @@ class RuntimeMixin:
                 return
             except TimeoutError:
                 continue
-
-    async def run_inference_once(self) -> dict[str, Any]:
-        """Run one inference cycle if a backend is attached.  Returns a summary."""
-        topology = self._active_topology()
-        if topology is None:
-            # Startup discovery may have lost the race against the first Home
-            # Assistant connection, or the database may have been empty and the
-            # connection appeared later.  Keep trying so the engine cannot sit
-            # permanently inert; this is a no-op once a topology exists.
-            retry = await self.maybe_bootstrap_topology()
-            if retry is not None and retry.get("status") == "candidate":
-                topology = self._active_topology()
-        if topology is None:
-            # Never silent: this is the condition that made a healthy-looking
-            # install emit nothing.  Log once per process, not once per 5 s.
-            if not self._topology_skip_logged:
-                self._topology_skip_logged = True
-                log.warning(
-                    "inference is not running: no topology configured "
-                    "(discovery found nothing and none was imported). "
-                    "Open the WattMosaic integration to configure CT channels."
-                )
-            return {"skipped": "no topology configured"}
-        self._topology_skip_logged = False
-        window = self._power_window(topology)
-        # ONE-LINE QUALITY HOOK (D3, coordinated with P6): a bad/degraded/stale/
-        # missing reader must never reach the solver.  P2/P6 will consume
-        # ``excluded_readers`` directly; until then the legacy loop gates here and
-        # records each excluded reader in ``stale_sources`` with its reason.
-        window, self._excluded_this_cycle = (
-            filter_excluded_from_window(window, excluded_readers(self.latest_quality))
-            if self.latest_quality is not None
-            else (window, {})
-        )
-        if self._excluded_this_cycle:
-            self._stale_sources = stale_sources_from_quality(self.latest_quality)
-        # Per-cycle context the disaggregation engine reads back off the window.
-        # Built in one dict so the frozen window is replaced once.
-        #
-        # ``device_levels`` publishes each device's last measured output level.
-        # Attribution reads it to interpolate a measured dimming curve, so a
-        # light at 40 % reports its watts at 40 % rather than its full-on value.
-        # Devices with no reported level are absent from the mapping, never
-        # defaulted to 100 %.
-        #
-        # ``channel_noise_floor_w`` publishes the quality layer's per-channel
-        # measured MAD (innovation sigma).  A single scalar floor cannot serve a
-        # 0.3 W inverter CT and a 30 W load-manager CT at once: too small turns
-        # every tick into an event, too large hides a real step.  Without this
-        # the detector's per-channel mapping was never reachable in production.
-        metadata = dict(window.metadata)
-        if self.device_levels:
-            metadata["device_levels"] = dict(self.device_levels)
-        noise_floors = self._channel_noise_floors()
-        if noise_floors:
-            metadata["channel_noise_floor_w"] = noise_floors
-        if metadata != dict(window.metadata):
-            window = replace(window, metadata=metadata)
-        # Attach the declared-link transitions observed since the last cycle.
-        # Without this the engine's ``_collect_transitions`` sees neither
-        # ``state_transitions`` nor ``previous_states`` and reports no events at
-        # all, so state-transition inference never runs in production.
-        if self._pending_transitions:
-            window = replace(
-                window,
-                state_transitions=tuple(self._pending_transitions),
-                previous_states={
-                    str(item["device_id"]): str(item["previous_state"])
-                    for item in self._pending_transitions
-                    if item.get("previous_state") is not None
-                },
-            )
-            self._pending_transitions.clear()
-        backend = self.inference_backend
-        if backend is None:
-            return {"skipped": self.inference_error or "inference backend not installed"}
-        process = getattr(backend, "process", None)
-        if process is None:
-            raise InferenceBackendUnavailable("inference backend has no process() method")
-        events = list(self._pending_backend_events)
-        self._pending_backend_events.clear()
-        batch = await maybe_await(
-            process(
-                window,
-                device_states=self.device_states,
-                topology=topology,
-                models=getattr(backend, "models", None),
-                events=events,
-            )
-        )
-        results = list(
-            getattr(batch, "results", [])
-            or (batch.get("results", []) if isinstance(batch, dict) else [])
-        )
-        reconciliation = getattr(batch, "reconciliation", None)
-        if reconciliation is None and isinstance(batch, dict):
-            reconciliation = batch.get("reconciliation")
-        if results:
-            # v3 DeviceEstimate keys by ``subject_id``; the shared legacy result
-            # keyed by ``device_id``.  Support both without naming either model.
-            self.latest_results.update(
-                {
-                    str(getattr(r, "subject_id", None) or getattr(r, "device_id", "")): r
-                    for r in results
-                }
-            )
-            self.db.insert_inference_results(results)
-        if reconciliation is not None:
-            if isinstance(reconciliation, dict):
-                reconciliation = ReconciliationV3.model_validate(reconciliation)
-            self.latest_reconciliation = reconciliation
-            self.db.insert_reconciliation(reconciliation)
-        # Track what the backend actually did so ``learning_active`` never
-        # advertises a pipeline that is not running.
-        self._sync_learning_state(backend)
-        self.inference_last_run_at = self._clock()
-        self.last_successful_processing_at = self.inference_last_run_at
-        self.cycles += 1
-        diagnostics = getattr(batch, "diagnostics", None)
-        return {
-            "results": len(results),
-            "reconciliation": bool(reconciliation),
-            "backend": diagnostics if isinstance(diagnostics, dict) else {},
-        }
 
     def _sync_learning_state(self, backend: Any) -> None:
         active = getattr(backend, "learning", None) is not None
@@ -968,6 +576,7 @@ class RuntimeMixin:
         O(1) per sample so ~30 HA events/s cannot starve ``/healthz``.
         """
         started = time.monotonic()
+        self.samples_ingested += 1
         try:
             at = reading.observed_at
             # P4 late sample / D5 supersession: a reading whose observed time is
@@ -1092,21 +701,11 @@ class RuntimeMixin:
         )
 
     async def on_ha_event(self, event: HAEvent) -> None:
-        """Fast-loop entry for a device-free HA event (P1 → P5).
-
-        A linked event also feeds the legacy per-device transition buffer so
-        the still-available 5 s loop and learning intake keep working until Z2.
-        """
+        """Fast-loop entry for a device-free HA event (P1 → P5)."""
+        self.events_ingested += 1
         try:
             if self.grouping_engine is not None:
                 self.grouping_engine.on_ha_event(event, now=event.observed_at)
-            if event.linked:
-                pending = getattr(self, "_pending_backend_events", None)
-                if pending is None:
-                    pending = self._pending_backend_events = deque(maxlen=512)
-                if len(pending) >= (pending.maxlen or 0):
-                    self.events_evicted_before_maturity += 1
-                pending.append(event)
         except Exception:  # noqa: BLE001 - fast loop must never propagate
             log.exception("fast-loop HA event handling failed")
 
@@ -1831,6 +1430,13 @@ class RuntimeMixin:
                 self.submit_background(self._prune_evidence)
             except Exception:  # noqa: BLE001
                 log.exception("maintenance cycle failed")
+            try:
+                # A fresh install whose startup discovery lost the race against
+                # the first HA connection keeps retrying (rate-limited) until
+                # measurement endpoints exist; a no-op afterwards.
+                await self.maybe_bootstrap_topology()
+            except Exception:  # noqa: BLE001
+                log.exception("endpoint discovery retry failed")
             try:
                 await asyncio.wait_for(self._stop_event.wait(), MAINTENANCE_INTERVAL_S)
                 return

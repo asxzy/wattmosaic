@@ -1,4 +1,4 @@
-"""Discovery facade: startup topology bootstrap and placement discovery.
+"""Discovery facade: startup endpoint bootstrap and placement discovery.
 
 Owned by D2 after X03 (endpoint discovery)."""
 
@@ -12,16 +12,17 @@ from collections.abc import Iterable, Mapping
 from datetime import timedelta
 from typing import Any
 
-from wattmosaic_engine.electrical._declared_shapes import DeclaredTree
-
 from ..api.facade import InvalidRequest, maybe_await
 from ..api.timeouts import HISTORY_TIMEOUT_BASE_S, HISTORY_TIMEOUT_PER_HOUR_S
-from ..contracts import CTType
-from ..disaggregation.auto_placement import mapping_edges_for_plan
+from ..disaggregation.auto_placement import (
+    devices_for_plan,
+    links_for_plan,
+    mapping_edges_for_plan,
+    reader_roles,
+)
 from ..ingestion.discovery import (
     devices_for_candidate_endpoints,
     discover_candidate_endpoints,
-    discover_candidate_topology,
     links_for_candidate_endpoints,
 )
 
@@ -39,32 +40,35 @@ TOPOLOGY_RETRY_INTERVAL_S = 60.0
 class DiscoveryApiMixin:
     """Behaviour for one responsibility of :class:`EngineCore`."""
 
-    async def bootstrap_topology(self, *, wait_connected_s: float = 0.0) -> dict[str, Any]:
-        """Discover a candidate topology when the database has none.
+    def _has_endpoints(self) -> bool:
+        try:
+            return bool(self.db.repos.entities.endpoints())
+        except Exception:  # noqa: BLE001 - a read failure means "unknown", retry later
+            return False
 
-        A fresh install used to look healthy while doing nothing: with no
-        topology, ``run_inference_once`` returns ``{"skipped": "no topology
-        configured"}``, that return value was never logged, and the integration
-        published only global entities.  Discovery is therefore run once at
-        startup when no topology is stored, and the outcome is logged so the
-        condition is never silent again.
+    async def bootstrap_topology(self, *, wait_connected_s: float = 0.0) -> dict[str, Any]:
+        """Discover candidate measurement endpoints when the database has none.
+
+        A fresh install used to look healthy while doing nothing.  Discovery is
+        therefore run once at startup when no :class:`MeasurementEndpoint` is
+        stored, and the outcome is logged so the condition is never silent.
 
         ``hasource.start()`` only *schedules* the connection; the first states
-        arrive later from ``_prime()``.  Calling discovery immediately would
-        therefore read an empty cache and conclude "no monitor", which is why
-        ``wait_connected_s`` bounds how long startup waits for the first
-        successful subscription.  A zero wait is used by the retry path, which
-        runs after the connection is expected to be up.
+        arrive later from ``_prime()``, which is why ``wait_connected_s`` bounds
+        how long startup waits for the first successful subscription.  A zero
+        wait is used by the retry path.
 
-        This only ever *creates a candidate*.  It never overwrites an existing
-        topology, never confirms one, and never invents device state links: a
-        candidate is what the user reviews in the integration wizard.  A failure
-        here is recorded and logged but must not stop the engine.
+        This only ever creates *candidates* through the v3 repositories
+        (:meth:`bootstrap_endpoints`): CT endpoints, candidate single-subject
+        endpoints with ingestion disabled until confirmed, the Physical Devices
+        they imply and their HA power links.  It never confirms a scope, never
+        writes a topology edge and never invents device state links.  A failure
+        is recorded and logged but must not stop the engine.
         """
         if not self.config.topology_bootstrap:
             return {"skipped": "topology bootstrap disabled by configuration"}
-        if self._active_topology() is not None:
-            return {"skipped": "topology already configured"}
+        if self._has_endpoints():
+            return {"skipped": "measurement endpoints already configured"}
 
         if wait_connected_s > 0:
             waiter = getattr(self.hasource, "wait_connected", None)
@@ -76,73 +80,49 @@ class DiscoveryApiMixin:
 
         try:
             states = await self.hasource.state_snapshot()
-            registries = await self.hasource.registries()
-            discovered = discover_candidate_topology(states, registries)
         except Exception as exc:  # noqa: BLE001 - never block startup
             self.topology_bootstrap_error = f"{type(exc).__name__}: {exc}"
-            log.warning("topology discovery failed: %s", self.topology_bootstrap_error)
+            log.warning("endpoint discovery failed: %s", self.topology_bootstrap_error)
             return {"error": self.topology_bootstrap_error}
-
         if not states:
             # Not the same condition as "no monitor installed": Home Assistant
-            # simply has not answered yet.  Reporting it as "no monitor" would
-            # send the user looking for hardware instead of a connection problem.
+            # simply has not answered yet.
             message = (
-                "Home Assistant returned no states; topology discovery will retry "
+                "Home Assistant returned no states; endpoint discovery will retry "
                 "once the connection is up"
             )
             self.topology_bootstrap_error = message
             log.info("%s", message)
             return {"deferred": message}
 
-        if not discovered.channels or not discovered.devices:
-            # Distinguish "no CT hardware" from "CT hardware, no load circuits".
-            # A monitor that exposes only its own feed pair produces channels but
-            # no devices, and telling the user to install a monitor they already
-            # own would send them to the wrong problem.
-            if discovered.channels:
-                message = (
-                    "found a CT monitor but no load circuits on it; only panel feeds "
-                    "were discovered, so there is nothing to attribute. Check that the "
-                    "monitor's circuit entities are enabled in Home Assistant."
-                )
-            else:
-                message = (
-                    "no multi-channel energy monitor found in Home Assistant; "
-                    "configure a CT monitor or import a topology before inference can run"
-                )
+        outcome = await self.bootstrap_endpoints()
+        if "error" in outcome:
+            self.topology_bootstrap_error = str(outcome["error"])
+            return outcome
+        if not outcome.get("discovered"):
+            message = (
+                "no energy monitor or metering plug found in Home Assistant; "
+                "configure a CT monitor before inference can run"
+            )
             self.topology_bootstrap_error = message
             log.warning("%s", message)
-            return {"skipped": message, "channels": len(discovered.channels)}
+            return {"skipped": message, "endpoints": 0}
 
-        try:
-            self.db.save_topology(discovered, note="startup: candidate discovery")
-        except Exception as exc:  # noqa: BLE001 - a write failure must not crash startup
-            self.topology_bootstrap_error = f"{type(exc).__name__}: {exc}"
-            log.warning(
-                "topology discovery could not be stored: %s", self.topology_bootstrap_error
-            )
-            return {"error": self.topology_bootstrap_error}
-
-        self.topology_cache = self.db.load_topology()
         self.topology_bootstrap_error = None
         self.db.log_system_event(
             "info",
             "topology",
-            "candidate topology discovered at startup",
-            {"channels": len(discovered.channels), "devices": len(discovered.devices)},
+            "candidate measurement endpoints discovered at startup",
+            dict(outcome),
         )
         log.info(
-            "discovered candidate topology: %d channels, %d devices "
-            "(unconfirmed; review it in the WattMosaic integration)",
-            len(discovered.channels),
-            len(discovered.devices),
+            "discovered %d measurement endpoints (%d CT, %d candidates awaiting "
+            "confirmation in the WattMosaic integration)",
+            outcome.get("discovered", 0),
+            outcome.get("ct", 0),
+            outcome.get("candidates", 0),
         )
-        return {
-            "channels": len(discovered.channels),
-            "devices": len(discovered.devices),
-            "status": "candidate",
-        }
+        return {**outcome, "status": "candidate"}
 
     async def bootstrap_endpoints(self, *, persist: bool = True) -> dict[str, Any]:
         """Discover Measurement Endpoints and persist them as candidates (D2).
@@ -202,7 +182,7 @@ class DiscoveryApiMixin:
         """
         if not self.config.topology_bootstrap:
             return None
-        if self._active_topology() is not None:
+        if self._has_endpoints():
             return None
         now = time.monotonic()
         if now - self._last_topology_attempt < TOPOLOGY_RETRY_INTERVAL_S:
@@ -214,20 +194,36 @@ class DiscoveryApiMixin:
     def _candidate_state_entities(
         states: Iterable[Mapping[str, Any]],
         registries: Mapping[str, Any] | None,
-        topology: DeclaredTree,
+        declared: Iterable[str] = (),
     ) -> tuple[list[Any], dict[str, str]]:
         """The entities this run may reason about, from states + registries.
 
-        Candidate *population* is deliberately not derived from the topology
+        Candidate *population* is deliberately not derived from declarations
         (contract §2): doing that starved auto placement to one device's
-        entities, so a shared lighting circuit could never be resolved.  The
-        topology is still consulted, but only to subtract what it already
-        declares.  Kept as a thin seam so the population rule can be exercised
+        entities.  ``declared`` (entities a person already linked) is only
+        subtracted.  Kept as a thin seam so the population rule can be exercised
         without a recorder or a database.
         """
         from ..ingestion.candidate_entities import candidate_state_entities
 
-        return candidate_state_entities(states, registries, topology)
+        return candidate_state_entities(states, registries, declared)
+
+    def _user_linked_entities(self) -> set[str]:
+        """HA entities a person (or HA's own device link) already declared.
+
+        Links written by discovery -- including earlier auto placements -- are
+        not a user's assertion and must not block a re-run from re-deriving them.
+        """
+        try:
+            rows = self.db.repos.entities.links()
+        except Exception:  # noqa: BLE001 - no links table -> nothing declared
+            return set()
+        return {
+            str(row["entity_id"])
+            for row in rows
+            if str(row.get("declared_by") or "") not in ("discovery",)
+            and row.get("valid_until") is None
+        }
 
     async def discover_placements(
         self,
@@ -283,11 +279,12 @@ class DiscoveryApiMixin:
         if max_candidates < 1:
             raise InvalidRequest("max_candidates must be at least 1")
 
-        topology = self._active_topology()
-        if topology is None:
+        endpoints = self._matrix_endpoints()
+        topology_version = self._matrix_versions()["topology_version_id"]
+        if not endpoints:
             return {
                 "ok": False,
-                "detail": "no topology to place devices on",
+                "detail": "no measurement endpoints to place devices on",
                 "applied": False,
                 "lookback_hours": lookback_hours,
                 "topology_version": None,
@@ -305,11 +302,10 @@ class DiscoveryApiMixin:
                 "groups": [],
                 "withheld": {},
                 "skipped": {},
-                "notes": ["no topology to place devices on"],
+                "notes": ["no measurement endpoints to place devices on"],
             }
 
-        from ..device_configuration import project_configuration
-        from ..disaggregation.auto_placement import merge_placements, plan_placements
+        from ..disaggregation.auto_placement import ROLE_BRANCH, ROLE_MAIN, plan_placements
         from ..ingestion.correlation import (
             correlate,
             estimate_row_noise,
@@ -319,27 +315,36 @@ class DiscoveryApiMixin:
 
         states_payload = await maybe_await(self.hasource.state_snapshot())
         registries = await maybe_await(self.hasource.registries())
+        user_entities = self._user_linked_entities()
         candidates, candidate_refused = self._candidate_state_entities(
-            states_payload or [], registries, topology
+            states_payload or [], registries, user_entities
         )
         found = len(candidates)
         candidates = candidates[:max_candidates]
         entity_ids = [candidate.entity_id for candidate in candidates]
 
+        roles = reader_roles(endpoints)
+        by_id = {endpoint.endpoint_id: endpoint for endpoint in endpoints}
         row_channels = {
-            channel.ct_id: channel
-            for channel in topology.channels
-            if channel.enabled and channel.ct_type == CTType.BRANCH
+            endpoint_id: by_id[endpoint_id]
+            for endpoint_id, role in roles.items()
+            if role == ROLE_BRANCH and by_id[endpoint_id].enabled
         }
         # Contract §4: a group is never emitted for a main row.  A main aggregate
         # contains every downstream fixture, so fitting it would "identify"
         # wattages that were never separately measured -- exactly the fabrication
         # tier B must not do.
         excluded_ct_ids = frozenset(
-            channel.ct_id
-            for channel in topology.channels
-            if channel.ct_type == CTType.MAIN
+            endpoint_id for endpoint_id, role in roles.items() if role == ROLE_MAIN
         )
+        # A reader a confirmed single-subject declaration owns is that subject's
+        # whole measurement; placing another fixture on it would count twice.
+        owned_readers = {
+            endpoint.endpoint_id: str(endpoint.scope_subject_id)
+            for endpoint in endpoints
+            if endpoint.scope_subject_id
+            and str(getattr(endpoint.scope_status, "value", endpoint.scope_status)) == "confirmed"
+        }
         notes: list[str] = []
         stats: dict[str, Any] = {
             "candidate_entities": len(candidates),
@@ -384,7 +389,7 @@ class DiscoveryApiMixin:
                 "ok": True,
                 "applied": False,
                 "lookback_hours": lookback_hours,
-                "topology_version": topology.version,
+                "topology_version": topology_version,
                 "stats": stats,
                 "accepted": [],
                 "refused": _named_refusals(),
@@ -476,7 +481,9 @@ class DiscoveryApiMixin:
             # Readings are keyed by entity id in the payload; remap to ct_id so the
             # correlation (and the placement) speak the topology's vocabulary.
             by_entity = {
-                str(ch.entity_id): ch.ct_id for ch in topology.channels if ch.entity_id
+                str(endpoint.entity_id): endpoint.endpoint_id
+                for endpoint in endpoints
+                if endpoint.entity_id
             }
             row_readings = {
                 by_entity[entity]: rows for entity, rows in readings.items() if entity in by_entity
@@ -495,34 +502,32 @@ class DiscoveryApiMixin:
             stats["observations"] = len(observations)
             report = correlate(observations, now=end, row_noise_w=row_noise)
 
-            configurations = self.db.load_device_configurations()
             # Contract §3.1: a write needs **both** the request's consent and the
             # stored opt-in.  ``apply`` defaults to false, so ``None`` is read-only;
             # an explicit ``apply=True`` cannot override a disabled opt-in, because
             # that switch is the user's standing decision.
             allow_apply = apply is True and bool(self.config.auto_placement)
-            channels = topology.channel_map()
             labels = {candidate.entity_id: candidate.friendly_name for candidate in candidates}
             plan = plan_placements(
-                report=report, topology=topology, configurations=configurations, labels=labels
+                report=report,
+                readers=roles,
+                user_entities=user_entities,
+                owned_readers=owned_readers,
+                labels=labels,
             )
 
             def _channel_label(ct_id: str) -> tuple[str, str | None]:
-                channel = channels.get(ct_id)
-                if channel is None:
+                endpoint = by_id.get(ct_id)
+                if endpoint is None:
                     return ct_id, None
-                return channel.name or ct_id, channel.panel_name
+                return endpoint.display_name or ct_id, endpoint.panel_id
 
             groups: list[dict[str, Any]] = []
             withheld: dict[str, str] = {}
             # Entities tier A is about to place.  Computed before the group fit so the
             # advisory pass can exclude them: the same fixture must not appear with
             # both a measured wattage (Placed) and a fitted one (Group).
-            placed_entity_ids = {
-                placement.configuration.state_entity_ids[0]
-                for placement in plan.accepted
-                if placement.configuration.state_entity_ids
-            }
+            placed_entity_ids = {placement.entity_id for placement in plan.accepted}
             if include_groups and fit_shared_rows is not None:
                 # Contract §4 forbids a group on a main row, and
                 # keeps those rows out of the fit entirely: a main aggregate contains
@@ -544,13 +549,13 @@ class DiscoveryApiMixin:
                 # discovery from handing a wattage fit a row that has no wattage.
                 fitted = fit_shared_rows(
                     row_readings={
-                        channel.ct_id: [
+                        endpoint.endpoint_id: [
                             dict(row)
-                            for row in payload.get(channel.entity_id, ())
+                            for row in payload.get(endpoint.entity_id, ())
                             if isinstance(row, Mapping) and _is_numeric_state(row)
                         ]
-                        for channel in row_channels.values()
-                        if channel.ct_id not in excluded_ct_ids and channel.entity_id
+                        for endpoint in row_channels.values()
+                        if endpoint.endpoint_id not in excluded_ct_ids and endpoint.entity_id
                     },
                     entity_states={
                         entity: [dict(row) for row in rows if isinstance(row, Mapping)]
@@ -630,9 +635,8 @@ class DiscoveryApiMixin:
 
             accepted: list[dict[str, Any]] = []
             for placement in plan.accepted:
-                configuration = placement.configuration
-                ct_id = configuration.monitored_by_ct_ids[0]
-                entity_id = configuration.state_entity_ids[0]
+                ct_id = placement.reader_id
+                entity_id = placement.entity_id
                 ct_label, panel_name = _channel_label(ct_id)
                 candidate = next(
                     (c for c in report.candidates if c.entity_id == entity_id), None
@@ -650,7 +654,7 @@ class DiscoveryApiMixin:
                             if candidate is not None
                             else None
                         )
-                        or configuration.expected.on_w,
+                        or placement.on_w,
                         "off_w": getattr(candidate, "typical_off_w", None)
                         if candidate is not None
                         else None,
@@ -658,10 +662,7 @@ class DiscoveryApiMixin:
                         "agreement": getattr(candidate, "agreement", None),
                         "corroborations": getattr(candidate, "corroborations", None),
                         "specificity_z": getattr(candidate, "specificity_z", None),
-                        "dimmable": bool(
-                            configuration.light is not None
-                            and configuration.light.dimming_curve
-                        ),
+                        "dimmable": bool(placement.dimming_curve),
                         "evidence": list(placement.evidence),
                         "applied": False,
                     }
@@ -693,7 +694,6 @@ class DiscoveryApiMixin:
                 accepted,
                 refused,
                 allow_apply,
-                configurations,
             )
 
         (
@@ -705,7 +705,6 @@ class DiscoveryApiMixin:
             accepted,
             refused,
             allow_apply,
-            configurations,
         ) = await asyncio.to_thread(_analyse)
         stats["withheld"] = len(withheld)
 
@@ -722,7 +721,7 @@ class DiscoveryApiMixin:
             "ok": True,
             "applied": False,
             "lookback_hours": lookback_hours,
-            "topology_version": topology.version,
+            "topology_version": topology_version,
             "stats": stats,
             "accepted": accepted,
             "refused": refused,
@@ -751,26 +750,16 @@ class DiscoveryApiMixin:
                 )
             return result
 
-        merged = merge_placements(configurations, plan)
-        # The friendly name the placement reported is a display name, so it is
-        # written to the topology row rather than to the persisted configuration.
-        projected = project_configuration(
-            topology,
-            merged,
-            display_names={
-                placement.device_id: placement.name
-                for placement in plan.accepted
-                if placement.name
-            },
-        )
-        self.db.save_device_configurations(merged)
-        self.db.save_topology(projected, note="auto placement from observed co-movement")
-        self.topology_cache = projected
-        # Contract 3.0: an applied auto placement also publishes its inference
-        # as v3 mapping edges (S15).  The version service owns the append-only
-        # write and the version bump; the CT id is the v3 endpoint id.  A
-        # transport-only deployment has no version service and simply keeps the
-        # declared-device/topology write it always had.
+        # Contract 3.0: an applied placement writes v3 rows only -- a Physical
+        # Device per fixture and a discovered ``load_state`` link from its entity.
+        now = self._clock()
+        for device in devices_for_plan(plan, created_at=now):
+            if self.db.repos.entities.get_device(device.device_id) is None:
+                self.db.repos.entities.upsert_device(device)
+        for link in links_for_plan(plan, valid_from=now):
+            self.db.repos.entities.add_entity_link(link)
+        # The placement's reader becomes a CANDIDATE mapping edge (S15).  The
+        # version service owns the append-only write and the version bump.
         versions = getattr(self, "version_service", None)
         if versions is not None:
             # Auto placements are replaced wholesale on each run.  Keep every
@@ -789,7 +778,7 @@ class DiscoveryApiMixin:
                     )
                     if getattr(edge, "declared_by", None) != "auto_placement"
                 ]
-            edges = (*persisted, *mapping_edges_for_plan(plan, valid_from=self._clock()))
+            edges = (*persisted, *mapping_edges_for_plan(plan, valid_from=now))
             if edges:
                 version_id = versions.propose_mapping(edges, None)
                 versions.promote_mapping(version_id, "auto placement")
@@ -803,7 +792,6 @@ class DiscoveryApiMixin:
         for item in result["accepted"]:
             item["applied"] = True
         result["applied"] = True
-        result["topology_version"] = projected.version
         return result
 
 

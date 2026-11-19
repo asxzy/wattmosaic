@@ -1,62 +1,60 @@
-"""Turn correlation evidence into device placements (ADR-0024).
+"""Turn correlation evidence into v3 device placements (ADR-0024, contract 3.0).
 
 :mod:`wattmosaic_engine.ingestion.correlation` answers *which CT row a switch is
 on*.  This module is the only place that turns that answer into something the
-inference engine acts on, and it is deliberately a separate step for three
-reasons:
+engine acts on, and it is deliberately a separate step for three reasons:
 
 1. **Acceptance is not a side effect.**  Correlation is pure and tests can read
    its verdict without a database.  Placement is a write, so it stays behind an
    explicit call the facade makes only when the user opted in.
-2. **Conflicts must be reportable, not silently dropped.**  A row already owned
-   by a declared device cannot hold a second device (the circuit would be
-   counted twice).  Returning the reason lets the UI tell the user exactly which
-   channel to convert instead of pretending nothing happened.
-3. **User knowledge always wins.**  An entity a person already configured is
-   never rewritten by a guess, however good the correlation looked.
+2. **Conflicts must be reportable, not silently dropped.**  A reader already
+   owned by a single-subject declaration cannot hold a second device (the
+   circuit would be counted twice).  Returning the reason lets the UI tell the
+   user exactly which endpoint to change instead of pretending nothing happened.
+3. **User knowledge always wins.**  An entity a person already linked is never
+   rewritten by a guess, however good the correlation looked.
 
-What the produced configuration claims -- and what it does not
--------------------------------------------------------------
-An auto placement states three things it actually observed:
+What an applied placement writes
+--------------------------------
+Only v3 rows, each marked as an inference so nothing downstream mistakes it for
+a person's assertion:
 
-* *this entity is a runtime signal for this device* -- it moved, repeatedly;
-* *this CT row is where it is* -- the row answered, repeatedly, in the right
-  direction, and no competing row did;
-* *this is what it draws* -- the measured step, and for a dimmer the measured
-  level→watts curve rather than one full-on number.
-
-It states them with ``configured_by="auto"``, so nothing downstream can mistake
-them for a person's assertion, and the confidence tier is never raised by them.
+* a :class:`~wattmosaic_engine.contracts.PhysicalDevice` with a stable id derived
+  from the entity id (:func:`auto_device_id`);
+* a ``load_state`` :class:`~wattmosaic_engine.contracts.HaEntityLink` from the
+  fixture's entity to that device, ``declared_by="discovery"``;
+* a CANDIDATE / INFERRED :class:`~wattmosaic_engine.contracts.MappingEdge` from
+  the device to the reader it was observed on, ``declared_by="auto_placement"``
+  (:func:`mapping_edges_for_plan`).
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from wattmosaic_engine.contracts import (
-    CTType,
-    DeviceConfiguration,
-    DeviceConfigurationSet,
     EdgeEvidence,
     EdgeLifecycleV3,
-    ExpectedPower,
-    HaConnectivity,
-    LightConfiguration,
+    HaEntityLink,
+    HaEntityRole,
     MappingEdge,
-    MonitoringLevel,
     Observability,
+    PhysicalDevice,
 )
-from wattmosaic_engine.device_configuration import cts_claimed_by_dedicated
-from wattmosaic_engine.electrical._declared_shapes import DeclaredTree
 from wattmosaic_engine.ingestion.correlation import CorrelationReport
 
-#: Prefix for a device this module creates.  Kept distinct from discovery's
-#: ``dev_`` rows so a reader can tell a correlated fixture from a CT-derived
-#: placeholder without consulting the configuration store.
+#: Prefix for a device this module creates, so a reader can tell a correlated
+#: fixture from a declared device without consulting any other store.
 AUTO_DEVICE_PREFIX = "dev_auto_"
+
+#: Reader roles (see :func:`reader_roles`).  Only a ``branch`` reader may hold
+#: a placed fixture; a ``main`` reader sees the whole installation.
+ROLE_MAIN = "main"
+ROLE_BRANCH = "branch"
+ROLE_OTHER = "other"
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
@@ -66,14 +64,16 @@ class Placement:
     """One accepted correlation, ready to be written."""
 
     device_id: str
-    configuration: DeviceConfiguration
+    entity_id: str
+    reader_id: str
+    #: The measured on-step of the fixture, in watts (always positive).
+    on_w: float
+    #: Measured ``(level, fraction_of_full_on)`` points for a dimmer, or ``None``.
+    dimming_curve: tuple[tuple[float, float], ...] | None = None
     #: Human-readable justification.  Shown, never parsed.
     evidence: tuple[str, ...] = field(default_factory=tuple)
-    #: Display name the state snapshot reported for this fixture.  A device's
-    #: display name belongs to the topology row (``DeviceDecl.name``), not to
-    #: the persisted configuration, so it travels on the placement and is handed
-    #: to materialisation.  ``None`` means no name was supplied -- the engine then
-    #: keeps the device id rather than inventing one from the slug.
+    #: Display name the state snapshot reported for this fixture.  ``None`` means
+    #: no name was supplied -- the device then keeps its id as its name.
     name: str | None = None
 
 
@@ -93,8 +93,7 @@ def auto_device_id(entity_id: str) -> str:
     """Stable device id for a fixture, derived only from its entity id.
 
     Stable is the point: the same switch must map to the same device across
-    restarts, or every re-run would create a second device for the same lamp and
-    the accumulated energy statistics would split.
+    restarts, or every re-run would create a second device for the same lamp.
     """
     stem = str(entity_id).strip()
     domain, _, object_id = stem.partition(".")
@@ -103,20 +102,46 @@ def auto_device_id(entity_id: str) -> str:
     return f"{AUTO_DEVICE_PREFIX}{slug or 'fixture'}"
 
 
-def _dimming_curve_config(
+def reader_roles(endpoints: Collection[object]) -> dict[str, str]:
+    """``endpoint_id -> role`` for v3 measurement endpoints.
+
+    A panel-main endpoint or a ``panel_feed`` scope is ``main``; any other CT is
+    a ``branch`` (a circuit row a fixture may sit on); everything else (plugs,
+    appliance monitors, virtual readers) is ``other``.
+    """
+
+    def _text(value: object) -> str:
+        return str(getattr(value, "value", value) or "")
+
+    out: dict[str, str] = {}
+    for endpoint in endpoints:
+        get = endpoint.get if isinstance(endpoint, Mapping) else (
+            lambda key, _e=endpoint: getattr(_e, key, None)
+        )
+        endpoint_id = get("endpoint_id")
+        if not endpoint_id:
+            continue
+        kind = _text(get("kind"))
+        scope = _text(get("scope"))
+        if kind == "panel_main" or scope == "panel_feed":
+            out[str(endpoint_id)] = ROLE_MAIN
+        elif kind == "ct":
+            out[str(endpoint_id)] = ROLE_BRANCH
+        else:
+            out[str(endpoint_id)] = ROLE_OTHER
+    return out
+
+
+def relative_dimming_curve(
     curve: tuple[tuple[float, float], ...],
-) -> LightConfiguration | None:
-    """Express measured watts as the ``fraction_of_full_on`` curve the contract holds.
+) -> tuple[tuple[float, float], ...] | None:
+    """Express measured watts as a ``fraction_of_full_on`` curve.
 
-    ``LightConfiguration.dimming_curve`` is a *fixture* description, so it stores
-    output as a fraction of full-on watts.  Correlation measured absolute watts,
-    so the two are reconciled here: the largest measured point becomes "full on"
-    and every other point is expressed relative to it.
-
-    Returns ``None`` when the curve cannot describe a ratio -- a single point, a
-    non-positive maximum, or levels outside ``[0, 1]``.  A malformed curve is
-    dropped rather than repaired, because a repaired curve would report a shape
-    that was never measured.
+    The largest measured point becomes "full on" and every other point is
+    expressed relative to it.  Returns ``None`` when the curve cannot describe a
+    ratio -- a single point, a non-positive maximum, or levels outside
+    ``(0, 1]``.  A malformed curve is dropped rather than repaired, because a
+    repaired curve would report a shape that was never measured.
     """
     points = [
         (float(level), float(watts))
@@ -128,105 +153,63 @@ def _dimming_curve_config(
     top = max(watts for _, watts in points)
     if top <= 0.0:
         return None
-    relative = sorted((level, min(watts / top, 1.0)) for level, watts in points)
-    return LightConfiguration(
-        bulb_count=1,
-        watts_per_bulb_on=top,
-        dimming_curve=relative,
-    )
-
-
-def _existing_state_entities(
-    configurations: DeviceConfigurationSet | Iterable[DeviceConfiguration],
-) -> set[str]:
-    """Entities the *user* has already declared, ignoring prior auto placements.
-
-    Auto placements are excluded on purpose.  They are re-derived on every run;
-    counting them here would make the second run see its own output as a user
-    declaration, refuse the candidate, and then withdraw the device it created a
-    minute earlier.  Only a person's assertion blocks a correlation.
-    """
-    items = (
-        configurations.devices
-        if isinstance(configurations, DeviceConfigurationSet)
-        else list(configurations)
-    )
-    out: set[str] = set()
-    for config in items:
-        if not config.is_user_asserted:
-            continue
-        out.update(str(e) for e in config.state_entity_ids)
-        if config.controller is not None:
-            out.update(str(e) for e in config.controller.load_entity_ids)
-    return out
+    return tuple(sorted((level, min(watts / top, 1.0)) for level, watts in points))
 
 
 def plan_placements(
     *,
     report: CorrelationReport,
-    topology: DeclaredTree,
-    configurations: DeviceConfigurationSet | Iterable[DeviceConfiguration],
-    assume_owned: bool = False,
+    readers: Mapping[str, str],
+    user_entities: Collection[str] = (),
+    owned_readers: Mapping[str, str] | None = None,
     labels: Mapping[str, str] | None = None,
 ) -> PlacementPlan:
     """Decide which accepted candidates may become devices.
 
-    A candidate is placed only when all of these hold:
+    ``readers`` maps a reader id to its role (:func:`reader_roles`).  A
+    candidate is placed only when all of these hold:
 
-    * its row is a **branch** CT.  A ``main`` row sees the whole installation;
-      placing a fixture on it would misattribute power;
-    * the row is **not already claimed** by a declared device
-      (``assume_owned`` bypasses this for a caller that has just converted the
-      channel and deliberately re-runs -- it never invents the conversion);
-    * the entity is **not already configured**.  A person's declaration always
-      wins over a correlation;
-    * the measured watts are **positive**.  A zero step cannot justify a device,
-      because an on/off transition that moved no measured power is not evidence
-      of a load.
+    * its reader exists and is a **branch** reader.  A ``main`` reader sees the
+      whole installation; placing a fixture on it would misattribute power;
+    * the reader is **not owned** by a single-subject declaration
+      (``owned_readers``: reader id -> the subject it measures);
+    * the entity is **not already linked by a person** (``user_entities``);
+    * the measured watts are **positive**.  An on/off transition that moved no
+      measured power is not evidence of a load.
 
-    Everything else is reported in :attr:`PlacementPlan.refused` with the reason,
-    so the caller can surface it rather than silently discarding the evidence.
-
-    ``labels`` maps ``entity_id -> display name`` (the friendly name the state
-    snapshot reported).  It only ever *labels* a placement; it never decides one,
-    because a name is display data and a slug is not a name.  Without a label the
-    created device keeps its id.
+    Everything else is reported in :attr:`PlacementPlan.refused` with the reason.
+    ``labels`` maps ``entity_id -> display name``; it only ever labels a
+    placement and never decides one.
     """
-    channels = topology.channel_map()
-    known_entities = _existing_state_entities(configurations)
-    existing_devices = {device.device_id for device in topology.devices}
+    owned = dict(owned_readers or {})
+    known_entities = set(user_entities)
     label_for = labels or {}
     accepted: list[Placement] = []
     refused: dict[str, str] = {}
 
     for candidate in report.candidates:
         entity_id = candidate.entity_id
-        channel = channels.get(candidate.ct_id)
-        if channel is None:
-            refused[entity_id] = f"CT row {candidate.ct_id!r} no longer exists"
+        reader_id = candidate.ct_id
+        role = readers.get(reader_id)
+        if role is None:
+            refused[entity_id] = f"CT row {reader_id!r} no longer exists"
             continue
-        if channel.ct_type == CTType.MAIN:
+        if role == ROLE_MAIN:
             refused[entity_id] = (
-                f"CT row {candidate.ct_id!r} measures the whole installation; "
+                f"CT row {reader_id!r} measures the whole installation; "
                 "a fixture cannot be placed on a main row"
             )
             continue
-        if channel.ct_type != CTType.BRANCH:
-            refused[entity_id] = f"CT row {candidate.ct_id!r} is not a load row"
+        if role != ROLE_BRANCH:
+            refused[entity_id] = f"CT row {reader_id!r} is not a load row"
             continue
-        if not assume_owned:
-            # A row another *declared* device already owns is that device's whole
-            # measurement.  Placing a fixture on it too would count the circuit
-            # twice, so it is refused with the reason.  ``assume_owned`` bypasses
-            # this for a caller that has just converted the channel and
-            # deliberately re-runs -- it never invents the conversion.
-            owner = cts_claimed_by_dedicated(topology, [candidate.ct_id])
-            if owner is not None:
-                refused[entity_id] = (
-                    f"CT row {candidate.ct_id!r} is already owned by device "
-                    f"{owner[0]!r}; convert that channel to a shared circuit first"
-                )
-                continue
+        owner = owned.get(reader_id)
+        if owner is not None:
+            refused[entity_id] = (
+                f"CT row {reader_id!r} is already owned by device {owner!r}; "
+                "convert that endpoint to a shared circuit first"
+            )
+            continue
         if entity_id in known_entities:
             refused[entity_id] = "already configured by the user; left unchanged"
             continue
@@ -235,39 +218,13 @@ def plan_placements(
                 "the measured step was not positive, so no load can be attributed"
             )
             continue
-
-        device_id = auto_device_id(entity_id)
-        if device_id in existing_devices:
-            # Idempotent re-run: the device already exists, so its configuration
-            # will be re-projected rather than created twice.
-            pass
-
-        light = _dimming_curve_config(candidate.dimming_curve)
-        configuration = DeviceConfiguration(
-            device_id=device_id,
-            connectivity=HaConnectivity.CONNECTED,
-            monitoring=MonitoringLevel.SHARED,
-            state_entity_ids=[entity_id],
-            monitored_by_ct_ids=[candidate.ct_id],
-            configured_by="auto",
-            expected=ExpectedPower(
-                on_w=float(candidate.typical_w),
-                # The measured step is the load; a fixture switching on does not
-                # draw more than what the row showed.  The tolerance is wide
-                # because the CT row is shared and a sibling's step can overlap.
-                tolerance_fraction=0.25,
-            ),
-            light=light,
-            notes=[
-                f"auto_placement:{candidate.corroborations} corroborations",
-                f"agreement:{candidate.agreement:.2f}",
-                *("measured_dimming_curve" for _ in [0] if light is not None),
-            ],
-        )
         accepted.append(
             Placement(
-                device_id=device_id,
-                configuration=configuration,
+                device_id=auto_device_id(entity_id),
+                entity_id=entity_id,
+                reader_id=reader_id,
+                on_w=float(candidate.typical_w),
+                dimming_curve=relative_dimming_curve(candidate.dimming_curve),
                 evidence=(*candidate.evidence, f"measured {candidate.typical_w:.2f} W"),
                 name=label_for.get(entity_id) or None,
             )
@@ -276,27 +233,31 @@ def plan_placements(
     return PlacementPlan(accepted=tuple(accepted), refused=refused)
 
 
-def merge_placements(
-    configurations: DeviceConfigurationSet,
-    plan: PlacementPlan,
-) -> DeviceConfigurationSet:
-    """Return a new configuration set with the plan applied.
+def devices_for_plan(plan: PlacementPlan, *, created_at: datetime) -> tuple[PhysicalDevice, ...]:
+    """The :class:`PhysicalDevice` rows an applied plan implies."""
+    return tuple(
+        PhysicalDevice(
+            device_id=placement.device_id,
+            name=placement.name or placement.device_id,
+            origin="ha_device",
+            created_at=created_at,
+        )
+        for placement in plan.accepted
+    )
 
-    Auto placements are replaced wholesale on each run so a fixture that stops
-    correlating is withdrawn, while user declarations are never touched.  This
-    asymmetry is the point: an inference may be revised, an assertion may not.
-    """
-    by_device = {
-        device_id: config
-        for device_id, config in configurations.by_device().items()
-        if config.configured_by != "auto"
-    }
-    for placement in plan.accepted:
-        by_device[placement.device_id] = placement.configuration
-    return DeviceConfigurationSet(
-        version=configurations.version + 1,
-        updated_at=configurations.updated_at,
-        devices=list(by_device.values()),
+
+def links_for_plan(plan: PlacementPlan, *, valid_from: datetime) -> tuple[HaEntityLink, ...]:
+    """One ``load_state`` link per placed fixture, marked as discovered."""
+    return tuple(
+        HaEntityLink(
+            entity_id=placement.entity_id,
+            target_kind="device",
+            target_id=placement.device_id,
+            role=HaEntityRole.LOAD_STATE,
+            valid_from=valid_from,
+            declared_by="discovery",
+        )
+        for placement in plan.accepted
     )
 
 
@@ -310,33 +271,25 @@ def mapping_edges_for_plan(
     Auto placement is an inference, not a user declaration: every edge it
     writes is ``declared_by="auto_placement"`` and starts at CANDIDATE with
     INFERRED observability (HB §4.3 — one event never promotes an edge past
-    CANDIDATE).  A CT id is the v3 endpoint id for CT readers
-    (``entities.py: endpoint_id == legacy ct_id``), so the placement's monitored
-    CT becomes the mapping edge's ``endpoint_id`` verbatim.  A fixture with no
-    single monitored CT is left unmapped rather than fabricated onto a feed.
+    CANDIDATE).
     """
-    edges: list[MappingEdge] = []
-    for placement in plan.accepted:
-        ct_ids = tuple(dict.fromkeys(placement.configuration.monitored_by_ct_ids))
-        if len(ct_ids) != 1:
-            continue
-        endpoint_id = str(ct_ids[0])
-        edges.append(
-            MappingEdge(
-                mapping_edge_id=f"me::{placement.device_id}->{endpoint_id}",
-                subject_kind="device",
-                subject_id=placement.device_id,
-                endpoint_id=endpoint_id,
-                observability=Observability.INFERRED,
-                lifecycle=EdgeLifecycleV3.CANDIDATE,
-                declared_by="auto_placement",
-                evidence=EdgeEvidence(
-                    support=len(placement.evidence),
-                    independent_causes=1,
-                ),
-                valid_from=valid_from,
-            )
+    edges = [
+        MappingEdge(
+            mapping_edge_id=f"me::{placement.device_id}->{placement.reader_id}",
+            subject_kind="device",
+            subject_id=placement.device_id,
+            endpoint_id=placement.reader_id,
+            observability=Observability.INFERRED,
+            lifecycle=EdgeLifecycleV3.CANDIDATE,
+            declared_by="auto_placement",
+            evidence=EdgeEvidence(
+                support=len(placement.evidence),
+                independent_causes=1,
+            ),
+            valid_from=valid_from,
         )
+        for placement in plan.accepted
+    ]
     return tuple(sorted(edges, key=lambda edge: edge.mapping_edge_id))
 
 
@@ -344,8 +297,14 @@ __all__ = [
     "AUTO_DEVICE_PREFIX",
     "Placement",
     "PlacementPlan",
+    "ROLE_BRANCH",
+    "ROLE_MAIN",
+    "ROLE_OTHER",
     "auto_device_id",
+    "devices_for_plan",
+    "links_for_plan",
     "mapping_edges_for_plan",
-    "merge_placements",
     "plan_placements",
+    "reader_roles",
+    "relative_dimming_curve",
 ]

@@ -1,29 +1,16 @@
-"""Measurement and event contracts (owned by K02).
+"""Measurement, event and data-quality contracts (K02).
 
 Implements ``interfaces.md`` §3: the HB §2.1 :class:`ReaderMeasurement`, the
 device-free :class:`HAEvent`, and the stage-4/5/6 records
 :class:`MeasurementEvent`, :class:`EventEvidence`, :class:`SubEvent`,
-:class:`ReaderDelta` and :class:`EventGroup`, with their lifecycle enums.
+:class:`ReaderDelta` and :class:`EventGroup`, with their lifecycle enums.  It
+also owns the measurement basis of a watt value (:class:`MeasurementBasis`),
+the per-reader data-quality status and report (:class:`QualityStatus`,
+:class:`DataQualityReport`) and time-scoped measurement factors
+(:class:`MeasurementFactor`).
 
-This module is additive only: it introduces no name that already exists in
-:mod:`wattmosaic_engine.contracts.legacy`.  The §3 names that would collide with
-the legacy surface are suffixed with ``V3``; there are none among this module's
-public names, but for reference the mapping used elsewhere in the contract set
-is:
-
-* ``TopologyEdge`` -> ``TopologyEdgeV3``, ``TopologyVersion`` ->
-  ``TopologyVersionV3`` (K03);
-* ``EdgeLifecycle`` -> ``EdgeLifecycleV3``, ``UnknownLoadProfile`` ->
-  ``UnknownLoadProfileV3``, ``Observability`` -> ``ObservabilityV3`` (K03);
-* ``ConfidenceVector`` -> ``ConfidenceVectorV3`` (K00);
-* ``PowerLevel`` -> ``PowerLevelV3`` (K06).
-
-Two shared types are *reused*, not shadowed: :class:`EvidenceRef` and
-:class:`VersionTriple` come from :mod:`wattmosaic_engine.contracts.foundation`,
-as does the single Pydantic :class:`~wattmosaic_engine.contracts.legacy.Model`
-base (``extra="forbid"``, ``use_enum_values=True``).  They are re-exported here
-as a convenience so ``measurement.EvidenceRef`` works, but they are not in
-``__all__`` (they belong to K00) and therefore are not counted as new names.
+``EvidenceRef``, ``VersionTriple`` and the single Pydantic ``Model`` base
+(``extra="forbid"``, ``use_enum_values=True``) come from :mod:`.foundation`.
 
 Absent values are ``None``, never ``0`` (HB §18): a reader with no usable data
 in its window keeps ``delta_w is None`` with ``completeness="missing"``.
@@ -33,17 +20,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable
 from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 
-from .foundation import EvidenceRef, VersionTriple
-from .legacy import Model
+from .foundation import EvidenceRef, Model, VersionTriple, _document, utcnow
 
 __all__: list[str] = [
     # Enums
+    "MeasurementBasis",
+    "QualityStatus",
     "MeasurementType",
     "QualityFlag",
     "StepClass",
@@ -57,10 +46,136 @@ __all__: list[str] = [
     "SubEvent",
     "ReaderDelta",
     "EventGroup",
+    # Data quality and measurement factors
+    "DataQualityReport",
+    "MeasurementFactor",
+    "validate_factor_intervals",
     # Content-hash helpers
     "ha_event_id",
     "measurement_event_id",
 ]
+
+
+# --------------------------------------------------------------------------- #
+# Measurement basis, data quality and per-reader factors.
+# --------------------------------------------------------------------------- #
+
+
+class MeasurementBasis(str, Enum):
+    """What produced the watt value, independent of how much we trust it.
+
+    ``Source`` answers *"how was the value obtained"*; this answers *"what kind
+    of instrument produced the watts"*.  A ``DIRECT_MEASURED`` result can be
+    ``FACTOR_ADJUSTED``, and a ``MODEL_ESTIMATED`` result can never be
+    ``CT_MEASURED``.
+    """
+
+    CT_MEASURED = "ct_measured"
+    MONITOR_REPORTED = "monitor_reported"
+    FACTOR_ADJUSTED = "factor_adjusted"
+    ESTIMATED_APPLIANCE_TOTAL = "estimated_appliance_total"
+    UNKNOWN = "unknown"
+
+_document(
+    MeasurementBasis,
+    CT_MEASURED="A physical CT reading of the conductor, used as reported.",
+    MONITOR_REPORTED="The monitor published the whole load itself (e.g. Refoss).",
+    FACTOR_ADJUSTED="A per-circuit scaling factor was applied to the reading.",
+    ESTIMATED_APPLIANCE_TOTAL=(
+        "An appliance total estimated from a model or a configured prior, not measured."
+    ),
+    UNKNOWN="The basis is not established; no scaling or interpretation is claimed.",
+)
+
+
+class QualityStatus(str, Enum):
+    GOOD = "good"
+    DEGRADED = "degraded"
+    STALE = "stale"
+    BAD = "bad"
+    MISSING = "missing"
+
+
+class DataQualityReport(Model):
+    timestamp: datetime = Field(default_factory=utcnow)
+    overall_score: float = 0.0
+    channels: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    issues: list[str] = Field(default_factory=list)
+
+
+class MeasurementFactor(Model):
+    """A per-circuit scaling factor with a validity interval.
+
+    A bare float on ``CTChannel`` cannot answer *"what factor was in force when
+    this reading was taken"*, so a changed factor makes history
+    unreconstructable.  A reading is resolved against the interval covering its
+    ``state_timestamp``; today's factor is never applied to a past sample.
+    """
+
+    ct_id: str
+    """The CT the factor belongs to."""
+
+    multiplier: float = Field(gt=0.0)
+    """Strictly positive scaling applied to the reading.  Zero would hide the
+    circuit and a negative value would look like export."""
+
+    effective_from: datetime
+    """Inclusive start of the interval."""
+
+    effective_to: datetime | None = None
+    """Exclusive end of the interval; ``None`` means "still in force"."""
+
+    applied_by: Literal["monitor", "user", "unknown"] = "unknown"
+    """Who applied the factor.  ``monitor`` means the reported power already
+    includes it and must never be multiplied again."""
+
+    declared_by: Literal["user", "import", "default"] = "user"
+    """Where the declaration came from, for audit."""
+
+    note: str | None = None
+    """Free-text reason, e.g. ``"Refoss publishes the whole load"``."""
+
+    @field_validator("multiplier")
+    @classmethod
+    def _positive_finite(cls, v: float) -> float:
+        value = float(v)
+        if value != value or value in (float("inf"), float("-inf")):
+            raise ValueError("multiplier must be finite")
+        if value <= 0.0:
+            raise ValueError("multiplier must be greater than zero")
+        return value
+
+    @model_validator(mode="after")
+    def _interval_is_forward(self) -> MeasurementFactor:
+        if self.effective_to is not None and self.effective_to <= self.effective_from:
+            raise ValueError(
+                "effective_to must be strictly after effective_from; an empty "
+                "interval covers no reading"
+            )
+        return self
+
+
+def validate_factor_intervals(factors: Iterable[MeasurementFactor]) -> None:
+    """Reject overlapping validity intervals for the same ``ct_id``.
+
+    Intervals are half-open (``[from, to)``), so a factor change at ``t`` is
+    expressible: the old interval ends exactly where the new one begins.
+    Different CTs may overlap freely.  Raises ``ValueError`` on the first
+    conflict; returns ``None`` when every interval is disjoint per channel.
+    """
+    by_ct: dict[str, list[MeasurementFactor]] = {}
+    for factor in factors:
+        by_ct.setdefault(str(factor.ct_id), []).append(factor)
+    for ct_id, items in by_ct.items():
+        ordered = sorted(items, key=lambda f: f.effective_from)
+        for earlier, later in zip(ordered, ordered[1:], strict=False):
+            if earlier.effective_to is None or later.effective_from < earlier.effective_to:
+                raise ValueError(
+                    f"overlapping measurement factors for ct_id={ct_id!r}: "
+                    f"{earlier.effective_from.isoformat()}.."
+                    f"{earlier.effective_to.isoformat() if earlier.effective_to else 'open'} "
+                    f"overlaps {later.effective_from.isoformat()}"
+                )
 
 
 # --------------------------------------------------------------------------- #

@@ -1,6 +1,6 @@
 {
   "additionalProperties": false,
-  "description": "Seven-component confidence vector for a v3 estimate.\n\nEach component is an *uncalibrated engineering score* in ``[0, 1]`` or\n``None`` when not assessed.  **This is not a probability** (ADR-0007): the\nnumbers are not calibrated, do not sum to one, and must not be interpreted\nas likelihoods.  There is deliberately **no blended scalar** field, no\n``__float__`` and no arithmetic -- a consumer must name the component it\nmeans (DEC-24; HB \u00a79.6).  This v3 type supersedes the legacy six-dimension\n``ConfidenceVector`` and is intentionally a distinct public name.",
+  "description": "Seven-component confidence vector for a v3 estimate.\n\nEach component is an *uncalibrated engineering score* in ``[0, 1]`` or\n``None`` when not assessed.  **This is not a probability** (ADR-0007): the\nnumbers are not calibrated, do not sum to one, and must not be interpreted\nas likelihoods.  There is deliberately **no blended scalar** field, no\n``__float__`` and no arithmetic -- a consumer must name the component it\nmeans (DEC-24; HB \u00a79.6).",
   "properties": {
     "measurement_quality": {
       "anyOf": [

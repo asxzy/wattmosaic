@@ -329,7 +329,7 @@ def _measurement_type(value: str) -> MeasurementType:
 # Compatibility predicate (design §2.6)
 # --------------------------------------------------------------------------- #
 
-Phase = Literal["l1", "l2", "both", "unknown"]
+PhaseLiteral = Literal["l1", "l2", "both", "unknown"]
 
 
 def _family(measurement_type: MeasurementType | str) -> str:

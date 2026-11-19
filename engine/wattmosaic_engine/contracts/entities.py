@@ -1,42 +1,23 @@
-"""Entity contracts (owned by K01): the four HB §1.1 object kinds.
-
-This module defines the canonical entities for HB §1 and their many-to-many
-links (§1.2):
+"""Entity contracts (K01): the four HB §1.1 object kinds.
 
 * :class:`PhysicalDevice` — a real-world appliance or load (DEC-04 preserves
-  legacy ids such as ``dev_ct_07`` verbatim; new devices use ``pd_<ulid>``).
+  migrated ids verbatim; new devices use ``pd_<ulid>``).
 * :class:`LoadComponent` — an electrically distinguishable part of a device
   (user-declared only, DEC-07).
 * :class:`HaEntity` / :class:`HaEntityLink` — Home Assistant evidence and its
-  many-to-many links to devices *or* components (DEC-08).
+  many-to-many links to devices *or* components (DEC-08), each with an
+  :class:`HaEntityRole`.
 * :class:`MeasurementEndpoint` / :class:`EndpointConfigRevision` — an
   independent measurement identity with append-only configuration history
-  (HB §1.1 D).  A CT endpoint's id equals the legacy ``ct_id``.
+  (HB §1.1 D).  A CT endpoint keeps the reader id it always had.
+* :class:`LoadShape` — the declared load-shape class of a device or component.
 
-Naming / reuse notes
---------------------
-The existing :class:`~wattmosaic_engine.contracts.legacy.LoadShape`,
-:class:`~wattmosaic_engine.contracts.legacy.HaEntityRole` and
-:class:`~wattmosaic_engine.contracts.legacy.MeasurementBasis` enums are imported
-from ``legacy`` and re-used -- they are deliberately **not** exported from
-this module's ``__all__`` because those names already belong to the legacy
-surface.  None of the nine new public names below collide with ``legacy``, so
-no ``V3`` suffix is needed here.
-
-``interfaces.md`` §2 types ``EndpointConfigRevision.measurement_type`` as
-``"MeasurementType"`` (owned by K02, which has not landed yet).  To avoid
-defining a parallel public name that would collide with K02's export, the field
-is typed as a ``Literal`` of the exact five values from interfaces.md §3.  With
-the shared ``Model`` base's ``use_enum_values=True`` this is behaviourally
-identical to the future enum-typed field.
-
-The ``MeasurementEndpoint.revisions`` field is the in-memory list of loaded
-:class:`EndpointConfigRevision` objects.  It is needed to enforce the DEC-05
-guard ("latest revision declared_by == 'user'") on the endpoint itself; storage
-(S13) persists these in the ``endpoint_config_revisions`` table.
-
-This module is additive only: CONTRACT_VERSION stays ``2.4.0`` and no legacy
-contract is modified.
+``EndpointConfigRevision.measurement_type`` is typed as a ``Literal`` of the
+five :class:`~wattmosaic_engine.contracts.MeasurementType` values; with the
+shared ``Model`` base's ``use_enum_values=True`` this is behaviourally identical
+to an enum-typed field.  ``MeasurementEndpoint.revisions`` is the in-memory list
+of loaded revisions, needed to enforce the DEC-05 guard on the endpoint itself;
+storage (S13) persists them in ``endpoint_config_revisions``.
 """
 
 from __future__ import annotations
@@ -47,9 +28,11 @@ from typing import Literal
 
 from pydantic import model_validator
 
-from .legacy import HaEntityRole, LoadShape, MeasurementBasis, Model  # noqa: F401  (reused)
+from .foundation import Model, _document
 
 __all__: list[str] = [
+    "LoadShape",
+    "HaEntityRole",
     "EndpointKind",
     "EndpointScope",
     "ScopeStatus",
@@ -60,6 +43,64 @@ __all__: list[str] = [
     "HaEntity",
     "HaEntityLink",
 ]
+
+
+# --------------------------------------------------------------------------- #
+# Device / entity enums.
+# --------------------------------------------------------------------------- #
+
+
+class LoadShape(str, Enum):
+    """How a device draws power -- a declared property of the appliance.
+
+    The v3 model class (:class:`~wattmosaic_engine.contracts.ModelClass`) is
+    chosen from it (DEC-34).  Rule: a load shape is **declared**, never
+    inferred: no code path derives it from a device name, an entity id or any
+    other naming surface.  ``UNKNOWN`` is the neutral default.
+    """
+
+    FIXED = "fixed"
+    """Constant watts while running: a binary load on one level."""
+
+    ADJUSTABLE = "adjustable"
+    """Power follows a continuous control value; the response may be a curve."""
+
+    DYNAMIC = "dynamic"
+    """Power follows a discrete or time-varying programme, not one setting."""
+
+    DELAYED = "delayed"
+    """The control signal and the load are separated by a response delay."""
+
+    ALWAYS_ON = "always_on"
+    """There is no OFF state; the minimum power is the standby draw."""
+
+    UNKNOWN = "unknown"
+    """Not declared, or no model exists yet; no claim is made either way."""
+
+
+class HaEntityRole(str, Enum):
+    """What one Home Assistant entity means for a physical device.
+
+    A role makes "many entities, one appliance" a contract instead of a
+    convention, which is what makes double counting preventable.
+    """
+
+    LOAD_STATE = "load_state"
+    MODE_ONLY = "mode_only"
+    POWER_MEASUREMENT = "power_measurement"
+    ENERGY_COUNTER = "energy_counter"
+    AVAILABILITY = "availability"
+    UNKNOWN = "unknown"
+
+_document(
+    HaEntityRole,
+    LOAD_STATE="The entity's state proves the appliance is running (never watts).",
+    MODE_ONLY="Context only: a mode/thermostat signal that proves nothing about load.",
+    POWER_MEASUREMENT="The entity reports watts and may be the one power contributor.",
+    ENERGY_COUNTER="The entity reports cumulative energy, never instantaneous watts.",
+    AVAILABILITY="The entity only reports reachability.",
+    UNKNOWN="The role has not been established.",
+)
 
 
 # --------------------------------------------------------------------------- #

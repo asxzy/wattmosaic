@@ -1,7 +1,7 @@
 {
   "$defs": {
     "PowerLevelV3": {
-      "description": "Operating level of a published value (HB \u00a711.5).\n\nUnlike the legacy ``PowerLevel``, ``OFF`` and ``STANDBY`` are distinct\nmembers: OFF is a transition endpoint, not a claim of 0 W (HB \u00a711.5,\nrule 6).  ``UNKNOWN`` is the neutral default.",
+      "description": "Operating level of a published value (HB \u00a711.5).\n\n``OFF`` and ``STANDBY`` are distinct members: OFF is a transition endpoint, not a claim of 0 W (HB \u00a711.5,\nrule 6).  ``UNKNOWN`` is the neutral default.",
       "enum": [
         "off",
         "standby",

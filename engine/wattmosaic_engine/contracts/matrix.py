@@ -1,42 +1,18 @@
-"""Matrix contracts (owned by K05): structured cells, trees and drill-downs.
+"""Matrix contracts (K05): structured cells, trees and drill-downs.
 
 Implements ``interfaces.md`` §8 and the HB §9/§10/§19 vocabulary for the
-topology-aware mapping matrix.  A cell is a structured, evidence-backed object
-(HB §9.6); the observability and mapping-status vocabularies are the HB §9.7
-seven-state sets; the column tree is L0–L4 (``ColumnNode``); and the row tree
-carries the special row kinds (``RowKind``) of DEC-27.  Drill-down payloads
+topology-aware measurement matrix.  A cell is a structured, evidence-backed
+object (HB §9.6); the observability and mapping-status vocabularies are the
+HB §9.7 seven-state sets; the column tree is L0–L4 (``ColumnNode``); and the row
+tree carries the special row kinds (``RowKind``) of DEC-27.  Drill-down payloads
 (``CellDetail``, ``ReaderDetail``, ``RowDetail``) serve HB §19.4.
 
-Naming vs the legacy surface
-----------------------------
-Most §8 names are new and need no suffix.  Where a name would collide with a
-public name in :mod:`wattmosaic_engine.contracts.legacy`, the v3 type is
-suffixed with ``V3``:
-
-* legacy ``ConfidenceVector`` (six dimensions + ``method``)
-  -> :class:`foundation.ConfidenceVectorV3` (seven scoped components), used for
-  ``MappingCell.confidence``.
-* legacy ``MappingObservability`` (four states)
-  -> :class:`~wattmosaic_engine.contracts.topology.Observability` (K03's shared
-  seven-state set), which :class:`CellMapping` now reuses directly.  The legacy
-  ``MappingCellStatus`` is not reused; the v3 vocabulary is
-  :class:`MappingStatus`.
-* ``Observability`` and ``RelationType`` are imported from
-  :mod:`wattmosaic_engine.contracts.topology` rather than redefined here, so the
-  seven HB §9.7 observability values and the §4.2 relation values have a single
-  source of truth.  ``RelationType`` is widened with the lowercase literal
-  ``"direct_endpoint"`` (a single-subject endpoint, DEC-05) and ``None``.
-* legacy ``PowerLevel`` already has the needed distinct members
-  (STANDBY/IDLE/ACTIVE/TRANSIENT/UNKNOWN) and is reused for
-  ``CellPower.operating_state``; no ``PowerLevelV3`` is required.
-* legacy ``TopologyEdge`` / ``TopologyVersion`` / ``EdgeLifecycle`` /
-  ``UnknownLoadProfile`` are not used by this module; their v3 counterparts
-  belong to K03.
-* ``Bounds`` / ``EvidenceRef`` / ``IdentifiabilityStatus`` /
-  ``EstimateStatus`` / ``VersionTriple`` are reused from
-  :mod:`wattmosaic_engine.contracts.foundation`.
-
-This module is additive only: ``CONTRACT_VERSION`` stays ``"2.4.0"``.
+Shared vocabularies are reused: ``Observability`` and ``RelationType`` from
+:mod:`.topology` (``RelationType`` widened with ``"direct_endpoint"`` and
+``None``), ``PowerLevelV3`` from :mod:`.power_models` for
+``CellPower.operating_state``, and ``Bounds`` / ``EvidenceRef`` /
+``IdentifiabilityStatus`` / ``EstimateStatus`` / ``VersionTriple`` /
+``ConfidenceVectorV3`` from :mod:`.foundation`.
 
 Null policy (HB §18): every watt / confidence field that can be absent is
 ``None``; a non-identifiable member never receives a number.
@@ -56,9 +32,10 @@ from .foundation import (
     EstimateStatus,
     EvidenceRef,
     IdentifiabilityStatus,
+    Model,
     VersionTriple,
 )
-from .legacy import Model, PowerLevel
+from .power_models import PowerLevelV3
 from .topology import Observability, RelationType
 
 __all__: list[str] = [
@@ -167,7 +144,7 @@ class CellPower(Model):
     estimated_power_w: float | None = None
     bounds: Bounds | None = None
     standby_power_w: float | None = None
-    operating_state: PowerLevel | None = None
+    operating_state: PowerLevelV3 | None = None
     expected_profile_ref: str | None = None
     uncertainty_w: float | None = None
 
@@ -435,7 +412,7 @@ class RowDetail(Model):
     row_id: str
     kind: RowKind
     label: str
-    operating_state: PowerLevel | None = None
+    operating_state: PowerLevelV3 | None = None
     power_profile_ref: str | None = None
     observed_readers: list[str] = Field(default_factory=list)
     mapping_history: list[dict[str, Any]] = Field(default_factory=list)

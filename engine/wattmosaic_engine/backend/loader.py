@@ -20,9 +20,8 @@ def load_inference_backend(config: Any, database: Any | None = None) -> Any:
 
     This function is the *only* place that touches the backend package and it
     uses a guarded import so the engine always starts.
-    ``WattMosaicBackend`` exposes ``process(window, *, device_states, topology,
-    models)`` (sync or async) returning an object/dict with ``results``,
-    ``reconciliation`` and optional ``diagnostics``.
+    ``WattMosaicBackend`` is the aggregation / learning-status adapter of the
+    three-loop runtime.
 
     The backend is imported lazily so the engine stays importable (and testable)
     when the model layer is absent.

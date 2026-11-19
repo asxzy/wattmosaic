@@ -244,9 +244,6 @@ class DiagnosticsApiMixin:
                 "events_ingested": self.events_ingested,
                 "samples_persisted": self.samples_persisted,
                 "events_persisted": self.events_persisted,
-                "events_evicted_before_maturity": self.events_evicted_before_maturity,
-                "unlinked_events_ignored": self.unlinked_events_ignored,
-                "power_events_not_state": self.power_events_not_state,
                 "persistence_errors": self.persistence_errors,
                 "queue": self.persist_queue.stats(),
             },
@@ -259,19 +256,6 @@ class DiagnosticsApiMixin:
 
     def quality(self) -> DataQualityReport:
         return self.quality_report()
-
-    def circuits(self) -> list[dict[str, Any]]:
-        """Stored circuit scopes, derived by the analysis pass.
-
-        Read-only: nothing here classifies or writes.  A circuit only appears
-        after a pass has had the evidence to name a class, and its
-        ``classification_status`` stays ``candidate`` until a user confirms it.
-        """
-        try:
-            rows = self.db.circuits_all()
-        except Exception:  # noqa: BLE001 - a read failure is an empty answer
-            return []
-        return [self._jsonable(row) for row in rows]
 
     @staticmethod
     def _jsonable(value: Any) -> Any:
@@ -318,26 +302,6 @@ class DiagnosticsApiMixin:
             ),
         }
 
-    def isolation_status(self) -> dict[str, Any]:
-        """Isolation verdict counts from the last analysis pass."""
-        backend = self.inference_backend
-        method = getattr(backend, "isolation_status", None)
-        if method is None:
-            return {
-                "source": "no_analysis_pass",
-                "counts": {
-                    "analysed": 0,
-                    "isolated": 0,
-                    "contaminated": 0,
-                    "insufficient_data": 0,
-                },
-                "verdicts": [],
-            }
-        try:
-            return method()
-        except Exception:  # noqa: BLE001
-            return {"source": "unavailable", "counts": {}, "verdicts": []}
-
     def diagnostics(self) -> dict[str, Any]:
         report = run_diagnostics(
             config=self.config,
@@ -381,12 +345,9 @@ class DiagnosticsApiMixin:
             "# HELP wattmosaic_samples_ingested_total Samples received from Home Assistant",
             "# TYPE wattmosaic_samples_ingested_total counter",
             f"wattmosaic_samples_ingested_total {self.samples_ingested}",
-            "# HELP wattmosaic_events_ingested_total Device events received",
+            "# HELP wattmosaic_events_ingested_total Home Assistant state-change events received",
             "# TYPE wattmosaic_events_ingested_total counter",
             f"wattmosaic_events_ingested_total {self.events_ingested}",
-            "# HELP wattmosaic_power_events_not_state_total Declared power-entity events not used as device state",
-            "# TYPE wattmosaic_power_events_not_state_total counter",
-            f"wattmosaic_power_events_not_state_total {self.power_events_not_state}",
             "# HELP wattmosaic_samples_persisted_total Samples written to SQLite",
             "# TYPE wattmosaic_samples_persisted_total counter",
             f"wattmosaic_samples_persisted_total {self.samples_persisted}",

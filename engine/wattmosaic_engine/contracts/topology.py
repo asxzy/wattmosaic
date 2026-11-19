@@ -1,21 +1,11 @@
-"""Topology, mapping-edge, residual and unknown-profile contracts (owned by K03).
+"""Topology, mapping-edge, configuration-event, residual and unknown-profile contracts (K03).
 
-These are the v3 contracts of ``interfaces.md`` §4.  They are additive only:
-``CONTRACT_VERSION`` stays ``2.4.0`` and the legacy surface is left untouched.
-
-Naming: the contracts facade (``contracts/__init__.py``) star-imports this module
-alongside ``legacy``.  Four names from §4 already exist on that legacy surface,
-so the v3 types carry a ``V3`` suffix here:
-
-* legacy ``EdgeLifecycle``            -> :class:`EdgeLifecycleV3`
-* legacy ``TopologyEdge``             -> :class:`TopologyEdgeV3`
-* legacy ``TopologyVersion``          -> :class:`TopologyVersionV3`
-* legacy ``UnknownLoadProfile``       -> :class:`UnknownLoadProfileV3`
-
-Every other §4 name is new.  In particular the config-event enums
-(``ConfigurationChangeKind``, ``ChangeDetection``, ``ChangeStatus``) and
-``MeasurementBasis`` are *reused* from :mod:`~wattmosaic_engine.contracts.legacy`
-rather than redefined, as the task requires.
+The v3 contracts of ``interfaces.md`` §4: lifecycle-tagged
+:class:`TopologyEdgeV3` / :class:`MappingEdge` edges and their versions, the
+configuration-change vocabulary (:class:`ConfigurationChangeKind`,
+:class:`ChangeDetection`, :class:`ChangeStatus`) and
+:class:`ConfigurationEvent`, per-reader residual points and unknown-load
+profiles.  ``MeasurementBasis`` is reused from :mod:`.measurement`.
 
 Null policy (HB §18): an absent measurement or estimate is ``None``, never zero.
 All nullable scores and powers here therefore default to ``None``.
@@ -29,10 +19,13 @@ from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
-from .foundation import EvidenceRef, MappingVersionId, TopologyVersionId
-from .legacy import ChangeDetection, ChangeStatus, ConfigurationChangeKind, MeasurementBasis, Model
+from .foundation import EvidenceRef, MappingVersionId, Model, TopologyVersionId
+from .measurement import MeasurementBasis
 
 __all__: list[str] = [
+    "ConfigurationChangeKind",
+    "ChangeDetection",
+    "ChangeStatus",
     # Enums
     "RelationType",
     "EdgeLifecycleV3",
@@ -57,6 +50,78 @@ __all__: list[str] = [
 # --------------------------------------------------------------------------- #
 
 
+# --------------------------------------------------------------------------- #
+# Configuration-change enums (HB §14).
+# --------------------------------------------------------------------------- #
+
+
+class ConfigurationChangeKind(str, Enum):
+    """The nine kinds of configuration change (spec 09 §7.6).
+
+    Exactly nine members, and the set is not extensible: a residual baseline
+    drift is **not** a configuration change, so the change surface's
+    discriminator is a separate, wider vocabulary (09 §7.10).
+    """
+
+    SMART_PLUG_RELOCATION = "smart_plug_relocation"
+    """A smart plug was moved to a different reader."""
+
+    CT_READER_RELOCATION = "ct_reader_relocation"
+    """A CT reader was moved to a different conductor."""
+
+    READER_REPLACEMENT = "reader_replacement"
+    """A reader was replaced by another."""
+
+    CT_DIRECTION_CHANGE = "ct_direction_change"
+    """A reader's clamp direction was reversed."""
+
+    CALIBRATION_CHANGE = "calibration_change"
+    """A reader's calibration was corrected."""
+
+    CIRCUIT_RECONFIGURATION = "circuit_reconfiguration"
+    """The circuit a reader belongs to was reconfigured."""
+
+    READER_INSTALLATION = "reader_installation"
+    """A new reader was installed."""
+
+    READER_REMOVAL = "reader_removal"
+    """A reader was removed; its history is retained, not deleted."""
+
+    MEASUREMENT_SCOPE_CHANGE = "measurement_scope_change"
+    """The scope a reader measures changed."""
+
+
+class ChangeDetection(str, Enum):
+    """How a configuration change was learned (spec 09 §7.6)."""
+
+    DECLARED = "declared"
+    """The user stated it."""
+
+    OBSERVED = "observed"
+    """The engine saw it happen."""
+
+    INFERRED = "inferred"
+    """The engine concluded it from indirect evidence."""
+
+
+class ChangeStatus(str, Enum):
+    """Whether a recorded configuration change is established (spec 09 §7.6).
+
+    Contract 2.4.0 adds this as a vocabulary distinct from ``ChangeDetection``:
+    ``detection`` says *how* the engine learned of the change, while ``status``
+    says *whether* the change is established.  A ``SUSPECTED`` change is an
+    uncertain, not-auto-confirmed proposal that leaves the live configuration
+    untouched until validated (REQ-CHANGE-002/005); only ``CONFIRMED`` reads
+    as established.
+    """
+
+    SUSPECTED = "suspected"
+    """An uncertain proposal, not auto-confirmed; live configuration untouched."""
+
+    CONFIRMED = "confirmed"
+    """The change was validated and is established."""
+
+
 class RelationType(str, Enum):
     """The five reader↔reader relation kinds of HB §4.2 (DEC-10, DEC-11)."""
 
@@ -70,10 +135,8 @@ class RelationType(str, Enum):
 class EdgeLifecycleV3(str, Enum):
     """Lifecycle of a single v3 topology or mapping edge (HB §4.3).
 
-    This is a *new* seven-state vocabulary.  The legacy :class:`EdgeLifecycle`
-    has a different member set (it includes ``UNDER_REVIEW`` and omits nothing,
-    but is not identical); it is deliberately left alone.  One event never moves
-    an edge past CANDIDATE (DEC-10).
+    A seven-state vocabulary.  One event never moves an edge past CANDIDATE
+    (DEC-10).
     """
 
     CANDIDATE = "candidate"
@@ -239,15 +302,15 @@ class MappingVersion(Model):
 
 
 # --------------------------------------------------------------------------- #
-# Configuration events (reusing the legacy change enums).
+# Configuration events.
 # --------------------------------------------------------------------------- #
 
 
 class ConfigurationEvent(Model):
     """A declared or inferred configuration change (HB §14, §4).
 
-    The ``kind``, ``detection`` and ``status`` enums are the existing v2 ones,
-    reused verbatim from ``contracts.legacy``.
+    ``kind``, ``detection`` and ``status`` use the configuration-change enums
+    defined above.
     """
 
     event_id: str

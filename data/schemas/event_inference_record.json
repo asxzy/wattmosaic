@@ -147,7 +147,7 @@
     },
     "ConfidenceVectorV3": {
       "additionalProperties": false,
-      "description": "Seven-component confidence vector for a v3 estimate.\n\nEach component is an *uncalibrated engineering score* in ``[0, 1]`` or\n``None`` when not assessed.  **This is not a probability** (ADR-0007): the\nnumbers are not calibrated, do not sum to one, and must not be interpreted\nas likelihoods.  There is deliberately **no blended scalar** field, no\n``__float__`` and no arithmetic -- a consumer must name the component it\nmeans (DEC-24; HB \u00a79.6).  This v3 type supersedes the legacy six-dimension\n``ConfidenceVector`` and is intentionally a distinct public name.",
+      "description": "Seven-component confidence vector for a v3 estimate.\n\nEach component is an *uncalibrated engineering score* in ``[0, 1]`` or\n``None`` when not assessed.  **This is not a probability** (ADR-0007): the\nnumbers are not calibrated, do not sum to one, and must not be interpreted\nas likelihoods.  There is deliberately **no blended scalar** field, no\n``__float__`` and no arithmetic -- a consumer must name the component it\nmeans (DEC-24; HB \u00a79.6).",
       "properties": {
         "measurement_quality": {
           "anyOf": [
@@ -658,7 +658,7 @@
       "type": "string"
     },
     "PowerLevelV3": {
-      "description": "Operating level of a published value (HB \u00a711.5).\n\nUnlike the legacy ``PowerLevel``, ``OFF`` and ``STANDBY`` are distinct\nmembers: OFF is a transition endpoint, not a claim of 0 W (HB \u00a711.5,\nrule 6).  ``UNKNOWN`` is the neutral default.",
+      "description": "Operating level of a published value (HB \u00a711.5).\n\n``OFF`` and ``STANDBY`` are distinct members: OFF is a transition endpoint, not a claim of 0 W (HB \u00a711.5,\nrule 6).  ``UNKNOWN`` is the neutral default.",
       "enum": [
         "off",
         "standby",
@@ -760,7 +760,7 @@
     }
   },
   "additionalProperties": false,
-  "description": "A versioned event interpretation; evidence immutable, result versioned.\n\n``interpretation_revision == 1`` iff ``previous_record_id is None`` \u2014 the\nsame chain rule :class:`legacy.InferenceRecord` applies to its revision.",
+  "description": "A versioned event interpretation; evidence immutable, result versioned.\n\n``interpretation_revision == 1`` iff ``previous_record_id is None`` \u2014 the\nrevision chain is append-only.",
   "properties": {
     "record_id": {
       "title": "Record Id",

@@ -9,7 +9,6 @@ materialised sparse view on a reader connection (``mapping/service.py``).
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from types import SimpleNamespace
 from typing import Any
 
 from ..api.facade import maybe_await
@@ -23,59 +22,8 @@ from ..mapping.service import (
 class MappingApiMixin:
     """Behaviour for one responsibility of :class:`EngineCore`."""
 
-    # -- legacy /mapping path (stays until Z1) ------------------------------ #
-
-    async def mapping_matrix(self) -> dict[str, Any]:
-        """The Device↔Reader mapping matrix with a single bulk model read.
-
-        Kept for the legacy ``/mapping`` route until Z1 removes it.  Reuses the
-        read-time projection in ``derive_mapping_matrix`` so the response is
-        byte-identical to the fallback path — only the model source changes: one
-        bulk read feeds an in-memory adapter instead of a per-device ``models()``
-        N+1.
-        """
-        from ..api.facade import derive_mapping_matrix
-        from ..models.serde import version_from_row
-
-        active_by_device: dict[str, Any] = {}
-        for device_id, row in self._bulk_active_models().items():
-            version = version_from_row(row)
-            if version is not None:
-                active_by_device[device_id] = version.model_dump(mode="json")
-
-        def models_reader(device_id: str) -> dict[str, Any]:
-            return {
-                "device_id": device_id,
-                "active": active_by_device.get(device_id),
-                "versions": [],
-            }
-
-        projection_facade = SimpleNamespace(
-            topology=self.topology,
-            relations=self.relations,
-            models=models_reader,
-            ha_device_registry=self.ha_device_registry,
-        )
-        return await derive_mapping_matrix(projection_facade)
-
-    def _bulk_active_models(self) -> dict[str, dict[str, Any]]:
-        """All devices' active model rows in ONE query, keyed by device id."""
-        with self.db._reader() as conn:
-            rows = conn.execute(
-                """SELECT v.* FROM device_model_versions v JOIN device_models m
-                ON v.device_id=m.device_id AND v.model_type=m.model_type AND v.version=m.active_version
-                ORDER BY v.created_at DESC"""
-            ).fetchall()
-        out: dict[str, dict[str, Any]] = {}
-        for row in rows:
-            data = dict(row)
-            device_id = str(data.get("device_id") or "")
-            if device_id and device_id not in out:
-                out[device_id] = data
-        return out
-
     async def ha_device_registry(self) -> dict[str, Any]:
-        """HA device registry (cached), for the mapping matrix device axis."""
+        """HA device registry (cached), for the matrix device axis."""
         try:
             registries = await maybe_await(self.hasource.registries())
         except Exception:  # noqa: BLE001 - registry is optional

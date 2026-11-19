@@ -317,6 +317,15 @@ class EntitiesRepository(Repository):
         with self._reader() as conn:
             return [_row(row) for row in conn.execute(query, params).fetchall()]
 
+    def links(self) -> list[dict[str, Any]]:
+        """Every stored HA entity link, ordered by entity then target."""
+        query = (
+            f"SELECT {', '.join(_LINK_COLUMNS)} FROM ha_entity_links "
+            "ORDER BY entity_id, target_kind, target_id, valid_from"
+        )
+        with self._reader() as conn:
+            return [_row(row) for row in conn.execute(query).fetchall()]
+
     def subjects_for_ha_device(self, ha_device_id: str) -> list[dict[str, Any]]:
         """All ``(entity, target_kind, target_id, role)`` links whose HA entity
         belongs to a given Home Assistant device id.

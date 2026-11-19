@@ -3,7 +3,7 @@
 One ring of readings per measurement endpoint.  Migration 16 adds the rest of
 the HB §2.1 measurement as nullable columns; :meth:`SamplesRepository.insert_readings`
 persists every field of a :class:`~wattmosaic_engine.contracts.ReaderMeasurement`.
-The legacy :meth:`insert_ct_samples` stays for the pre-v3 ingest path.
+
 """
 
 from __future__ import annotations
@@ -25,32 +25,6 @@ from ..repositories import SAMPLE_FETCH_CHUNK, Repository, as_utc, enum_value, i
 
 
 class SamplesRepository(Repository):
-    def insert_ct_samples(self, rows: Iterable[dict[str, Any]]) -> int:
-        payload = [
-            (
-                r["ct_id"], r["entity_id"], float(r["value_w"]), float(r["raw_value"]), r.get("unit", "W"),
-                iso(r["state_timestamp"]), iso(r["received_at"]), iso(r.get("physical_timestamp")),
-                r.get("quality", "good"), int(bool(r.get("repeated"))), int(r.get("sequence", 0)),
-            )
-            for r in rows
-        ]
-        if not payload:
-            return 0
-        with self._lock:
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
-                self._conn.executemany(
-                    """INSERT INTO ct_samples(ct_id, entity_id, value_w, raw_value, unit, state_timestamp,
-                    received_at, physical_timestamp, quality, repeated, sequence)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                    payload,
-                )
-                self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
-        return len(payload)
-
     # -- reader samples v2 (migration 16) ---------------------------------- #
     def insert_readings(self, readings: Iterable[ReaderMeasurement]) -> int:
         """Persist every HB §2.1 field of a batch of :class:`ReaderMeasurement`.

@@ -55,7 +55,7 @@
       "type": "object"
     },
     "EdgeLifecycleV3": {
-      "description": "Lifecycle of a single v3 topology or mapping edge (HB \u00a74.3).\n\nThis is a *new* seven-state vocabulary.  The legacy :class:`EdgeLifecycle`\nhas a different member set (it includes ``UNDER_REVIEW`` and omits nothing,\nbut is not identical); it is deliberately left alone.  One event never moves\nan edge past CANDIDATE (DEC-10).",
+      "description": "Lifecycle of a single v3 topology or mapping edge (HB \u00a74.3).\n\nA seven-state vocabulary.  One event never moves an edge past CANDIDATE\n(DEC-10).",
       "enum": [
         "candidate",
         "provisional",

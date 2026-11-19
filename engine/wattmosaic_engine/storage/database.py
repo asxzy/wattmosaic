@@ -38,33 +38,14 @@ import logging
 import shutil
 import sqlite3
 import threading
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ..contracts import (
-    Circuit,
-    DeviceConfiguration,
-    DeviceConfigurationSet,
-    EventIsolation,
-    InferenceRecord,
-    MeasurementFactor,
-    ModelStatus,
-    ModelType,
-    ResidualPower,
-    TopologyRelation,
-    utcnow,
-)
-
-# ZI: the delegating methods below keep their legacy-compatible signatures for
-# the shared callers owned by other areas (topology service, learning, tests).
-# The shared legacy contract models are reached through the legacy module
-# namespace so this area binds no legacy contract name; ZC removes them.
-from ..contracts import legacy as _legacy
+from ..contracts import utcnow
 from .migrations import LATEST_VERSION, apply_migrations, current_version, pending_migrations
 from .repositories import Repositories, backup_pattern, iso
-from .repositories.topology import TopologyRepository
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -374,63 +355,7 @@ class Database:
             row = self._conn.execute("SELECT value FROM engine_state WHERE key=?", (key,)).fetchone()
         return json.loads(row["value"]) if row else default
 
-    # -- topology --------------------------------------------------------- #
-    @staticmethod
-    def _insertion_order(channels: Iterable[_legacy.CTChannel]) -> list[_legacy.CTChannel]:
-        """Order channels so a parent is always written before its children.
-
-        The rule lives on :class:`TopologyRepository` -- the SQL that needs it is
-        there -- and is reached through the class rather than an instance because
-        ``save_topology`` is a write and this ordering is pure.  Kept importable
-        from ``Database`` because the migration-era code and tests name it here.
-        """
-        return TopologyRepository._insertion_order(channels)
-
-    def save_topology(self, topology: _legacy.Topology, note: str = "") -> int:
-        return self.repos.topology.save_topology(topology, note=note)
-
-    def load_topology(self) -> _legacy.Topology | None:
-        return self.repos.topology.load_topology()
-
-    def upsert_circuit(self, circuit: Circuit) -> None:
-        self.repos.topology.upsert_circuit(circuit)
-
-    def circuits_all(self) -> list[dict[str, Any]]:
-        return self.repos.topology.circuits_all()
-
-    # -- device configuration --------------------------------------------- #
-    def save_device_configurations(self, configurations: DeviceConfigurationSet) -> None:
-        """Replace the stored per-device configuration set atomically."""
-        self.repos.devices.save_device_configurations(configurations)
-
-    def load_device_configurations(self) -> DeviceConfigurationSet:
-        return self.repos.devices.load_device_configurations()
-
-    def get_device_configuration(self, device_id: str) -> DeviceConfiguration | None:
-        return self.repos.devices.get_device_configuration(device_id)
-
-    # -- samples ---------------------------------------------------------- #
-    def insert_ct_samples(self, rows: Iterable[dict[str, Any]]) -> int:
-        return self.repos.samples.insert_ct_samples(rows)
-
-    def ct_samples_between(
-        self, start: datetime, end: datetime, ct_ids: list[str] | None = None
-    ) -> list[dict[str, Any]]:
-        return self.repos.samples.ct_samples_between(start, end, ct_ids)
-
-    def latest_ct_sample(self, ct_id: str) -> dict[str, Any] | None:
-        return self.repos.samples.latest_ct_sample(ct_id)
-
-    def latest_ct_samples(self) -> dict[str, dict[str, Any]]:
-        return self.repos.samples.latest_ct_samples()
-
     # -- events ----------------------------------------------------------- #
-    def insert_device_event(self, event: dict[str, Any]) -> None:
-        self.repos.events.insert_device_event(event)
-
-    def recent_device_events(self, since: datetime, limit: int = 1000) -> list[dict[str, Any]]:
-        return self.repos.events.recent_device_events(since, limit)
-
     def log_quality_event(
         self, code: str, message: str, severity: str = "warning", channel_id: str | None = None,
         details: dict[str, Any] | None = None,
@@ -443,136 +368,26 @@ class Database:
         self.repos.events.log_system_event(level, category, message, details)
 
     # -- inference -------------------------------------------------------- #
-    def insert_inference_results(self, results: Iterable[_legacy.InferenceResult]) -> int:
-        return self.repos.inference.insert_inference_results(results)
-
-    def latest_inference_results(self) -> list[dict[str, Any]]:
-        """The newest result per device, cached across reads until the next write."""
-        return self.repos.inference.latest_inference_results()
-
     def inference_history(
         self, device_id: str, since: datetime, limit: int = 5000
     ) -> list[dict[str, Any]]:
         return self.repos.inference.inference_history(device_id, since, limit)
 
     # -- versioned inference records (contract 1.6.0, migration 9) --------- #
-    def insert_inference_record(self, record: InferenceRecord) -> None:
-        """Append one revision.  A revision never overwrites its predecessor."""
-        self.repos.records.insert_inference_record(record)
-
     def inference_records_for_device(
         self, device_id: str, since: datetime | None = None, limit: int = 5000
     ) -> list[dict[str, Any]]:
         return self.repos.records.inference_records_for_device(device_id, since, limit)
 
-    def latest_inference_record(self, device_id: str) -> dict[str, Any] | None:
-        return self.repos.records.latest_inference_record(device_id)
-
-    def inference_records_for_topology_version(
-        self, topology_version: int | str, limit: int = 5000
-    ) -> list[dict[str, Any]]:
-        return self.repos.records.inference_records_for_topology_version(topology_version, limit)
-
     # -- measurement factors (contract 1.6.0) ----------------------------- #
-    def insert_measurement_factor(self, factor: MeasurementFactor) -> None:
-        self.repos.associations.insert_measurement_factor(factor)
-
     def factors_for_ct(self, ct_id: str) -> list[dict[str, Any]]:
-        return self.repos.associations.factors_for_ct(ct_id)
+        return self.repos.factors.factors_for_ct(ct_id)
 
-    # -- typed topology relations (contract 1.6.0) ------------------------ #
-    def insert_topology_relation(self, relation: TopologyRelation) -> None:
-        self.repos.associations.insert_topology_relation(relation)
-
-    def relations_of_kind(self, kind: _legacy.RelationKind | str) -> list[dict[str, Any]]:
-        return self.repos.associations.relations_of_kind(kind)
-
-    # -- isolation verdicts (migration 10) --------------------------------- #
-    def insert_isolation_verdict(
-        self, verdict: EventIsolation, *, algorithm_version: str = ""
-    ) -> None:
-        self.repos.records.insert_isolation_verdict(verdict, algorithm_version=algorithm_version)
-
-    def isolation_verdict(self, event_id: str) -> dict[str, Any] | None:
-        return self.repos.records.isolation_verdict(event_id)
-
-    def isolation_verdicts(
-        self, since: datetime | None = None, limit: int = 500
-    ) -> list[dict[str, Any]]:
-        return self.repos.records.isolation_verdicts(since, limit)
-
-    def resolve_evidence_ref(self, ref: str) -> bool:
-        """Whether one ``evidence_refs`` entry names a row that still exists."""
-        return self.repos.records.resolve_evidence_ref(ref)
-
-    def _sample_exists(self, key: str) -> bool:
-        return self.repos.samples.sample_exists(key)
-
-    def _circuit_exists(self, circuit_id: str) -> bool:
-        return self.repos.topology.circuit_exists(circuit_id)
-
-    def _record_exists(self, record_id: str) -> bool:
-        return self.repos.records.record_exists(record_id)
-
-    def _relation_exists(self, relation_id: str) -> bool:
-        return self.repos.records.relation_exists(relation_id)
-
-    # -- residual power (contract 1.6.0) ---------------------------------- #
-    def insert_residual_power(
-        self,
-        residual: ResidualPower,
-        timestamp: datetime | None = None,
-        reconciliation_id: int | None = None,
-    ) -> None:
-        self.repos.residual.insert_residual_power(residual, timestamp, reconciliation_id)
-
+    # -- residual (per-reader series, migration 19) ----------------------- #
     def residual_history(
         self, since: datetime | None = None, limit: int = 5000
     ) -> list[dict[str, Any]]:
         return self.repos.residual.residual_history(since, limit)
-
-    # -- reconciliation --------------------------------------------------- #
-    def insert_reconciliation(self, rec: _legacy.Reconciliation) -> None:
-        self.repos.residual.insert_reconciliation(rec)
-
-    def latest_reconciliation(self) -> dict[str, Any] | None:
-        return self.repos.residual.latest_reconciliation()
-
-    # -- learning --------------------------------------------------------- #
-    def insert_learning_sample(self, sample: _legacy.LearningSample) -> None:
-        self.repos.learning.insert_learning_sample(sample)
-
-    def learning_samples(
-        self, device_id: str | None = None, accepted_only: bool = True
-    ) -> list[dict[str, Any]]:
-        return self.repos.learning.learning_samples(device_id, accepted_only)
-
-    def count_learning_samples(self, device_id: str, accepted_only: bool = True) -> int:
-        return self.repos.learning.count_learning_samples(device_id, accepted_only)
-
-    # -- models ----------------------------------------------------------- #
-    def save_model_version(self, model: _legacy.DeviceModelVersion, activate: bool = False) -> None:
-        self.repos.models.save_model_version(model, activate=activate)
-
-    def active_model(self, device_id: str, model_type: str | None = None) -> dict[str, Any] | None:
-        return self.repos.models.active_model(device_id, model_type)
-
-    def model_versions(self, device_id: str) -> list[dict[str, Any]]:
-        return self.repos.models.model_versions(device_id)
-
-    def set_model_status(
-        self, device_id: str, model_type: str, version: int, status: ModelStatus
-    ) -> None:
-        self.repos.models.set_model_status(device_id, model_type, version, status)
-
-    def set_model_frozen(self, device_id: str, frozen: bool) -> None:
-        self.repos.models.set_model_frozen(device_id, frozen)
-
-    def is_model_frozen(self, device_id: str) -> bool:
-        return self.repos.models.is_model_frozen(device_id)
-
-    def rollback_model(self, device_id: str, model_type: str) -> int | None:
-        return self.repos.models.rollback_model(device_id, model_type)
 
     # -- aggregation / retention ----------------------------------------- #
     def upsert_power_aggregate(
@@ -626,18 +441,12 @@ class Database:
         return self.repos.aggregates.stats()
 
 
-def default_parameters() -> _legacy.DeviceModelParameters:
-    return _legacy.DeviceModelParameters()
-
-
 __all__ = [
     "BACKUP_FROM_VERSION",
     "BACKUP_KEEP",
     "Database",
     "LATEST_VERSION",
-    "ModelType",
     "apply_migrations",
     "current_version",
-    "default_parameters",
     "iso",
 ]

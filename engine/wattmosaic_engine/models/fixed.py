@@ -44,7 +44,7 @@ from ..contracts import (
     PowerPrediction,
     PredictionStatus,
 )
-from .base import finite, median, robust_sigma
+from .numeric import finite, median, robust_sigma
 
 __all__ = [
     "FixedPowerModel",

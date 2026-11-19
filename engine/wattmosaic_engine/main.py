@@ -41,7 +41,6 @@ import logging
 import signal
 import sys
 import time
-from collections import deque
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
@@ -58,14 +57,8 @@ from .contracts import (
     ReconciliationV3,
     utcnow,
 )
-
-# ZI: the legacy topology cache still holds the shared Topology model until ZC
-# removes it; it is reached through the legacy namespace so this area binds no
-# legacy contract name.
-from .contracts import legacy as _legacy
 from .core import (
     MAINTENANCE_INTERVAL_S,
-    NESTING_RESAMPLE_GRID,
     SAMPLE_BATCH_SIZE,
     SAMPLE_FLUSH_INTERVAL_S,
     TOPOLOGY_BOOTSTRAP_WAIT_S,
@@ -78,20 +71,10 @@ from .core import (
     RuntimeMixin,
     SnapshotMixin,
     TopologyApiMixin,
-    _as_utc,
     _event_time,
-    _forward_fill,
     _is_numeric_state,
-    _json_list,
-    _json_obj,
-    _linkable_state_entities,
     _prom_label,
-    _safe_float,
     _safe_history_row,
-    _sample_grid,
-    _sampling_cadence_s,
-    row_to_inference_result,
-    row_to_reconciliation,
 )
 from .ingestion.ha_source import HASource
 from .ingestion.queue import BoundedQueue
@@ -102,14 +85,12 @@ log = logging.getLogger("wattmosaic.main")
 
 #: Everything this module exposes publicly.  ``EngineCore`` and the CLI are
 #: defined here; the rest is re-exported from the split modules so existing
-#: importers (``from wattmosaic_engine.main import row_to_reconciliation``,
-#: ``load_inference_backend``, ``TOPOLOGY_BOOTSTRAP_WAIT_S``, ``_sample_grid``,
+#: importers (``load_inference_backend``, ``TOPOLOGY_BOOTSTRAP_WAIT_S``,
 #: ``HISTORY_TIMEOUT_*`` …) keep working unchanged.
 __all__ = [
     "HISTORY_TIMEOUT_BASE_S",
     "HISTORY_TIMEOUT_PER_HOUR_S",
     "MAINTENANCE_INTERVAL_S",
-    "NESTING_RESAMPLE_GRID",
     "SAMPLE_BATCH_SIZE",
     "SAMPLE_FLUSH_INTERVAL_S",
     "SUPERVISION_BACKOFF_BASE_S",
@@ -121,25 +102,15 @@ __all__ = [
     "InferenceBackendUnavailable",
     "JsonFormatter",
     "Supervisor",
-    "_as_utc",
     "_event_time",
-    "_forward_fill",
     "_is_numeric_state",
-    "_json_list",
-    "_json_obj",
-    "_linkable_state_entities",
     "_prom_label",
-    "_safe_float",
     "_safe_history_row",
-    "_sample_grid",
-    "_sampling_cadence_s",
     "build_parser",
     "configure_logging",
     "load_inference_backend",
     "log",
     "main",
-    "row_to_inference_result",
-    "row_to_reconciliation",
 ]
 
 SUPERVISION_BACKOFF_BASE_S = 1.0
@@ -161,14 +132,6 @@ SUPERVISION_BACKOFF_MAX_S = 60.0
 #: budget -- 25x the measured 17 s at 72 h -- while the base keeps a short
 #: window from ever waiting longer than a stalled connection would.
 
-#: ``NESTING_RESAMPLE_GRID``, ``_sample_grid``, ``_sampling_cadence_s`` and
-#: ``_forward_fill`` live in :mod:`wattmosaic_engine.core.topology_api`, beside
-#: the nesting comparison they implement, and are re-exported below.  The flag is
-#: **off by default, deliberately**: the union grid and the resampled grid produce
-#: the same candidate pairs on the reference installation, but ``instants``,
-#: ``joint_instants`` and ``containment`` describe *how many instants were
-#: compared*, so enabling it silently changes a published response.
-#:
 #: Discovery's CPU half moved with the rest of the discovery facade to
 #: :mod:`wattmosaic_engine.core.discovery_api`.  It is still a nested function
 #: whose compute block is handed to the loop as
@@ -186,8 +149,6 @@ SUPERVISION_BACKOFF_MAX_S = 60.0
 #: pass; ``tests/unit/test_panel.py`` also reads this file for them, so the
 #: prefixes are spelled out above and emitted in
 #: :mod:`wattmosaic_engine.core.discovery_api`.
-#: ``row_to_inference_result`` / ``row_to_reconciliation`` live in
-#: :mod:`wattmosaic_engine.core.rows` (D3 owns their null semantics).
 
 
 # --------------------------------------------------------------------------- #
@@ -284,13 +245,6 @@ class EngineCore(
         self.hasource = HASource.from_config(config)
 
         self.persist_queue: BoundedQueue[tuple[str, Any]] = BoundedQueue(config.queue_max_size)
-        self.device_states: dict[str, Any] = {}
-        #: Latest *measured* dimmer output per device, as a fraction of full
-        #: scale, taken from the control entity's attributes.  Separate from
-        #: ``device_states`` because the state is ``on`` while the level is what
-        #: says how much: keeping them apart means a light that never reports
-        #: brightness simply has no entry, rather than an implied 100 %.
-        self.device_levels: dict[str, float] = {}
         self.latest_results: dict[str, DeviceEstimate] = {}
         self.latest_reconciliation: ReconciliationV3 = ReconciliationV3()
         self.latest_quality: DataQualityReport | None = None
@@ -305,34 +259,10 @@ class EngineCore(
         self._integrity_error: str | None = None
 
         self.learning_active = bool(config.learning_enabled)
-        self._pending_backend_events: deque[Any] = deque(maxlen=512)
-        #: Count of declared-link events evicted before they could mature.
-        #: A silent drop here is invisible data loss: the sample never appears and
-        #: nothing in the status surface explains why.  Reported instead.
-        self.events_evicted_before_maturity = 0
-        #: How many events arrived for entities no device declares.  A count, not
-        #: a dict: retaining one entry per undeclared entity would grow without
-        #: bound (~500 distinct entities in a typical installation) and would let
-        #: the engine derive transitions for devices that do not exist.  The count
-        #: still surfaces a topology gap without pretending the entity is
-        #: attributable.
-        self.unlinked_events_ignored = 0
-        #: Events that *were* for a declared device but came from a CT power entity
-        #: rather than a runtime state entity.  They are persisted as observations
-        #: but must not become the device's state (see ``on_event``); the count
-        #: makes that distinction visible instead of silent.
-        self.power_events_not_state = 0
-        #: Declared-link state transitions awaiting the next inference window.
-        #: Bounded by the number of declared devices, not by HA's event rate.
-        self._pending_transitions: deque[dict[str, Any]] = deque(maxlen=4096)
-        self.topology_cache: _legacy.Topology | None = None
-        #: Why startup discovery produced no topology (``None`` = no problem).
+        #: Why startup endpoint discovery found nothing (``None`` = no problem).
         #: Surfaced by ``/health`` so a fresh install cannot look healthy while
         #: having nothing to infer, which is how the original defect hid.
         self.topology_bootstrap_error: str | None = None
-        #: One-shot guard so the "no topology" warning is emitted once, not every
-        #: inference interval.
-        self._topology_skip_logged = False
         #: Monotonic timestamp of the last discovery attempt, so retries are
         #: rate-limited to ``TOPOLOGY_RETRY_INTERVAL_S``.
         self._last_topology_attempt = 0.0
@@ -349,8 +279,7 @@ class EngineCore(
         self.persistence_errors = 0
         self.cycles = 0
 
-        # Three-loop runtime state (P6).  The default runtime is the three-loop
-        # one; the legacy 5 s loop remains available until Z2 deletes it.
+        # Three-loop runtime state (P6): the only runtime.
         self.init_three_loop_state()
 
 
@@ -516,10 +445,14 @@ async def _run_once(config: EngineConfig, *, seconds: float = 10.0) -> int:
         # window, so report connectivity as observed at the end, not at startup.
         connected = bool(core.hasource.connected or core.samples_ingested)
         report = core._evaluate_quality()
-        # Exercise the real inference backend once so the summary proves the
-        # adapter is wired (results, reconciliation, or a clear reason).
+        # Inference is event driven (three-loop runtime): report whether the
+        # event loop published a v3 snapshot during the observation window.
         try:
-            inference = await core.run_inference_once()
+            published = core._v3_snapshot()
+            inference = {
+                "snapshot_published": published is not None,
+                "device_estimates": len(published.device_estimates) if published else 0,
+            }
         except Exception as exc:  # noqa: BLE001 - summary must always print
             inference = {"error": f"{type(exc).__name__}: {exc}"}
         summary = {

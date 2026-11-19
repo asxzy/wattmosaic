@@ -8,15 +8,13 @@ by every reader, so it is cached (see
 Migration 17 rebuilds ``inference_results`` with nullable power and the new
 estimate columns; the v3 handoff contracts (:class:`JointInferenceResult`,
 :class:`InferenceSnapshot`) are written here through :meth:`put_estimates`,
-:meth:`put_snapshot` and friends.  The legacy ``insert_inference_results``
-write path is unchanged so every Wave-0 caller keeps working on the same table.
+:meth:`put_snapshot` and friends.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
@@ -26,10 +24,6 @@ from ...contracts import (
     JointInferenceResult,
     utcnow,
 )
-
-# ZI: the legacy inference_results write path is kept as a delegation shim for
-# callers that still pass the shared legacy model (owned by ZC).  The model is
-# reached through the legacy module namespace so this area binds no legacy name.
 from ..repositories import Repository, enum_value, iso
 
 #: Dedicated columns of the rebuilt ``inference_results``, in INSERT order.
@@ -139,44 +133,6 @@ def _estimate_row(estimate: DeviceEstimate, versions: Any, at: str) -> tuple[Any
 
 
 class InferenceRepository(Repository):
-    def insert_inference_results(self, results: Iterable[Any]) -> int:
-        payload = [
-            (
-                r.device_id, iso(r.timestamp), r.power_w, r.energy_kwh, r.source, r.confidence,
-                r.model_id, r.model_version, r.operating_stage, r.stage_status, r.sample_count,
-                r.quality_status, r.measurement_age_seconds, json.dumps(r.supporting_ct_channels),
-                json.dumps(r.explanation), json.dumps(r.provenance, default=str),
-                enum_value(r.confidence_tier),
-                enum_value(r.monitoring_level),
-                enum_value(r.power_behavior),
-                json.dumps(list(r.tier_reasons)),
-            )
-            for r in results
-        ]
-        if not payload:
-            return 0
-        with self._lock:
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
-                self._conn.executemany(
-                    """INSERT INTO inference_results(device_id, timestamp, power_w, energy_kwh, source,
-                    confidence, model_id, model_version, operating_stage, stage_status, sample_count,
-                    quality_status, measurement_age_seconds, supporting_ct_channels_json, explanation_json,
-                    provenance_json, confidence_tier, monitoring_level, power_behavior,
-                    tier_reasons_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    payload,
-                )
-                self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
-            # Invalidate the latest-results cache only after a successful commit,
-            # so a rolled-back batch cannot stampede readers into a needless
-            # re-scan.  The generation counter also guards a reader that opened
-            # its snapshot before this write committed (see the method below).
-            self.db.invalidate_latest_results()
-        return len(payload)
-
     def latest_inference_results(self) -> list[dict[str, Any]]:
         """The newest result per device, cached across reads until the next write.
 

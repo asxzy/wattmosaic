@@ -47,19 +47,20 @@ TIERS: tuple[str, ...] = ("L1", "L2", "L3", "L4")
 #: places.  Classified by the spec's criteria -- raw measurement / event
 #: evidence / aggregate / versioned -- rather than omitted:
 #:
-#: * ``ct_channels``, ``devices`` -- versioned topology state written by
-#:   ``save_topology`` beside ``topology_versions`` (L4).  The spec names only
-#:   the ``topology_versions`` snapshot.
 #: * ``device_state_samples`` -- per-device state rows, pruned on the raw
 #:   horizon like every other per-instant row (L1).
 #: * ``inference_results``, ``reconciliation_results``, ``data_quality_events``,
 #:   ``system_events`` -- per-cycle telemetry and log rows on the raw horizon,
-#:   not aggregates and not versioned state.  ``device_events`` is L2 (it is
-#:   event evidence); ``system_events`` is an operational log, so it is grouped
-#:   with the other non-aggregate telemetry rather than declared evidence.
+#:   not aggregates and not versioned state.  ``system_events`` is an
+#:   operational log, so it is grouped with the other non-aggregate telemetry
+#:   rather than declared evidence.
 #: * ``operating_stages`` -- a segment of a ``device_runs`` run, so L3.
-#: * ``learning_samples`` -- captured observations that feed model fitting,
-#:   versioned-model work, so L4.
+#:
+#: The contract-2 tables (``ct_channels``, ``devices``, ``topology_versions``,
+#: ``topology_relations``, ``device_models``, ``device_model_versions``,
+#: ``learning_samples``, ``residual_power``, ``device_events``,
+#: ``ha_entity_bindings``) are archived as ``*_legacy`` by migration 25, which
+#: classifies the archived names in its own ``TIERS``.
 #: * ``schema_metadata`` -- schema bookkeeping (already listed by the spec).
 #:
 #: The spec-listed ``evidence_records`` does not exist and is not created here.
@@ -83,7 +84,6 @@ TIER_TABLES: dict[str, tuple[str, ...]] = {
     ),
     # §2.2 -- immutable event evidence.
     "L2": (
-        "device_events",
         "isolation_verdicts",
         "inference_records",
     ),
@@ -96,21 +96,12 @@ TIER_TABLES: dict[str, tuple[str, ...]] = {
     ),
     # §2.4 -- versioned models and topology, plus the versioned capture store.
     "L4": (
-        "device_models",
-        "device_model_versions",
         "device_configurations",
-        "topology_versions",
         "circuits",
-        "topology_relations",
         "ct_measurement_factors",
-        "ha_entity_bindings",
-        "residual_power",
         "schema_metadata",
         "device_flags",
         "engine_state",
-        "ct_channels",
-        "devices",
-        "learning_samples",
     ),
 }
 
@@ -258,24 +249,13 @@ def prunable_tables() -> tuple[tuple[str, str, str], ...]:
     ``Database.prune`` reads one declaration instead of a second hand-written
     list that can drift from the registry.
 
-    This is the shipped behaviour, entry by entry, not the tier model's
-    inference.  The one recorded disagreement:
-
-    * ``device_events`` is classified **L2** (event evidence, spec §2.2), which
-      the tier model would make long-term.  The shipped retention pass has
-      **always** age-pruned it on the raw horizon, and the spec itself names it
-      as the ~1.5 GB/day growth driver (§5.2, `main.py:886-890`).  Preserving
-      that behaviour is required by the task's "prune behaviour for existing
-      callers is unchanged"; re-tiering it to match the classification would
-      silently stop pruning the documented growth driver.  The disagreement is
-      recorded here rather than resolved silently -- the spec's L2 classification
-      of ``device_events`` needs a follow-up decision.
+    This is the shipped behaviour, entry by entry.  The legacy
+    ``device_events`` log used to be age-pruned here; migration 25 archives it
+    read-only as ``device_events_legacy``, so it is no longer pruned (a delete
+    would abort on its read-only trigger).
     """
     return (
         ("ct_samples", "received_at", RAW_HORIZON),
-        # The conflict entry.  See the docstring: L2 by classification, raw
-        # horizon by shipped behaviour.
-        ("device_events", "occurred_at", RAW_HORIZON),
         ("device_state_samples", "received_at", RAW_HORIZON),
         ("inference_results", "timestamp", RAW_HORIZON),
         ("reconciliation_results", "timestamp", RAW_HORIZON),
@@ -296,12 +276,10 @@ PRUNABLE_TABLES: dict[str, tuple[str, str]] = {
 # D5 -- re-tiering and DEC-30 retention declarations
 # --------------------------------------------------------------------------- #
 
-#: The legacy raw event log that ``ha_events_v3``/``event_evidence`` supersede.
-#: P6 stops writing it in favour of those tables (step 2 of the task) and Z1
-#: renames it to ``device_events_legacy``; until then it stays writable and keeps
-#: its shipped raw-horizon prune.  Declared here so the re-tiering is visible in
-#: one place rather than inferred from Z1's future rename.
-LEGACY_EVENT_TABLES: tuple[str, ...] = ("device_events",)
+#: The archived legacy raw event log that ``ha_events_v3``/``event_evidence``
+#: supersede.  Migration 25 renames it to ``device_events_legacy`` and makes it
+#: read-only; nothing writes or prunes it.
+LEGACY_EVENT_TABLES: tuple[str, ...] = ("device_events_legacy",)
 
 #: The canonical, immutable event-evidence table that replaces the legacy log.
 CANONICAL_EVIDENCE_TABLE = "event_evidence"
@@ -341,7 +319,7 @@ _GROWTH_TIERS = frozenset({"L1", "L2", "L3"})
 #: means the table has no meaningful single age key.
 _TABLE_TIME_COLUMNS: dict[str, str | None] = {
     "ct_samples": "received_at",
-    "device_events": "occurred_at",
+    "device_events_legacy": "occurred_at",
     "device_state_samples": "received_at",
     "inference_results": "timestamp",
     "reconciliation_results": "timestamp",

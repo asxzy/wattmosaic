@@ -62,7 +62,6 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..device_links import CONFIG_LOAD_ENTITIES_KEY
 from ..entity_evidence import classify_entity, domain_of
 from .correlation import CANDIDATE_DOMAINS
 from .normalize import is_own_entity
@@ -82,17 +81,6 @@ REASON_WATTMOSAIC_ENTITY = "wattmosaic_entity"
 #: ``domain`` -- not a name, area or manufacturer heuristic.  ``None`` (a primary
 #: control or state) is normal and must stay a candidate.
 NON_LOAD_ENTITY_CATEGORIES = frozenset({"config", "diagnostic"})
-
-#: The three topology metadata keys that declare a device's runtime signals.
-#: Kept identical to ``main._linkable_state_entities`` on purpose: rule 2 says a
-#: declared entity is not a candidate, and re-using the same key set is the only
-#: way "declared" means the same thing in both places.
-DECLARED_STATE_ENTITY_KEYS = (
-    "state_entity_ids",
-    "load_entity_ids",
-    CONFIG_LOAD_ENTITIES_KEY,
-)
-
 
 @dataclass(slots=True, frozen=True)
 class CandidateEntity:
@@ -137,27 +125,6 @@ def _registry_rows(registries: Mapping[str, Any] | None, key: str) -> dict[str, 
     return rows
 
 
-def declared_state_entities(topology: Any | None) -> set[str]:
-    """Entities the topology already declares as runtime signals for a device.
-
-    An entity a person (or the mapping wizard) already linked is not a question
-    to be answered again.  The key set matches ``main._linkable_state_entities``
-    exactly; this helper lives here so the candidate module can be tested without
-    the engine process.
-    """
-    out: set[str] = set()
-    if topology is None:
-        return out
-    for device in topology.devices:
-        for key in DECLARED_STATE_ENTITY_KEYS:
-            raw = (device.metadata or {}).get(key)
-            if isinstance(raw, str):
-                out.add(raw)
-            elif isinstance(raw, Iterable):
-                out.update(str(value) for value in raw if value)
-    return {entity_id for entity_id in out if entity_id}
-
-
 def _state_rows(states: Iterable[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
     """Index the state snapshot by entity id; the last row wins on duplicates."""
     out: dict[str, Mapping[str, Any]] = {}
@@ -197,7 +164,7 @@ def _device_class(state: Mapping[str, Any]) -> str | None:
 def candidate_state_entities(
     states: Iterable[Mapping[str, Any]],
     registries: Mapping[str, Any] | None,
-    topology: Any | None = None,
+    declared: Iterable[str] = (),
 ) -> tuple[list[CandidateEntity], dict[str, str]]:
     """Entities that COULD be a fixture on a shared circuit.
 
@@ -208,7 +175,8 @@ def candidate_state_entities(
     Inclusion needs all five rules (contract §2), checked in this order so the
     most specific, most durable reason wins:
 
-    1. the entity is not already declared by the topology (``already_declared_state_entity``);
+    1. the entity is not already declared -- ``declared`` holds the entities a person
+       already linked to a device (``already_declared_state_entity``);
     2. the entity is not WattMosaic's own output (``wattmosaic_entity``);
     3. Home Assistant does not declare it as a ``config``/``diagnostic`` entity
        (``not_a_load_entity_category``);
@@ -245,7 +213,7 @@ def candidate_state_entities(
     states_by_id = _state_rows(states)
     entities = _registry_rows(registries, "entities")
     devices = _registry_rows(registries, "devices")
-    declared = declared_state_entities(topology)
+    declared = {str(entity) for entity in declared if entity}
 
     candidates: list[CandidateEntity] = []
     refused: dict[str, str] = {}
@@ -316,7 +284,6 @@ def candidate_state_entities(
 
 __all__ = [
     "CandidateEntity",
-    "DECLARED_STATE_ENTITY_KEYS",
     "NON_LOAD_ENTITY_CATEGORIES",
     "REASON_ALREADY_DECLARED",
     "REASON_MODE_ENTITY",
@@ -324,5 +291,4 @@ __all__ = [
     "REASON_NOT_A_LOAD_ENTITY_CATEGORY",
     "REASON_WATTMOSAIC_ENTITY",
     "candidate_state_entities",
-    "declared_state_entities",
 ]

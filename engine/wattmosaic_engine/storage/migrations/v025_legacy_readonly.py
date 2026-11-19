@@ -1,29 +1,17 @@
-"""Migration 25 (Z1): mark the legacy tables read-only.
+"""Migration 25 (Z1/ZC): archive the legacy tables read-only.
 
 DEC-02 keeps legacy tables for one release rather than dropping them.  The
 released S13-S19 migrations copied their contents into the canonical v3 tables
-(ids preserved), so no v3 code path needs the originals any more; they are kept
-only as a rollback record.  This module provides the ``*_legacy`` rename plus
-``BEFORE INSERT/UPDATE/DELETE ... RAISE(ABORT)`` triggers that make the archived
-rows immutable.
+(ids preserved), so no runtime code path reads or writes the originals any more;
+they are kept only as a rollback record.
 
-Why ``MIGRATION.apply`` is deliberately empty
----------------------------------------------
-The migration-matrix gate (``tests/unit/test_migration_matrix.py``) upgrades a
-schema-11 fixture through *every* migration to ``LATEST_VERSION`` and asserts
-that no table or column present before the upgrade disappears afterwards.  An
-unconditional in-place ``ALTER TABLE x RENAME TO x_legacy`` would remove the
-original table name and break that invariant (and any still-running read path)
-on a database the moment it is opened.  The archive step is therefore an
-explicit, atomic operation -- :func:`archive_legacy_tables` -- that a deployment
-invokes on the backup copy during the cutover (V2's migration rehearsal), not a
-side effect of opening the database.  The migration still bumps ``user_version``
-to 25 so the cutover is recorded, and this module is discovered and ordered like
-every other migration.
-
-The rename itself uses ``ALTER TABLE ... RENAME TO ...`` and the triggers use
-``RAISE(ABORT)``; nothing is ever dropped.  Applying the helper twice is a
-no-op: a table that is already renamed is skipped.
+``MIGRATION.apply`` renames each still-present legacy table to ``<name>_legacy``
+(``ALTER TABLE ... RENAME TO ...``) and installs ``BEFORE INSERT/UPDATE/DELETE``
+triggers that ``RAISE(ABORT)``, so the archived rows are immutable.  Nothing is
+ever dropped.  Migrations 1-24 (and their backfills, which read these tables
+under their original names) run *before* this one, so an upgrade from any
+released schema still sees the tables it expects.  Applying the archive twice
+is a no-op: a table that is already renamed is skipped.
 """
 
 from __future__ import annotations
@@ -40,10 +28,25 @@ LEGACY_TABLES: tuple[str, ...] = (
     "topology_relations",
     "device_model_versions",
     "device_models",
+    "learning_samples",
     "residual_power",
     "device_events",
     "ha_entity_bindings",
 )
+
+#: The storage tier each archived table keeps (it is the same data, renamed).
+LEGACY_TABLE_TIERS: dict[str, str] = {
+    "ct_channels": "L4",
+    "devices": "L4",
+    "topology_versions": "L4",
+    "topology_relations": "L4",
+    "device_model_versions": "L4",
+    "device_models": "L4",
+    "learning_samples": "L4",
+    "residual_power": "L4",
+    "device_events": "L2",
+    "ha_entity_bindings": "L4",
+}
 
 #: Suffix applied to each archived table.
 LEGACY_SUFFIX = "_legacy"
@@ -86,20 +89,26 @@ def archive_legacy_tables(conn: sqlite3.Connection) -> tuple[str, ...]:
     return tuple(archived)
 
 
+def _apply(conn: sqlite3.Connection) -> None:
+    archive_legacy_tables(conn)
+
+
 MIGRATION = Migration(
     version=25,
     name="v025_legacy_readonly",
     statements=(),
-    apply=None,
+    apply=_apply,
 )
 
-#: No new tables: this migration only archives existing ones (opt-in), so it
-#: declares no tiers of its own.
-TIERS: dict[str, str] = {}
+#: The archived tables, classified in the tier their data always had.
+TIERS: dict[str, str] = {
+    archived_name(table): tier for table, tier in LEGACY_TABLE_TIERS.items()
+}
 
 
 __all__ = [
     "LEGACY_SUFFIX",
+    "LEGACY_TABLE_TIERS",
     "LEGACY_TABLES",
     "MIGRATION",
     "TIERS",

@@ -47,11 +47,10 @@ from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any
 
-from wattmosaic_engine.contracts import Phase
-
 from .expectations import ExpectedInterpretation
 from .factors import FactorEpoch, FactorOwner, FactorTimeline, RefossFactorChannel
 from .frames import assert_no_ground_truth_keys
+from .topology import Phase
 
 # --------------------------------------------------------------------------- #
 # Canonical numbers (the brief's table, in one place)

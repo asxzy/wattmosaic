@@ -43,13 +43,7 @@ from datetime import UTC, datetime, timedelta
 import numpy as np
 import pytest
 from scipy.optimize import lsq_linear
-from wattmosaic_engine.contracts import (
-    CTChannel,
-    CTType,
-    IdentifiabilityStatus,
-    Phase,
-    TopologyStatus,
-)
+from wattmosaic_engine.contracts import IdentifiabilityStatus
 from wattmosaic_engine.inference import identifiability as identifiability_module
 from wattmosaic_engine.inference.identifiability import (
     IdentifiabilityAnalyzer,
@@ -352,20 +346,6 @@ def run_new_pipeline(
         ),
         residual_by_reader=residual,
         unknown_total_w=sum(value for value in residual.values() if value is not None),
-    )
-
-
-# --------------------------------------------------------------------------- #
-# Legacy path (unchanged engine, so the test proves the old defect).
-# --------------------------------------------------------------------------- #
-def _channel(cid: str, ct_type: CTType = CTType.BRANCH, *, parent: str | None = None):
-    return CTChannel(
-        ct_id=cid,
-        entity_id=f"sensor.{cid}",
-        ct_type=ct_type,
-        phase=Phase.L1,
-        parent_ct_id=parent,
-        topology_status=TopologyStatus.CONFIRMED,
     )
 
 

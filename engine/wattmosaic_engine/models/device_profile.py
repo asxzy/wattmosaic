@@ -1,9 +1,8 @@
 """The device power profile: standby, idle, active and transient.
 
-A device's power is not one number.  ``ExpectedPower`` (``contracts.py``) is
-the contract's *declared envelope*; this module is the engine-side object that
-turns it into one explicit profile and answers the question a published value
-needs answered: **which level is this?**
+A device's power is not one number.  This module is the engine-side object that
+turns a device's declared levels into one explicit profile and answers the
+question a published value needs answered: **which level is this?**
 
 Design rules (spec ``06-device-and-load-model-spec.md`` §5):
 
@@ -27,15 +26,14 @@ from typing import Any
 
 from ..contracts import (
     AdjustableSpec,
-    ExpectedPower,
     FixedSpec,
     LearningObservation,
     LevelStat,
     LoadShape,
-    ModelType,
+    ModelClass,
     PowerLevelV3,
 )
-from .base import _linear_interp, enforce_monotonic, finite
+from .numeric import _linear_interp, enforce_monotonic, finite
 
 #: The four levels in their natural order: lowest (off but connected) to
 #: highest (doing work), with the transient last because it is not a level.
@@ -59,8 +57,8 @@ class AdjustableResponse:
     through this model.
 
     The class reuses the very same machinery the dimmable model is built on --
-    :func:`~wattmosaic_engine.models.base.enforce_monotonic` (PAVA) and
-    :func:`~wattmosaic_engine.models.base._linear_interp` -- so a non-linear
+    :func:`~wattmosaic_engine.models.numeric.enforce_monotonic` (PAVA) and
+    :func:`~wattmosaic_engine.models.numeric._linear_interp` -- so a non-linear
     response is represented without duplicating that logic and without any
     dimmable-light-specific attribute names.  The control variable is a plain
     declared string, matched against a context attribute of the same name (or
@@ -158,9 +156,9 @@ class AdjustableResponse:
         )
 
     @property
-    def model_type(self) -> ModelType:
-        """The model implementation axis this response belongs to."""
-        return ModelType.DIMMABLE
+    def model_class(self) -> ModelClass:
+        """The v3 model class this response belongs to."""
+        return ModelClass.ADJUSTABLE
 
     def as_parameters(self) -> AdjustableSpec:
         """The declared curve as a v3 :class:`AdjustableSpec`."""
@@ -192,7 +190,7 @@ class AdjustableResponse:
     def describe(self) -> dict[str, Any]:
         return {
             "name": self.name,
-            "model_type": self.model_type.value,
+            "model_class": self.model_class.value,
             "load_shape": LoadShape.ADJUSTABLE.value,
             "control_variable": self.control_variable,
             "monotonic_declared": self.monotonic,
@@ -206,7 +204,7 @@ class AdjustableResponse:
 class DevicePowerProfile:
     """Standby, idle, active and transient power for one device.
 
-    Sourced from :class:`~wattmosaic_engine.contracts.ExpectedPower`.  Every
+    Sourced from a declaration (:meth:`from_mapping`).  Every
     field is ``float | None``; ``None`` means the declaration did not state it,
     which is distinct from ``0.0`` (a stated zero draw).
 
@@ -240,36 +238,12 @@ class DevicePowerProfile:
 
     # -- constructors ----------------------------------------------------- #
     @classmethod
-    def from_expected(cls, device_id: str, expected: ExpectedPower) -> DevicePowerProfile:
-        """Build a profile from a declared ``ExpectedPower`` envelope.
-
-        The source is the contract's declaration, never an inference: this
-        constructor reads only the numbers the user (or an import) stated.
-        """
-        return cls(
-            device_id=device_id,
-            standby_w=expected.standby_w,
-            idle_w=expected.idle_w,
-            active_w=expected.on_w,
-            transient_w=cls._transient(expected),
-            tolerance_w=expected.tolerance(),
-        )
-
-    @staticmethod
-    def _transient(expected: ExpectedPower) -> float | None:
-        """The transient bound: the start-up inrush, else the shutdown decay."""
-        if expected.startup_w is not None:
-            return expected.startup_w
-        return expected.shutdown_w
-
-    @classmethod
     def for_adjustable(
         cls,
         device_id: str,
         load_shape: LoadShape,
         points: Sequence[tuple[float, float]],
         *,
-        expected: ExpectedPower | None = None,
         control_variable: str = "level",
         monotonic: bool = True,
     ) -> DevicePowerProfile:
@@ -281,11 +255,7 @@ class DevicePowerProfile:
         neutral profile with no response, even if its name suggests otherwise.
         Nothing here reads a device or entity name.
         """
-        profile = (
-            cls.from_expected(device_id, expected)
-            if expected is not None
-            else cls(device_id=device_id)
-        )
+        profile = cls(device_id=device_id)
         if load_shape != LoadShape.ADJUSTABLE:
             return profile
         response = AdjustableResponse.from_declared(

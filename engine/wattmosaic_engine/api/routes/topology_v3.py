@@ -1,6 +1,7 @@
 """Event-sourced topology v3 routes (T4).
 
-Per-edge declaration, pin/reject, version history and endpoint config edits.
+Per-edge declaration, pin/reject, version history, endpoint config edits and the
+panel hierarchy (``/topology/tree``, built from T1's primary display tree).
 These are the only topology-write routes since the 3.0 cutover; the legacy
 declared-topology handlers were removed.  A backend that does not implement
 them answers 503 through :class:`FacadeUnavailable`, matching the other
@@ -9,6 +10,7 @@ optional areas.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from aiohttp import web
@@ -84,9 +86,28 @@ async def topology_endpoint_config(request: web.Request) -> web.Response:
     return _ok(await maybe_await(method(request.match_info["endpoint_id"], changes)))
 
 
+#: Truthy spellings accepted by ``?include_nesting=``.  Anything else (including
+#: an empty value) is false: nesting is opt-in because it is the expensive path.
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+async def topology_tree(request: web.Request) -> web.Response:
+    """GET /topology/tree — panel hierarchy from the active v3 topology.
+
+    The blocking read runs in a worker thread; nesting suggestions are opt-in.
+    """
+    raw = request.query.get("include_nesting")
+    include_nesting = raw is not None and raw.strip().lower() in _TRUTHY
+    method = _require(_facade(request), "panel_tree")
+    return _ok(
+        await maybe_await(await asyncio.to_thread(method, include_nesting=include_nesting))
+    )
+
+
 def register(router: web.UrlDispatcher, base: str, deps: object) -> None:
     # The v3 topology-write routes, always mounted unconditionally.
     router.add_get(f"{base}/topology/v3", topology_v3_get)
+    router.add_get(f"{base}/topology/tree", topology_tree)
     router.add_post(f"{base}/topology/edges", topology_edges_post)
     router.add_post(f"{base}/topology/edges/{{edge_id}}/pin", topology_edge_pin)
     router.add_post(f"{base}/topology/edges/{{edge_id}}/reject", topology_edge_reject)
@@ -101,6 +122,7 @@ __all__ = [
     "topology_edge_reject",
     "topology_edges_post",
     "topology_endpoint_config",
+    "topology_tree",
     "topology_v3_get",
     "topology_version",
     "topology_versions",

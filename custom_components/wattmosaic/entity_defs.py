@@ -38,9 +38,9 @@ DEVICE_SENSORS: dict[str, dict[str, Any]] = {
         "state_class": None,
         "unit": None,
         "icon": "mdi:source-branch",
-        # Mirrors ``contracts.Source`` exactly.  ``configured_prior`` is a real
-        # engine source (a user-stated watt value proved by a declared load
-        # signal), so omitting it declared a state domain the engine can leave.
+        # A frozen option set (recorder history depends on it).  Every value
+        # the integration can derive for a device is listed, so the sensor
+        # never reports ``unknown`` for a legitimate state.
         "options": [
             "direct_measured",
             "inferred",

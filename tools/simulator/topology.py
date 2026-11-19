@@ -30,7 +30,29 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
-from wattmosaic_engine.contracts import CTType, Phase, Polarity
+
+class CTType(str, Enum):
+    """Simulated CT role: a panel feed, a circuit row, or unknown."""
+
+    MAIN = "main"
+    BRANCH = "branch"
+    UNKNOWN = "unknown"
+
+
+class Phase(str, Enum):
+    """Simulated leg (the v3 endpoint-revision ``phase`` literals)."""
+
+    L1 = "l1"
+    L2 = "l2"
+    BOTH = "both"  # double-pole 240 V load or a CT spanning both legs
+    UNKNOWN = "unknown"
+
+
+class Polarity(str, Enum):
+    """Simulated CT orientation (the v3 endpoint-revision ``polarity`` literals)."""
+
+    NORMAL = "normal"
+    INVERTED = "inverted"
 
 
 class SimDeviceType(str, Enum):
@@ -181,83 +203,6 @@ class HouseholdTopology:
     # ------------------------------------------------------------------ #
     # Contract bridge
     # ------------------------------------------------------------------ #
-    def to_contract_topology(self, *, confirmed: bool = True):
-        """Export this simulated topology as the authoritative contract.
-
-        The result is a ``wattmosaic_engine.contracts.Topology`` so tests and
-        the real engine consume exactly the same schema as production.
-
-        Modelling decisions required by the contract's validation rules:
-
-        * A single-device circuit CT is a ``branch`` row that carries the owning
-          ``device_id`` and is listed in the device's ``branch_ct_ids``.  Every
-          CT is a circuit; there is no single-device role in the contract.
-        * A sub-panel feed is a ``branch`` CT whose parent is the main-panel
-          line.  Nested ``main`` CTs are illegal because mains are summed.
-        * 240 V loads are ``double_pole=True`` with ``phase=both``.
-        * Unmetered ("unknown") loads have no CT and are **excluded** from the
-          device list: they can only ever be residual power, so giving them a
-          device row would invite fabricated attribution.
-        """
-        from wattmosaic_engine.contracts import (
-            CTChannel,
-            DeviceTopology,
-            Topology,
-            TopologyStatus,
-        )
-
-        status = TopologyStatus.CONFIRMED if confirmed else TopologyStatus.CANDIDATE
-        devices = [d for d in self.devices if d.metadata.get("attributable", True)]
-        owner_of: dict[str, str] = {}
-        for dev in devices:
-            if dev.dedicated_ct:
-                for ct_id in dev.circuits:
-                    owner_of[ct_id] = dev.device_id
-
-        channels = [
-            CTChannel(
-                ct_id=c.ct_id,
-                entity_id=c.entity_id,
-                name=c.name,
-                ct_type=c.ct_type,
-                phase=c.phase,
-                parent_ct_id=c.parent_ct_id,
-                polarity=c.polarity,
-                device_id=owner_of.get(c.ct_id),
-                paired_ct_id=c.paired_ct_id,
-                resolution_w=c.resolution_w,
-                expected_interval_s=c.expected_interval_s,
-                reliability=c.reliability,
-                topology_status=status,
-                metadata={"panel": c.panel, "simulated": True},
-            )
-            for c in self.channels
-        ]
-        device_rows = [
-            DeviceTopology(
-                device_id=d.device_id,
-                name=d.name,
-                branch_ct_ids=sorted(d.circuits),
-                phase=d.phase,
-                double_pole=d.double_pole,
-                topology_status=status,
-                metadata={
-                    **d.metadata,
-                    "simulated": True,
-                    "circuits": dict(d.circuits),
-                    "device_type": d.sim_type.value,
-                    "nominal_power_w": d.nominal_power_w,
-                },
-            )
-            for d in devices
-        ]
-        return Topology(
-            version=1,
-            status=status,
-            channels=channels,
-            devices=device_rows,
-            notes=list(self.notes),
-        )
 
 
 def _ch(

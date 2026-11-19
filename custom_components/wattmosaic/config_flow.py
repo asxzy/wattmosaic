@@ -164,7 +164,16 @@ async def _probe_engine(
         topology = await client.topology()
     except Exception:  # noqa: BLE001 - never block connection on this
         topology = None
-    return (topology if isinstance(topology, dict) else {}), {}
+    # The confirmation screen reports how many measurement endpoints (CT
+    # channels and metering plugs) the engine already knows.
+    endpoints: Any = None
+    try:
+        endpoints = await client._request("GET", "/endpoints", expect=(dict, list))
+    except Exception:  # noqa: BLE001 - never block connection on this
+        endpoints = None
+    result = dict(topology) if isinstance(topology, dict) else {}
+    result["endpoint_count"] = len(normalise_endpoints(endpoints))
+    return result, {}
 
 
 # --------------------------------------------------------------------------- #
@@ -404,7 +413,7 @@ class WattMosaicConfigFlow(_EndpointWizard, ConfigFlow, domain=DOMAIN):
         # answered, not merely that an app announced itself.
         topology, probe_errors = await _probe_engine(self.hass, base_url, None)
         self._probe_errors = probe_errors
-        self._probe_channels = len((topology or {}).get("channels") or [])
+        self._probe_channels = int((topology or {}).get("endpoint_count") or 0)
         return await self.async_step_hassio_confirm()
 
     async def async_step_hassio_confirm(
@@ -418,7 +427,7 @@ class WattMosaicConfigFlow(_EndpointWizard, ConfigFlow, domain=DOMAIN):
             # Let the user retry the probe without leaving the discovery flow.
             topology, errors = await _probe_engine(self.hass, self._base_url, None)
             self._probe_errors = errors
-            self._probe_channels = len((topology or {}).get("channels") or [])
+            self._probe_channels = int((topology or {}).get("endpoint_count") or 0)
             if not errors:
                 return await self.async_step_hassio_confirm()
 

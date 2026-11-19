@@ -1,38 +1,24 @@
-"""Static gate: the cut-over removed the legacy engine paths (Z2 / Z2b).
+"""Static gate: contract 3.0.0 has no legacy engine paths or legacy contracts.
 
-The three-loop runtime is the only runtime.  Nothing under ``engine/`` may
-still define or import the symbols that implemented the removed path: the
-5 s full solve (:class:`DisaggregationEngine`), the greedy step credit, the
-per-member model split / 0 W placeholder, and the old pointer-based topology
-and model-interpreter helpers.
+The three-loop runtime is the only runtime and the v3 contracts are the only
+contracts.  This gate reads source with ``ast`` rather than importing modules, so
+a dead-but-importable module cannot keep the old behaviour alive by accident,
+and it closes the evasions earlier cut-overs used:
 
-This is a *structural* gate: it reads source with ``ast`` rather than importing
-modules, so a dead-but-importable module cannot keep the old behaviour alive
-by accident.  Only identifier bindings (class/function definitions, imports and
-module/class-level assignments) count: string literals such as a provenance
-key in a historical migration are data, not a live code path.  Two locations
-are deliberately excluded because they are owned by later tasks or are
-historical data rewrites rather than production code paths:
+* binding a retired contract model under any name (an import, an alias, a
+  definition, an annotation target);
+* reaching it as an attribute of the ``contracts`` package or of a
+  ``contracts.legacy`` module (``contracts.legacy.Topology``), through
+  ``getattr(..., "Topology")``, or by naming the ``contracts.legacy`` module in
+  a string;
+* keeping a retired module alive at a new import site.
 
-* ``contracts/legacy.py`` and the contract facades: the legacy *contracts*
-  (including ``branch_ct_ids`` / ``parent_ct_id``) are removed by Z1, not Z2;
-* ``storage/migrations/``: migrations read legacy column/field names to
-  rewrite historical rows and are intentionally frozen.
-
-Z2b additionally forbids the *modules* that implemented the retained legacy
-helpers (``electrical/models.py``, ``electrical/panel_tree.py``,
-``electrical/nesting.py`` and ``disaggregation/configuration.py``).  A module
-is allowed to survive only when its *sole* production importers are the
-legacy contract facade (``contracts/legacy.py``) or a frozen storage migration
-(``storage/migrations/``) — those are rewritten by Z1, not by this cutover.
-The allowlist is explicit below so a new importer cannot quietly keep a module
-alive.
-
-Z1 extends the gate with contract-3.0.0 symbols that are genuinely gone from
-the production tree (``PowerState`` and its ``power_state_for`` derivation) and
-pins the cut-over version across engine and integration.  The remaining legacy
-contract *models* stay reachable through the facade until the unowned tests that
-import them are ported by their owners; see the task's open issues.
+Scope is every Python file under ``engine/`` and ``custom_components/``.  The
+only exclusion is ``engine/wattmosaic_engine/storage/migrations/``: migrations
+1-24 read the legacy *tables and columns* by name as SQL strings while upgrading
+historical databases (they run before migration 25 archives those tables), so
+those strings are data, not live code paths.  Even there, no migration may
+import or reference a legacy contract *model*.
 """
 
 from __future__ import annotations
@@ -42,9 +28,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 ENGINE = ROOT / "engine" / "wattmosaic_engine"
+INTEGRATION = ROOT / "custom_components" / "wattmosaic"
 
-#: Symbols that must not be reachable as live definitions/imports under engine/.
-FORBIDDEN = frozenset(
+#: Removed engine symbols (Z2): the 5 s full solve and its helpers.
+REMOVED_SYMBOLS = frozenset(
     {
         "DisaggregationEngine",
         "power_w_is_placeholder",
@@ -56,39 +43,173 @@ FORBIDDEN = frozenset(
         "expected_power_w",
         "infer_model_type",
         "inference_interval_s",
-        # Z2b: renamed dodges from Z2 must not survive under another spelling.
         "_power_for_params",
         "_infer_model_type",
         "parent_endpoint_id",
-        # Z1: contract 3.0.0 removes the legacy provenance/power-state axis
-        # entirely (architecture.md §5).  The v3 surface uses EstimateStatus,
-        # IdentifiabilityStatus and PowerLevelV3 instead.
+        "run_inference_once",
+        "discover_candidate_topology",
+        "derive_mapping_matrix",
+        "build_mapping_matrix",
+        "row_to_inference_result",
+        "row_to_reconciliation",
+    }
+)
+
+#: Every contract-2 model, enum and helper removed at contract 3.0.0
+#: (architecture.md §5).  None may be bound or referenced anywhere in scope.
+LEGACY_CONTRACT_NAMES = frozenset(
+    {
+        "CTChannel",
+        "CTType",
+        "Circuit",
+        "CircuitClass",
+        "ConfidenceDimension",
+        "ConfidenceTier",
+        "ConfidenceVector",
+        "ConfigurationChangeEvent",
+        "ControllerConfiguration",
+        "ControllerStateMapping",
+        "ControllerStateRole",
+        "DeviceConfiguration",
+        "DeviceConfigurationSet",
+        "DeviceEvent",
+        "DeviceModelParameters",
+        "DeviceModelVersion",
+        "DeviceReaderMappingCell",
+        "DeviceState",
+        "DeviceTopology",
+        "DeviceType",
+        "EdgeLifecycle",
+        "EventEvidenceRecord",
+        "EventIsolation",
+        "ExpectedPower",
+        "HaConnectivity",
+        "HaEntityBinding",
+        "InferenceRecord",
+        "InferenceResult",
+        "IsolationStatus",
+        "LearningSample",
+        "LightConfiguration",
+        "LightType",
+        "MappingCellStatus",
+        "MappingObservability",
+        "Measurement",
+        "ModelStatus",
+        "ModelType",
+        "MonitoringLevel",
+        "Phase",
+        "Polarity",
+        "PowerBehavior",
+        "PowerLevel",
         "PowerState",
+        "Reconciliation",
+        "RelationKind",
+        "ResidualBaselineChange",
+        "ResidualDecompositionRecord",
+        "ResidualKind",
+        "ResidualPower",
+        "SampleRejection",
+        "SnapshotResponse",
+        "Source",
+        "StorageHealthReport",
+        "TIER_RANK",
+        "Topology",
+        "TopologyEdge",
+        "TopologyRelation",
+        "TopologyStatus",
+        "TopologyVersion",
+        "UnknownLoadLifecycle",
+        "UnknownLoadProfile",
+        "UnknownResidualEvent",
+        "derived_residual_kind",
         "power_state_for",
     }
 )
 
-#: Historical/data-rewrite sources where field *names* are data, not code.
-EXCLUDED = (
+#: Retired modules: none may exist (relative to ``engine/wattmosaic_engine``).
+DELETED_MODULES = (
     "contracts/legacy.py",
-    "storage/migrations/",
+    "electrical/_declared_shapes.py",
+    "electrical/models.py",
+    "electrical/panel_tree.py",
+    "electrical/nesting.py",
+    "electrical/hierarchy.py",
+    "electrical/topology.py",
+    "electrical/main_power.py",
+    "electrical/matrix.py",
+    "electrical/direct.py",
+    "disaggregation/configuration.py",
+    "disaggregation/mapping.py",
+    "disaggregation/audit.py",
+    "disaggregation/isolation.py",
+    "disaggregation/association.py",
+    "disaggregation/circuits.py",
+    "disaggregation/reconcile.py",
+    "disaggregation/_shared.py",
+    "disaggregation/tiers.py",
+    "device_configuration.py",
+    "device_links.py",
+    "models/base.py",
+    "models/serde.py",
+    "models/view.py",
+    "models/residual_power.py",
+    "learning/sample_collector.py",
+    "core/rows.py",
+    "backend/inference.py",
+    "backend/audit.py",
+    "backend/reanalysis.py",
+    "backend/batch.py",
+    "storage/repositories/topology.py",
+    "storage/repositories/devices.py",
+    "storage/repositories/associations.py",
+    "api/routes/topology.py",
 )
 
+#: Legacy storage tables archived read-only by migration 25.
+LEGACY_TABLES = (
+    "ct_channels",
+    "devices",
+    "topology_versions",
+    "topology_relations",
+    "device_model_versions",
+    "device_models",
+    "learning_samples",
+    "residual_power",
+    "device_events",
+    "ha_entity_bindings",
+)
 
-def _excluded(path: Path) -> bool:
-    rel = path.relative_to(ENGINE).as_posix()
-    return any(rel == e or rel.startswith(e) for e in EXCLUDED)
+MIGRATIONS = "storage/migrations/"
+
+
+def _files() -> list[Path]:
+    out: list[Path] = []
+    for root in (ENGINE, INTEGRATION):
+        out.extend(p for p in sorted(root.rglob("*.py")) if "__pycache__" not in p.parts)
+    return out
+
+
+def _rel(path: Path) -> str:
+    return path.relative_to(ROOT).as_posix()
+
+
+def _is_migration(path: Path) -> bool:
+    return path.is_relative_to(ENGINE) and path.relative_to(ENGINE).as_posix().startswith(
+        MIGRATIONS
+    )
 
 
 def _bound_names(tree: ast.Module) -> set[str]:
-    """Names bound at module or class scope (definitions, imports, fields)."""
+    """Names bound anywhere: definitions, imports (and aliases), assignments."""
     found: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             found.add(node.name)
         elif isinstance(node, ast.ImportFrom):
             for alias in node.names:
-                found.add(alias.asname or alias.name)
+                found.add(alias.name)
+                if alias.asname:
+                    found.add(alias.asname)
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 found.add(alias.asname or alias.name.split(".")[0])
@@ -101,123 +222,151 @@ def _bound_names(tree: ast.Module) -> set[str]:
     return found
 
 
-def _offenders() -> list[str]:
-    out: list[str] = []
-    for path in sorted(ENGINE.rglob("*.py")):
-        if "__pycache__" in path.parts or _excluded(path):
-            continue
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except (SyntaxError, UnicodeDecodeError):
-            continue
-        hits = _bound_names(tree) & FORBIDDEN
-        for name in sorted(hits):
-            out.append(f"{path.relative_to(ROOT).as_posix()}: {name}")
-    return out
+def _dotted(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _dotted(node.value)
+        return None if base is None else f"{base}.{node.attr}"
+    return None
 
 
-def test_no_legacy_symbols_are_reachable() -> None:
-    """No production module may define or import a removed legacy symbol."""
-    offenders = _offenders()
-    assert not offenders, "legacy engine paths are still reachable:\n" + "\n".join(offenders)
+def _legacy_references(tree: ast.Module, *, in_contracts: bool = True) -> list[str]:
+    """Every way a module can reach the legacy contract surface.
 
-
-#: Legacy helper modules Z2b retires.  Each value is the *explicit* allowlist
-#: of importers permitted to keep a module alive: only the Z1-owned legacy
-#: contract facade and frozen storage migrations.  Any other importer — even a
-#: sibling module in the same package — keeps the module forbidden.
-REMOVED_MODULES: dict[str, frozenset[str]] = {
-    "electrical/models.py": frozenset({"contracts/legacy.py", "storage/migrations/"}),
-    "electrical/panel_tree.py": frozenset({"contracts/legacy.py", "storage/migrations/"}),
-    "electrical/nesting.py": frozenset({"contracts/legacy.py", "storage/migrations/"}),
-    "disaggregation/configuration.py": frozenset(
-        {"contracts/legacy.py", "storage/migrations/"}
-    ),
-}
-
-
-def _module_name(rel: str) -> str:
-    """Importable module path for a source file relative to ENGINE."""
-    parts = rel.removesuffix(".py").split("/")
-    if parts[-1] == "__init__":
-        parts = parts[:-1]
-    return "wattmosaic_engine" + (("." + ".".join(parts)) if parts else "")
-
-
-def _importers_of(module: str) -> set[str]:
-    """Relative paths under ENGINE importing exactly ``module`` (AST-based).
-
-    Reading source rather than importing modules means a dead-but-importable
-    module cannot hide from the gate.  A submodule import is a distinct target
-    and is ignored; the removed module never imports itself.
+    ``in_contracts`` says whether a relative ``from .legacy import`` resolves to
+    ``contracts.legacy`` (it does inside the contracts package; inside
+    ``storage/migrations`` it names the frozen ``migrations/legacy.py``).
     """
-    want = _module_name(module)
-    found: set[str] = set()
-    for path in sorted(ENGINE.rglob("*.py")):
-        if "__pycache__" in path.parts:
-            continue
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except (SyntaxError, UnicodeDecodeError):
-            continue
-        rel = path.relative_to(ENGINE).as_posix()
-        if rel == module:
-            continue
-        source_module = _module_name(rel)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                if any(alias.name == want for alias in node.names):
-                    found.add(rel)
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                if node.level == 0:
-                    target = ".".join([source_module, node.module])
-                else:
-                    base = source_module.split(".")
-                    target = ".".join([*base[: max(1, len(base) - node.level)], node.module])
-                if target == want:
-                    found.add(rel)
-    return found
-
-
-def _is_allowed_importer(rel: str, allowed: frozenset[str]) -> bool:
-    return any(rel == a or rel.startswith(a) for a in allowed)
-
-
-def test_removed_legacy_modules_are_deleted() -> None:
-    """Retired legacy helper modules may exist only for Z1/storage consumers."""
-    offenders: list[str] = []
-    for module, allowed in REMOVED_MODULES.items():
-        if not (ENGINE / module).exists():
-            continue
-        unexpected = sorted(
-            imp for imp in _importers_of(module) if not _is_allowed_importer(imp, allowed)
-        )
-        if unexpected:
-            offenders.append(
-                f"{module}: imported by {', '.join(unexpected)} "
-                f"(allowed only by: {', '.join(sorted(allowed))})"
+    hits: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            relative_legacy = in_contracts and node.level == 1 and (
+                module == "legacy" or (not module and any(a.name == "legacy" for a in node.names))
             )
-    assert not offenders, "legacy helper modules are still alive:\n" + "\n".join(offenders)
+            if relative_legacy or module.endswith("contracts.legacy") or (
+                module.endswith("contracts") and any(a.name == "legacy" for a in node.names)
+            ):
+                hits.append(f"import of contracts.legacy (line {node.lineno})")
+            for alias in node.names:
+                if alias.name in LEGACY_CONTRACT_NAMES:
+                    hits.append(f"import of {alias.name} (line {node.lineno})")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.endswith("contracts.legacy"):
+                    hits.append(f"import of {alias.name} (line {node.lineno})")
+        elif isinstance(node, ast.Attribute):
+            dotted = _dotted(node) or ""
+            if node.attr == "legacy" and (_dotted(node.value) or "").endswith("contracts"):
+                hits.append(f"attribute {dotted} (line {node.lineno})")
+            base = _dotted(node.value) or ""
+            if node.attr in LEGACY_CONTRACT_NAMES and (
+                base.endswith("contracts") or base.endswith("legacy")
+            ):
+                hits.append(f"attribute {dotted} (line {node.lineno})")
+        elif isinstance(node, ast.Call) and _dotted(node.func) == "getattr" and len(node.args) >= 2:
+            name = node.args[1]
+            if isinstance(name, ast.Constant) and name.value in LEGACY_CONTRACT_NAMES | {"legacy"}:
+                hits.append(f"getattr(..., {name.value!r}) (line {node.lineno})")
+        elif (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and ("contracts.legacy" in node.value or "contracts/legacy" in node.value)
+        ):
+            hits.append(f"string naming contracts.legacy (line {node.lineno})")
+    return hits
+
+
+def test_no_removed_engine_symbols_are_bound() -> None:
+    """No production module may define or import a removed engine symbol."""
+    offenders: list[str] = []
+    for path in _files():
+        if _is_migration(path):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for name in sorted(_bound_names(tree) & REMOVED_SYMBOLS):
+            offenders.append(f"{_rel(path)}: {name}")
+    assert not offenders, "removed engine symbols are still bound:\n" + "\n".join(offenders)
+
+
+def test_no_legacy_contract_names_are_bound() -> None:
+    """No module binds a retired contract name (import, alias or definition)."""
+    offenders: list[str] = []
+    for path in _files():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for name in sorted(_bound_names(tree) & LEGACY_CONTRACT_NAMES):
+            offenders.append(f"{_rel(path)}: {name}")
+    assert not offenders, "legacy contract names are still bound:\n" + "\n".join(offenders)
+
+
+def test_no_legacy_contract_references_by_any_means() -> None:
+    """No import, alias, attribute access, getattr or string reaches the legacy surface."""
+    offenders: list[str] = []
+    for path in _files():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        in_contracts = path.is_relative_to(ENGINE / "contracts")
+        offenders.extend(
+            f"{_rel(path)}: {hit}" for hit in _legacy_references(tree, in_contracts=in_contracts)
+        )
+    assert not offenders, "legacy contracts are still referenced:\n" + "\n".join(offenders)
+
+
+def test_contract_facade_exports_no_legacy_name() -> None:
+    """The ``contracts`` package exposes only v3 names."""
+    from wattmosaic_engine import contracts
+
+    leaked = sorted(name for name in LEGACY_CONTRACT_NAMES if hasattr(contracts, name))
+    assert not leaked, f"legacy contract names still exported: {leaked}"
+    assert not hasattr(contracts, "legacy")
+
+
+def test_deleted_modules_do_not_exist() -> None:
+    """Every retired module is gone from the tree."""
+    present = [rel for rel in DELETED_MODULES if (ENGINE / rel).exists()]
+    assert not present, f"retired modules still exist: {present}"
+
+
+def test_legacy_table_names_appear_only_in_migrations() -> None:
+    """Outside migrations, no SQL string names a legacy table by its live name.
+
+    Migration 25 renames them to ``*_legacy`` read-only; a runtime query against
+    the old name would fail, and one against the archived name would be a read
+    of archived data, which no runtime path may do either.
+    """
+    import re
+
+    patterns = [
+        re.compile(rf"\b(FROM|INTO|UPDATE|JOIN|TABLE)\s+\"?{table}(_legacy)?\b", re.IGNORECASE)
+        for table in LEGACY_TABLES
+    ]
+    offenders: list[str] = []
+    for path in _files():
+        if _is_migration(path):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and any(p.search(node.value) for p in patterns)
+            ):
+                offenders.append(f"{_rel(path)}:{node.lineno}: {node.value.strip()[:80]}")
+    assert not offenders, "legacy tables are still queried at runtime:\n" + "\n".join(offenders)
 
 
 def test_contract_version_is_cut_over_to_3_0_0() -> None:
-    """Z1: contract 3.0.0 is the single version across engine and integration.
-
-    The legacy contract module no longer pins 2.4.0; the authoritative constant
-    lives in ``contracts/foundation.py`` and is mirrored by the HA integration.
-    """
-    from wattmosaic_engine import contracts
-    from wattmosaic_engine.contracts import foundation, legacy
-
-    assert contracts.CONTRACT_VERSION == "3.0.0"
-    assert foundation.CONTRACT_VERSION == "3.0.0"
-    assert legacy.CONTRACT_VERSION == "3.0.0"
-
-    # The integration mirror is loaded from source (HA is not installed here).
+    """Contract 3.0.0 is the single version across engine and integration."""
     import importlib.util
     import sys
 
-    const_path = ROOT / "custom_components" / "wattmosaic" / "const.py"
+    from wattmosaic_engine import contracts
+    from wattmosaic_engine.contracts import foundation
+
+    assert contracts.CONTRACT_VERSION == "3.0.0"
+    assert foundation.CONTRACT_VERSION == "3.0.0"
+
+    const_path = INTEGRATION / "const.py"
     spec = importlib.util.spec_from_file_location("wm_z1_const", const_path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -226,247 +375,21 @@ def test_contract_version_is_cut_over_to_3_0_0() -> None:
     assert module.CONTRACT_VERSION == contracts.CONTRACT_VERSION
 
 
-def test_no_legacy_names_in_zl() -> None:
-    """ZL (models + learning + aggregation + model/learning repositories).
-
-    Contract 3.0 removed the legacy power-model classes, the sample-based
-    learning pipeline and the pointer-based contracts.  No file in the ZL area
-    may define or import any of those names; the surviving read adapters for
-    archived model rows use local duck-typed value objects instead.
-    """
-    legacy_names = frozenset(
-        {
-            "CTChannel",
-            "DeviceTopology",
-            "Topology",
-            "branch_ct_ids",
-            "parent_ct_id",
-            "paired_ct_id",
-            "alias_of_ct_id",
-            "Source",
-            "PowerState",
-            "ConfidenceTier",
-            "TopologyStatus",
-            "RelationKind",
-            "MappingObservability",
-            "MappingCellStatus",
-            "InferenceResult",
-            "Reconciliation",
-            "DeviceReaderMappingCell",
-            "DeviceModelVersion",
-            "DeviceModelParameters",
-            "LearningSample",
-            "Measurement",
-            "DeviceEvent",
-            "EventEvidenceRecord",
-            "ConfigurationChangeEvent",
-            "TopologyEdge",
-            "TopologyVersion",
-            "UnknownLoadProfile",
-            "PowerLevel",
-            "ConfidenceVector",
-        }
-    )
-    area = (
-        ENGINE / "models",
-        ENGINE / "learning",
-        ENGINE / "aggregation",
-    )
-    files = [p for root in area for p in root.rglob("*.py")]
-    files += [
-        ENGINE / "storage" / "repositories" / "models.py",
-        ENGINE / "storage" / "repositories" / "learning.py",
-    ]
-    offenders: list[str] = []
-    for path in files:
-        if not path.exists():
-            continue
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except (SyntaxError, UnicodeDecodeError):
-            continue
-        hits = _bound_names(tree) & legacy_names
-        for name in sorted(hits):
-            offenders.append(f"{path.relative_to(ROOT).as_posix()}: {name}")
-    assert not offenders, "ZL area still references legacy names:\n" + "\n".join(offenders)
-# --------------------------------------------------------------------------- #
-# ZT: topology / disaggregation area — no legacy contract names.
-# --------------------------------------------------------------------------- #
-#
-# Contract 3.0 removes the legacy contract models and enums.  Every file owned
-# by the topology/disaggregation area must name the v3 contracts (or the neutral
-# migration seam ``electrical/_declared_shapes.py``) instead.  The seam is the
-# single documented bridge that still imports the retired models so the
-# read-only projections stay byte-identical; ZC rewrites only that file at the
-# final cutover.  It is excluded from this area-scoped assertion exactly as
-# ``contracts/legacy.py`` is excluded from the global gate above.
-
-ZT_AREA_FILES = (
-    "electrical/topology.py",
-    "electrical/factors.py",
-    "electrical/hierarchy.py",
-    "electrical/main_power.py",
-    "electrical/topology_change.py",
-    "electrical/topology_inference.py",
-    "electrical/__init__.py",
-    "disaggregation/association.py",
-    "disaggregation/audit.py",
-    "disaggregation/auto_placement.py",
-    "disaggregation/circuits.py",
-    "disaggregation/mapping.py",
-    "disaggregation/reconcile.py",
-    "disaggregation/tiers.py",
-    "disaggregation/group_fit.py",
-    "disaggregation/isolation.py",
-    "disaggregation/_shared.py",
-    "device_configuration.py",
-    "device_links.py",
-    "mapping/display_tree.py",
-    "versioning/__init__.py",
-    "versioning/service.py",
-    "versioning/workflow.py",
-    "core/topology_api.py",
-    "core/discovery_api.py",
-    "api/routes/topology.py",
-    "storage/repositories/topology.py",
-    "storage/repositories/associations.py",
-)
-
-#: Retired contract names eliminated from this area at contract 3.0.
-ZT_LEGACY_NAMES = frozenset(
-    {
-        "CTChannel",
-        "DeviceTopology",
-        "Topology",
-        "branch_ct_ids",
-        "parent_ct_id",
-        "paired_ct_id",
-        "alias_of_ct_id",
-        "Source",
-        "PowerState",
-        "ConfidenceTier",
-        "TopologyStatus",
-        "RelationKind",
-        "MappingObservability",
-        "MappingCellStatus",
-        "InferenceResult",
-        "Reconciliation",
-        "DeviceReaderMappingCell",
-        "DeviceModelVersion",
-        "DeviceModelParameters",
-        "LearningSample",
-        "Measurement",
-        "DeviceEvent",
-        "EventEvidenceRecord",
-        "ConfigurationChangeEvent",
-        "TopologyEdge",
-        "TopologyVersion",
-        "UnknownLoadProfile",
-        "PowerLevel",
-        "ConfidenceVector",
+def test_gate_catches_each_evasion() -> None:
+    """The reference detector flags every evasion this gate exists to close."""
+    samples = {
+        "from .legacy import Model": 1,
+        "from ..contracts import legacy as _legacy": 1,
+        "from wattmosaic_engine.contracts.legacy import Topology": 2,
+        "import wattmosaic_engine.contracts.legacy": 1,
+        "x = contracts.legacy.Topology": 2,
+        "x = contracts.CTChannel": 1,
+        "x = getattr(contracts, 'Topology')": 1,
+        "x = 'wattmosaic_engine.contracts.legacy'": 1,
+        "from wattmosaic_engine.contracts import Topology as DeclaredTree": 1,
     }
-)
-
-
-def test_no_legacy_names_in_topology_disaggregation() -> None:
-    """No topology/disaggregation area file binds a retired contract name."""
-    offenders: list[str] = []
-    for rel in ZT_AREA_FILES:
-        path = ENGINE / rel
-        if not path.exists():
-            continue  # a module deleted in a later cutover cannot offend
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        hits = _bound_names(tree) & ZT_LEGACY_NAMES
-        for name in sorted(hits):
-            offenders.append(f"{rel}: {name}")
-    assert not offenders, "legacy contract names remain in the area:\n" + "\n".join(
-        offenders
-    )
-
-
-def test_no_legacy_names_in_ingestion_runtime_backend() -> None:
-    """ZI: no production module in the ingestion/runtime/backend area may bind
-    a legacy contract name (architecture.md §5, contract 3.0.0).
-
-    The area is the ingestion / runtime / backend cutover (ZI).  Legacy contract
-    names that still describe the removed 2.x surface must not be imported or
-    defined by any module this area owns: the runtime ingests only
-    ``ReaderMeasurement`` / ``HAEvent`` and the v3 repositories/services.  The
-    contract facade itself and frozen migrations are intentionally excluded --
-    ZC owns those and reads historical field names as data.  Tests may name
-    legacy contracts when exercising migration/back-compat paths; they are not
-    production modules.
-
-    Only identifier *bindings* count (imports, definitions, annotations and
-    assignments), matching the AST-based approach of the other gate tests:
-    string literals such as provenance keys or SQL column names are data, not
-    live code paths.
-    """
-    import ast
-
-    area_files: list[Path] = []
-    for sub in ("ingestion", "quality", "synchronization", "backend"):
-        area_files.extend((ENGINE / sub).rglob("*.py"))
-    for rel in (
-        "core/runtime.py",
-        "core/rows.py",
-        "core/snapshot.py",
-        "core/models_api.py",
-        "core/mapping_api.py",
-        "core/diagnostics_api.py",
-        "main.py",
-        "api/facade.py",
-        "api/protocols.py",
-        "storage/database.py",
-        "storage/repositories/inference.py",
-        "inference/estimates.py",
-        "inference/evidence.py",
-        "inference/topology_filter.py",
-    ):
-        area_files.append(ENGINE / rel)
-
-    legacy_names = frozenset(
-        {
-            "CTChannel",
-            "DeviceTopology",
-            "Topology",  # legacy model (not TopologyEdgeV3/TopologyVersionV3)
-            "branch_ct_ids",
-            "parent_ct_id",
-            "paired_ct_id",
-            "alias_of_ct_id",
-            "Source",
-            "PowerState",
-            "ConfidenceTier",
-            "TopologyStatus",
-            "RelationKind",  # v1 (not RelationType)
-            "MappingObservability",
-            "MappingCellStatus",
-            "InferenceResult",
-            "Reconciliation",  # v1 (not ReconciliationV3)
-            "DeviceReaderMappingCell",
-            "DeviceModelVersion",
-            "DeviceModelParameters",
-            "LearningSample",
-            "Measurement",  # legacy (not ReaderMeasurement/MeasurementEndpoint/MeasurementType)
-            "DeviceEvent",
-            "EventEvidenceRecord",
-            "ConfigurationChangeEvent",  # legacy (not ConfigurationEvent v3)
-            "PowerLevel",  # legacy (not PowerLevelV3)
-            "ConfidenceVector",  # legacy (not ConfidenceVectorV3)
-        }
-    )
-
-    offenders: list[str] = []
-    for path in sorted(set(area_files)):
-        if not path.exists() or "__pycache__" in path.parts:
-            continue
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except (SyntaxError, UnicodeDecodeError):
-            continue
-        hits = _bound_names(tree) & legacy_names
-        for name in sorted(hits):
-            offenders.append(f"{path.relative_to(ROOT).as_posix()}: {name}")
-    assert not offenders, "legacy contract names still reachable in the ZI area:\n" + "\n".join(
-        offenders
-    )
+    for source, minimum in samples.items():
+        hits = _legacy_references(ast.parse(source))
+        assert len(hits) >= minimum, (source, hits)
+    aliased = _bound_names(ast.parse("from x import Topology as DeclaredTree"))
+    assert "Topology" in aliased and "DeclaredTree" in aliased

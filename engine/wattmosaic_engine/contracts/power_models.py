@@ -1,21 +1,13 @@
-"""Power-model contracts (owned by K06).
+"""Power-model contracts (K06).
 
 A discriminated, fully serialisable power-model spec (``PowerModelSpec``), its
 append-only versions and status-event log, a prediction type that can say
-"unknown" without ever fabricating a zero, deterministic delta priors and
-learning observations.
+"unknown" without ever fabricating a zero, deterministic delta priors, learning
+observations and the operating stages of a running device.
 
-This module is additive only: it introduces no name that already exists in
-:mod:`wattmosaic_engine.contracts.legacy`.  Where ``interfaces.md`` §5 uses a
-name the legacy surface already owns, the v3 name is suffixed with ``V3``:
-
-* ``PowerLevel`` (legacy, four levels with OFF collapsed into STANDBY)
-  -> :class:`PowerLevelV3` here (adds a distinct ``OFF`` member, HB §11.5).
-
-All other §5 names (``ModelBasis``, ``LevelStat``, ``FixedSpec``,
-``PowerPrediction``, ``LearningObservation``, ...) are new and need no suffix.
-``Model``, ``EvidenceRef`` and ``IdentifiabilityStatus`` are re-used from the
-legacy/foundation modules where they already exist.
+:class:`PowerLevelV3` keeps ``OFF`` and ``STANDBY`` distinct (HB §11.5).
+``Model``, ``EvidenceRef`` and ``IdentifiabilityStatus`` come from
+:mod:`.foundation`.
 
 Null policy (HB §18): a prediction or observation with no value carries
 ``None``, never ``0``.  An ``UNKNOWN`` prediction has ``mean_w is None``.
@@ -30,10 +22,11 @@ from typing import Annotated, Any, Literal
 
 from pydantic import Field, model_validator
 
-from .foundation import EvidenceRef, IdentifiabilityStatus, ModelVersionId
-from .legacy import Model
+from .foundation import EvidenceRef, IdentifiabilityStatus, Model, ModelVersionId
 
 __all__: list[str] = [
+    "StageStatus",
+    "OperatingStage",
     # Enums / vocabulary
     "ModelBasis",
     "ModelClass",
@@ -70,6 +63,27 @@ SPEC_SCHEMA_VERSION = 1
 # --------------------------------------------------------------------------- #
 
 
+# --------------------------------------------------------------------------- #
+# Operating stages of a running device.
+# --------------------------------------------------------------------------- #
+
+
+class StageStatus(str, Enum):
+    IDENTIFIED = "identified"
+    PROBABLE = "probable"
+    UNKNOWN = "unknown"
+
+
+class OperatingStage(Model):
+    name: str
+    status: StageStatus = StageStatus.UNKNOWN
+    power_mean_w: float = 0.0
+    power_std_w: float = 0.0
+    min_duration_s: float | None = None
+    max_duration_s: float | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
 class ModelBasis(str, Enum):
     """What a model is fitted on, and how its numbers must be interpreted."""
 
@@ -96,8 +110,7 @@ class ModelClass(str, Enum):
 class PowerLevelV3(str, Enum):
     """Operating level of a published value (HB §11.5).
 
-    Unlike the legacy ``PowerLevel``, ``OFF`` and ``STANDBY`` are distinct
-    members: OFF is a transition endpoint, not a claim of 0 W (HB §11.5,
+    ``OFF`` and ``STANDBY`` are distinct members: OFF is a transition endpoint, not a claim of 0 W (HB §11.5,
     rule 6).  ``UNKNOWN`` is the neutral default.
     """
 

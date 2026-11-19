@@ -1,17 +1,9 @@
-"""Common numeric helpers shared by the v3 power-model implementation.
+"""Dependency-free numeric helpers for the v3 power models.
 
-The legacy device-model classes (``binary``, ``dimmable``, ``variable_speed``,
-``multi_state``, ``time_varying``, ``composite``, ``residual``) were retired in
-the contract-3.0 cutover: prediction now goes through the single v3 codec and
-registry (:mod:`wattmosaic_engine.models.spec` /
-:mod:`wattmosaic_engine.models.registry`) over
-:class:`~wattmosaic_engine.contracts.PowerModelSpec` values.
-
-What remains here are the dependency-free numeric building blocks that the v3
-learners (:mod:`wattmosaic_engine.learning.incremental`), the declared-device
-profile adapter (:mod:`wattmosaic_engine.models.device_profile`) and external
-audit tools still import.  Nothing in this module builds a power value from a
-raw parameter bag, and ``ON``/``OFF`` never means ``0 W`` (HB §11.5).
+Used by the v3 learners (:mod:`wattmosaic_engine.learning.incremental`), the
+concrete spec fitters (:mod:`.fixed`, :mod:`.adjustable`) and the declared
+device profile (:mod:`.device_profile`).  Nothing here builds a power value from
+a raw parameter bag, and ``ON``/``OFF`` never means ``0 W`` (HB §11.5).
 """
 
 from __future__ import annotations
@@ -21,7 +13,7 @@ import statistics
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-from .protocols import attribute_value, normalise_series
+from .protocols import normalise_series
 
 # --------------------------------------------------------------------------- #
 # Numeric helpers
@@ -32,12 +24,6 @@ ON_STATES_DEFAULT = frozenset({"on", "open", "running", "active", "heating", "co
 # 0 W.  Idle/standby are removed from the legacy "off" classification so a
 # device that is merely idle is never routed to an OFF/0 W fallback.
 OFF_STATES_DEFAULT = frozenset({"off", "closed", "false", "0"})
-
-
-def enum_text(value: Any) -> str:
-    if isinstance(value, str):
-        return value
-    return str(getattr(value, "value", value))
 
 
 def finite(value: Any) -> float | None:
@@ -158,53 +144,12 @@ def error_metrics(actual: Sequence[float], predicted: Sequence[float]) -> dict[s
     }
 
 
-def context_control(context: Any, *names: str) -> tuple[float | None, str | None]:
-    """Read a numeric control value from attributes or top level."""
-    for name in names:
-        value = finite(attribute_value(context, name))
-        if value is not None:
-            return value, name
-    raw = getattr(context, "control_value", None)
-    if raw is None and isinstance(context, dict):
-        raw = context.get("control_value")
-    value = finite(raw)
-    variable = getattr(context, "control_variable", None)
-    if variable is None and isinstance(context, dict):
-        variable = context.get("control_variable")
-    if value is not None:
-        return value, str(variable) if variable else "control_value"
-    return None, None
-
-
-def context_numeric(context: Any, *names: str) -> float | None:
-    for name in names:
-        value = finite(attribute_value(context, name))
-        if value is not None:
-            return value
-    return None
-
-
-def is_on(state: str | None, on_states: frozenset[str] = ON_STATES_DEFAULT) -> bool | None:
-    if state is None:
-        return None
-    text = state.strip().lower()
-    if text in on_states:
-        return True
-    if text in OFF_STATES_DEFAULT:
-        return False
-    return None
-
-
 __all__ = [
     "ON_STATES_DEFAULT",
     "OFF_STATES_DEFAULT",
-    "context_control",
-    "context_numeric",
-    "enum_text",
     "enforce_monotonic",
     "error_metrics",
     "finite",
-    "is_on",
     "mean",
     "median",
     "normalise_series",

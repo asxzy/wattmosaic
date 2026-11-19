@@ -4,17 +4,11 @@ Version-id aliases and helpers, typed evidence references, provenance/status
 enums, justified ``Bounds``, the v3 seven-component ``ConfidenceVector`` and a
 small null-policy gate used by the reflective tests.
 
-This module is additive only: it introduces no name that already exists in
-:mod:`wattmosaic_engine.contracts.legacy`.  Where ``interfaces.md`` §1 uses a
-name that the legacy surface already owns, the v3 name is suffixed with ``V3``:
-
-* ``ConfidenceVector`` (legacy, six dimensions + a ``method`` string)
-  -> :class:`ConfidenceVectorV3` here (seven scoped components, no blend).
-
-The other §1 names (``TopologyVersionId``, ``EvidenceRef``, ``Bounds``,
-``EstimateStatus``, ...) are new and need no suffix.  ``Model`` is re-used from
-the legacy module, where it is the single Pydantic base (``extra="forbid"``,
-``use_enum_values=True``) required by the interfaces spec.
+It also owns the single Pydantic base :class:`Model` (``extra="forbid"``,
+``use_enum_values=True``) required by the interfaces spec, the house clock
+helper :func:`utcnow` and ``CONTRACT_VERSION``.  The seven-component confidence
+vector is spelled :class:`ConfidenceVectorV3` (the contract-2 six-dimension
+vector was removed at 3.0).
 
 Null policy (HB §18): an absent measurement or estimate is ``None``, never a
 zero.  Every field here that represents a score or a bound defaults to ``None``.
@@ -25,22 +19,22 @@ from __future__ import annotations
 import hashlib
 import re
 from contextvars import ContextVar
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import Field, model_validator
-
-from .legacy import Model
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 #: Contract version.  Canonical source for the 3.0.0 cutover (DEC-01).  The
 #: integration mirrors this value in ``custom_components/wattmosaic/const.py``;
 #: a major mismatch is refused by the integration's ``_check_contract``.
 CONTRACT_VERSION = "3.0.0"
 
-# NOTE: ``CONTRACT_VERSION`` is deliberately *not* in ``__all__``: the facade
-# re-exports it from the legacy surface (the canonical literal lives here and is
-# mirrored there), and a v3 star-export may not shadow a legacy public name.
 __all__: list[str] = [
+    # Base, clock and version
+    "CONTRACT_VERSION",
+    "Model",
+    "utcnow",
     # Version-id types and helpers
     "TopologyVersionId",
     "MappingVersionId",
@@ -73,6 +67,30 @@ __all__: list[str] = [
     "audit_model_null_policy",
     "audit_models_null_policy",
 ]
+
+
+
+def utcnow() -> datetime:
+    """The house clock: an aware UTC ``datetime``."""
+    return datetime.now(UTC)
+
+
+class Model(BaseModel):
+    """The single Pydantic base of every contract model."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=True, frozen=False)
+
+
+def _document(enum_cls: type[Enum], /, **docs: str) -> None:
+    """Attach a docstring to each enum member.
+
+    ``str, Enum`` keeps the class docstring on every *member* as well (a string
+    literal after an assignment is not retained at runtime), so without this the
+    per-member prose would exist only in the source.
+    """
+    for name, value in docs.items():
+        enum_cls[name].__doc__ = value
+
 
 # --------------------------------------------------------------------------- #
 # Version-id types (DEC-09): human-readable, monotonically numbered ids.
@@ -319,8 +337,7 @@ class ConfidenceVectorV3(Model):
     numbers are not calibrated, do not sum to one, and must not be interpreted
     as likelihoods.  There is deliberately **no blended scalar** field, no
     ``__float__`` and no arithmetic -- a consumer must name the component it
-    means (DEC-24; HB §9.6).  This v3 type supersedes the legacy six-dimension
-    ``ConfidenceVector`` and is intentionally a distinct public name.
+    means (DEC-24; HB §9.6).
     """
 
     measurement_quality: float | None = Field(default=None, ge=0.0, le=1.0)

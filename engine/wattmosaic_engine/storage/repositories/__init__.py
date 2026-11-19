@@ -9,7 +9,7 @@ delegating methods with the old names -- so no caller in Wave 0 changes.
 **Extending it without editing this file.**  :class:`Repositories` resolves a
 repository from its *module name* on first access:
 
-    db.repos.samples.insert_ct_samples(rows)
+    db.repos.samples.insert_readings(readings)
     db.repos.entities.endpoint_revision_at(endpoint_id, t)   # added by S13
 
 A later task drops ``repositories/<name>.py`` beside these modules, defines a

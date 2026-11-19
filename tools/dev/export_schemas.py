@@ -27,6 +27,7 @@ from wattmosaic_engine.contracts import (  # noqa: E402
     matrix,
     measurement,
     power_models,
+    service,
     topology,
 )
 
@@ -41,16 +42,13 @@ OUT = ROOT / "data" / "schemas"
 # the v2 surface.
 V3_TRANSPORT_MODELS = {
     "data_quality_report": contracts.DataQualityReport,
-    "health_response": contracts.HealthResponse,
-    "error_response": contracts.ErrorResponse,
-    "service_command": contracts.ServiceCommand,
-    "service_result": contracts.ServiceResult,
 }
 
 # Submodules that contribute v3 schemas.  Each declares ``SCHEMA_EXPORTS`` as a
 # list of ``(name, model)`` pairs; tasks own their submodule's list, so no task
 # needs to edit this exporter.
 SCHEMA_MODULES = (
+    service,
     foundation,
     entities,
     measurement,

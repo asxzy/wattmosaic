@@ -16,9 +16,9 @@ import random
 from dataclasses import dataclass, field
 from enum import Enum
 
-from wattmosaic_engine.contracts import Polarity, QualityStatus
+from wattmosaic_engine.contracts import QualityStatus
 
-from .topology import SimChannel
+from .topology import Polarity, SimChannel
 
 
 class QualityLevel(str, Enum):

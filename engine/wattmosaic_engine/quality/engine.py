@@ -56,8 +56,8 @@ from typing import Any
 
 from ..contracts import (
     DataQualityReport,
-    Phase,
-    Polarity,
+    EndpointKind,
+    EndpointScope,
     QualityStatus,
     utcnow,
 )
@@ -230,6 +230,67 @@ def _is_unavailable(
 
 
 @dataclass(frozen=True, slots=True)
+class ChannelConfig:
+    """What the quality checks need to know about one reader's declaration.
+
+    Built from a v3 :class:`~wattmosaic_engine.contracts.MeasurementEndpoint`
+    and its latest configuration revision (:func:`channel_config_from_endpoints`).
+    ``role`` is ``main`` for a panel feed, ``branch`` for a circuit CT and
+    ``other`` otherwise; ``phase``/``polarity`` are the revision's literals.
+    """
+
+    entity_id: str | None
+    phase: str = "unknown"
+    polarity: str = "normal"
+    role: str = "other"
+
+
+def channel_config_from_endpoints(endpoints: Iterable[Any]) -> dict[str, ChannelConfig]:
+    """Per-reader :class:`ChannelConfig`, keyed by ``endpoint_id``.
+
+    Accepts contract models or plain mappings.  The phase and polarity come from
+    the latest revision; an endpoint without one is ``unknown``/``normal``.
+    """
+    out: dict[str, ChannelConfig] = {}
+    for endpoint in endpoints:
+        get = endpoint.get if isinstance(endpoint, Mapping) else (
+            lambda key, default=None, _e=endpoint: getattr(_e, key, default)
+        )
+        endpoint_id = get("endpoint_id")
+        if not endpoint_id:
+            continue
+        revisions = list(get("revisions", None) or [])
+        latest = None
+        if revisions:
+            latest = max(
+                revisions,
+                key=lambda r: int(r.get("revision", 0) if isinstance(r, Mapping) else r.revision),
+            )
+
+        def _rev(key: str, default: str, _latest: Any = latest) -> str:
+            if _latest is None:
+                return default
+            value = _latest.get(key) if isinstance(_latest, Mapping) else getattr(_latest, key, None)
+            return str(getattr(value, "value", value) or default)
+
+        kind = str(getattr(get("kind"), "value", get("kind")) or "")
+        scope = str(getattr(get("scope"), "value", get("scope")) or "")
+        if kind == EndpointKind.PANEL_MAIN.value or scope == EndpointScope.PANEL_FEED.value:
+            role = "main"
+        elif kind == EndpointKind.CT.value:
+            role = "branch"
+        else:
+            role = "other"
+        out[str(endpoint_id)] = ChannelConfig(
+            entity_id=get("entity_id"),
+            phase=_rev("phase", "unknown"),
+            polarity=_rev("polarity", "normal"),
+            role=role,
+        )
+    return out
+
+
+@dataclass(frozen=True, slots=True)
 class OverlapCluster:
     """A group of channels sharing identical simultaneous values."""
 
@@ -292,7 +353,7 @@ class DataQualityEngine:
         window: AlignedWindow,
         health: Mapping[str, ChannelHealth] | None = None,
         *,
-        topology: Any | None = None,
+        channels: Mapping[str, ChannelConfig] | None = None,
         reconciliation: Any | None = None,
         unavailable: Iterable[str] | None = None,
         energy_window: EnergyWindow | None = None,
@@ -301,8 +362,8 @@ class DataQualityEngine:
     ) -> DataQualityReport:
         """Score every channel in ``window`` (power) and ``energy_window``.
 
-        ``health`` provides observed intervals/noise; ``topology`` adds
-        polarity/phase checks; ``reconciliation`` adds a home-level consistency
+        ``health`` provides observed intervals/noise; ``channels`` (the
+        declared per-reader :class:`ChannelConfig`) adds polarity/phase checks; ``reconciliation`` adds a home-level consistency
         penalty; ``unavailable`` lists entities HA reports as unavailable.
         ``energy_window``/``energy_health`` cover cumulative energy counters and
         are never mixed with power scoring.
@@ -310,7 +371,7 @@ class DataQualityEngine:
         health = health or {}
         energy_health = energy_health or {}
         unavailable_set = set(unavailable or ())
-        channel_config = topology.channel_map() if topology is not None else {}
+        channel_config = dict(channels or {})
         issues: list[str] = []
         channels: dict[str, dict[str, Any]] = {}
         scores: list[float] = []
@@ -595,9 +656,9 @@ class DataQualityEngine:
 
         # 7. Polarity / phase consistency
         if cfg is not None:
-            phase_value = getattr(cfg.phase, "value", cfg.phase)
-            polarity_value = getattr(cfg.polarity, "value", cfg.polarity)
-            if polarity_value == Polarity.INVERTED.value and ch.value_w > 0:
+            phase_value = str(cfg.phase)
+            polarity_value = str(cfg.polarity)
+            if polarity_value == "inverted" and ch.value_w > 0:
                 result.penalize(
                     t.polarity_penalty,
                     "polarity_inconsistent",
@@ -613,10 +674,9 @@ class DataQualityEngine:
             #
             # A *main* row is excluded on purpose: negative power there is real
             # export / reverse flow and is reported as such, not a defect.
-            ct_type_value = getattr(cfg.ct_type, "value", cfg.ct_type)
             if (
-                polarity_value == Polarity.NORMAL.value
-                and ct_type_value == "branch"
+                polarity_value == "normal"
+                and cfg.role == "branch"
                 and ch.value_w < 0
             ):
                 result.penalize(
@@ -626,7 +686,7 @@ class DataQualityEngine:
                     "the CT is reversed or the polarity declaration is wrong",
                     issues=issues,
                 )
-            if phase_value == Phase.UNKNOWN.value:
+            if phase_value == "unknown":
                 result.penalize(
                     t.phase_unknown_penalty, "phase_unknown", "topology phase unconfirmed", issues=issues
                 )
@@ -937,6 +997,7 @@ def excluded_readers(report: DataQualityReport | None) -> dict[str, str]:
 
 
 __all__ = [
+    "ChannelConfig",
     "DataQualityEngine",
     "DUPLICATE_ENTITY_EXPLANATION",
     "EXCLUDED_QUALITY_STATUSES",
@@ -944,6 +1005,7 @@ __all__ = [
     "OverlapCluster",
     "QUALITY_THRESHOLDS",
     "QualityThresholds",
+    "channel_config_from_endpoints",
     "excluded_readers",
     "score_to_status",
 ]

@@ -1518,7 +1518,7 @@ def state_overrides(active: Sequence[str], quiet: Sequence[str]) -> dict[str, st
     # The engine's global ON-state vocabulary moved to the v3 power-model base
     # (L1/K06).  Reading it from there keeps the override rule identical while
     # avoiding the deleted legacy ``disaggregation.engine`` module.
-    from wattmosaic_engine.models.base import ON_STATES_DEFAULT as ON_STATES
+    from wattmosaic_engine.models.numeric import ON_STATES_DEFAULT as ON_STATES
 
     out: dict[str, str] = {}
     for label, evidence_on in [(item, True) for item in active] + [

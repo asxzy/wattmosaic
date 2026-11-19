@@ -31,7 +31,11 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from wattmosaic_engine.contracts import Measurement, Polarity, QualityStatus
+from wattmosaic_engine.contracts import QualityStatus
+
+#: The endpoint-revision polarity literals (``EndpointConfigRevision.polarity``).
+POLARITY_NORMAL = "normal"
+POLARITY_INVERTED = "inverted"
 
 #: Documented fallback derived from the measured HA environment
 #: (``median_of_channel_medians_s = 15.736``).  Used *only* when a window
@@ -65,7 +69,7 @@ class ChannelReading:
     age_s: float | None = 0.0
     quality: QualityStatus = QualityStatus.GOOD
     repeated: bool = False
-    polarization: Polarity = Polarity.NORMAL
+    polarization: str = POLARITY_NORMAL
     history: tuple[tuple[datetime, float], ...] = ()
     resolution_w: float | None = None
     expected_interval_s: float | None = None
@@ -85,7 +89,7 @@ class ChannelReading:
         """Polarity-corrected value; sign is preserved (negative = export)."""
         if self.value_w is None:
             return None
-        return -self.value_w if self.polarization == Polarity.INVERTED else self.value_w
+        return -self.value_w if str(self.polarization) == POLARITY_INVERTED else self.value_w
 
     def median_history_interval_s(self) -> float | None:
         ts = [t for t, _ in self.history]
@@ -147,7 +151,7 @@ class ObservationWindow:
                 age_s=float(ages.get(cid, 0.0)),
                 quality=qualities.get(cid, QualityStatus.GOOD),
                 repeated=bool(repeated.get(cid, False)),
-                polarization=Polarity.INVERTED if cid in inverted else Polarity.NORMAL,
+                polarization=POLARITY_INVERTED if cid in inverted else POLARITY_NORMAL,
                 history=tuple(histories.get(cid, ())),
             )
             for cid, value in values.items()
@@ -270,18 +274,15 @@ def _coerce_age(raw: object) -> float | None:
     return value if math.isfinite(value) else None
 
 
+def _polarity(value: object) -> str:
+    """Normalise a polarity value (enum or string) to the revision literal."""
+    text = str(getattr(value, "value", value) or POLARITY_NORMAL).strip().lower()
+    return POLARITY_INVERTED if text == POLARITY_INVERTED else POLARITY_NORMAL
+
+
 def _to_reading(channel_id: str, raw: object, at: datetime) -> ChannelReading:
     if isinstance(raw, ChannelReading):
         return raw
-    if isinstance(raw, Measurement):
-        return ChannelReading(
-            channel_id=channel_id,
-            value_w=raw.effective_power_w(),
-            age_s=max(0.0, (at - raw.state_timestamp).total_seconds()),
-            quality=raw.quality,
-            repeated=raw.repeated,
-            polarization=raw.polarization,
-        )
     if isinstance(raw, (int, float)) and not isinstance(raw, bool):
         value = float(raw)
         return ChannelReading(
@@ -297,7 +298,7 @@ def _to_reading(channel_id: str, raw: object, at: datetime) -> ChannelReading:
             age_s=_coerce_age(raw.get("age_s", raw.get("age_seconds"))),
             quality=QualityStatus(str(raw.get("quality", "good"))),
             repeated=bool(raw.get("repeated", False)),
-            polarization=Polarity(str(raw.get("polarization", raw.get("polarity", "normal")))),
+            polarization=_polarity(raw.get("polarization", raw.get("polarity", POLARITY_NORMAL))),
             history=tuple((t, float(v)) for t, v in history),
             resolution_w=raw.get("resolution_w"),
             expected_interval_s=raw.get("expected_interval_s"),
@@ -311,12 +312,7 @@ def _to_reading(channel_id: str, raw: object, at: datetime) -> ChannelReading:
             quality = QualityStatus(str(quality))
         except ValueError:
             quality = QualityStatus.BAD
-    pol = getattr(raw, "polarization", getattr(raw, "polarity", Polarity.NORMAL))
-    if not isinstance(pol, Polarity):
-        try:
-            pol = Polarity(str(pol))
-        except ValueError:
-            pol = Polarity.NORMAL
+    pol = _polarity(getattr(raw, "polarization", getattr(raw, "polarity", POLARITY_NORMAL)))
     return ChannelReading(
         channel_id=channel_id,
         value_w=None if value is None else float(value),

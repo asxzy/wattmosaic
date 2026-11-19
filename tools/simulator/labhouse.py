@@ -46,8 +46,6 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from wattmosaic_engine.contracts import Phase, Polarity
-
 from .factors import FactorOwner, FactorTimeline, RefossFactorChannel
 from .frames import observation_stream, truth_stream
 from .scenario import HouseholdScenario, SimulatorConfig
@@ -55,6 +53,8 @@ from .sensors import QualityLevel
 from .topology import (
     CTType,
     HouseholdTopology,
+    Phase,
+    Polarity,
     SimChannel,
     SimDevice,
     SimDeviceType,

@@ -1,33 +1,27 @@
-"""Authoritative WattMosaic data contracts (single source of truth).
+"""Authoritative WattMosaic data contracts (contract 3.0, single source of truth).
 
-This module is a *package facade*.  The original single-file module now lives
-in :mod:`wattmosaic_engine.contracts.legacy` and is re-exported verbatim so
-that the ~66 callers doing ``from wattmosaic_engine.contracts import X`` keep
-working with no behaviour change.  The seven submodules below are owned by the
-Wave-1 contract tasks; each starts empty (``__all__ = []``) and is star-imported
-here.  This facade is written once and must never need editing again: as those
-tasks fill their submodules, their exports appear here automatically.
+This module is a *package facade*: every submodule declares its public names in
+``__all__`` and is star-imported here, so callers write
+``from wattmosaic_engine.contracts import X``.
+
+* :mod:`.foundation` -- the ``Model`` base, ``utcnow``, ``CONTRACT_VERSION``,
+  version ids, evidence refs, status enums, bounds and the confidence vector;
+* :mod:`.entities` -- measurement endpoints, physical devices, HA entities;
+* :mod:`.measurement` -- readings, HA events, detected events, data quality;
+* :mod:`.topology` -- topology/mapping edges and versions, configuration events;
+* :mod:`.power_models` -- versioned power-model specs and learning observations;
+* :mod:`.inference` -- estimates, joint results and the inference snapshot;
+* :mod:`.matrix` -- the measurement-matrix payload;
+* :mod:`.service` -- the HTTP health/error envelopes and service commands.
 """
 
 from __future__ import annotations
 
-# 1. Legacy surface, verbatim.  ``legacy`` defines no ``__all__`` so the star
-#    import brings across every public name (models, enums, helpers, and the
-#    imported typing/pydantic names that callers have come to rely on).
 from .entities import *  # noqa: F403
 from .foundation import *  # noqa: F403
 from .inference import *  # noqa: F403
-from .legacy import *  # noqa: F403
-from .legacy import __annotations__ as _legacy_annotations
-from .legacy import _document as _document  # noqa: F401
-from .legacy import _reject_parent_cycle as _reject_parent_cycle  # noqa: F401
 from .matrix import *  # noqa: F403
 from .measurement import *  # noqa: F403
 from .power_models import *  # noqa: F403
+from .service import *  # noqa: F403
 from .topology import *  # noqa: F403
-
-# Preserve the legacy module's ``__annotations__`` (``TIER_RANK``) so reflective
-# callers see the same mapping they did before the split.  A plain ``globals``
-# assignment avoids registering this name as an annotation itself.
-globals()["__annotations__"] = dict(_legacy_annotations)
-del _legacy_annotations

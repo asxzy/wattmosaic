@@ -68,7 +68,7 @@
     }
   },
   "additionalProperties": false,
-  "description": "A declared or inferred configuration change (HB \u00a714, \u00a74).\n\nThe ``kind``, ``detection`` and ``status`` enums are the existing v2 ones,\nreused verbatim from ``contracts.legacy``.",
+  "description": "A declared or inferred configuration change (HB \u00a714, \u00a74).\n\n``kind``, ``detection`` and ``status`` use the configuration-change enums\ndefined above.",
   "properties": {
     "event_id": {
       "title": "Event Id",

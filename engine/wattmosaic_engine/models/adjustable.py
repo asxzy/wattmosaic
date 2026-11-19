@@ -40,8 +40,8 @@ from ..contracts import (
     PowerPrediction,
     PredictionStatus,
 )
-from .base import _linear_interp, enforce_monotonic, finite, median, robust_sigma
 from .fixed import model_class_for_load_shape
+from .numeric import _linear_interp, enforce_monotonic, finite, median, robust_sigma
 
 __all__ = [
     "AdjustableModel",

@@ -55,8 +55,7 @@ def test_every_tools_module_imports() -> None:
 
 
 def test_tools_gate_covers_the_ported_tools() -> None:
-    """The gate must actually include the three Z2c tools."""
+    """The gate must actually include the ported Z2c tools."""
     names = {p.relative_to(ROOT).as_posix() for p in _tool_modules()}
     assert "tools/audit/replay_capture.py" in names
-    assert "tools/dev/replay_nesting.py" in names
     assert "tools/audit/derive_state_entities.py" in names

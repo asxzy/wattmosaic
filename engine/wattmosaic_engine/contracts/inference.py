@@ -1,29 +1,15 @@
-"""Inference contracts (owned by K04).
+"""Inference contracts (K04).
 
 First-class device and group estimates, candidate/match states, versioned
-event-inference records and the HB §12.1 :class:`InferenceSnapshot`.
+event-inference records, the nullable :class:`ReconciliationV3` balance and the
+HB §12.1 :class:`InferenceSnapshot`.
 
-This module is additive only: it introduces no name that already exists in
-:mod:`wattmosaic_engine.contracts.legacy`.  Where ``interfaces.md`` §6 uses a
-name that the legacy surface already owns, the v3 name is suffixed with ``V3``:
-
-* ``Reconciliation`` (legacy, non-nullable balance) -> :class:`ReconciliationV3`
-  here (every term nullable, HB §18; ``main = identified + groups + unknown +
-  residual`` with a ``balance_error_w`` diagnostic).
-* ``DataQualityReport`` (legacy) -> re-used verbatim from the legacy module for
-  the snapshot's ``system_quality`` field (it is not a new public name here).
-* ``PowerLevel`` (legacy) -> superseded by ``PowerLevelV3`` from K06's
-  ``power_models`` module for the estimate's ``level`` field; the legacy enum
-  does not distinguish OFF / STANDBY / IDLE (HB §11.5).  ``PowerLevelV3`` is
-  imported from :mod:`contracts.power_models`, not redefined here.
-* ``EventGroupStatus`` (§3, owned by K02) and ``ReaderMeasurement`` (K02) ->
-  imported from :mod:`contracts.measurement`; ``ReaderResidualPoint`` (K03) ->
-  imported from :mod:`contracts.topology`.  These canonical types are re-used
-  rather than duplicated or suffixed with ``V3`` here.
-
-The shared foundation types (``VersionTriple``, ``EvidenceRef``, ``Bounds``,
-``EstimateStatus``, ``IdentifiabilityStatus``, ``InferenceMethod``,
-``ConfidenceVectorV3``) are re-used from :mod:`contracts.foundation`.
+Shared types are reused, never redefined: ``PowerLevelV3`` from
+:mod:`.power_models`; ``EventGroupStatus``, ``ReaderMeasurement`` and
+``DataQualityReport`` from :mod:`.measurement`; ``ReaderResidualPoint`` from
+:mod:`.topology`; ``VersionTriple``, ``EvidenceRef``, ``Bounds``,
+``EstimateStatus``, ``IdentifiabilityStatus``, ``InferenceMethod`` and
+``ConfidenceVectorV3`` from :mod:`.foundation`.
 
 Null policy (HB §18): an absent power is ``None``, never ``0``.  Every watt
 field here defaults to ``None`` and a non-identifiable member never carries a
@@ -46,11 +32,11 @@ from .foundation import (
     EvidenceRef,
     IdentifiabilityStatus,
     InferenceMethod,
+    Model,
     SnapshotId,
     VersionTriple,
 )
-from .legacy import DataQualityReport, Model
-from .measurement import EventGroupStatus, ReaderMeasurement
+from .measurement import DataQualityReport, EventGroupStatus, ReaderMeasurement
 from .power_models import PowerLevelV3
 from .topology import ReaderResidualPoint
 
@@ -302,7 +288,7 @@ class EventInferenceRecord(Model):
     """A versioned event interpretation; evidence immutable, result versioned.
 
     ``interpretation_revision == 1`` iff ``previous_record_id is None`` — the
-    same chain rule :class:`legacy.InferenceRecord` applies to its revision.
+    revision chain is append-only.
     """
 
     record_id: str

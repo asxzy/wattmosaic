@@ -300,7 +300,7 @@ def _bins(observations: Iterable[LearningObservation], n_bins: int) -> list[list
 
 def _pava_points(bins: Sequence[Sequence[float]]) -> list[tuple[float, float]]:
     """One (x, robust-median-y) point per non-empty bin, made monotone by PAVA."""
-    from ..models.base import enforce_monotonic
+    from ..models.numeric import enforce_monotonic
 
     points: list[tuple[float, float]] = []
     for idx, values in enumerate(bins):
@@ -711,6 +711,6 @@ def predict_spec(spec: Any, observation: LearningObservation) -> float | None:
 
 
 def _interp(x: float, xs: Sequence[float], ys: Sequence[float]) -> float | None:
-    from ..models.base import _linear_interp
+    from ..models.numeric import _linear_interp
 
     return _linear_interp(x, list(zip(xs, ys, strict=False)))

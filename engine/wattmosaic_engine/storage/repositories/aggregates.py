@@ -82,8 +82,7 @@ class AggregatesRepository(Repository):
         Which tables are pruned, by which timestamp column and on which horizon,
         is read from :func:`wattmosaic_engine.storage.tiers.prunable_tables`
         rather than restated here.  The registry's horizon is authoritative for a
-        table: a table classified in one tier but shipped on another keeps the
-        shipped horizon (``device_events``, see the registry).
+        table.
 
         The signature and its defaults are unchanged: ``main.py``'s maintenance
         loop still calls ``prune(retention_days_raw, retention_days_aggregates)``
@@ -116,33 +115,33 @@ class AggregatesRepository(Repository):
         return removed
 
     def export_device_data(self, device_id: str) -> dict[str, Any]:
-        """Every persisted row that belongs to one device, for the export endpoint."""
+        """Every persisted v3 row that belongs to one subject, for the export endpoint."""
         with self._lock:
-            inferences = self._conn.execute(
+            estimates = self._conn.execute(
                 "SELECT * FROM inference_results WHERE device_id=? ORDER BY timestamp ASC",
                 (device_id,),
             ).fetchall()
-            samples = self._conn.execute(
-                "SELECT * FROM learning_samples WHERE device_id=? ORDER BY captured_at ASC",
+            observations = self._conn.execute(
+                "SELECT * FROM learning_observations WHERE subject_id=? ORDER BY created_at ASC",
                 (device_id,),
             ).fetchall()
-            models = self._conn.execute(
-                "SELECT * FROM device_model_versions WHERE device_id=? ORDER BY version ASC",
+            versions = self._conn.execute(
+                "SELECT * FROM power_model_versions_v3 WHERE subject_id=? ORDER BY number ASC",
                 (device_id,),
             ).fetchall()
         return {
             "device_id": device_id,
             "exported_at": iso(utcnow()),
-            "inference_results": [dict(r) for r in inferences],
-            "learning_samples": [dict(r) for r in samples],
-            "model_versions": [dict(r) for r in models],
+            "inference_results": [dict(r) for r in estimates],
+            "learning_observations": [dict(r) for r in observations],
+            "model_versions": [dict(r) for r in versions],
         }
 
     def stats(self) -> dict[str, Any]:
         """Row counts, schema version and file size for ``GET /status``."""
         tables = (
-            "ct_samples", "device_events", "inference_results", "learning_samples",
-            "device_model_versions", "power_aggregates", "energy_aggregates",
+            "ct_samples", "ha_events_v3", "inference_results", "learning_observations",
+            "power_model_versions_v3", "power_aggregates", "energy_aggregates",
             "reconciliation_results", "data_quality_events", "system_events",
         )
         with self._lock:

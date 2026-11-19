@@ -24,20 +24,6 @@ sys.path.insert(0, str(ROOT / "tools" / "audit"))
 REFERENCE = ROOT / "data" / "examples" / "reference_house"
 
 
-def _reference_topology():
-    """Build the candidate topology from the synthetic reference household."""
-    import build_topology
-
-    if not (REFERENCE / "ha_environment_audit.json").exists():
-        pytest.skip("reference fixture not generated")
-    original = build_topology.DATA
-    build_topology.DATA = REFERENCE
-    try:
-        return build_topology.build()
-    finally:
-        build_topology.DATA = original
-
-
 def test_normalize_base_url_adds_default_port() -> None:
     from ha_client import normalize_base_url
 
@@ -149,31 +135,6 @@ def test_profile_missing_file(tmp_path: Path) -> None:
 
     with pytest.raises(SystemExit):
         profile(tmp_path / "nope.jsonl")
-
-
-def test_topology_candidate_builder_is_candidate_only() -> None:
-    """Every auto-derived element must be 'candidate', never 'confirmed'."""
-    topology = _reference_topology()
-    assert topology.status == "candidate"
-    assert topology.channels
-    assert all(c.topology_status == "candidate" for c in topology.channels)
-    assert all(d.topology_status == "candidate" for d in topology.devices)
-    # No channel may claim a parent that does not exist.
-    ids = {c.ct_id for c in topology.channels}
-    for c in topology.channels:
-        if c.parent_ct_id:
-            assert c.parent_ct_id in ids
-        if c.paired_ct_id:
-            assert c.paired_ct_id in ids
-
-
-def test_topology_pairing_creates_single_double_pole_device() -> None:
-    topology = _reference_topology()
-    doubles = [d for d in topology.devices if d.double_pole]
-    assert doubles, "expected the *_ct1/*_ct2 pairs to be recognised"
-    for dev in doubles:
-        assert len(dev.branch_ct_ids) == 2
-        assert dev.phase == "both"
 
 
 def test_audit_identifies_monitors_structurally_not_by_brand() -> None:
