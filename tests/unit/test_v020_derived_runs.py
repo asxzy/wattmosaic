@@ -62,7 +62,7 @@ def test_migration_creates_the_two_tables(tmp_path: Path) -> None:
     conn.close()
 
     conn = sqlite3.connect(path)
-    assert apply_migrations(conn) == 20
+    assert apply_migrations(conn) >= 20  # later migrations (e.g. v021) advance past v020
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"derived_runs", "derived_estimates"} <= tables
     cols = {r[1] for r in conn.execute("PRAGMA table_info(derived_runs)")}
@@ -94,12 +94,12 @@ def test_migration_is_idempotent(tmp_path: Path) -> None:
     path = tmp_path / "pre.db"
     _build_pre_migration_db(path)
     conn = sqlite3.connect(path)
-    assert apply_migrations(conn) == 20
+    assert apply_migrations(conn) >= 20  # later migrations (e.g. v021) advance past v020
     for statement in V020.statements:
         conn.execute(statement)
     if V020.apply is not None:
         V020.apply(conn)
-    assert apply_migrations(conn) == 20
+    assert apply_migrations(conn) >= 20  # later migrations (e.g. v021) advance past v020
     conn.close()
 
 
@@ -107,5 +107,5 @@ def test_database_opens_at_v020(tmp_path: Path) -> None:
     path = tmp_path / "pre.db"
     _build_pre_migration_db(path)
     db = Database(path)
-    assert db.schema_version == 20
+    assert db.schema_version >= 20  # later migrations advance past v020
     db.close()
