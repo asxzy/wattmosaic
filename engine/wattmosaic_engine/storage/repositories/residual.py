@@ -90,6 +90,38 @@ class ResidualRepository(Repository):
                 raise
         return len(payload)
 
+    def upsert_points(self, batch: Iterable[ReaderResidualPoint]) -> int:
+        """Write live residual points; the last write for ``(reader_id, at)`` wins.
+
+        The live runtime may publish more than once at one instant (a steady
+        and an event result stamped with the same injected clock).  Those are
+        successive interpretations of the same instant, so the later one
+        replaces the earlier rather than being rejected by the PK the way
+        :meth:`put_points` (append-only batch import) rejects it.  One
+        transaction per batch.
+        """
+        payload = [self._point_row(point) for point in batch]
+        if not payload:
+            return 0
+        columns = ", ".join(_POINT_COLUMNS)
+        placeholders = ", ".join("?" * len(_POINT_COLUMNS))
+        updates = ", ".join(
+            f"{column}=excluded.{column}" for column in _POINT_COLUMNS[2:]
+        )
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.executemany(
+                    f"INSERT INTO reader_residual_series({columns}) VALUES({placeholders}) "
+                    f"ON CONFLICT(reader_id, at) DO UPDATE SET {updates}",
+                    payload,
+                )
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+        return len(payload)
+
     def series(
         self, reader_id: str, since: datetime | None = None, until: datetime | None = None
     ) -> list[dict[str, Any]]:

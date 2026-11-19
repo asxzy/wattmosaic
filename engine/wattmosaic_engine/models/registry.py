@@ -414,6 +414,34 @@ class Registry(ModelSetView):
             versions=versions,
         )
 
+    def model_set_id_at(self, at: datetime) -> ModelSetId:
+        """The id of the active set as it stood at ``at`` (HB §13 ``as_of``).
+
+        Derived from the append-only event log: only events stamped (with the
+        injected clock) at or before ``at`` count, and the same activation rule
+        as :meth:`active_version` picks each subject's version.  Deterministic
+        and restart-safe, since it reads only persisted events.
+        """
+        instant = self._coerce_time(at)
+        active: list[str] = []
+        for subject_id in self.subjects():
+            by_version: dict[str, list[dict[str, Any]]] = {}
+            for row in self._repo.versions(subject_id):
+                if not isinstance(row, dict):
+                    continue
+                vid = str(row.get("version_id"))
+                by_version[vid] = [
+                    e
+                    for e in self._repo.events(vid)
+                    if instant is not None
+                    and (stamp := self._coerce_time(e.get("at"))) is not None
+                    and stamp <= instant
+                ]
+            winner = derive_active_version_id(by_version)
+            if winner is not None:
+                active.append(winner)
+        return make_model_set_id(active)
+
     @property
     def model_set_id(self) -> ModelSetId:
         with self._lock:

@@ -362,6 +362,7 @@ class RuntimeMixin:
         self._group_off_level: dict[str, float] = {}
         #: Latest T3 residual point per reader (steady and event publishes).
         self._latest_residuals: dict[str, ReaderResidualPoint] = {}
+        self._persisted_residual_keys: dict[str, tuple[Any, ...]] = {}
         self.last_model_set_change: dict[str, Any] | None = None
         self._last_heartbeat_wall = time.monotonic()
 
@@ -385,8 +386,14 @@ class RuntimeMixin:
         # the same DB reports the same id).  An activation, rollback or L6
         # promotion advances it for every later snapshot, record and matrix cell.
         registry = self.model_registry_v3
-        self.version_service.bind_model_set(lambda: str(registry.model_set_id))
+        self.version_service.bind_model_set(
+            lambda: str(registry.model_set_id), registry.model_set_id_at
+        )
         registry.add_listener(self._on_model_set_changed)
+        # One D1 change-listener: every topology/mapping activation (declared
+        # configuration events, T7 self-heal, user pin/reject/declare, rollback)
+        # refreshes the triple new event groups are stamped with.
+        self.version_service.add_listener(self._on_versions_changed)
         self.matrix_updater = MatrixUpdater(
             store=self._live_matrix_store(),
             versions=self.version_service,
@@ -482,7 +489,15 @@ class RuntimeMixin:
         the same authoritative D1 view.  No topology/mapping decision is made
         here: the edges come from D1's declared seed.
         """
+        previous = self.version_service
+        if previous is not None and previous is not versions:
+            remove = getattr(previous, "remove_listener", None)
+            if callable(remove):
+                remove(self._on_versions_changed)
         self.version_service = versions
+        add = getattr(versions, "add_listener", None)
+        if callable(add):
+            add(self._on_versions_changed)
         self._wire_self_healing()
         if self.matrix_updater is not None:
             from ..mapping.updater import MatrixUpdater
@@ -814,7 +829,42 @@ class RuntimeMixin:
         }
         latest.update({point.reader_id: point for point in points})
         self._latest_residuals = latest
+        self._persist_residual_points(points)
         return [latest[reader] for reader in sorted(latest)]
+
+    def _persist_residual_points(self, points: Sequence[ReaderResidualPoint]) -> None:
+        """Append live points to the S19 per-reader series (design §6).
+
+        A reader's point is written only when its content changed since the
+        last one written for that reader, so an unchanged re-publish adds no
+        row (the same rule S17 applies to snapshots); the series is therefore
+        a change-point series.  Two publishes at one instant upsert: the last
+        interpretation of that instant wins (``ResidualRepository.upsert_points``).
+        Retention follows the table's tier registration (``reader_residual_series``
+        is L3 history and not age-pruned, like ``inference_snapshots``).
+        """
+        repo = getattr(getattr(self.db, "repos", None), "residual", None)
+        upsert = getattr(repo, "upsert_points", None)
+        if not callable(upsert):
+            return
+        changed: list[ReaderResidualPoint] = []
+        keys: dict[str, tuple[Any, ...]] = {}
+        for point in points:
+            key = (
+                point.residual_w, point.baseline_w, point.dynamic_w,
+                point.noise_sigma_w, point.topology_version_id, str(point.basis),
+            )
+            if self._persisted_residual_keys.get(point.reader_id) != key:
+                changed.append(point)
+                keys[point.reader_id] = key
+        if not changed:
+            return
+        try:
+            upsert(changed)
+        except Exception:  # noqa: BLE001 - persistence must not stop the publish
+            log.exception("residual series write failed")
+            return
+        self._persisted_residual_keys.update(keys)
 
     def _on_model_set_changed(self, model_set_id: str) -> None:
         """L1 registry hook: an activation/rollback/promotion changed the set.
@@ -824,8 +874,38 @@ class RuntimeMixin:
         the grouping engine), so records and matrix writes cite the new set.
         """
         self.last_model_set_change = {"model_set_id": model_set_id, "at": self._clock()}
-        if self.grouping_engine is not None and self.version_service is not None:
-            self.grouping_engine.versions = self.version_service.current()
+        self._refresh_grouping_versions()
+        # Design §L7: a model promotion triggers reconciliation, through the
+        # same sink topology/mapping promotions use (_on_version_promoted).
+        self._enqueue_reconciliation(
+            {
+                "reason": "model_promotion",
+                "version_id": model_set_id,
+                "at": self._clock().isoformat(),
+            }
+        )
+
+    def _on_versions_changed(self, kind: str, version_id: str) -> None:
+        """D1 hook: a topology or mapping version became active."""
+        self._refresh_grouping_versions()
+
+    def _refresh_grouping_versions(self) -> None:
+        """Re-stamp P5 with the current triple (and topology view).
+
+        Groups already open keep the triple they were formed under; groups
+        formed from now on — and so their event records and matrix writes —
+        carry the new one.
+        """
+        engine = self.grouping_engine
+        service = self.version_service
+        if engine is None or service is None:
+            return
+        try:
+            triple = service.current()
+            engine.versions = triple
+            engine.topology = service.topology_view(triple.topology_version_id)
+        except Exception:  # noqa: BLE001 - a refresh must not undo a promotion
+            log.exception("grouping version refresh failed")
 
     def _parent_readers(self) -> frozenset[str]:
         """Readers that are CONTAINS parents in the declared topology."""
@@ -1824,11 +1904,10 @@ class RuntimeMixin:
                 reconciler._model_sets[triple.model_set_id] = self.model_registry_v3
             end = self._clock()
             start = end - timedelta(hours=1)
-            return reconciler.run(
-                (start, end),
-                triple,
-                reason="topology_promotion",
-            )
+            reason = payload.get("reason") if isinstance(payload, Mapping) else None
+            if reason not in _RECONCILIATION_REASONS:
+                reason = "topology_promotion"
+            return reconciler.run((start, end), triple, reason=reason)
         except Exception:  # noqa: BLE001 - reconciliation is best-effort background work
             log.exception("L7 reconciliation failed")
             return None
@@ -2073,6 +2152,19 @@ class _StaticEstablished:
 
     def identities(self) -> Mapping[tuple[str, str], float]:
         return {}
+
+
+#: The reasons L7's ``Reconciler.run`` records (learning/reconciliation.py).
+_RECONCILIATION_REASONS = frozenset(
+    {
+        "model_promotion",
+        "topology_promotion",
+        "mapping_promotion",
+        "late_evidence",
+        "manual",
+        "replay",
+    }
+)
 
 
 def _steady_group(result: JointInferenceResult, at: datetime) -> EventGroup:

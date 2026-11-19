@@ -313,12 +313,27 @@ class SnapshotAssembler:
         held_by_reader = {str(k): v for k, v in inputs.held_readings.items()}
         main_w = _sum_all([_reading_value(held_by_reader.get(r)) for r in roots])
         residual_w = _sum_all([residual_by_reader.get(r) for r in roots])
-        identified = sum(
-            float(e.point_w)
-            for e in devices.values()
-            if e.point_w is not None and e.status in (EstimateStatus.ESTIMATED, EstimateStatus.MEASURED)
-        ) or None
-        group_w = sum(float(g.point_w) for g in groups.values() if g.point_w is not None) or None
+        # HB §18: absent is None, but a sum over a *known, empty* set is a real
+        # 0 W.  The published device/group sets are always known here, so their
+        # totals are 0.0 when nothing qualifies.  Only ESTIMATED/MEASURED points
+        # are identified power and only groups with a point are group power; a
+        # device or group without a point is not part of these terms (its load
+        # stays in the reader residual), exactly as before.
+        identified = float(
+            sum(
+                float(e.point_w)
+                for e in devices.values()
+                if e.point_w is not None
+                and e.status in (EstimateStatus.ESTIMATED, EstimateStatus.MEASURED)
+            )
+        )
+        group_w = float(sum(float(g.point_w) for g in groups.values() if g.point_w is not None))
+        # Unknown load is NOT treated as a known-empty sum: the live solvers emit
+        # an unknown-scope value even when the scope's row had no usable sigma
+        # (an unconstrained 0.0, and a delta rather than a level), so a zero
+        # here is not a computed 0 W.  The HB §17 walkthrough pins the unknown
+        # total as "not computed" (None) on the steady prelude; the prior rule is
+        # kept until the solvers mark an unconstrained scope as unknown.
         unknown_w = None
         unknowns = getattr(inputs.result, "unknown_estimates", ())
         if unknowns:

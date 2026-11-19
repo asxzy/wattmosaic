@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from types import MappingProxyType
@@ -43,6 +44,8 @@ from wattmosaic_engine.contracts import (
     VersionTriple,
 )
 from wattmosaic_engine.runtime.interfaces import Clock, MappingView, TopologyView
+
+_LOGGER = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
 # Injected repository seams (satisfied by db.repos.topology_v3 / .mapping).
@@ -290,7 +293,13 @@ class VersionService:
     for the current model versions; it is injected here and copied verbatim into
     every assembled triple (the model lifecycle is not owned by this service).
     :meth:`bind_model_set` replaces the injected constant with a live source
-    (the registry), so a model activation is reported by :meth:`current`.
+    (the registry), so a model activation is reported by :meth:`current`, and
+    optionally a history lookup so :meth:`as_of` reports the set active at ``t``.
+
+    :meth:`add_listener` registers a callback fired after *every* topology or
+    mapping activation this service performs (promotion, rollback, and the
+    declared configuration events that promote through it), so consumers that
+    stamp the triple (P5 grouping) refresh from one place.
     """
 
     def __init__(
@@ -307,6 +316,8 @@ class VersionService:
         self._clock = clock
         self._model_set_id = model_set_id
         self._model_set_source: Callable[[], str] | None = None
+        self._model_set_history: Callable[[datetime], str] | None = None
+        self._listeners: list[Callable[[str, str], None]] = []
         self._matrix_store = matrix_store
         self._topo_views: dict[str, _FrozenTopologyView] = {}
         self._map_views: dict[str, _FrozenMappingView] = {}
@@ -336,17 +347,53 @@ class VersionService:
 
     # -- triple assembly ---------------------------------------------------- #
 
-    def bind_model_set(self, source: Callable[[], str] | None) -> None:
+    def bind_model_set(
+        self,
+        source: Callable[[], str] | None,
+        history: Callable[[datetime], str] | None = None,
+    ) -> None:
         """Read the model-set id from ``source`` (L1's registry) from now on.
 
         The model lifecycle stays L1's: this service only *reports* the id the
         registry derives from its persisted active set (content-derived, so it
-        is deterministic and identical after a restart).  ``None`` unbinds and
-        falls back to the injected constant.
+        is deterministic and identical after a restart).  ``history(t)`` is the
+        id of the set that was active at ``t`` (derived from the timestamped
+        model event log) and backs :meth:`as_of`.  ``None`` unbinds and falls
+        back to the injected constant.
         """
         self._model_set_source = source
+        self._model_set_history = history if source is not None else None
         if source is not None:
             self._model_set_id = str(source())
+
+    def _model_set_at(self, at: datetime) -> str:
+        history = self._model_set_history
+        if history is not None:
+            return str(history(at))
+        return self._current_model_set_id()
+
+    # -- change notification ------------------------------------------------ #
+
+    def add_listener(self, callback: Callable[[str, str], None]) -> None:
+        """Call ``callback(kind, version_id)`` after a topology/mapping activation.
+
+        ``kind`` is ``"topology"`` or ``"mapping"``.  Registering the same
+        callable twice is a no-op.  A failing listener is logged, never raised
+        into the promotion that has already committed.
+        """
+        if callback not in self._listeners:
+            self._listeners.append(callback)
+
+    def remove_listener(self, callback: Callable[[str, str], None]) -> None:
+        if callback in self._listeners:
+            self._listeners.remove(callback)
+
+    def _notify(self, kind: str, version_id: str) -> None:
+        for callback in tuple(self._listeners):
+            try:
+                callback(kind, version_id)
+            except Exception:  # noqa: BLE001 - the activation already committed
+                _LOGGER.exception("version listener failed for %s %s", kind, version_id)
 
     def _current_model_set_id(self) -> str:
         source = self._model_set_source
@@ -376,8 +423,10 @@ class VersionService:
         version's activation is recorded by this service at promote/rollback
         time (using the injected clock); pre-existing (backfilled) versions are
         seeded from their ``created_at``.  Ties break on the monotone version
-        number, so the answer is deterministic.  The model-set id is not
-        versioned here, so the current (bound or injected) value is used.
+        number, so the answer is deterministic.  The model-set id comes from the
+        bound registry history (the set active at ``at``, from the timestamped
+        model event log); without a bound history the current (bound or
+        injected) value is used.
         """
         if isinstance(at, str):
             # A version-id lookup: honour the prior version explicitly rather
@@ -392,14 +441,14 @@ class VersionService:
                 mapping_version_id=self._as_of_version(
                     self._mapping_versions(), self._map_activated, stamp, "map-1"
                 ),
-                model_set_id=self._current_model_set_id(),
+                model_set_id=self._model_set_at(stamp),
             )
         topo_id = self._as_of_version(self._topo.versions(), self._topo_activated, at, "topo-1")
         map_id = self._as_of_version(self._mapping_versions(), self._map_activated, at, "map-1")
         return VersionTriple(
             topology_version_id=topo_id,
             mapping_version_id=map_id,
-            model_set_id=self._current_model_set_id(),
+            model_set_id=self._model_set_at(_as_utc(at)),
         )
 
     @staticmethod
@@ -591,6 +640,7 @@ class VersionService:
             )
             self._topo.set_active(new_id)
             self._topo_activated[new_id] = self._clock()
+            self._notify("topology", new_id)
             return new_id
         if kind == "mapping":
             rows = self._mapping_versions()
@@ -641,6 +691,7 @@ class VersionService:
             return
         self._topo.set_active(version_id)
         self._topo_activated[version_id] = self._clock()
+        self._notify("topology", version_id)
 
     def _promote_mapping(self, version_id: str) -> None:
         conn = self._conn(self._map)
@@ -755,6 +806,7 @@ class VersionService:
                 conn.execute("ROLLBACK")
                 raise
         self._map_views.clear()
+        self._notify("mapping", version_id)
 
     @staticmethod
     def _next_number(rows: list[dict[str, Any]]) -> int:
