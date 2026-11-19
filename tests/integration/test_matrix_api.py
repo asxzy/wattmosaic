@@ -24,6 +24,7 @@ bound onto a lightweight stand-in with a real ``Database`` and clock.
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
@@ -41,6 +42,8 @@ from wattmosaic_engine.contracts import (
     CellTimestamps,
     CellVisual,
     ConfidenceVectorV3,
+    EdgeEvidence,
+    EdgeLifecycleV3,
     EstimateStatus,
     IdentifiabilityStatus,
     MappingCell,
@@ -48,8 +51,10 @@ from wattmosaic_engine.contracts import (
     MatrixPayload,
     Observability,
     ReaderDetail,
+    RelationType,
     RowDetail,
     RowKind,
+    TopologyEdgeV3,
 )
 from wattmosaic_engine.core.mapping_api import MappingApiMixin
 from wattmosaic_engine.mapping.service import (
@@ -132,14 +137,93 @@ def _seed(db: Database, cells: list[MappingCell], *, at: datetime = _ORIGIN) -> 
     db.repos.mapping.upsert_cells(cells, mapping_version_id=mapping_version, at=at)
 
 
-def _set_active_map(db: Database, version_id: str = "map-1") -> None:
+def _set_active_map(db: Database, version_id: str = "map-1", number: int = 1) -> None:
     """Record an active mapping version so ETag uses a real version id."""
     with db._lock:
         db._conn.execute(
-            "INSERT OR IGNORE INTO mapping_versions(version_id, number, status, mapping_edge_ids_json, created_at) "
-            "VALUES (?, 1, 'active', '[]', ?)",
-            (version_id, _ORIGIN.isoformat()),
+            "INSERT OR IGNORE INTO mapping_versions(version_id, number, status, mapping_edge_ids_json, created_at, digest) "
+            "VALUES (?, ?, 'active', '[]', ?, ?)",
+            (version_id, number, _ORIGIN.isoformat(), "digest"),
         )
+
+
+# HB §17 reference house: Main ⊃ Subpanel ⊃ {Circuit A, Circuit B}, Main ⊃
+# Circuit C.  Five measurement endpoints, four CONFIRMED CONTAINS edges.
+_HB17_READERS = ("Main", "Subpanel", "Circuit A", "Circuit B", "Circuit C")
+_HB17_CONTAINS = (
+    ("Main", "Subpanel"),
+    ("Subpanel", "Circuit A"),
+    ("Subpanel", "Circuit B"),
+    ("Main", "Circuit C"),
+)
+
+
+def _seed_hb17_topology(db: Database) -> None:
+    """Seed the HB17 endpoints and CONTAINS edges via the S13/S14 repositories."""
+    for reader_id in _HB17_READERS:
+        db.repos.entities.upsert_endpoint(
+            dict(
+                endpoint_id=reader_id,
+                kind="ct",
+                display_name=reader_id,
+                scope="circuit",
+                scope_status="confirmed",
+                enabled=1,
+                created_at=_ORIGIN,
+            )
+        )
+    edge_ids: list[str] = []
+    for parent, child in _HB17_CONTAINS:
+        edge_id = f"hb17::{parent}->{child}"
+        edge_ids.append(edge_id)
+        db.repos.topology_v3.upsert_edge(
+            TopologyEdgeV3(
+                edge_id=edge_id,
+                relation=RelationType.CONTAINS,
+                source_endpoint_id=parent,
+                target_endpoint_id=child,
+                lifecycle=EdgeLifecycleV3.CONFIRMED,
+                declared_by="user",
+                evidence=EdgeEvidence(),
+                valid_from=_ORIGIN,
+                pinned=True,
+            )
+        )
+    # The migration backfills an empty active version ("topo-1"); point its
+    # edge set at the seeded edges (the repository has no setter for edge ids).
+    with db._lock:
+        db._conn.execute(
+            "UPDATE topology_versions_v3 SET edge_ids_json=? WHERE version_id='topo-1'",
+            (json.dumps(edge_ids),),
+        )
+
+
+def _leaf_ids(nodes: Any) -> list[str]:
+    out: list[str] = []
+    stack = list(nodes)
+    while stack:
+        node = stack.pop()
+        if getattr(node, "kind", None) == "reader":
+            out.append(str(node.reader_id))
+        else:
+            stack.extend(getattr(node, "children", ()) or ())
+    return out
+
+
+def _max_depth(node: Any, depth: int = 1) -> int:
+    children = getattr(node, "children", ()) or ()
+    return depth if not children else max(_max_depth(child, depth + 1) for child in children)
+
+
+def _all_rows(nodes: Any) -> list[Any]:
+    """Every RowNode, including grouping nodes and nodes with children."""
+    out: list[Any] = []
+    stack = list(nodes)
+    while stack:
+        node = stack.pop()
+        out.append(node)
+        stack.extend(getattr(node, "children", ()) or ())
+    return out
 
 
 async def _with_server(facade: Any, fn: Any, *, token: str = TOKEN) -> Any:
@@ -457,3 +541,140 @@ def test_paging_bounds_page_size() -> None:
     filters = MatrixFilters.from_query({"page": "2", "page_size": "99999"})
     assert filters.page == 2
     assert filters.page_size == MatrixFilters.MAX_PAGE_SIZE
+
+
+# --------------------------------------------------------------------------- #
+# M3b: real L0–L4 columns / non-empty rows from the canonical repositories.
+# --------------------------------------------------------------------------- #
+
+
+def test_hb17_columns_have_depth_five_and_one_leaf_per_endpoint(db_path: Path) -> None:
+    """A DB seeded with the HB17 topology returns real L0..L4 column trees."""
+    db = Database(db_path)
+    _set_active_map(db)
+    _seed_hb17_topology(db)
+    _seed(db, [_make_cell("dev_a", "Main", power_w=100.0, at=_ORIGIN)])
+    facade = MatrixFacade(db_path)
+
+    async def fn(session: aiohttp.ClientSession, base: str) -> None:
+        async with session.get(f"{base}/matrix", headers=HEADERS) as resp:
+            assert resp.status == 200
+            payload = MatrixPayload.model_validate(await resp.json())
+
+        assert len(payload.columns) == 1
+        root = payload.columns[0]
+        assert root.level == "L0" and root.kind == "domain"
+        assert _max_depth(root) == 5, "expected L0..L4 levels"
+        levels = set()
+
+        def walk(node: Any) -> None:
+            levels.add(node.level)
+            for child in node.children:
+                walk(child)
+
+        walk(root)
+        assert levels == {"L0", "L1", "L2", "L3", "L4"}
+
+        leaves = _leaf_ids(payload.columns)
+        assert len(leaves) == len(_HB17_READERS)
+        assert set(leaves) == set(_HB17_READERS)
+        # One leaf per endpoint — no duplicates from secondary relations.
+        assert len(leaves) == len(set(leaves))
+
+        # Rows are real too: one device row plus reader-residual and summary rows.
+        assert payload.rows
+        row_ids = {row.row_id for row in _all_rows(payload.rows)}
+        assert "summary" in row_ids
+        kinds = {str(row.kind) for row in _all_rows(payload.rows)}
+        assert "reader_residual" in kinds
+
+    asyncio.run(_with_server(facade, fn))
+
+
+def test_hb17_rows_include_devices_components_profiles_groups(db_path: Path) -> None:
+    """Rows come from devices/components/groups/profiles/readers that exist."""
+    db = Database(db_path)
+    _set_active_map(db)
+    _seed_hb17_topology(db)
+
+    # Physical devices + a load component via the S13 repository.
+    db.repos.entities.upsert_device(
+        dict(
+            device_id="dev_tv",
+            name="Television",
+            origin="user",
+            created_at=_ORIGIN,
+        )
+    )
+    db.repos.entities.upsert_component(
+        dict(component_id="lc_screen", device_id="dev_tv", name="Screen")
+    )
+    # Unknown-load profile via the S19 repository.
+    from wattmosaic_engine.contracts import UnknownLoadProfileV3
+
+    db.repos.residual.put_profile(
+        UnknownLoadProfileV3(
+            profile_id="prof_fridge",
+            scope_endpoint_id="Main",
+            lifecycle="characterised",
+            signature={},
+            event_count=1,
+            independent_event_count=1,
+            first_seen=_ORIGIN,
+            last_seen=_ORIGIN,
+        )
+    )
+    # A current group id via the S17 group-estimate repository.
+    with db._lock:
+        db._conn.execute(
+            "INSERT OR REPLACE INTO device_group_estimates("
+            "group_id, at, member_ids_json, source_reader_ids_json, evidence_refs_json, "
+            "topology_version_id, mapping_version_id, model_set_id, estimate_json) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                "grp_lights",
+                _ORIGIN.isoformat(),
+                json.dumps(["dev_tv"]),
+                "[]",
+                "[]",
+                "topo-1",
+                "map-1",
+                "mset-x",
+                "{}",
+            ),
+        )
+
+    facade = MatrixFacade(db_path)
+    payload = facade.matrix_payload()
+    kinds = {str(row.kind) for row in _all_rows(payload.rows)}
+    assert "device" in kinds
+    assert "component" in kinds
+    assert "unknown_profile" in kinds
+    assert "group" in kinds
+    assert "reader_residual" in kinds
+    assert "summary" in kinds
+
+
+def test_etag_changes_when_mapping_version_changes(db_path: Path) -> None:
+    """The ETag tracks the mapping version even when the cells do not change."""
+    db = Database(db_path)
+    _set_active_map(db, "map-1", number=1)
+    _seed_hb17_topology(db)
+    _seed(db, [_make_cell("dev_a", "Main", power_w=100.0, at=_ORIGIN)])
+    facade = MatrixFacade(db_path)
+
+    first_etag = facade.matrix_etag()
+    assert first_etag.startswith("map-1-")
+
+    # Bump the active mapping version; cells and topology stay identical.
+    _set_active_map(db, "map-2", number=2)
+    second_etag = facade.matrix_etag()
+    assert second_etag.startswith("map-2-")
+    assert second_etag != first_etag
+
+    # The second request still serves real trees after the cache key changed.
+    payload = facade.matrix_payload()
+    assert payload.mapping_version_id == "map-2"
+    assert _max_depth(payload.columns[0]) == 5
+    assert len(_leaf_ids(payload.columns)) == len(_HB17_READERS)
+
