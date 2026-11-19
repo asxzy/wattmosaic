@@ -54,7 +54,7 @@
 | P1 | 3 | VERIFIED |  |  | new path applies polarity once; legacy-path DEF-01 unproven (removed in Z2) |
 | P2 | 3 | VERIFIED |  |  |  |
 | P3 | 3 | VERIFIED |  |  | P3b follow-up: DATA_GAP delta None |
-| P4 | 3 | NOT_STARTED | | | |
+| P4 | 3 | IN_PROGRESS |  |  |  |
 | P5 | 3 | NOT_STARTED | | | |
 | T1 | 3 | VERIFIED |  |  | primary_display_tree matches M1 build_columns |
 | T2 | 3 | VERIFIED |  |  |  |
@@ -74,19 +74,19 @@
 | U1 | 3 | VERIFIED |  | AT-12 |  |
 | I5 | 4 | VERIFIED |  | AT-14 | AT-14 closed (snapshot single-count); V1 must also check matrix physical total |
 | I6 | 4 | VERIFIED |  | AT-18 | AT-18 closed; record read index in-memory (persisted via S16) |
-| I7 | 4 | NOT_STARTED | | | |
+| I7 | 4 | IN_PROGRESS |  |  |  |
 | T5 | 4 | VERIFIED |  | AT-02 | AT-02 closed; user CONFIRMED edges never auto-CONFLICTED -> fixed in T7; replay_nesting score needs operator DB (V2) |
-| T6 | 4 | NOT_STARTED | | AT-04 | |
-| T7 | 4 | NOT_STARTED | | AT-15, 16 | |
+| T6 | 4 | IN_PROGRESS |  | AT-04 |  |
+| T7 | 4 | IN_PROGRESS |  | AT-15, 16 |  |
 | M2 | 4 | VERIFIED |  | AT-11 | AT-11 closed |
-| M3 | 4 | IN_PROGRESS |  |  |  |
+| M3 | 4 | VERIFIED |  |  | facade served empty column/row trees -> M3b |
 | L4 | 4 | VERIFIED |  |  |  |
-| L5 | 4 | NOT_STARTED | | | |
+| L5 | 4 | IN_PROGRESS |  |  |  |
 | L6 | 4 | NOT_STARTED | | | |
 | D4 | 4 | IN_PROGRESS |  |  |  |
 | H1 | 4 | NOT_STARTED | | | |
 | H2 | 4 | VERIFIED |  |  | partial: async_migrate_entry hook -> H1; v2 forms removal -> Z2 |
-| U2 | 4 | NOT_STARTED | | AT-20 | |
+| U2 | 4 | IN_PROGRESS |  | AT-20 |  |
 | P6 | 4 | NOT_STARTED | | | |
 | Z2 | 5 | NOT_STARTED | | | |
 | Z1 | 5 | NOT_STARTED | | | |
