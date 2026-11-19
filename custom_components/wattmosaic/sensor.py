@@ -29,7 +29,7 @@ from .const import (
     VERSION,
 )
 from .coordinator import WattMosaicCoordinator
-from .entity_defs import DEVICE_SENSORS, GLOBAL_SENSORS
+from .entity_defs import DEVICE_SENSORS, GLOBAL_SENSORS, GROUP_SENSORS
 from .entity_values import (
     BINDABLE_KEYS,
     RECONCILIATION_KEYS,
@@ -41,7 +41,7 @@ from .entity_values import (
     resolve_binding_target,
 )
 from .hub_device import via_device_for_entry
-from .util import energy_entity_available, published_energy, utcnow
+from .util import as_float, energy_entity_available, published_energy, utcnow
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -82,6 +82,7 @@ async def async_setup_entry(
         WattMosaicGlobalSensor(coordinator, entry, key) for key in GLOBAL_SENSORS
     ]
     known_devices: set[str] = set()
+    known_groups: set[str] = set()
 
     @callback
     def _add_new_devices() -> None:
@@ -99,6 +100,18 @@ async def async_setup_entry(
                     continue
                 new_entities.append(
                     WattMosaicDeviceSensor(coordinator, entry, device_id, key)
+                )
+        # Contract 3.0 (H1 step 4): one synthetic group device per stable
+        # group_id.  A group that disappears keeps its entity (unavailable) for
+        # the 7-day retention window, so we iterate the coordinator's visible
+        # groups (published + retained) rather than only the current snapshot.
+        for group_id in coordinator.visible_groups():
+            if group_id in known_groups:
+                continue
+            known_groups.add(group_id)
+            for key in GROUP_SENSORS:
+                new_entities.append(
+                    WattMosaicGroupSensor(coordinator, entry, group_id, key)
                 )
         if new_entities:
             async_add_entities(new_entities)
@@ -602,6 +615,19 @@ class WattMosaicDeviceSensor(_WattMosaicBase, RestoreEntity):
             attributes["provenance"] = result.get("provenance", {})
             attributes["model_id"] = result.get("model_id")
             attributes["model_version"] = result.get("model_version")
+            # Contract 3.0 (H1, design §11): status, identifiability, justified
+            # bounds, group id and the three independent versions travel to HA
+            # as attributes.  A non-identifiable member has power=None with
+            # [lower_w, upper_w]; it never acquires a fabricated number.
+            attributes["estimate_status"] = result.get("estimate_status")
+            attributes["identifiability"] = result.get("identifiability")
+            attributes["lower_w"] = result.get("lower_w")
+            attributes["upper_w"] = result.get("upper_w")
+            attributes["group_id"] = result.get("group_id")
+            attributes["provisional"] = result.get("provisional")
+            attributes["topology_version_id"] = result.get("topology_version_id")
+            attributes["mapping_version_id"] = result.get("mapping_version_id")
+            attributes["model_version_id"] = result.get("model_version_id")
         if self._key == "confidence_tier":
             attributes["tier_reasons"] = result.get("tier_reasons", [])
             attributes["note"] = (
@@ -621,3 +647,77 @@ class WattMosaicDeviceSensor(_WattMosaicBase, RestoreEntity):
         if self._key == "sample_count":
             attributes["source"] = result.get("source")
         return attributes
+
+
+# --------------------------------------------------------------------------- #
+# Contract-3.0 group power sensors (H1 step 4, DEC-25)
+# --------------------------------------------------------------------------- #
+
+
+class WattMosaicGroupSensor(_WattMosaicBase, RestoreEntity):
+    """The identified sum of a device group, on a synthetic group device.
+
+    ``unique_id`` is ``{entry_id}_group_{group_id}_power`` — deliberately in a
+    different namespace from per-device sensors, so adding groups cannot alter
+    any pre-existing unique id or entity id.  A group that disappears keeps its
+    entity (unavailable, no value) for the 7-day retention window rather than
+    being deleted.
+    """
+
+    def __init__(
+        self,
+        coordinator: WattMosaicCoordinator,
+        entry: ConfigEntry,
+        group_id: str,
+        key: str,
+    ) -> None:
+        super().__init__(coordinator, entry)
+        definition = GROUP_SENSORS[key]
+        self._group_id = group_id
+        self._key = key
+        self._attr_translation_key = "group_power"
+        self._attr_unique_id = f"{entry.entry_id}_group_{group_id}_power"
+        self._attr_icon = definition.get("icon")
+        self._attr_native_unit_of_measurement = _UNIT_MAP.get(definition.get("unit") or "")
+        self._attr_device_class = _DEVICE_CLASS_MAP.get(definition.get("device_class") or "")
+        self._attr_state_class = _STATE_CLASS_MAP.get(definition.get("state_class") or "")
+        if definition.get("suggested_display_precision") is not None:
+            self._attr_suggested_display_precision = definition["suggested_display_precision"]
+        # A synthetic device per stable group id; parented to the engine hub.
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"{entry.entry_id}_group_{group_id}")},
+            name=f"{NAME} group {group_id}",
+            manufacturer=MANUFACTURER,
+            model="Device group",
+            **via_device_for_entry(coordinator.hass, entry),
+        )
+
+    def _group(self) -> dict[str, Any]:
+        groups = self.coordinator.visible_groups()
+        return groups.get(self._group_id, {})
+
+    @property
+    def available(self) -> bool:
+        group = self._group()
+        return bool(group.get("available")) and self._engine_available
+
+    @property
+    def native_value(self) -> Any:
+        if not self.available:
+            return None
+        return as_float(self._group().get("point_w"))
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        group = self._group()
+        return {
+            "group_id": self._group_id,
+            "member_ids": group.get("member_ids", []),
+            "identifiability": group.get("identifiability"),
+            "lower_w": group.get("lower_w"),
+            "upper_w": group.get("upper_w"),
+            "bounds_basis": group.get("bounds_basis"),
+            "topology_version_id": group.get("topology_version_id"),
+            "mapping_version_id": group.get("mapping_version_id"),
+        }
+

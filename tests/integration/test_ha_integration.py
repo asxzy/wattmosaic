@@ -3269,3 +3269,320 @@ class TestTopologyReplayAgainstTheRealClient:
         )
         view = state.as_diagnostics()
         assert "token-abc" not in json.dumps(view)
+
+
+# --------------------------------------------------------------------------- #
+# H1 — contract 3.0 HA surface: null semantics, status, groups
+# --------------------------------------------------------------------------- #
+
+
+def _v3_estimate(**overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "subject_kind": "device",
+        "subject_id": "lamp-a",
+        "point_w": 60.0,
+        "bounds": {"lower_w": 0.0, "upper_w": 100.0, "basis": "non_negativity"},
+        "status": "estimated",
+        "identifiability": "identifiable",
+        "group_id": None,
+        "method": "joint_delta",
+        "provisional": False,
+        "source_reader_ids": ["Circuit A"],
+        "evidence_refs": [],
+        "versions": {
+            "topology_version_id": "topo-1",
+            "mapping_version_id": "map-1",
+            "model_set_id": "mset-1",
+        },
+        "model_version_id": "mdl-lamp-a-1",
+        "updated_at": NOW.isoformat(),
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _v3_group(**overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "group_id": "group-1",
+        "member_ids": ["lamp-a", "lamp-b"],
+        "point_w": 250.0,
+        "bounds": {"lower_w": 0.0, "upper_w": 250.0, "basis": "group_sum"},
+        "identifiability": "group_identifiable",
+        "source_reader_ids": ["Circuit A"],
+        "evidence_refs": [],
+        "versions": {
+            "topology_version_id": "topo-1",
+            "mapping_version_id": "map-1",
+            "model_set_id": "mset-1",
+        },
+        "updated_at": NOW.isoformat(),
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _v3_snapshot(**overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "snapshot_id": "snap-test",
+        "observed_at": NOW.isoformat(),
+        "computed_at": NOW.isoformat(),
+        "versions": {
+            "topology_version_id": "topo-1",
+            "mapping_version_id": "map-1",
+            "model_set_id": "mset-1",
+        },
+        "reader_measurements": [],
+        "device_estimates": [],
+        "group_estimates": [],
+        "residual_estimates": [],
+        "reconciliation": {"main_w": 250.0},
+        "system_quality": {"timestamp": NOW.isoformat()},
+        "stale_sources": [],
+        "unresolved_events": [],
+    }
+    payload.update(overrides)
+    return payload
+
+
+class TestV3SnapshotDetection:
+    def test_v3_shape_is_detected(self) -> None:
+        assert util.is_v3_snapshot(_v3_snapshot()) is True
+        assert util.is_v3_snapshot({"device_estimates": [], "snapshot_id": "x"}) is True
+
+    def test_legacy_shape_is_not_v3(self) -> None:
+        assert util.is_v3_snapshot({"results": [], "reconciliation": {}}) is False
+        assert util.is_v3_snapshot(None) is False
+
+
+class TestV3NullSemantics:
+    """A device power state is a number only for MEASURED or ESTIMABLE+IDENTIFIABLE."""
+
+    def test_measured_publishes_point(self) -> None:
+        estimate = util.coerce_v3_estimate(
+            _v3_estimate(status="measured", identifiability="identifiable", method="direct_reading")
+        )
+        assert estimate is not None
+        assert estimate["power_w"] == 60.0
+
+    def test_estimated_identifiable_publishes_point(self) -> None:
+        estimate = util.coerce_v3_estimate(_v3_estimate())
+        assert estimate is not None
+        assert estimate["power_w"] == 60.0
+
+    @pytest.mark.parametrize(
+        "status,identifiability",
+        [
+            ("estimated", "non_identifiable"),
+            ("estimated", "partially_identifiable"),
+            ("estimated", "insufficient_evidence"),
+            ("estimated", "group_identifiable"),
+            ("unknown", "identifiable"),
+            ("unknown", "non_identifiable"),
+            ("allocated", "identifiable"),
+            ("allocated", "non_identifiable"),
+        ],
+    )
+    def test_every_other_combination_is_none(self, status: str, identifiability: str) -> None:
+        estimate = util.coerce_v3_estimate(
+            _v3_estimate(status=status, identifiability=identifiability)
+        )
+        assert estimate is not None
+        assert estimate["power_w"] is None
+        values = entity_values.device_values(
+            estimate, engine_available=True, now=NOW, stale_after=120
+        )
+        assert values["power"] is None
+        assert values["running"] is False
+
+    def test_missing_point_never_becomes_zero(self) -> None:
+        estimate = util.coerce_v3_estimate(_v3_estimate(point_w=None, status="unknown"))
+        assert estimate is not None
+        assert estimate["power_w"] is None
+        assert estimate["raw_point_w"] is None
+
+    def test_nan_point_becomes_none(self) -> None:
+        estimate = util.coerce_v3_estimate(_v3_estimate(point_w="NaN"))
+        assert estimate is not None
+        assert estimate["power_w"] is None
+
+
+class TestV3Attributes:
+    """Status, identifiability, bounds, group and versions reach HA."""
+
+    def test_attributes_are_coerced(self) -> None:
+        estimate = util.coerce_v3_estimate(
+            _v3_estimate(
+                status="unknown",
+                identifiability="non_identifiable",
+                group_id="group-1",
+                provisional=True,
+            )
+        )
+        assert estimate is not None
+        assert estimate["estimate_status"] == "unknown"
+        assert estimate["identifiability"] == "non_identifiable"
+        assert estimate["lower_w"] == 0.0
+        assert estimate["upper_w"] == 100.0
+        assert estimate["group_id"] == "group-1"
+        assert estimate["provisional"] is True
+        assert estimate["topology_version_id"] == "topo-1"
+        assert estimate["mapping_version_id"] == "map-1"
+        assert estimate["model_version_id"] == "mdl-lamp-a-1"
+
+    def test_absent_measurements_stay_none(self) -> None:
+        estimate = util.coerce_v3_estimate(
+            _v3_estimate(bounds={}, versions={}, model_version_id=None)
+        )
+        assert estimate is not None
+        assert estimate["lower_w"] is None
+        assert estimate["upper_w"] is None
+        assert estimate["topology_version_id"] is None
+        assert estimate["mapping_version_id"] is None
+        assert estimate["model_version_id"] is None
+
+    def test_bad_enum_values_degrade_honestly(self) -> None:
+        estimate = util.coerce_v3_estimate(
+            _v3_estimate(status="made_up", identifiability="also_made_up")
+        )
+        assert estimate is not None
+        assert estimate["estimate_status"] == "unknown"
+        assert estimate["identifiability"] == "insufficient_evidence"
+        assert estimate["power_w"] is None
+
+    def test_sensor_layer_surfaces_attributes(self) -> None:
+        estimate = util.coerce_v3_estimate(
+            _v3_estimate(status="unknown", identifiability="non_identifiable", group_id="group-1")
+        )
+        values = entity_values.device_values(
+            estimate, engine_available=True, now=NOW, stale_after=120
+        )
+        assert values["estimate_status"] == "unknown"
+        assert values["identifiability"] == "non_identifiable"
+        assert values["lower_w"] == 0.0
+        assert values["upper_w"] == 100.0
+        assert values["group_id"] == "group-1"
+
+
+class TestV3GroupSensors:
+    """One group power sensor per stable group_id; members stay unknown."""
+
+    def test_250w_scenario_member_unknown_group_reads_250(self) -> None:
+        member = util.coerce_v3_estimate(
+            _v3_estimate(
+                point_w=None,
+                status="unknown",
+                identifiability="non_identifiable",
+                group_id="group-1",
+                bounds={"lower_w": 0.0, "upper_w": 250.0, "basis": "non_negativity"},
+            )
+        )
+        assert member is not None
+        assert member["power_w"] is None
+        assert member["lower_w"] == 0.0
+        assert member["upper_w"] == 250.0
+        assert member["identifiability"] == "non_identifiable"
+
+        group = util.coerce_v3_group(_v3_group(point_w=250.0))
+        assert group is not None
+        assert group["point_w"] == 250.0
+        assert group["group_id"] == "group-1"
+        assert group["identifiability"] == "group_identifiable"
+
+        snapshot = util.coerce_v3_snapshot(
+            _v3_snapshot(device_estimates=[member["raw_estimate"]], group_estimates=[group["raw_group"]])
+        )
+        assert snapshot["groups"]["group-1"]["point_w"] == 250.0
+        assert snapshot["results_by_id"]["lamp-a"]["power_w"] is None
+
+    def test_group_retention_keeps_disappeared_group_entity(self) -> None:
+        from datetime import timedelta
+
+        assert util.group_still_retained(
+            NOW - timedelta(days=3),
+            now=NOW,
+            retain_after_s=const.GROUP_RETAIN_AFTER_DISAPPEAR_S,
+        ) is True
+        assert util.group_still_retained(
+            NOW - timedelta(days=8),
+            now=NOW,
+            retain_after_s=const.GROUP_RETAIN_AFTER_DISAPPEAR_S,
+        ) is False
+        assert util.group_still_retained(None, now=NOW, retain_after_s=999) is False
+
+    def test_group_unique_id_namespace(self) -> None:
+        """A group sensor never reuses a per-device unique id."""
+        group_uid = "entry123_group_group-1_power"
+        device_uid = "entry123_lamp-a_power"
+        assert group_uid != device_uid
+        assert group_uid.startswith("entry123_group_")
+
+
+class TestV3EnumOptions:
+    """Enum options cover every engine state — no invalid-state log errors."""
+
+    def test_estimate_status_options_cover_contract(self) -> None:
+        from wattmosaic_engine.contracts import EstimateStatus
+
+        options = set(entity_defs.DEVICE_SENSORS["estimate_status"]["options"])
+        assert options == {s.value for s in EstimateStatus}
+
+    def test_identifiability_options_cover_contract(self) -> None:
+        from wattmosaic_engine.contracts import IdentifiabilityStatus
+
+        options = set(entity_defs.DEVICE_SENSORS["identifiability"]["options"])
+        assert options == {s.value for s in IdentifiabilityStatus}
+
+    def test_coerced_values_are_all_valid_options(self) -> None:
+        for raw in util.coerce_v3_snapshot(
+            _v3_snapshot(
+                device_estimates=[
+                    _v3_estimate(status="measured", identifiability="identifiable"),
+                    _v3_estimate(subject_id="b", status="estimated", identifiability="non_identifiable"),
+                    _v3_estimate(subject_id="c", status="allocated", identifiability="group_identifiable"),
+                ]
+            )
+        )["results"]:
+            assert raw["estimate_status"] in entity_defs.DEVICE_SENSORS["estimate_status"]["options"]
+            assert raw["identifiability"] in entity_defs.DEVICE_SENSORS["identifiability"]["options"]
+
+
+class TestV3EnergyNoneNeverResets:
+    """A None power never resets total_increasing (ADR-0020)."""
+
+    def test_none_power_keeps_held_total(self) -> None:
+        assert util.published_energy(None, 2.041) == 2.041
+        assert util.integrate_energy(2.041, None, 60.0, max_gap_s=120) == 2.041
+
+    def test_v3_estimate_has_no_energy_of_its_own(self) -> None:
+        # v3 device estimates carry power only; the engine owns energy.  The
+        # coerced value is None so the held-total logic is never reset by a
+        # missing energy reading.
+        estimate = util.coerce_v3_estimate(_v3_estimate())
+        assert estimate is not None
+        assert estimate["energy_kwh"] is None
+
+
+class TestAt17HASide:
+    """AT-17 HA half: a missing/silent reader yields an unknown state, not 0 W."""
+
+    def test_silent_source_reader_yields_unknown(self) -> None:
+        estimate = util.coerce_v3_estimate(
+            _v3_estimate(status="measured", identifiability="identifiable", method="direct_reading")
+        )
+        assert estimate is not None
+        assert estimate["power_w"] == 60.0
+        assert util.estimate_state_from_sources(
+            estimate, stale_sources=["Circuit A"]
+        ) == "unknown"
+
+    def test_healthy_source_reader_stays_known(self) -> None:
+        estimate = util.coerce_v3_estimate(_v3_estimate())
+        assert estimate is not None
+        assert util.estimate_state_from_sources(estimate, stale_sources=[]) == "known"
+
+    def test_null_power_is_unknown_even_without_stale_sources(self) -> None:
+        estimate = util.coerce_v3_estimate(
+            _v3_estimate(point_w=None, status="unknown", identifiability="non_identifiable")
+        )
+        assert estimate is not None
+        assert util.estimate_state_from_sources(estimate) == "unknown"

@@ -62,6 +62,10 @@ CONF_DEVICE_LINKS = "device_links"
 #: learned from observed co-movement (ADR-0024).  Stored as an option so the
 #: decision is the user's, survives restarts, and can be revoked.
 CONF_AUTO_PLACEMENT = "auto_placement"
+#: H2/H1: v3 endpoint-choice plan derived from legacy ``ct_assignments``.  The
+#: config-entry migration writes it once; setup replays it as user edges/scopes
+#: so stored declarations become user edges on the next replay (DEC-13).
+CONF_V3_ENDPOINT_SETUP = "v3_endpoint_setup"
 
 # --------------------------------------------------------------------------- #
 # Defaults
@@ -204,7 +208,26 @@ DEVICE_SENSOR_KEYS: tuple[str, ...] = (
     "operating_stage",
     "last_inference",
     "data_quality",
+    "estimate_status",
+    "identifiability",
 )
+
+#: Contract-3.0 enum option lists (HB §8.4/§8.5).  Kept as plain string tuples
+#: so the pure modules stay importable without ``homeassistant``.  Every option
+#: is listed: HA logs an invalid-state error when an entity publishes a value
+#: outside its declared options.
+ESTIMATE_STATUSES: tuple[str, ...] = ("measured", "estimated", "allocated", "unknown")
+IDENTIFIABILITY_STATUSES: tuple[str, ...] = (
+    "identifiable",
+    "partially_identifiable",
+    "group_identifiable",
+    "non_identifiable",
+    "insufficient_evidence",
+)
+
+#: A group that stops being published stays visible but unavailable for this
+#: long, so a transient gap cannot delete its entity/statistics (H1 step 4).
+GROUP_RETAIN_AFTER_DISAPPEAR_S: int = 7 * 24 * 3600
 
 DEVICE_BINARY_KEYS: tuple[str, ...] = ("running",)
 

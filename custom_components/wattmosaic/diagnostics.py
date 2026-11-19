@@ -87,6 +87,23 @@ async def async_get_config_entry_diagnostics(
         "snapshot_age_stale": coordinator.summary_stale(),
         "device_count": len(coordinator.data.results) if coordinator.data else 0,
         "last_error": coordinator.data.last_error if coordinator.data else None,
+        # Contract-3.0 group estimates (H1): stable group ids, their identified
+        # sums and justification, for a support download.  Redacted of tokens.
+        "groups": {
+            group_id: {
+                "point_w": group.get("point_w"),
+                "lower_w": group.get("lower_w"),
+                "upper_w": group.get("upper_w"),
+                "identifiability": group.get("identifiability"),
+                "member_ids": group.get("member_ids", []),
+                "topology_version_id": group.get("topology_version_id"),
+                "mapping_version_id": group.get("mapping_version_id"),
+            }
+            for group_id, group in (
+                (coordinator.data.groups if coordinator.data else {}) or {}
+            ).items()
+        },
+        "v3_versions": (snapshot or {}).get("v3_versions") or {},
         # Audit trail of the topology replay: "pushed v5 at 12:03, engine now
         # v5" is answerable from a diagnostics download alone.
         **coordinator.topology_push_diagnostics,

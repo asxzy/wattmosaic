@@ -331,8 +331,26 @@ class EngineClient:
         return await self._request("GET", "/status")
 
     async def snapshot(self) -> dict[str, Any]:
-        """``GET /snapshot`` -> ``SnapshotResponse``."""
+        """``GET /snapshot`` -> legacy ``SnapshotResponse``."""
         return await self._request("GET", "/snapshot")
+
+    async def snapshot_v3(self) -> dict[str, Any]:
+        """``GET /snapshot?v=3`` -> v3 ``InferenceSnapshot`` (D4).
+
+        The engine serves both shapes on the same path for the duration of the
+        integration branch; the coordinator feature-detects by payload shape so
+        a legacy engine (which ignores the query param) keeps working until Z1.
+        """
+        return await self._request("GET", "/snapshot", params={"v": "3"})
+
+    async def groups(self) -> Any:
+        """``GET /groups`` -> v3 ``DeviceGroupEstimate[]``.
+
+        Groups are carried inside the v3 snapshot; this endpoint exists for
+        diagnostics and for a coordinator that wants to refresh groups on their
+        own.  Absence is tolerated (a legacy engine has no such route).
+        """
+        return await self._request("GET", "/groups", expect=(dict, list))
 
     async def devices(self) -> Any:
         """``GET /devices`` -> device list (plain list or ``{"devices": [...]}``)."""

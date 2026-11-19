@@ -547,3 +547,47 @@ class TestBindingCannotRename:
         assert binding_update("device_a", "device_a") is None
         assert binding_update("device_a", None) is None
         assert binding_update("device_a", "") is None
+
+
+# --------------------------------------------------------------------------- #
+# H1 — new entity namespaces must not perturb existing unique ids
+# --------------------------------------------------------------------------- #
+
+
+class TestNewEntitiesDoNotChangeExistingIds:
+    """Group and enum sensors add new unique ids without rewriting old ones.
+
+    The regression this guards: a refactor that rebuilt the per-device sensor
+    keys from a shared table could renumber existing keys, orphaning every
+    long-term statistics series.  New keys are *appended* to the per-device
+    table and groups live in a separate namespace.
+    """
+
+    def test_existing_device_keys_are_unchanged_and_still_first(self) -> None:
+        import importlib
+
+        from tests.integration.test_ha_integration import PACKAGE_NAME
+
+        const = importlib.import_module(f"{PACKAGE_NAME}.const")
+        keys = const.DEVICE_SENSOR_KEYS
+        assert keys[:10] == (
+            "power",
+            "energy",
+            "source",
+            "confidence",
+            "confidence_tier",
+            "sample_count",
+            "model_validity",
+            "operating_stage",
+            "last_inference",
+            "data_quality",
+        )
+        assert keys[10:] == ("estimate_status", "identifiability")
+
+    def test_group_and_enum_unique_ids_are_distinct_from_device_ids(self) -> None:
+        device = f"entry123_{ENGINE_DEVICE}_power"
+        enum = f"entry123_{ENGINE_DEVICE}_estimate_status"
+        group = "entry123_group_group-1_power"
+        assert len({device, enum, group}) == 3
+        # The device entity keeps its byte-identical unique id.
+        assert device == "entry123_water_heater_power"

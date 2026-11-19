@@ -310,3 +310,45 @@ def test_api_client_redacts_token() -> None:
     assert "redact" in text.lower() or "***" in text, "api_client must redact tokens in errors"
     assert "X-API-Token" in text
     assert "X-WattMosaic-Contract-Version" in text
+
+
+# --------------------------------------------------------------------------- #
+# H1 — contract-3.0 surface static checks
+# --------------------------------------------------------------------------- #
+
+
+def test_v3_enum_sensors_are_declared_on_the_provenance_device() -> None:
+    """estimate_status/identifiability exist with every engine option (DEC-25)."""
+    definitions = (PKG / "entity_defs.py").read_text()
+    assert '"estimate_status"' in definitions
+    assert '"identifiability"' in definitions
+    # They are diagnostic sensors on the synthetic device, never in BINDABLE_KEYS.
+    values = (PKG / "entity_values.py").read_text()
+    bindable = values.split("BINDABLE_KEYS:")[1].split("=", 1)[1].split("\n", 1)[0]
+    assert "estimate_status" not in bindable
+    assert "identifiability" not in bindable
+
+
+def test_group_sensor_unique_id_namespace() -> None:
+    """A group power sensor uses `{entry_id}_group_{group_id}_power` (H1 step 4)."""
+    source = (PKG / "sensor.py").read_text()
+    assert 'f"{entry.entry_id}_group_{group_id}_power"' in source
+    assert "class WattMosaicGroupSensor" in source
+
+
+def test_v3_snapshot_route_is_requested_by_the_client() -> None:
+    """The coordinator fetches the v3 snapshot, with a legacy fallback."""
+    api_text = (PKG / "api_client.py").read_text()
+    assert 'async def snapshot_v3' in api_text
+    assert '"/snapshot"' in api_text and '"v": "3"' in api_text
+    coord = (PKG / "coordinator.py").read_text()
+    assert "snapshot_v3()" in coord
+    assert "is_v3_snapshot" in coord
+
+
+def test_no_actuation_in_v3_group_or_migration_code() -> None:
+    """Adding group sensors and migrations never introduces device actuation."""
+    for name in ("sensor.py", "__init__.py"):
+        text = (PKG / name).read_text()
+        for pattern in FORBIDDEN_ACTUATION_PATTERNS:
+            assert not re.search(pattern, text), f"{name}: {pattern}"

@@ -69,7 +69,21 @@ def device_values(
         "operating_stage": result.get("operating_stage"),
         "last_inference": result.get("timestamp"),
         "data_quality": quality,
-        "running": device_is_running(result.get("power_w"), result.get("source")),
+        "running": device_is_running(
+            result.get("power_w"), result.get("source"), result.get("estimate_status")
+        ),
+        # Contract 3.0 (H1): the status/identifiability axes and justified
+        # bounds reach HA as attributes.  A non-identifiable member keeps
+        # ``power=None`` with [lower_w, upper_w], never a fabricated number.
+        "estimate_status": result.get("estimate_status"),
+        "identifiability": result.get("identifiability"),
+        "lower_w": result.get("lower_w"),
+        "upper_w": result.get("upper_w"),
+        "group_id": result.get("group_id"),
+        "provisional": result.get("provisional"),
+        "topology_version_id": result.get("topology_version_id"),
+        "mapping_version_id": result.get("mapping_version_id"),
+        "model_version_id": result.get("model_version_id"),
     }
 
 

@@ -133,3 +133,38 @@ def test_last_value_never_lost(value: float) -> None:
         )
         is True
     )
+
+
+# --------------------------------------------------------------------------- #
+# H1 — a null estimate never resets total_increasing (ADR-0020)
+# --------------------------------------------------------------------------- #
+
+
+class TestNullPowerDoesNotResetEnergy:
+    def test_none_power_keeps_the_held_total(self) -> None:
+        assert util.published_energy(None, 2.041) == 2.041
+        assert util.integrate_energy(2.041, None, 60.0, max_gap_s=120) == 2.041
+
+    def test_a_missing_estimate_carries_no_energy(self) -> None:
+        import importlib
+
+        ev = importlib.import_module(f"{PACKAGE_NAME}.entity_values")
+        result = {
+            "device_id": "x",
+            "timestamp": "2026-11-05T12:00:00Z",
+            "power_w": None,
+            "energy_kwh": None,
+            "status": "unknown",
+            "estimate_status": "unknown",
+            "identifiability": "non_identifiable",
+            "quality_status": "good",
+        }
+        coerced = ev.device_values(
+            result,
+            engine_available=True,
+            now=__import__("datetime").datetime(2026, 11, 5, 12, 0, tzinfo=__import__("datetime").UTC),
+            stale_after=120,
+        )
+        assert coerced["power"] is None
+        assert coerced["energy"] is None
+        assert coerced["estimate_status"] == "unknown"

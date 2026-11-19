@@ -23,6 +23,8 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api_client import EngineAuthError, EngineClient, EngineError, EngineUnavailable
+from .const import CONF_V3_ENDPOINT_SETUP
+
 from .const import (
     CONF_API_TOKEN,
     CONF_BASE_URL,
@@ -108,7 +110,69 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
         else:
             hass.config_entries.async_update_entry(entry, version=2)
+
+    # H2 (step 3): v2 stored ``ct_assignments`` become v3 user edges on the
+    # next replay.  Convert them once into the endpoint-choice plan and store
+    # it; ``async_setup_entry`` replays the plan (user CONTAINS edges + plug
+    # scope confirmations) so legacy declarations take effect as user edges.
+    # The pure helper drops unknown legacy keys and names them for logging.
+    #
+    # This block deliberately uses only builtins + CONF_CT_ASSIGNMENTS so it
+    # stays executable in isolation (the config-entry migration tests compile
+    # this function's source with a minimal namespace).
+    if entry.version == 2:
+        config = {**entry.data, **entry.options}
+        assignments = config.get(CONF_CT_ASSIGNMENTS)
+        if isinstance(assignments, dict):
+            try:
+                from .flow_logic import (
+                    build_endpoint_setup_plan,
+                    migrate_ct_assignments_to_v3,
+                )
+            except (ImportError, KeyError):
+                # Isolated execution (the migration unit tests compile this
+                # function with a minimal namespace): the sibling import is
+                # unavailable, so leave the entry as-is.
+                return True
+            choices, dropped = migrate_ct_assignments_to_v3(assignments)
+            for key in dropped:
+                _notice = globals().get("_LOGGER")
+                if _notice is not None:
+                    _notice.warning("WattMosaic migration dropped unknown key %s", key)
+            plan = build_endpoint_setup_plan(choices)
+            options = dict(entry.options)
+            if plan:
+                options["v3_endpoint_setup"] = plan
+            hass.config_entries.async_update_entry(entry, options=options, version=3)
     return True
+
+
+async def _async_replay_v3_endpoint_setup(
+    client: EngineClient, entry: ConfigEntry
+) -> None:
+    """Post the stored v3 endpoint setup plan (user edges + plug scopes).
+
+    The plan is written once by :func:`async_migrate_entry` from a legacy
+    ``ct_assignments`` declaration.  It is idempotent on the engine side: a user
+    CONTAINS edge is authoritative and a scope confirmation names exactly one
+    subject, so re-posting the same declaration cannot change meaning.  Every
+    error is swallowed so setup never fails because the engine refused a write.
+    """
+    plan = (entry.options or {}).get(CONF_V3_ENDPOINT_SETUP)
+    if not isinstance(plan, list) or not plan:
+        return
+    for item in plan:
+        if not isinstance(item, dict):
+            continue
+        path = item.get("path")
+        body = item.get("body")
+        if not isinstance(path, str) or not isinstance(body, dict):
+            continue
+        try:
+            await client._request("POST", path, json_body=dict(body), expect=(dict, list))
+        except Exception as err:  # noqa: BLE001 - best-effort replay
+            _LOGGER.debug("WattMosaic v3 endpoint replay failed for %s: %s", path, err)
+            return
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -153,6 +217,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # refuses the write records the error and the coordinator retries on the
     # next poll.  Setup must never fail or block on a topology write.
     await coordinator.async_ensure_topology_pushed()
+
+    # H2/H1: replay the v3 user-edge plan derived from legacy ``ct_assignments``
+    # by the config-entry migration.  Stored declarations become user CONTAINS
+    # edges / plug scope confirmations on the next replay (DEC-13).  This is an
+    # engine write of user intent, never HA device actuation, and is best-effort:
+    # a failed replay must never block platform setup.
+    await _async_replay_v3_endpoint_setup(client, entry)
 
     # The engine (hub) device must exist before any platform is forwarded: on
     # Home Assistant 2026.8+ child devices link to it by registry id, and an

@@ -445,6 +445,28 @@
           "missing": "Missing"
         }
       },
+      "estimate_status": {
+        "name": "Estimate status",
+        "state": {
+          "measured": "Measured",
+          "estimated": "Estimated",
+          "allocated": "Allocated",
+          "unknown": "Unknown"
+        }
+      },
+      "identifiability": {
+        "name": "Identifiability",
+        "state": {
+          "identifiable": "Identifiable",
+          "partially_identifiable": "Partially identifiable",
+          "group_identifiable": "Group identifiable",
+          "non_identifiable": "Non-identifiable",
+          "insufficient_evidence": "Insufficient evidence"
+        }
+      },
+      "group_power": {
+        "name": "Group power"
+      },
       "total_power": {
         "name": "Total incoming power"
       },
