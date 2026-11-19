@@ -97,3 +97,4 @@
 | V2 | 6 | NOT_STARTED | | | |
 | L8 | 6 | NOT_STARTED | | | optional |
 | S00 | ? | VERIFIED | | | seam added by orchestrator: migration numbering, fresh-DB backup |
+| ZF | ? | VERIFIED | | | quality from ReaderStateStore, v022 nullable confidence; ratio fixed to |balance_error|/main |
