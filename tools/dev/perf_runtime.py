@@ -50,9 +50,10 @@ directory and removed on exit.
 
 Measurement assumptions (recorded for the deployment report)
 ------------------------------------------------------------
-* The P2 ring and P3 σ warm-up are bounded to a small steady-state window so
-  the O(ring) cadence probe does not swamp the per-sample fast-path cost; the
-  load primes them before timing.  No stage is skipped or replaced.
+* The benchmark runs the real P2 store and P3 detector at production defaults:
+  no shortened ring and no shortened σ warm-up.  Cadence is maintained
+  incrementally in P2 (O(1) amortized per sample), so the full ring stays on the
+  fast path without a periodic full re-sort.  No stage is skipped or replaced.
 * P3's synchronous P4/P5 handoff callback is timed separately and excluded from
   the fast-path figure (it is measured as ready->published latency instead).
 * Background jobs are submitted to the runtime's single background executor, as
@@ -282,24 +283,11 @@ def run_benchmark(
     core = E["EngineCore"](config, db, clock=clock)
     core._wire_v3_services()
 
-    # Benchmark configuration of the real P2 store / P3 detector (assumption).
-    # A real install retains ~6 h of samples and warms σ over 64 samples; the
-    # detector's cadence probe is O(ring) on every sample, so a full production
-    # ring would dominate the O(1) per-sample cost with bookkeeping rather than
-    # measurement.  We bound the ring and warm-up to a small steady-state window
-    # (the injected-clock workload primes it before timing).  No stage is skipped
-    # or replaced: normalize, store, detection and the candidate ring all run.
-    from wattmosaic_engine.realtime.reader_state import ReaderStateStore  # noqa: PLC0415
-    core.reader_state = ReaderStateStore(
-        stale_after_s=config.stale_after_s,
-        missing_after_s=max(config.stale_after_s * 5.0, 600.0),
-        clock=clock,
-        ring_min_samples=8,
-    )
-    from wattmosaic_engine.realtime.detection import DetectorConfig  # noqa: PLC0415
-    core.change_detector.config = DetectorConfig(sigma_warmup_samples=6)
-    core.change_detector.store = core.reader_state
-    core.window_collector.store = core.reader_state
+    # Production defaults for the real P2 store / P3 detector: no overrides.
+    # Cadence is now maintained incrementally (O(1) amortized per sample), so a
+    # full production ring no longer dominates the fast-path cost.  No stage is
+    # skipped or replaced: normalize, store, detection and the candidate ring all
+    # run with the same configuration a real install uses.
 
     # -- production HA source: the real P1 ingestion entry ------------------- #
     source = E["HASource"](
@@ -418,7 +406,12 @@ def run_benchmark(
         """
         from wattmosaic_engine.contracts import MeasurementType, ReaderMeasurement
 
-        warm = 8
+        # Cover the detector's *production* warm-up window (default 64), plus a
+        # small margin.  With the old shortened warm-up (6) a handful of samples
+        # was enough; at the production default the runtime needs the full
+        # history before it will open SUSPECT on a genuine step, so the timed
+        # load actually forms groups and exercises the event loop.
+        warm = core.change_detector.config.sigma_warmup_samples + 6
         for i in range(warm):
             at = origin - timedelta(seconds=warm - i)
             for rid in load["readers"]:
@@ -546,6 +539,7 @@ def run_benchmark(
 
     try:
         asyncio.run(drive())
+        runtime_metrics = core.runtime_metrics()
         db_end = db_path.stat().st_size if db_path.exists() else 0
     finally:
         core.inference_executor.shutdown(wait=False)
@@ -571,6 +565,8 @@ def run_benchmark(
             "seed": seed,
             "samples": len(fast_us),
             "event_cycles": published_count,
+            "groups_superseded": runtime_metrics.get("groups_superseded", 0),
+            "groups_dropped": runtime_metrics.get("groups_dropped", 0),
             "matrix_cells_seeded": cells_written,
         },
         "fast_path_us_per_sample": {

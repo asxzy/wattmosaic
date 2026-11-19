@@ -350,6 +350,9 @@ class RuntimeMixin:
         self.loop_lag_s: dict[str, float] = {"fast": 0.0, "event": 0.0, "background": 0.0}
         self.stage_latency_s: dict[str, float] = {}
         self.groups_dropped = 0
+        #: Revisions superseded by a newer revision of the same group before
+        #: inference (event-loop coalescing).  Observable, never guessed.
+        self.groups_superseded = 0
         self.infer_group_calls = 0
         self.infer_steady_calls = 0
         self.heartbeats = 0
@@ -664,11 +667,51 @@ class RuntimeMixin:
         fold on the background executor.  Keeping the fold off the event loop is
         what preserves the O(1) fast path while still folding each group's reader
         deltas into the durable per-pair evidence ledger.
+
+        When several revisions of the same group are queued, the event loop
+        coalesces them at drain time and infers only the newest (see
+        :meth:`_coalesce_ready_groups`).  Superseded revisions are counted in
+        ``groups_superseded``; the newest revision of any group is never dropped.
         """
         if not self.groups_ready.put_nowait(group):
             self.groups_dropped += 1
             log.warning("event group queue full; dropped the oldest group")
         self._schedule_topology_ledger(group)
+
+    def _coalesce_ready_groups(self, seed: EventGroup | None = None) -> list[EventGroup]:
+        """Drain the ready queue, returning one group per id: the newest revision.
+
+        P5 re-delivers a group each time a co-temporal reader joins it, so a
+        growing group can queue many revisions of the same ``group_id``.  Inferring
+        every one is wasted work: only the newest revision covers every sub-event,
+        and it is the one whose result is finally published.  This keeps the
+        newest revision of *every* group (never drops a group entirely), preserves
+        first-seen ordering between distinct groups, and counts the superseded
+        revisions.  Ordering within a group is by revision, so the retained value
+        is always the greatest revision seen.
+        """
+        queued = self.groups_ready.drain()
+        newest: dict[str, EventGroup] = {}
+        order: list[str] = []
+        if seed is not None:
+            newest[seed.group_id] = seed
+            order.append(seed.group_id)
+        for group in queued:
+            if group is None:  # the shutdown sentinel
+                continue
+            group_id = group.group_id
+            prior = newest.get(group_id)
+            if prior is None:
+                newest[group_id] = group
+                order.append(group_id)
+            elif group.revision >= prior.revision:
+                # Newer (or equal, later-arriving) revision supersedes the old.
+                newest[group_id] = group
+                self.groups_superseded += 1
+            else:
+                # An older revision queued after a newer one is itself dropped.
+                self.groups_superseded += 1
+        return [newest[group_id] for group_id in order]
 
     def _record_association_from_step(self, event: MeasurementEvent) -> None:
         """Feed the T7 relocation detector from P3 reader-step events (a feed only).
@@ -1029,24 +1072,38 @@ class RuntimeMixin:
         )
 
     async def _event_loop(self) -> None:
-        """Drain ready groups: infer → persist → matrix → snapshot → learning."""
+        """Drain ready groups: infer → persist → matrix → snapshot → learning.
+
+        Ready groups are coalesced per cycle: when several revisions of one
+        group are queued, only the newest is inferred (the rest are counted as
+        superseded).  Inference and publish stay on the single-worker inference
+        executor (off the asyncio loop) exactly as before.  Batching the ready
+        set per cycle also lets the loop avoid one executor round-trip per
+        superseded revision, which is what keeps ready→published latency bounded
+        at high event rates.
+        """
         while not self._stopping:
-            group = await self.groups_ready.get()
-            if group is None:
+            first = await self.groups_ready.get()
+            if first is None:
                 return
-            started = time.monotonic()
-            try:
-                bundle = await asyncio.to_thread(self._build_input_bundle, group)
-                if bundle is None:
-                    continue
-                result = await asyncio.to_thread(self._run_infer_group, bundle)
-                await asyncio.to_thread(
-                    self._publish_group_result, bundle["group"], result, bundle
-                )
-            except Exception:  # noqa: BLE001 - one bad group must not kill the loop
-                log.exception("event-loop inference failed for group %s", group.group_id)
-            finally:
-                self._record_latency("event", (time.monotonic() - started) * 1000.0)
+            # ``first`` was already dequeued; fold it into the coalescing pass
+            # with the rest so the freshest revision per group wins (including
+            # the case where a newer revision was queued straight behind it).
+            batch = self._coalesce_ready_groups(seed=first)
+            for group in batch:
+                started = time.monotonic()
+                try:
+                    bundle = await asyncio.to_thread(self._build_input_bundle, group)
+                    if bundle is None:
+                        continue
+                    result = await asyncio.to_thread(self._run_infer_group, bundle)
+                    await asyncio.to_thread(
+                        self._publish_group_result, bundle["group"], result, bundle
+                    )
+                except Exception:  # noqa: BLE001 - one bad group must not kill the loop
+                    log.exception("event-loop inference failed for group %s", group.group_id)
+                finally:
+                    self._record_latency("event", (time.monotonic() - started) * 1000.0)
 
     def _publish_group_result(
         self,
@@ -1927,6 +1984,7 @@ class RuntimeMixin:
             "event_queue": self.groups_ready.stats(),
             "persist_queue": self.persist_queue.stats(),
             "groups_dropped": self.groups_dropped,
+            "groups_superseded": self.groups_superseded,
             "infer_group_calls": self.infer_group_calls,
             "infer_steady_calls": self.infer_steady_calls,
             "heartbeats": self.heartbeats,
