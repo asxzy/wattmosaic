@@ -21,7 +21,7 @@ Null policy (HB §18): an absent reading, delta, sigma or residual stays
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from types import MappingProxyType
 from typing import Any
 
@@ -167,8 +167,24 @@ def _row_index(operator: ObservationOperator, reader_id: str) -> int | None:
     return None
 
 
-def _direct_subjects(operator: ObservationOperator) -> dict[str, tuple[str, int]]:
-    """Single-subject DIRECT endpoints: ``subject_id -> (reader_id, row)``."""
+def _direct_subjects(
+    operator: ObservationOperator,
+    declared_single_subject: Collection[tuple[str, str]] = (),
+) -> dict[str, tuple[str, int]]:
+    """MEASURED candidates: ``subject_id -> (reader_id, row)``.
+
+    HB §8.5 / DEC-05: a one-subject DIRECT *row* is not enough.  An endpoint
+    must have a **declared, confirmed SINGLE_SUBJECT scope naming that subject**
+    (its current EndpointConfigRevision, not rejected) for its reading to be
+    MEASURED.  A branch CT that happens to have one mapped subject — with
+    unknown loads — is never silently promoted.  ``declared_single_subject`` is
+    the set of ``(reader_id, subject_id)`` pairs the runtime resolved from S13
+    endpoints; it is injected so this module stays pure (no storage import).
+    """
+    declared = {
+        (str(reader_id), str(subject_id))
+        for reader_id, subject_id in declared_single_subject
+    }
     result: dict[str, tuple[str, int]] = {}
     H = np.asarray(operator.H, dtype=float)
     for (row, column), entry in operator.entries.items():
@@ -179,7 +195,11 @@ def _direct_subjects(operator: ObservationOperator) -> dict[str, tuple[str, int]
         support = np.flatnonzero(np.abs(H[row]) > _NONZERO_TOL) if H.ndim == 2 else np.zeros(0, int)
         if support.size != 1:
             continue
-        result.setdefault(operator.subjects[column][1], (operator.rows[row].reader_id, row))
+        reader_id = operator.rows[row].reader_id
+        subject_id = operator.subjects[column][1]
+        if (reader_id, subject_id) not in declared:
+            continue
+        result.setdefault(subject_id, (reader_id, row))
     return result
 
 
@@ -300,6 +320,7 @@ def infer_group(
     clock: Clock,
     *,
     ha_subjects: Mapping[str, Sequence[tuple[str, str]]] | None = None,
+    declared_single_subject: Collection[tuple[str, str]] = (),
 ) -> JointInferenceResult:
     """Compose I1→I2→I3→I4→I5→I6 for one event group (pure).
 
@@ -310,6 +331,12 @@ def infer_group(
     to the subjects its entity is linked to at the event instant (DEC-08).  P6
     resolves it from ``ha_entity_links``; it is a pure value, so the call stays
     deterministic.  Omitted, I1 parses subjects from the references themselves.
+
+    ``declared_single_subject`` (optional, keyword-only) is the collection of
+    ``(reader_id, subject_id)`` pairs whose endpoints declare a confirmed
+    SINGLE_SUBJECT scope naming that subject (DEC-05).  Without it, no reading
+    is treated as a DIRECT one — a one-subject circuit CT is ESTIMATED or a
+    group/unknown, never MEASURED (HB §8.5).
     """
     at = clock()
 
@@ -414,7 +441,7 @@ def infer_group(
         )
         if value is not None
     }
-    direct = _group_direct_readings(group, operator)
+    direct = _group_direct_readings(group, operator, declared_single_subject)
     devices, group_estimates = assemble_status_estimates(
         EstimateInputs(
             report=report,
@@ -465,16 +492,19 @@ def infer_group(
 
 
 def _group_direct_readings(
-    group: EventGroup, operator: ObservationOperator
+    group: EventGroup,
+    operator: ObservationOperator,
+    declared_single_subject: Collection[tuple[str, str]] = (),
 ) -> dict[str, DirectReading]:
-    """Fresh single-subject endpoint values from a group's reader deltas.
+    """Fresh *declared* single-subject endpoint values from a group's deltas.
 
     A confirmed DIRECT endpoint is its subject's measurement; when the event
     is a level report (e.g. HB §17 step 8's 3 W plug standby) the delta carries
-    that level and the device is MEASURED rather than inferred.
+    that level and the device is MEASURED rather than inferred.  A one-subject
+    circuit CT has no declared scope and is never a DIRECT reading (DEC-05).
     """
     direct: dict[str, DirectReading] = {}
-    for sid, (reader_id, _row) in _direct_subjects(operator).items():
+    for sid, (reader_id, _row) in _direct_subjects(operator, declared_single_subject).items():
         delta = next((rd for rd in group.reader_deltas if rd.reader_id == reader_id), None)
         if delta is None or delta.delta_w is None:
             continue
@@ -597,6 +627,8 @@ def infer_steady(
     established: EstablishedStructure,
     versions: VersionTriple,
     clock: Clock,
+    *,
+    declared_single_subject: Collection[tuple[str, str]] = (),
 ) -> SteadyInferenceResult:
     """Steady-state absolute solve constrained by established structure.
 
@@ -605,6 +637,11 @@ def infer_steady(
     disagrees with an established identity by more than
     :data:`CONFLICT_N_SIGMA` standard deviations is flagged CONFLICTED and its
     id is added to ``unresolved_events`` (DEC-22).
+
+    ``declared_single_subject`` (optional, keyword-only) is the collection of
+    ``(reader_id, subject_id)`` pairs whose endpoints declare a confirmed
+    SINGLE_SUBJECT scope naming that subject (DEC-05).  Without it a
+    one-subject circuit CT is never MEASURED (HB §8.5).
     """
     at = clock()
     levels: dict[str, float | None] = {}
@@ -640,7 +677,7 @@ def infer_steady(
     x_full, cov_full = _align_solution(op_constrained, solved_ids, solution)
     aligned = _partial_solution(solution, x_full, cov_full)
 
-    report = _steady_report(operator, aligned, established)
+    report = _steady_report(operator, aligned, established, declared_single_subject)
     points: dict[str, float | None] = {
         sid: _finite(x_full[_op_column(operator, sid)])
         for sid in report.subject_ids
@@ -654,8 +691,10 @@ def infer_steady(
         if sid in points:
             points[sid] = _finite(level)
 
-    conflicted = _conflicts(operator, readings, levels, sigmas, established)
-    direct = _steady_direct_readings(operator, readings)
+    conflicted = _conflicts(
+        operator, readings, levels, sigmas, established, declared_single_subject
+    )
+    direct = _steady_direct_readings(operator, readings, declared_single_subject)
 
     devices, groups = assemble_status_estimates(
         EstimateInputs(
@@ -805,6 +844,7 @@ def _steady_report(
     operator: ObservationOperator,
     solution: Any,
     established: EstablishedStructure,
+    declared_single_subject: Collection[tuple[str, str]] = (),
 ) -> IdentifiabilityReport:
     """Report whose evidence is the established (CONFIRMED) structure."""
     identities = {
@@ -830,7 +870,9 @@ def _steady_report(
         elif members:
             membership[sid] = _group_id_for(established.groups(), sid)
             subjects[sid] = IdentifiabilityStatus.NON_IDENTIFIABLE
-        elif sid in _direct_subjects(operator):
+        elif sid in _direct_subjects(operator, declared_single_subject):
+            # Only a *declared* single-subject endpoint is an IDENTIFIABLE
+            # direct reading (DEC-05); a lone circuit CT is not.
             subjects[sid] = IdentifiabilityStatus.IDENTIFIABLE
         else:
             subjects[sid] = IdentifiabilityStatus.PARTIALLY_IDENTIFIABLE
@@ -903,9 +945,10 @@ def _conflicts(
     levels: Mapping[str, float | None],
     sigmas: Mapping[str, float | None],
     established: EstablishedStructure,
+    declared_single_subject: Collection[tuple[str, str]] = (),
 ) -> list[str]:
     """Subjects whose current reading disagrees with an identity by > 3σ."""
-    direct = _direct_subjects(operator)
+    direct = _direct_subjects(operator, declared_single_subject)
     conflicts: list[str] = []
     for pair, level in established.identities().items():
         sid = str(pair[1])
@@ -927,10 +970,12 @@ def _conflicts(
 
 
 def _steady_direct_readings(
-    operator: ObservationOperator, readings: Mapping[str, HeldReading]
+    operator: ObservationOperator,
+    readings: Mapping[str, HeldReading],
+    declared_single_subject: Collection[tuple[str, str]] = (),
 ) -> dict[str, DirectReading]:
     direct: dict[str, DirectReading] = {}
-    for sid, (reader_id, _row) in _direct_subjects(operator).items():
+    for sid, (reader_id, _row) in _direct_subjects(operator, declared_single_subject).items():
         held = readings.get(reader_id)
         if held is None or held.value is None or held.state != "held":
             continue

@@ -316,6 +316,8 @@ def test_step8_tv_standby_is_measured_at_three_watts_not_zero() -> None:
     # The plug reports 3 W standby as the reader delta on the single-subject
     # endpoint; that is a DIRECT reading, not an inference.
     group = _group("hb17-tv-standby", ("tv_plug",), 3.0, lights=False)
+    # DEC-05: MEASURED only comes from a declared single-subject endpoint.
+    # The tv_plug is a confirmed single-subject endpoint naming the TV.
     result = infer_group(
         group,
         operator,
@@ -325,6 +327,7 @@ def test_step8_tv_standby_is_measured_at_three_watts_not_zero() -> None:
         InMemoryMatchStore(),
         VT,
         lambda: T0,
+        declared_single_subject={("tv_plug", "tv")},
     )
     tv = next(e for e in result.device_estimates if e.subject_id == "tv")
     assert tv.point_w == 3.0
