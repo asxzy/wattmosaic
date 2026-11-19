@@ -216,8 +216,14 @@ class LearningWorker:
         if isinstance(row, LearningObservation):
             return row
         if isinstance(row, Mapping):
+            # An S18 row also carries its storage-only columns (the raw
+            # ``*_json`` encodings of the decoded fields); the contract forbids
+            # extra keys, so validate the contract's own fields only.
+            fields = LearningObservation.model_fields
             try:
-                return LearningObservation.model_validate(dict(row))
+                return LearningObservation.model_validate(
+                    {key: value for key, value in row.items() if key in fields}
+                )
             except Exception:  # noqa: BLE001
                 return None
         return None

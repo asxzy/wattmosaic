@@ -19,7 +19,6 @@ from .fixed import (
     suggest_model_class,
 )
 from .kernel import KernelModel, fit_kernel_from_windows
-from .learn import learn_power_model
 from .numeric import (
     OFF_STATES_DEFAULT,
     ON_STATES_DEFAULT,
@@ -63,7 +62,6 @@ __all__ = [
     "fit_fixed_spec",
     "fit_kernel_from_windows",
     "finite",
-    "learn_power_model",
     "median",
     "model_class_for_load_shape",
     "predict_component_sum",

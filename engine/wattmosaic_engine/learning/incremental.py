@@ -54,7 +54,15 @@ DEFAULT_WINDOW = 4096
 DEFAULT_BINS = 12
 
 _ON_LEVELS = frozenset({"on", "open", "running", "active", "heating", "cooling", "true", "1"})
-_OFF_LEVELS = frozenset({"off", "closed", "false", "0"})
+#: Transitions whose step lands on the circuit's post-removal baseline.  Their
+#: level (``residual_step_w``, else ``|ΔP|``) is the device's standby draw on a
+#: shared circuit -- the ΔP + residual-baseline chain of ``models.fixed``
+#: (``_derive_standby``, AT-03).  An OFF transition's ΔP is a negative *step*,
+#: never the level the device settles at, so it feeds ``transition_delta["off"]``
+#: only and never a STANDBY level (OFF never means 0 W -- or less, HB §18).
+_RESIDUAL_TRANSITIONS = frozenset(
+    {"residual_baseline", "baseline_step", "residual_step", "standby_baseline"}
+)
 
 
 def _name(value: Any) -> str:
@@ -219,14 +227,23 @@ def _level_for(observation: LearningObservation) -> PowerLevelV3 | None:
     transition = _name(observation.transition).lower()
     if transition in _ON_LEVELS:
         return PowerLevelV3.ACTIVE
-    if transition in _OFF_LEVELS:
-        return PowerLevelV3.STANDBY
     if transition in {"idle"}:
         return PowerLevelV3.IDLE
     if transition in {"transient"}:
         return PowerLevelV3.TRANSIENT
     if transition in {"standby"}:
         return PowerLevelV3.STANDBY
+    return None
+
+
+def _baseline_standby(observation: LearningObservation) -> float | None:
+    """The standby level a residual-baseline step reveals, or ``None``."""
+    step = _attr_float(observation, "residual_step_w")
+    if step is not None:
+        return step
+    if _name(observation.transition).lower() in _RESIDUAL_TRANSITIONS:
+        value = _finite(observation.delta_w)
+        return abs(value) if value is not None else None
     return None
 
 
@@ -254,7 +271,11 @@ def _attr_float(observation: LearningObservation, key: str) -> float | None:
 def _batch_fixed(observations: Iterable[LearningObservation]) -> FixedSpec:
     levels: dict[str, list[float]] = {}
     transitions: dict[str, list[float]] = {}
+    baseline: list[float] = []
     for obs in observations:
+        standby = _baseline_standby(obs)
+        if standby is not None:
+            baseline.append(standby)
         value = _finite(obs.delta_w)
         if value is None:
             continue
@@ -262,6 +283,8 @@ def _batch_fixed(observations: Iterable[LearningObservation]) -> FixedSpec:
         if level is not None:
             levels.setdefault(_name(level), []).append(value)
         transitions.setdefault(_name(obs.transition), []).append(value)
+    if baseline:
+        levels[PowerLevelV3.STANDBY.value] = baseline
     return FixedSpec(
         levels={
             PowerLevelV3(key): _stat(values) for key, values in levels.items()
@@ -429,6 +452,7 @@ class IncrementalAccumulator:
     _counts: dict[str, dict[str, int]] = field(default_factory=dict)
     _control_points: dict[float, RobustStats] = field(default_factory=dict)
     _standby: RobustStats = field(default_factory=RobustStats)
+    _baseline: RobustStats = field(default_factory=RobustStats)
     _kernel: dict[str, dict[str, dict[str, RobustStats]]] = field(default_factory=dict)
     _component_ids: list[str] = field(default_factory=list)
     _previous_state: str | None = None
@@ -443,6 +467,7 @@ class IncrementalAccumulator:
         model_class = _name(self.model_class)
 
         if model_class == ModelClass.FIXED.value:
+            self._baseline.add(_baseline_standby(observation))
             if value is not None:
                 level = _level_for(observation)
                 if level is not None:
@@ -507,8 +532,8 @@ class IncrementalAccumulator:
         merged._counts = _merge_counts(self._counts, other._counts)
         merged._control_points = _merge_stats(self._control_points, other._control_points, self.window)
         merged._component_ids = list(dict.fromkeys([*self._component_ids, *other._component_ids]))
-        for stats, other_stats in ((self._standby, other._standby),):
-            merged._standby = _combine_stats(stats, other_stats, self.window)
+        merged._standby = _combine_stats(self._standby, other._standby, self.window)
+        merged._baseline = _combine_stats(self._baseline, other._baseline, self.window)
         for transition, by_phase in self._kernel.items():
             target = merged._kernel.setdefault(
                 transition,
@@ -558,8 +583,13 @@ class IncrementalAccumulator:
             )
         if model_class == ModelClass.COMPONENT_SUM.value:
             return ComponentSumSpec(component_ids=list(self._component_ids))
+        levels = {PowerLevelV3(key): value.stat() for key, value in self._levels.items()}
+        if self._baseline.count:
+            # A residual-baseline step is the standby level itself; it wins over
+            # a STANDBY-labelled ΔP, as in ``models.fixed._derive_standby``.
+            levels[PowerLevelV3.STANDBY] = self._baseline.stat()
         return FixedSpec(
-            levels={PowerLevelV3(key): value.stat() for key, value in self._levels.items()},
+            levels=levels,
             transition_delta={key: value.stat() for key, value in self._transitions.items()},
         )
 

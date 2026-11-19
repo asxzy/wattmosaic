@@ -8,14 +8,18 @@ Closes: L2.  Two standby paths are pinned against the HB §17 reference house:
   is learned from a device-attributed ΔP chain (OFF transition) plus a
   residual-baseline step (T3) -> ESTIMATED at STANDBY with mean ~7, never 0.
 
-The test injects the learning observations explicitly (the L4/L2 handoff) so
-it exercises the real fitter rather than reading ground truth out of the
-simulator.  No xfail: L2 closes this requirement.
+The test injects the shared device's learning observations explicitly (the
+L4/L2 handoff) so it exercises the real S18 store, L6 worker, L5 incremental
+fitter/promotion gate and registry rather than reading ground truth out of the
+simulator; the TV's level is learned from its plug's observed samples.  Both
+estimates are then published by the generic steady solve (``infer_steady``)
+with levels from the registry's active models (see
+``tests/support/learning_scenario.py``).  No xfail: L2 closes this requirement.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from wattmosaic_engine.contracts import (
@@ -25,7 +29,8 @@ from wattmosaic_engine.contracts import (
     ModelBasis,
     PowerLevelV3,
 )
-from wattmosaic_engine.models import learn_power_model
+
+from tests.support.learning_scenario import learn_standby
 
 CLOSED_BY = "L2"
 
@@ -56,7 +61,7 @@ def _obs(
         status="confirmed",
         identifiability="identifiable",
         basis=basis,
-        created_at=T0,
+        created_at=T0 + timedelta(seconds=seq),
     )
 
 
@@ -70,32 +75,46 @@ def test_plug_standby_measured_and_learned_standby_level(hb17) -> None:
 
     # The TV is anchored by its reported single-subject endpoint level; the
     # shared-circuit device has only a ΔP chain plus a residual-baseline step.
+    # The chain is observed five times: L5 never promotes a model from fewer
+    # than five independent confirmed events (DEC-32).
     observations = [
-        _obs(
-            "shared_circuit_device",
-            0,
-            endpoint="ct_a",
-            transition="on",
-            delta_w=45.0,
-        ),
-        _obs(
-            "shared_circuit_device",
-            1,
-            endpoint="ct_a",
-            transition="off",
-            delta_w=-45.0,
-        ),
-        _obs(
-            "shared_circuit_device",
-            2,
-            endpoint="ct_a",
-            transition="residual_baseline",
-            delta_w=-7.0,
-            attrs={"level": "standby", "residual_step_w": 7.0},
-        ),
+        obs
+        for cycle in range(5)
+        for obs in (
+            _obs(
+                "shared_circuit_device",
+                3 * cycle,
+                endpoint="ct_a",
+                transition="on",
+                delta_w=45.0,
+            ),
+            _obs(
+                "shared_circuit_device",
+                3 * cycle + 1,
+                endpoint="ct_a",
+                transition="off",
+                delta_w=-45.0,
+            ),
+            _obs(
+                "shared_circuit_device",
+                3 * cycle + 2,
+                endpoint="ct_a",
+                transition="residual_baseline",
+                delta_w=-7.0,
+                attrs={"level": "standby", "residual_step_w": 7.0},
+            ),
+        )
     ]
 
-    estimates = learn_power_model(hb17["observation"], observations=observations)
+    # The plug is a declared single-subject endpoint of the TV and its HA
+    # switch is linked to the TV (user declarations, DEC-05/DEC-08).
+    run = learn_standby(
+        hb17["observation"],
+        declared={"ct_plug": "tv"},
+        links={"switch.tv_plug": "tv"},
+        shared=observations,
+    )
+    estimates = run.estimates
     by_id = {e.subject_id: e for e in estimates}
 
     tv = by_id["tv"]
