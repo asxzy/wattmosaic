@@ -197,6 +197,15 @@ class _ReaderSM:
     suppression_level: float | None = None
     suppress_until: datetime | None = None
     post_step_baseline: float | None = None
+    #: Level the current SETTLING step moved away from (its pre-step level).
+    settling_origin: float | None = None
+    settling_sigma: float | None = None
+    # Z10: a reversal (fall back toward the pre-step baseline) detected while
+    # SETTLING after a step.  Held samples at the post-step level are tracked so
+    # the OFF onset can be dated from the *true* fall, not the settling window.
+    reversal_start: datetime | None = None
+    reversal_last_pre: datetime | None = None
+    reversal_count: int = 0
     step_history: deque[tuple[datetime, float, float]] = field(
         default_factory=lambda: deque(maxlen=64)
     )
@@ -348,7 +357,7 @@ class ChangeDetector:
         if sm.state is DetectorState.SUSPECT:
             self._in_suspect(reader, sm, value, sample_at, at, staleness)
         elif sm.state is DetectorState.SETTLING:
-            self._in_settling(reader, sm, value, sample_at)
+            self._in_settling(reader, sm, value, sample_at, at, staleness)
             if sm.state is DetectorState.STABLE:
                 # Settling ended on this sample, so it is the latest stable
                 # sample: a step that follows dates its onset (and takes its
@@ -600,7 +609,13 @@ class ChangeDetector:
             self._abort(reader, sm, at)
 
     def _in_settling(
-        self, reader: str, sm: _ReaderSM, value: float, sample_at: datetime
+        self,
+        reader: str,
+        sm: _ReaderSM,
+        value: float,
+        sample_at: datetime,
+        at: datetime,
+        staleness: float,
     ) -> None:
         baseline = sm.baseline_at_suspect
         if baseline is None:
@@ -609,17 +624,147 @@ class ChangeDetector:
         sigma = sm.sigma_at_suspect
         if sigma is not None:
             sm.last_deviation = value - baseline
+
+        # Z10: a step can reverse while its predecessor is still settling (a
+        # short ON pulse whose OFF lands inside the 120 s window).  Detect the
+        # reversal here, promptly, instead of waiting for SETTLING to expire and
+        # dating the onset from the settling window.  The reference is the held
+        # post-step level; a reversal must move past it by the same noise-aware
+        # enter threshold used to open SUSPECT, toward the pre-step baseline.
+        if self._detect_settling_reversal(reader, sm, value, sample_at, at, staleness):
+            return
+
         last_at = sm.last_level_at or sample_at
         if (sample_at - last_at).total_seconds() >= self.config.settle_s:
-            sm.state = DetectorState.STABLE
-            sm.last_level_at = sample_at
-            self.store.unfreeze_baseline(reader)
-            sm.drift_suppress_until = sample_at + timedelta(
-                seconds=2.0 * self.store.baseline_tau_s
+            self._end_settling(reader, sm, sample_at)
+
+    def _detect_settling_reversal(
+        self,
+        reader: str,
+        sm: _ReaderSM,
+        value: float,
+        sample_at: datetime,
+        at: datetime,
+        staleness: float,
+    ) -> bool:
+        """Emit a prompt OFF step when a settled step reverses mid-window.
+
+        Returns ``True`` when the reversal was confirmed and emitted (the state
+        machine has been re-seeded into SETTLING for the new level), otherwise
+        ``False``.  A reversal is a value beyond ``k * sigma`` from the held
+        post-step level in the direction of the pre-step baseline, confirmed by
+        ``confirm_samples`` consecutive such samples.  The onset is dated from
+        the last ON-level sample to the first fall sample, i.e. the real fall.
+        """
+        post_level = sm.post_step_baseline
+        pre_level = sm.settling_origin
+        sigma = sm.settling_sigma
+        if post_level is None or pre_level is None or sigma is None or pre_level == post_level:
+            return False
+
+        # Use the noise-aware k*sigma threshold only: the store's resolution is
+        # derived from the smallest innovation and is inflated by the step that
+        # produced the post level (a 113 W step makes a 3*resolution floor huge).
+        # sigma is the quiet-period estimate, so k*sigma is the right scale.
+        threshold = max(self.config.enter_z * sigma, self.config.min_delta_w)
+        fall = pre_level < post_level  # the settled step raised the level
+        is_reversal = (
+            (value < post_level - threshold)
+            if fall
+            else (value > post_level + threshold)
+        )
+
+        if not is_reversal:
+            # Track this as a sample still at the post-step level; it becomes
+            # the pre-onset anchor if a reversal is confirmed a moment later.
+            sm.reversal_last_pre = sample_at
+            sm.reversal_start = None
+            sm.reversal_count = 0
+            return False
+
+        if sm.reversal_start is None:
+            # The previous sample at the post-step level is the last one before
+            # the fall: use it for onset_lo so the window brackets the fall.
+            sm.reversal_last_pre = sm.reversal_last_pre or sample_at
+            sm.reversal_start = sample_at
+            sm.reversal_count = 1
+        else:
+            sm.reversal_count += 1
+
+        if sm.reversal_count < self.config.confirm_samples:
+            return False
+
+        first_fall = sm.reversal_start
+        last_pre = sm.reversal_last_pre
+        onset_hi = _aware(first_fall)
+        onset_lo = _aware(last_pre) if last_pre else onset_hi
+        # Bound the onset to the fall interval; never point it into the earlier
+        # settling window or before the post-step level was established.
+        if onset_hi - onset_lo > timedelta(seconds=self._cadence_s(reader)):
+            onset_lo = onset_hi - timedelta(seconds=self._cadence_s(reader))
+
+        delta_w = value - post_level
+        z = delta_w / sigma
+        quality = min(1.0, abs(z) / self.config.z_score_cap) * max(0.0, 1.0 - staleness)
+        if sm.bad_timestamp:
+            quality *= self.config.timestamp_penalty
+
+        if sm.last_emitted_onset_lo != onset_lo:
+            self.emit(
+                build_measurement_event(
+                    reader_id=reader,
+                    delta_w=delta_w,
+                    sigma_w=sigma,
+                    z_score=z,
+                    step_class=StepClass.SUSTAINED,
+                    onset_lo=onset_lo,
+                    onset_hi=onset_hi,
+                    pre_level_w=post_level,
+                    post_level_w=value,
+                    quality_score=quality,
+                    detected_at=at,
+                )
             )
-            self._clear_drift(sm)
-            sm.baseline_at_suspect = None
-            sm.sigma_at_suspect = None
+            sm.last_emitted_onset_lo = onset_lo
+
+        sm.step_history.append((onset_lo, delta_w, abs(delta_w)))
+        # Re-seed SETTLING for the new level: the reversal is itself a step, so
+        # its level becomes the reference and quiet samples cannot re-emit it.
+        sm.state = DetectorState.SETTLING
+        sm.last_level = value
+        sm.last_level_at = sample_at
+        sm.last_sample_at = sample_at
+        sm.suppression_level = value
+        sm.settling_origin = post_level
+        sm.settling_sigma = sigma
+        sm.post_step_baseline = value
+        sm.first_post = None
+        sm.onset_lo = None
+        sm.post_count = 0
+        self._reset_cusum(sm)
+        self._clear_drift(sm)
+        sm.drift_suppress_until = at + timedelta(seconds=2.0 * self.store.baseline_tau_s)
+        sm.reversal_start = None
+        sm.reversal_last_pre = sample_at
+        sm.reversal_count = 0
+        self.store.unfreeze_baseline(reader)
+        return True
+
+    def _end_settling(self, reader: str, sm: _ReaderSM, sample_at: datetime) -> None:
+        sm.state = DetectorState.STABLE
+        sm.last_level_at = sample_at
+        self.store.unfreeze_baseline(reader)
+        sm.drift_suppress_until = sample_at + timedelta(
+            seconds=2.0 * self.store.baseline_tau_s
+        )
+        self._clear_drift(sm)
+        sm.baseline_at_suspect = None
+        sm.sigma_at_suspect = None
+        sm.settling_origin = None
+        sm.settling_sigma = None
+        sm.reversal_start = None
+        sm.reversal_last_pre = None
+        sm.reversal_count = 0
 
     # -- confirmation / emission -------------------------------------------- #
 
@@ -708,6 +853,8 @@ class ChangeDetector:
         sm.last_level_at = sample_at
         sm.last_level = value
         sm.suppression_level = value
+        sm.settling_origin = baseline
+        sm.settling_sigma = sigma
         sm.post_step_baseline = value
         # Suppress further step signals only until the post-step level has
         # produced a couple of samples; after that the detector's own baseline
@@ -858,9 +1005,14 @@ class ChangeDetector:
         sm.state = DetectorState.SETTLING if settling else DetectorState.STABLE
         sm.baseline_at_suspect = None
         sm.sigma_at_suspect = None
+        sm.settling_origin = None
+        sm.settling_sigma = None
         sm.first_post = None
         sm.onset_lo = None
         sm.post_count = 0
+        sm.reversal_start = None
+        sm.reversal_last_pre = None
+        sm.reversal_count = 0
         self._reset_cusum(sm)
         self.store.unfreeze_baseline(reader)
         if settling:
