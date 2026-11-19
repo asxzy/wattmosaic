@@ -92,7 +92,7 @@
 | Z1 | 5 | VERIFIED |  |  | complete: ZC deleted legacy contracts/paths; gate green at c6a48f2 |
 | L7 | 5 | VERIFIED |  | AT-19 | AT-19 closed |
 | D5 | 5 | VERIFIED |  |  | v021 supersedes link; P6 must pass supersedes_evidence_id |
-| X09 | 5 | NOT_STARTED | | | |
+| X09 | 5 | VERIFIED |  |  | docs+release notes 3.0; routes/settings cross-checked |
 | V1 | 6 | NOT_STARTED | | all 20 | |
 | V2 | 6 | NOT_STARTED | | | |
 | L8 | 6 | NOT_STARTED | | | optional |
