@@ -1054,6 +1054,13 @@
     },
     "physical_total": {
       "$ref": "#/$defs/PhysicalTotal"
+    },
+    "stale_sources": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Stale Sources",
+      "type": "array"
     }
   },
   "required": [

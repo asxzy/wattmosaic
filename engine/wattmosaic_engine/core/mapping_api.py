@@ -274,7 +274,14 @@ class MappingApiMixin:
     def matrix_payload(self, query: Mapping[str, str] | None = None) -> Any:
         """The full typed matrix payload, filtered and paged from query params."""
         filters = MatrixFilters.from_query(dict(query or {}))
-        return self._matrix_service().payload(filters)
+        payload = self._matrix_service().payload(filters)
+        if filters.at is not None:
+            return payload
+        # The current view carries the published snapshot's stale readers, so a
+        # null column total always comes with its reason (HB §18, AT-17).
+        snapshot = getattr(self, "_v3_snapshot", lambda: None)()
+        stale = list(getattr(snapshot, "stale_sources", None) or [])
+        return payload.model_copy(update={"stale_sources": stale}) if stale else payload
 
     def matrix_cells_as_of(self, at: Any) -> Any:
         """Historical cells (HB §9.9), used by the ``at=`` query."""

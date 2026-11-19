@@ -371,11 +371,15 @@ class RuntimeMixin:
         if self.version_service is not None:
             return
         db = self.db
+        # One M2 store shared by D1 (a configuration event marks its cells
+        # SUSPECTED_CHANGE) and the matrix updater (which publishes them).
+        matrix_store = self._live_matrix_store()
         self.version_service = VersionService(
             topology_repo=db.repos.topology_v3,
             mapping_repo=db.repos.mapping,
             clock=self._clock,
             model_set_id="mset-live",
+            matrix_store=matrix_store,
         )
         self.model_registry_v3 = Registry(
             DatabaseModelRepository(db), clock=self._clock
@@ -395,7 +399,7 @@ class RuntimeMixin:
         # refreshes the triple new event groups are stamped with.
         self.version_service.add_listener(self._on_versions_changed)
         self.matrix_updater = MatrixUpdater(
-            store=self._live_matrix_store(),
+            store=matrix_store,
             versions=self.version_service,
             clock=self._clock,
         )
@@ -502,8 +506,13 @@ class RuntimeMixin:
         if self.matrix_updater is not None:
             from ..mapping.updater import MatrixUpdater
 
+            # One M2 store: when the D1 service marks cells on a configuration
+            # event, it must mark the cells the runtime actually publishes.
+            store = getattr(versions, "matrix_store", None)
+            if store is None:
+                store = self._live_matrix_store()
             self.matrix_updater = MatrixUpdater(
-                store=self._live_matrix_store(),
+                store=store,
                 versions=versions,
                 clock=self._clock,
             )
@@ -1421,6 +1430,69 @@ class RuntimeMixin:
         self._last_steady_at[reader] = now
         self._publish_group_result(_steady_group(result, now), result, {"operator": operator})
 
+    def _steady_retract_measured(
+        self, reader: str, views: tuple[Any, Any, Any, set[str]], now: datetime
+    ) -> None:
+        """A silent or excluded exclusive reader: its subjects become UNKNOWN.
+
+        What an exclusive reader *measured* is only as current as the reader
+        (HB §18 / AT-17): once it is missing, or D3 excludes it, the subjects it
+        measured are re-published once as UNKNOWN with null power and null
+        bounds -- never left at the last value and never a fabricated 0 W.
+        The next usable reading re-publishes them (``_last_direct_w`` is
+        cleared, so the >3σ gate does not hold the old value back).
+        """
+        if reader not in self._last_direct_w:
+            return
+        subjects, group_id = self._steady_target(reader, views[2], views[3])
+        del self._last_direct_w[reader]
+        if not subjects or group_id is not None:
+            return
+        from ..contracts import (
+            Bounds,
+            ConfidenceVectorV3,
+            DeviceEstimate,
+            EstimateStatus,
+            IdentifiabilityStatus,
+            InferenceMethod,
+        )
+
+        versions, topo_view, map_view, _parents = views
+        estimates = [
+            DeviceEstimate(
+                subject_kind=kind,
+                subject_id=subject_id,
+                point_w=None,
+                bounds=Bounds(lower_w=None, upper_w=None, basis="reader_ceiling"),
+                status=EstimateStatus.UNKNOWN,
+                identifiability=IdentifiabilityStatus.INSUFFICIENT_EVIDENCE,
+                method=InferenceMethod.NONE,
+                confidence=ConfidenceVectorV3(),
+                source_reader_ids=[reader],
+                evidence_refs=[],
+                versions=versions,
+                updated_at=now,
+            )
+            for kind, subject_id in subjects
+            if kind == "device"
+        ]
+        if not estimates:
+            return
+        result = JointInferenceResult(
+            status=EventGroupStatus.PROVISIONAL,
+            device_estimates=estimates,
+            group_estimates=[],
+            unknown_estimates=[],
+            candidates=[],
+            matches={},
+            residual_w_by_reader={},
+            versions=versions,
+            computed_at=now,
+        )
+        operator = build_observation_operator(topo_view, map_view, None, (reader,), subjects, now)
+        self._last_steady_at[reader] = now
+        self._publish_group_result(_steady_group(result, now), result, {"operator": operator})
+
     def _note_group_off_levels(self, group: EventGroup) -> None:
         """Record, per established group, its exclusive reader's group-off level.
 
@@ -1472,11 +1544,17 @@ class RuntimeMixin:
         views = self._steady_views()
         if views is None:
             return
+        excluded = excluded_readers(self.latest_quality)
         for reader in self.reader_state.readers():
             reading = self.reader_state.held(reader, now)
             sigma = self.reader_state.sigma(reader)
             baseline = self.reader_state.baseline(reader)
-            if reading.value is None or sigma is None or baseline is None:
+            if reading.value is None or reading.state != "held" or reader in excluded:
+                # Not a usable reading: what it measured is retracted, never
+                # re-solved from a stale/excluded value (HB §18).
+                self._steady_retract_measured(reader, views, now)
+                continue
+            if sigma is None or baseline is None:
                 continue
             subjects, group_id = self._steady_target(reader, views[2], views[3])
             if subjects:

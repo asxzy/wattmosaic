@@ -17,9 +17,22 @@ pytestmark = [pytest.mark.acceptance]
 def test_missing_reader_is_none_through_every_layer(hb17) -> None:
     """An absent reading stays null everywhere; no layer fabricates 0 W."""
     from wattmosaic_engine.contracts import EstimateStatus
-    from wattmosaic_engine.core.at17 import run_missing_data_pipeline
 
-    result = run_missing_data_pipeline(hb17["observation"], silent_reader="ct_b")
+    from tests.support.missing_data import run_missing_reader
+
+    # The live runtime replays the house; Circuit B stops reporting at 15 min
+    # and the stream runs on past ``missing_after_s``.  Declared up front: a
+    # fridge measured by Circuit B (a single-subject scope, DEC-05) and the TV
+    # on its plug.
+    result = run_missing_reader(
+        hb17,
+        silent_reader="ct_b",
+        silent_from_s=900.0,
+        devices={"tv": "ct_plug", "fridge": "ct_b"},
+        single_subject={"ct_plug": "tv", "ct_b": "fridge"},
+    )
+    # Non-vacuous: some published estimate does depend on the silent reader.
+    assert any("ct_b" in est.source_reader_ids for est in result.snapshot.device_estimates)
 
     column = result.matrix.reader_totals["ct_b"]
     assert column.measured_w is None

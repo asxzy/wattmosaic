@@ -358,6 +358,10 @@ class MatrixPayload(Model):
     cells: list[MappingCell]
     reader_totals: dict[str, ReaderColumnSummary]
     physical_total: PhysicalTotal
+    #: Readers excluded or silent right now, as the snapshot reports them
+    #: (``reader`` or ``reader: reason``).  A stale column's totals are null
+    #: with its reason here -- never a fabricated 0 W (HB §18, AT-17).
+    stale_sources: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _reader_leaves_are_unique(self) -> MatrixPayload:
