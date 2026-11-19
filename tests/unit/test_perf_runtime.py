@@ -1,0 +1,91 @@
+"""V2a — the synthetic perf benchmark, run in ``--quick`` mode with gates off.
+
+This test asserts only the *shape* of the report, not wall-clock budgets: shared
+CI runners cannot deliver a meaningful p99.  It proves the tool drives the real
+runtime (fast path, event loop, HTTP probes, background jobs, matrix) and emits
+every metric the deployment report consumes.  It stays well under 30 s.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_perf_runtime_quick_report_shape(tmp_path: Path) -> None:
+    """``--quick --no-gate`` produces the full, JSON-shaped report and exits 0."""
+    script = REPO_ROOT / "tools" / "dev" / "perf_runtime.py"
+    out = tmp_path / "perf.json"
+    proc = subprocess.run(
+        [
+            sys.executable, str(script),
+            "--quick", "--no-gate", "--json-out", str(out),
+        ],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert out.exists(), proc.stdout[-2000:]
+    report = json.loads(out.read_text())
+
+    # Every reported section is present and well-formed.
+    assert set(report) >= {
+        "scale", "fast_path_us_per_sample", "event_loop_ms", "healthz_ms",
+        "background_jobs", "db_growth_bytes_per_day", "matrix", "gates",
+    }
+    scale = report["scale"]
+    assert scale["readers"] == 40
+    assert scale["ha_entities"] == 500
+    assert scale["events_per_s"] == 30.0
+    assert scale["duration_s"] == 60.0
+    assert scale["samples"] > 0 and scale["event_cycles"] > 0
+
+    fast = report["fast_path_us_per_sample"]
+    assert set(fast) >= {"p50_us", "p95_us", "p99_us", "p50_ms", "p95_ms", "p99_ms"}
+    assert 0 < fast["p50_us"] <= fast["p95_us"] <= fast["p99_us"]
+    for key in ("event_loop_ms", "healthz_ms"):
+        summary = report[key]
+        assert set(summary) >= {"p50_ms", "p95_ms", "p99_ms", "count"}
+        assert summary["p50_ms"] <= summary["p95_ms"] <= summary["p99_ms"]
+        assert summary["count"] > 0
+
+    assert isinstance(report["background_jobs"], dict)
+    assert report["db_growth_bytes_per_day"] >= 0
+
+    matrix = report["matrix"]
+    assert matrix["devices"] == 500 and matrix["readers"] == 100
+    assert matrix["payload_cells"] == 50_000
+    assert matrix["get_p95_ms"] >= 0
+    assert matrix["payload_build_ms"]["p95_ms"] >= 0
+
+    gates = report["gates"]
+    assert set(gates) >= {
+        "healthz_p99_ms", "healthz_p99_limit_ms", "healthz_p99_ok",
+        "fast_path_p99_ms", "fast_path_limit_ms", "fast_path_ok",
+    }
+    assert gates["healthz_p99_limit_ms"] == 100.0
+    assert gates["fast_path_limit_ms"] == 0.2
+    assert report["gates_enabled"] is False
+
+    # Human text is on stdout as well as JSON on disk.
+    assert "fast path" in proc.stdout and "/healthz" in proc.stdout
+
+
+def test_perf_runtime_module_builds_a_contract_valid_matrix() -> None:
+    """The 500x100 payload is built through the real v3 matrix contracts."""
+    sys.path.insert(0, str(REPO_ROOT))
+    from wattmosaic_engine.contracts import MatrixPayload
+
+    from tools.dev import perf_runtime
+
+    payload = perf_runtime.build_matrix_payload(500, 100)
+    assert isinstance(payload, MatrixPayload)
+    assert len(payload.cells) == 50_000
+    assert len(payload.columns) == 100 and len(payload.rows) == 500
+    assert len({node.reader_id for node in payload.columns}) == 100

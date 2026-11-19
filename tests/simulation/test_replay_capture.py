@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 
@@ -158,6 +158,134 @@ def test_aligner_key_strips_the_domain_prefix() -> None:
     module = _replay_module()
     assert module.aligner_key("sensor.panel_a_ct1_power") == "panel_a_ct1_power"
     assert module.aligner_key("panel_a_ct1_power") == "panel_a_ct1_power"
+
+
+def _v3_db(tmp_path):
+    """Build a real, migrated DB and seed an active triple (v3 repositories)."""
+    from wattmosaic_engine.contracts import (
+        EdgeEvidence,
+        MappingEdge,
+        Observability,
+        RelationType,
+        TopologyEdgeV3,
+    )
+    from wattmosaic_engine.storage.database import Database
+
+    path = tmp_path / "capture.db"
+    db = Database(path)
+    svc = None
+    from wattmosaic_engine.versioning.service import VersionService
+
+    svc = VersionService(
+        topology_repo=db.repos.topology_v3,
+        mapping_repo=db.repos.mapping,
+        clock=lambda: datetime(2026, 1, 1, tzinfo=UTC),
+        model_set_id="mset-from-db",
+    )
+    # Different versions from the hard-coded HB §17 ones, to prove the tool
+    # reads them from the DB rather than binding to the v1 triple.
+    topo_v = svc.propose_topology(
+        [
+            TopologyEdgeV3(
+                edge_id="te::main::ct_a",
+                relation=RelationType.CONTAINS,
+                source_endpoint_id="main",
+                target_endpoint_id="ct_a",
+                lifecycle="confirmed",
+                declared_by="user",
+                beta=1.0,
+                beta_basis="unity",
+                evidence=EdgeEvidence(support=8, independent_causes=2),
+                valid_from=datetime(2026, 1, 1, tzinfo=UTC),
+                pinned=True,
+            )
+        ],
+        None,
+    )
+    svc.promote_topology(topo_v, "test seed")
+    map_v = svc.propose_mapping(
+        [
+            MappingEdge(
+                mapping_edge_id="me::tv->ct_a",
+                subject_kind="device",
+                subject_id="tv",
+                endpoint_id="ct_a",
+                observability=Observability.DIRECT,
+                lifecycle="confirmed",
+                declared_by="user",
+                evidence=EdgeEvidence(support=8, independent_causes=2),
+                valid_from=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+        ],
+        None,
+    )
+    svc.promote_mapping(map_v, "test seed")
+    # An active power model so the model-set id can be derived from the DB too.
+    # The tool only reads version_id/event rows, so a minimal raw row suffices.
+    from wattmosaic_engine.contracts import SPEC_SCHEMA_VERSION
+
+    db._conn.execute(
+        "INSERT OR IGNORE INTO power_model_versions_v3(version_id, subject_kind, "
+        "subject_id, number, model_class, basis, spec_json, schema_version, "
+        "trainer_version, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        ("mdl-bench-v1", "device", "tv", 1, "fixed", "absolute_anchor", "{}",
+         SPEC_SCHEMA_VERSION, "test", "2026-01-01T00:00:00+00:00"),
+    )
+    db._conn.execute(
+        "INSERT INTO power_model_events(version_id, event, reason, at) "
+        "VALUES('mdl-bench-v1','activated','test seed','2026-01-01T00:00:00+00:00')"
+    )
+    db.close()
+    return path, topo_v, map_v
+
+
+def test_read_versions_from_db_returns_active_triple(tmp_path) -> None:
+    """The tool reads topology/mapping versions from the v3 S14/S15 repos."""
+    module = _replay_module()
+    path, topo_v, map_v = _v3_db(tmp_path)
+    versions = module.read_versions_from_db(path)
+    assert versions is not None
+    assert versions["topology_version_id"] == topo_v
+    assert versions["mapping_version_id"] == map_v
+    assert versions["model_set_id"].startswith("mset-")
+
+
+def test_read_versions_from_db_without_v3_versions_returns_none(tmp_path) -> None:
+    """A database with no active v3 versions is reported as having none."""
+    import sqlite3
+
+    module = _replay_module()
+    path = tmp_path / "pre_v3.db"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE ct_samples(id INTEGER PRIMARY KEY, value_w REAL)")
+    conn.commit()
+    conn.close()
+    assert module.read_versions_from_db(path) is None
+
+
+def test_replay_stamps_db_derived_versions_on_the_run(tmp_path) -> None:
+    """``versions=`` rebinds the derived run's triple away from the HB17 one."""
+    module = _replay_module()
+    path, topo_v, map_v = _v3_db(tmp_path)
+    versions = module.read_versions_from_db(path)
+    assert versions is not None
+    house = build_hb17(seed=7, minutes=10, interval_s=10.0)
+    capture = _capture_from_house(house)
+    run = module.replay(capture, tick_s=10.0, versions=versions)
+    assert run.versions.topology_version_id == topo_v
+    assert run.versions.mapping_version_id == map_v
+    assert run.versions.model_set_id == versions["model_set_id"]
+    assert topo_v in run.derived_run_id
+
+
+def test_parse_versions_override() -> None:
+    """``--versions`` accepts exactly three comma-separated ids."""
+    module = _replay_module()
+    assert module.parse_versions_override("topo-9,map-5,mset-abc") == {
+        "topology_version_id": "topo-9",
+        "mapping_version_id": "map-5",
+        "model_set_id": "mset-abc",
+    }
 
 
 def test_jsonl_loader_reads_the_collector_format(tmp_path) -> None:
