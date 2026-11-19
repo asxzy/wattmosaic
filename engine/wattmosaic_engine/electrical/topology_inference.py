@@ -48,6 +48,8 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
+import numpy as np
+
 from wattmosaic_engine.contracts import (
     EdgeEvidence,
     EdgeLifecycleV3,
@@ -58,14 +60,30 @@ from wattmosaic_engine.contracts import (
 )
 
 from .nesting_math import (
+    ACTIVITY_MIN_W,
+    CLOSURE_MIN,
     CONTAINMENT_MIN,
+    CONTAINMENT_MIN_PARENT_W,
+    CONTAINMENT_TOL_W,
+    DUPLICATE_ACTIVITY_RATIO_MIN,
+    DUPLICATE_RATIO_MAX,
+    DUPLICATE_REL_DIFF_MAX,
+    EXCITATION_MIN_RATIO,
+    DuplicateEvidence,
+    MeasurementNode,
+    _as_float_array,
+    _finite_abs_max,
+    _finite_max,
     build_nodes,
+    closure_fraction,
     containment,
     duplicate_evidence,
 )
 
 __all__: list[str] = [
     "CONTAINMENT_MIN",
+    "NestingCandidate",
+    "infer_nesting",
     "MIN_INDEPENDENT_CAUSES",
     "MIN_SUPPORT_CONFIRMED",
     "MIN_SUPPORT_PROVISIONAL",
@@ -812,3 +830,388 @@ def infer_topology(
             )
         )
     return view
+
+
+# --------------------------------------------------------------------------- #
+# Measurement-based nesting proposals (T5, port of the retired nesting.py).
+# --------------------------------------------------------------------------- #
+# The legacy wizard engine is replaced by this one evidence ledger.  The numeric
+# kernels (containment / duplicate / closure / node grouping) already live in
+# the pure ``nesting_math`` module; only the orchestration is here.  Nothing in
+# this section writes a wiring fact: every result is a *candidate* that a user
+# must confirm, and the parent field is named ``parent_id`` (not the retired
+# pointer-based ``parent_ct_id``).
+
+
+@dataclass(frozen=True, slots=True)
+class NestingCandidate:
+    """A proposed ``child`` fed by ``parent``, with the evidence for it."""
+
+    child_reader_id: str
+    parent_id: str
+    kind: str  # "nested" | "duplicate"
+    evidence: dict[str, Any] = field(default_factory=dict)
+    requires_confirmation: bool = True
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "child_reader_id": self.child_reader_id,
+            "parent_id": self.parent_id,
+            "kind": self.kind,
+            "evidence": dict(self.evidence),
+            "requires_confirmation": self.requires_confirmation,
+            "status": "candidate",
+        }
+
+
+def _finite(value: Any) -> bool:
+    return isinstance(value, (int, float)) and math.isfinite(float(value))
+
+
+def _ne_node_series(
+    nodes: Mapping[str, MeasurementNode],
+    series: Mapping[str, Sequence[float]],
+) -> dict[str, list[float]]:
+    """Sum each node's member series into one watts series (pure)."""
+    out: dict[str, list[float]] = {}
+    for node_id, node in nodes.items():
+        present = [m for m in node.members if m in series]
+        if not present:
+            continue
+        length = len(series[present[0]])
+        if any(len(series[m]) != length for m in present):
+            raise ValueError("member series must have the same length")
+        total = np.zeros(length, dtype=np.float64)
+        seen = np.zeros(length, dtype=bool)
+        for member in present:
+            values = _as_float_array(series[member])
+            finite = np.isfinite(values)
+            total += np.where(finite, values, 0.0)
+            seen |= finite
+        out[node_id] = np.where(seen, total, math.nan).tolist()
+    return out
+
+
+def _ne_node_own_loads(
+    node: MeasurementNode,
+    direct_loads: Mapping[str, Sequence[float | None]],
+) -> list[float | None] | None:
+    """Sum a node's members' own directly-measured loads (unknown stays None)."""
+    contributing = [direct_loads[m] for m in node.members if m in direct_loads]
+    if not contributing:
+        return None
+    length = len(contributing[0])
+    if any(len(values) != length for values in contributing):
+        raise ValueError("direct_load series must have the same length")
+    total = np.zeros(length, dtype=np.float64)
+    seen = np.zeros(length, dtype=bool)
+    for values in contributing:
+        array = _as_float_array(values)
+        finite = np.isfinite(array)
+        total = np.where(total == 0.0, 0.0, total)
+        total = total + np.where(finite, array, 0.0)
+        seen |= finite
+    totals = total.tolist()
+    return [
+        value if covered else None
+        for value, covered in zip(totals, seen.tolist(), strict=True)
+    ]
+
+
+def _ne_declared_pair(a: str, b: str, channels: Mapping[str, Mapping[str, Any]]) -> bool:
+    pa = str(channels.get(a, {}).get("paired_ct_id") or "")
+    pb = str(channels.get(b, {}).get("paired_ct_id") or "")
+    return bool((pa and pa == b) or (pb and pb == a))
+
+
+def _ne_ancestor_of(
+    child: str, candidate: str, channels: Mapping[str, Mapping[str, Any]]
+) -> bool:
+    """True when ``candidate`` is a declared ancestor of ``child``."""
+    seen: set[str] = set()
+    current = str(channels.get(child, {}).get("parent_id") or "")
+    while current and current not in seen:
+        if current == candidate:
+            return True
+        seen.add(current)
+        current = str(channels.get(current, {}).get("parent_id") or "")
+    return False
+
+
+def _ne_resolve_alias(cid: str, aliases: Mapping[str, str]) -> str:
+    seen: set[str] = set()
+    while cid in aliases and cid not in seen:
+        seen.add(cid)
+        cid = aliases[cid]
+    return cid
+
+
+def _ne_leg_matches(parent: MeasurementNode, child_member: str, channels: Mapping[str, Any]) -> str:
+    """Pick the parent member on the same declared phase, else the first."""
+    phase = str(channels.get(child_member, {}).get("phase") or "unknown")
+    for member in parent.members:
+        if str(channels.get(member, {}).get("phase") or "unknown") == phase:
+            return member
+    return parent.members[0]
+
+
+def infer_nesting(
+    channels: Mapping[str, Mapping[str, Any]],
+    series: Mapping[str, Sequence[float]],
+    *,
+    container_ct_ids: Sequence[str] | None = None,
+    direct_loads: Mapping[str, Sequence[float | None]] | None = None,
+    containment_min: float = CONTAINMENT_MIN,
+    excitation_min_ratio: float = EXCITATION_MIN_RATIO,
+    closure_min: float = CLOSURE_MIN,
+    tol_w: float = CONTAINMENT_TOL_W,
+    min_parent_w: float = CONTAINMENT_MIN_PARENT_W,
+    report: dict[str, Any] | None = None,
+) -> list[NestingCandidate]:
+    """Propose nesting / duplicate relationships from aligned measurements.
+
+    ``channels`` maps a reader id to a mapping carrying ``ct_type``, ``phase``,
+    ``paired_ct_id`` and optionally ``parent_id`` (a declared wiring fact).
+    ``series`` maps the same ids to equally long, equally indexed watt series;
+    alignment is the caller's responsibility.  Only ``main`` readers may be
+    proposed as a child (a panel feed's level is measurable, a load's is not).
+    Every result is marked candidate and needs user confirmation — this never
+    writes a wiring fact.  Pure: no DB, no wall clock.
+    """
+    diagnostics: dict[str, Any] = report if report is not None else {}
+    diagnostics.setdefault("ambiguous", [])
+    diagnostics.setdefault("suppressed", [])
+    diagnostics.setdefault("not_inferable", [])
+
+    candidates: list[NestingCandidate] = []
+    ids = [cid for cid in sorted(series) if cid in channels]
+    if container_ct_ids is None:
+        containers = {
+            cid
+            for cid in ids
+            if str(channels[cid].get("ct_type") or "") in ("main", "branch")
+        }
+    else:
+        containers = {cid for cid in container_ct_ids if cid in series and cid in channels}
+
+    nodes = build_nodes({cid: channels[cid] for cid in ids})
+    diagnostics["nodes"] = [node.as_dict() for node in nodes.values()]
+    node_series = _ne_node_series(nodes, series)
+    node_arrays = {
+        node_id: np.asarray(values, dtype=np.float64)
+        for node_id, values in node_series.items()
+    }
+    signed_peak = {node_id: _finite_max(values) for node_id, values in node_arrays.items()}
+    activity_peak = {
+        node_id: _finite_abs_max(values) for node_id, values in node_arrays.items()
+    }
+
+    # -- duplicates first: they change how every other pair reads -----------
+    node_ids = sorted(node_series)
+    aliases: dict[str, str] = {}
+    duplicate_pairs: list[tuple[str, str, DuplicateEvidence]] = []
+    for i, a in enumerate(node_ids):
+        node_a = nodes[a]
+        for b in node_ids[i + 1 :]:
+            node_b = nodes[b]
+            if set(node_a.members) & set(node_b.members):
+                continue
+            if not (set(node_a.members) & containers or set(node_b.members) & containers):
+                continue
+            if activity_peak[a] < ACTIVITY_MIN_W and activity_peak[b] < ACTIVITY_MIN_W:
+                continue
+            if any(
+                _ne_declared_pair(x, y, channels)
+                for x in node_a.members
+                for y in node_b.members
+            ):
+                continue
+            if any(
+                _ne_ancestor_of(x, y, channels) for x in node_a.members for y in node_b.members
+            ):
+                continue
+            if any(
+                _ne_ancestor_of(y, x, channels) for x in node_a.members for y in node_b.members
+            ):
+                continue
+            evidence = duplicate_evidence(node_arrays[a], node_arrays[b])
+            if evidence is None:
+                continue
+            if evidence.activity_ratio < DUPLICATE_ACTIVITY_RATIO_MIN:
+                continue
+            if evidence.rel_diff > DUPLICATE_REL_DIFF_MAX:
+                continue
+            if evidence.ratio > DUPLICATE_RATIO_MAX:
+                continue
+            canonical, alias = sorted((a, b))
+            duplicate_pairs.append((canonical, alias, evidence))
+            aliases[alias] = canonical
+
+    for canonical, alias, evidence in duplicate_pairs:
+        root = _ne_resolve_alias(canonical, aliases)
+        aliases[alias] = root
+        parent_node = nodes[root]
+        for member in nodes[alias].members:
+            candidates.append(
+                NestingCandidate(
+                    child_reader_id=member,
+                    parent_id=_ne_leg_matches(parent_node, member, channels),
+                    kind="duplicate",
+                    evidence={
+                        "activity_ratio": round(evidence.activity_ratio, 4),
+                        "median_relative_difference": round(evidence.rel_diff, 4),
+                        "magnitude_ratio": round(evidence.ratio, 3),
+                        "median_w": [
+                            round(evidence.median_a_w, 1),
+                            round(evidence.median_b_w, 1),
+                        ],
+                        "joint_instants": evidence.joint_instants,
+                        "child_node": alias,
+                        "parent_node": root,
+                        "reason": (
+                            "both channels are active together whenever either is, "
+                            "and report the same magnitude: one wire measured twice, "
+                            "not two feeds"
+                        ),
+                    },
+                )
+            )
+
+    def canonical_node(node_id: str) -> str:
+        return _ne_resolve_alias(node_id, aliases)
+
+    # -- containment: a panel feed that never exceeds a container -----------
+    canonical_containers = sorted(
+        {
+            canonical_node(n)
+            for n in node_ids
+            if set(nodes[n].members) & containers
+        }
+    )
+    proposals: dict[str, list[tuple[str, float, int]]] = {}
+    nestable_child_types = frozenset({"main"})
+    for child in node_ids:
+        child_node = nodes[child]
+        if child_node.ct_type not in nestable_child_types:
+            diagnostics["not_inferable"].append(
+                {
+                    "reader_id": child_node.members[0] if child_node.members else child,
+                    "node_id": child,
+                    "reason": "load_level_not_measurable",
+                }
+            )
+            continue
+        if any(str(channels.get(m, {}).get("parent_id") or "") for m in child_node.members):
+            diagnostics["suppressed"].append(
+                {
+                    "reader_id": child_node.members[0],
+                    "node_id": child,
+                    "reason": "parent_already_declared",
+                }
+            )
+            continue
+        peak = signed_peak[child]
+        if peak <= 0.0:
+            diagnostics["suppressed"].append(
+                {"reader_id": child_node.members[0], "node_id": child, "reason": "never_active"}
+            )
+            continue
+        for parent in canonical_containers:
+            if parent == canonical_node(child):
+                continue
+            parent_series = node_arrays.get(parent)
+            if parent_series is None or len(parent_series) != len(node_arrays[child]):
+                continue
+            fraction, comparable = containment(
+                parent_series, node_arrays[child], tol_w=tol_w, min_outer_w=min_parent_w
+            )
+            if comparable == 0 or fraction < containment_min:
+                continue
+            parent_peak = signed_peak[parent]
+            if parent_peak <= 0.0 or peak / parent_peak < excitation_min_ratio:
+                continue
+            proposals.setdefault(child, []).append((parent, fraction, comparable))
+
+    # -- place each child at a level, using closure where it exists ---------
+    for child in sorted(proposals):
+        child_node = nodes[child]
+        child_series = node_series[child]
+        supporting: list[dict[str, Any]] = []
+        for parent, fraction, comparable in proposals[child]:
+            own = _ne_node_own_loads(nodes[parent], direct_loads or {})
+            closure: tuple[float, int, float] | None = None
+            if own is not None and len(own) == len(child_series):
+                accounted = [
+                    (None if not _finite(o) or not _finite(c) else float(o) + float(c))
+                    for o, c in zip(own, child_series, strict=True)
+                ]
+                closure = closure_fraction(node_series[parent], accounted)
+            if closure is not None and closure[1] and closure[0] < closure_min:
+                diagnostics["suppressed"].append(
+                    {
+                        "reader_id": child_node.members[0],
+                        "node_id": child,
+                        "reason": "closure_rejected",
+                        "parent_node": parent,
+                        "closure_fraction": round(closure[0], 4),
+                    }
+                )
+                continue
+            supporting.append(
+                {"parent": parent, "containment": fraction, "instants": comparable, "closure": closure}
+            )
+        if not supporting:
+            continue
+
+        def rank(row: dict[str, Any]) -> tuple[float, int, str]:
+            value = row["closure"]
+            if value is None or not value[1]:
+                return (float("inf"), 0, row["parent"])
+            return (value[2], -value[1], row["parent"])
+
+        ranked = sorted(supporting, key=rank)
+        best = ranked[0]
+        closure = best["closure"]
+        parent_node = nodes[best["parent"]]
+        if len(ranked) > 1 and rank(best)[0] == float("inf"):
+            diagnostics["ambiguous"].append(
+                {
+                    "reader_id": child_node.members[0],
+                    "node_id": child,
+                    "candidate_parents": sorted(row["parent"] for row in ranked),
+                    "reason": "no closure evidence to choose a level",
+                }
+            )
+            continue
+        evidence: dict[str, Any] = {
+            "containment": round(best["containment"], 4),
+            "instants": best["instants"],
+            "child_node": child,
+            "parent_node": best["parent"],
+            "reason": (
+                "child stays inside the parent at every comparable instant and "
+                "carries enough load for that to be evidence rather than idling"
+            ),
+        }
+        if closure is not None and closure[1]:
+            evidence["closure_fraction"] = round(closure[0], 4)
+            evidence["closure_instants"] = closure[1]
+            evidence["closure_median_remainder_w"] = round(closure[2], 1)
+        if child_node.is_assumed or parent_node.is_assumed:
+            evidence["assumed_grouping"] = sorted(
+                {node.grouping for node in (child_node, parent_node) if node.is_assumed}
+            )
+        if len(ranked) > 1:
+            evidence["other_containers"] = sorted(row["parent"] for row in ranked[1:])
+            evidence["containment_ambiguous"] = True
+        for member in child_node.members:
+            candidates.append(
+                NestingCandidate(
+                    child_reader_id=member,
+                    parent_id=_ne_leg_matches(parent_node, member, channels),
+                    kind="nested",
+                    evidence=dict(evidence),
+                )
+            )
+    candidates.sort(key=lambda c: (c.kind, c.child_reader_id, c.parent_id))
+    return candidates

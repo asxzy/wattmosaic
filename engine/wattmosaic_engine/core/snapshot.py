@@ -38,7 +38,7 @@ from ..contracts import (
     Topology,
     VersionTriple,
 )
-from ..electrical.panel_tree import TREE_VERSION, build_panel_tree
+from ..mapping.display_tree import TREE_VERSION, build_display_tree
 from .rows import row_to_inference_result, row_to_reconciliation
 
 log = logging.getLogger("wattmosaic.main")
@@ -616,7 +616,7 @@ class SnapshotMixin:
         if topology is None:
             return {}
         try:
-            from ..disaggregation.configuration import effective_configs
+            from ..device_configuration import effective_configs
 
             return effective_configs(topology)
         except Exception:  # noqa: BLE001 - optional backend must not break reads
@@ -707,9 +707,11 @@ class SnapshotMixin:
                 "notes": ["no topology configured"],
             }
         nesting = self.nesting_candidates() if include_nesting else None
-        return build_panel_tree(
+        return build_display_tree(
             topology,
             latest_results=self._latest_results_map(),
+            generated_at=self._clock().isoformat().replace("+00:00", "Z"),
+            include_nesting=include_nesting,
             nesting=nesting,
         )
 

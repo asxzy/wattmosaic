@@ -39,12 +39,6 @@ from wattmosaic_engine.electrical.matrix import (
     PreparedSystem,
     build_measurement_matrix,
 )
-from wattmosaic_engine.electrical.models import (
-    ABSOLUTE_DEVICE_CAP_W,
-    ModelView,
-    model_upper_bounds,
-    resolve_model,
-)
 from wattmosaic_engine.electrical.solver import (
     Identifiability,
     SolveResult,
@@ -59,6 +53,12 @@ from wattmosaic_engine.electrical.window import (
     ObservationWindow,
     coerce_window,
     observed_cadence_s,
+)
+from wattmosaic_engine.models.view import (
+    ABSOLUTE_DEVICE_CAP_W,
+    ModelView,
+    model_upper_bounds,
+    resolve_model,
 )
 
 

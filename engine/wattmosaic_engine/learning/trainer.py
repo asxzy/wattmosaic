@@ -77,74 +77,59 @@ class TrainingResult:
     notes: list[str] = field(default_factory=list)
 
 
-def _infer_model_type(device: Any, samples: Sequence[LearningSample] | None = None) -> ModelType:
-    """Choose a model type from device characteristics and observed samples.
+def _model_type_from_device(
+    device: Any, samples: Sequence[LearningSample] | None = None
+) -> ModelType:
+    """Select a model type from declared facts and observed control evidence.
 
-    Priority is intentional: composites and appliances need their specific
-    structure; control-curve models require evidence of a numeric control
-    variable; enumerated states need more than two distinct labels; everything
-    else falls back to binary, and finally residual when there is no state
-    information at all.
+    This is the v3 learning selector: it reads the device's *declared* load
+    shape (never a name or a keyword) and the control variables actually
+    observed in the samples.  The retired keyword-based inference (HA domain,
+    entity-id hints and free-text attributes) is gone — a model class is a
+    declaration, not a guess from a label (DEC-34).
     """
-    attrs: Mapping[str, Any] = {}
-    states: set[str] = set()
-    device_class = ""
-    domain = ""
-    appliance = ""
-    if device is not None:
-        if isinstance(device, Mapping):
-            raw_attrs = device.get("attributes") or {}
-            attrs = raw_attrs if isinstance(raw_attrs, Mapping) else {}
-            states = {str(s).lower() for s in (device.get("states") or device.get("state_options") or [])}
-            device_class = str(device.get("device_class") or "").lower()
-            domain = str(device.get("domain") or device.get("platform") or "").lower()
-            appliance = str(device.get("appliance_type") or device.get("device_type") or "").lower()
-            keys = set(attrs) | set(device)
-            if keys & _COMPONENT_HINTS:
-                return ModelType.COMPOSITE
-        else:
-            raw_attrs = getattr(device, "attributes", None)
-            attrs = raw_attrs if isinstance(raw_attrs, Mapping) else {}
-            states = {str(s).lower() for s in (getattr(device, "states", None) or [])}
-            device_class = str(getattr(device, "device_class", "") or "").lower()
-            domain = str(getattr(device, "domain", "") or "").lower()
-            appliance = str(getattr(device, "appliance_type", "") or "").lower()
-            keys = set(attrs)
-            if keys & _COMPONENT_HINTS:
-                return ModelType.COMPOSITE
+    from ..contracts import LoadShape
+    from ..models.fixed import model_class_for_load_shape
 
-    hint_text = " ".join([device_class, domain, appliance, *[str(k) for k in attrs]])
-    if any(hint in hint_text for hint in _TIME_VARYING_HINTS):
-        return ModelType.TIME_VARYING
-
-    variables = {(s.control_variable or "").strip().lower() for s in (samples or []) if s.control_variable}
+    # A declared adjustable shape, or observed numeric control variables, both
+    # select an adjustable model.  The concrete class follows the control
+    # variable's semantics (brightness -> dimmable, speed -> variable-speed).
+    variables = {
+        (s.control_variable or "").strip().lower()
+        for s in (samples or [])
+        if s.control_variable
+    }
     variables.discard("")
     if variables & _CONTROL_VARIABLES_BRIGHTNESS:
         return ModelType.DIMMABLE
     if variables & _CONTROL_VARIABLES_SPEED:
         return ModelType.VARIABLE_SPEED
-    if attrs and ({"brightness", "brightness_pct", "dim_level"} & set(attrs)):
-        return ModelType.DIMMABLE
-    if attrs and ({"speed", "percentage", "fan_speed", "rpm"} & set(attrs)):
-        return ModelType.VARIABLE_SPEED
 
-    # Enumerated modes: collect from explicit state vocabulary and from
-    # ``state:`` notes recorded by the collector.
-    if samples:
-        states |= {
-            note.split(":", 1)[1].strip().lower()
-            for s in samples
-            for note in s.notes
-            if isinstance(note, str) and note.startswith(("state:", "ha_state:"))
-        }
+    shape: LoadShape | str | None = None
+    if device is not None:
+        if isinstance(device, Mapping):
+            shape = device.get("load_shape") or device.get("power_behavior")
+        else:
+            shape = getattr(device, "load_shape", None) or getattr(device, "power_behavior", None)
+    if shape is not None:
+        model_class = model_class_for_load_shape(shape)
+        if str(getattr(model_class, "value", model_class)).lower() == "adjustable":
+            # No numeric control evidence yet: a dimmable model is the honest
+            # adjustable default (the curve is fitted when levels arrive).
+            return ModelType.DIMMABLE
+
+    # Multiple distinct state labels (from samples' state notes) need a
+    # multi-state model; otherwise a binary model is the conservative default.
+    states = {
+        note.split(":", 1)[1].strip().lower()
+        for s in (samples or [])
+        for note in s.notes
+        if isinstance(note, str) and note.startswith(("state:", "ha_state:"))
+    }
     states.discard("")
     non_operating = {"off", "on", "unavailable", "unknown", "idle", "standby"}
-    meaningful = states - non_operating
-    if len(meaningful) >= 2 or len(states - {"on", "off", "unavailable", "unknown"}) >= 3:
+    if len(states - non_operating) >= 2:
         return ModelType.MULTI_STATE
-
-    if states and states <= {"on", "off", "unavailable", "unknown", "open", "closed"}:
-        return ModelType.BINARY
     if states:
         return ModelType.BINARY
     # No state evidence at all: only a residual/pattern model is honest.
@@ -249,7 +234,7 @@ class Trainer:
                 reason=f"insufficient_samples:{len(accepted)}<{self.thresholds.min_samples_for_model}",
             )
         if model_type is None:
-            model_type = _infer_model_type(device, accepted)
+            model_type = _model_type_from_device(device, accepted)
         try:
             model_type = ModelType(model_type)
         except ValueError:

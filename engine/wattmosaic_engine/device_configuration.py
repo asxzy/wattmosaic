@@ -80,8 +80,6 @@ from wattmosaic_engine.contracts import (
 from wattmosaic_engine.entity_evidence import classify_entity
 from wattmosaic_engine.models.device_profile import DevicePowerProfile
 
-from ..electrical.topology import TopologyGraph, build_graph
-
 #: Metadata keys written by :func:`project_configuration`.
 CONFIG_LOAD_ENTITIES_KEY = "config_load_entity_ids"
 MODE_ENTITIES_KEY = "mode_entity_ids"
@@ -124,6 +122,41 @@ LINEAR_DIMMING_DEFAULT = True
 #: a default", and one that sees ``"configured_default"`` from the aligner must
 #: not read it as "the window width was declared".
 WINDOW_SOURCE_CONFIGURED = "configured"
+
+
+@dataclass(slots=True)
+class _AttributionView:
+    """Pure attribution view built directly from a :class:`Topology` contract.
+
+    This is the v3 replacement for the pointer-based ``TopologyGraph`` the
+    configuration projection used to import.  It answers exactly the three
+    questions the projection asks — which CTs observe a device, which channels
+    exist, and what topology the view came from — with no graph engine and no
+    legacy pointer fields.
+    """
+
+    topology: Topology
+
+    @property
+    def channels(self) -> dict[str, Any]:
+        return self.topology.channel_map()
+
+    def attribution_ct_ids(self, device_id: str) -> tuple[str, ...]:
+        device = self.topology.device_map().get(device_id)
+        if device is None:
+            return ()
+        channels = self.topology.channel_map()
+        return tuple(
+            dict.fromkeys(
+                cid
+                for cid in device.branch_ct_ids
+                if cid in channels and channels[cid].enabled
+            )
+        )
+
+
+def _build_attribution(topology: Topology | None) -> _AttributionView | None:
+    return _AttributionView(topology) if topology is not None else None
 
 
 @dataclass(slots=True, frozen=True)
@@ -207,7 +240,7 @@ class EffectiveConfig:
 
 def derive_monitoring(
     device: DeviceTopology | None,
-    graph: TopologyGraph | None,
+    graph: _AttributionView | None,
     *,
     topology: Topology | None = None,
     declared: MonitoringLevel = MonitoringLevel.UNKNOWN,
@@ -235,7 +268,7 @@ def derive_monitoring(
 
 def is_sole_occupant(
     device: DeviceTopology | None,
-    graph: TopologyGraph | None,
+    graph: _AttributionView | None,
     *,
     topology: Topology | None = None,
 ) -> bool:
@@ -382,7 +415,7 @@ def effective_config(
     device_id: str,
     *,
     topology: Topology | None = None,
-    graph: TopologyGraph | None = None,
+    graph: _AttributionView | None = None,
     device: DeviceTopology | None = None,
 ) -> EffectiveConfig:
     """Resolve one device's usable configuration from the topology metadata.
@@ -392,7 +425,7 @@ def effective_config(
     """
     if topology is None and graph is not None:
         topology = graph.topology
-    graph = graph if graph is not None else (build_graph(topology) if topology else None)
+    graph = graph if graph is not None else (_build_attribution(topology) if topology else None)
     if device is None and topology is not None:
         device = topology.device_map().get(device_id)
     metadata: Mapping[str, Any] = (
@@ -600,12 +633,12 @@ def _metadata_entities(value: Any) -> list[str]:
 def effective_configs(
     topology: Topology | None,
     *,
-    graph: TopologyGraph | None = None,
+    graph: _AttributionView | None = None,
 ) -> dict[str, EffectiveConfig]:
     """Resolve every device in the topology."""
     if topology is None:
         return {}
-    graph = graph if graph is not None else build_graph(topology)
+    graph = graph if graph is not None else _build_attribution(topology)
     return {
         device.device_id: effective_config(
             device.device_id, topology=topology, graph=graph, device=device

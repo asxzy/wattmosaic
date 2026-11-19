@@ -1,4 +1,4 @@
-"""Static gate: the cut-over removed the legacy engine paths (Z2).
+"""Static gate: the cut-over removed the legacy engine paths (Z2 / Z2b).
 
 The three-loop runtime is the only runtime.  Nothing under ``engine/`` may
 still define or import the symbols that implemented the removed path: the
@@ -18,6 +18,15 @@ historical data rewrites rather than production code paths:
   (including ``branch_ct_ids`` / ``parent_ct_id``) are removed by Z1, not Z2;
 * ``storage/migrations/``: migrations read legacy column/field names to
   rewrite historical rows and are intentionally frozen.
+
+Z2b additionally forbids the *modules* that implemented the retained legacy
+helpers (``electrical/models.py``, ``electrical/panel_tree.py``,
+``electrical/nesting.py`` and ``disaggregation/configuration.py``).  A module
+is allowed to survive only when its *sole* production importers are the
+legacy contract facade (``contracts/legacy.py``) or a frozen storage migration
+(``storage/migrations/``) — those are rewritten by Z1, not by this cutover.
+The allowlist is explicit below so a new importer cannot quietly keep a module
+alive.
 
 The gate is extended by Z1 with the remaining contract symbols.
 """
@@ -43,6 +52,10 @@ FORBIDDEN = frozenset(
         "expected_power_w",
         "infer_model_type",
         "inference_interval_s",
+        # Z2b: renamed dodges from Z2 must not survive under another spelling.
+        "_power_for_params",
+        "_infer_model_type",
+        "parent_endpoint_id",
     }
 )
 
@@ -98,3 +111,81 @@ def test_no_legacy_symbols_are_reachable() -> None:
     """No production module may define or import a removed legacy symbol."""
     offenders = _offenders()
     assert not offenders, "legacy engine paths are still reachable:\n" + "\n".join(offenders)
+
+
+#: Legacy helper modules Z2b retires.  Each value is the *explicit* allowlist
+#: of importers permitted to keep a module alive: only the Z1-owned legacy
+#: contract facade and frozen storage migrations.  Any other importer — even a
+#: sibling module in the same package — keeps the module forbidden.
+REMOVED_MODULES: dict[str, frozenset[str]] = {
+    "electrical/models.py": frozenset({"contracts/legacy.py", "storage/migrations/"}),
+    "electrical/panel_tree.py": frozenset({"contracts/legacy.py", "storage/migrations/"}),
+    "electrical/nesting.py": frozenset({"contracts/legacy.py", "storage/migrations/"}),
+    "disaggregation/configuration.py": frozenset(
+        {"contracts/legacy.py", "storage/migrations/"}
+    ),
+}
+
+
+def _module_name(rel: str) -> str:
+    """Importable module path for a source file relative to ENGINE."""
+    parts = rel.removesuffix(".py").split("/")
+    if parts[-1] == "__init__":
+        parts = parts[:-1]
+    return "wattmosaic_engine" + (("." + ".".join(parts)) if parts else "")
+
+
+def _importers_of(module: str) -> set[str]:
+    """Relative paths under ENGINE importing exactly ``module`` (AST-based).
+
+    Reading source rather than importing modules means a dead-but-importable
+    module cannot hide from the gate.  A submodule import is a distinct target
+    and is ignored; the removed module never imports itself.
+    """
+    want = _module_name(module)
+    found: set[str] = set()
+    for path in sorted(ENGINE.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        rel = path.relative_to(ENGINE).as_posix()
+        if rel == module:
+            continue
+        source_module = _module_name(rel)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                if any(alias.name == want for alias in node.names):
+                    found.add(rel)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                if node.level == 0:
+                    target = ".".join([source_module, node.module])
+                else:
+                    base = source_module.split(".")
+                    target = ".".join([*base[: max(1, len(base) - node.level)], node.module])
+                if target == want:
+                    found.add(rel)
+    return found
+
+
+def _is_allowed_importer(rel: str, allowed: frozenset[str]) -> bool:
+    return any(rel == a or rel.startswith(a) for a in allowed)
+
+
+def test_removed_legacy_modules_are_deleted() -> None:
+    """Retired legacy helper modules may exist only for Z1/storage consumers."""
+    offenders: list[str] = []
+    for module, allowed in REMOVED_MODULES.items():
+        if not (ENGINE / module).exists():
+            continue
+        unexpected = sorted(
+            imp for imp in _importers_of(module) if not _is_allowed_importer(imp, allowed)
+        )
+        if unexpected:
+            offenders.append(
+                f"{module}: imported by {', '.join(unexpected)} "
+                f"(allowed only by: {', '.join(sorted(allowed))})"
+            )
+    assert not offenders, "legacy helper modules are still alive:\n" + "\n".join(offenders)

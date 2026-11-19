@@ -305,8 +305,8 @@ class DiscoveryApiMixin:
                 "notes": ["no topology to place devices on"],
             }
 
+        from ..device_configuration import project_configuration
         from ..disaggregation.auto_placement import merge_placements, plan_placements
-        from ..disaggregation.configuration import project_configuration
         from ..ingestion.correlation import (
             correlate,
             estimate_row_noise,

@@ -45,7 +45,7 @@ from wattmosaic_engine.contracts import (
     MonitoringLevel,
     Topology,
 )
-from wattmosaic_engine.disaggregation.configuration import cts_claimed_by_dedicated
+from wattmosaic_engine.device_configuration import cts_claimed_by_dedicated
 from wattmosaic_engine.ingestion.correlation import CorrelationReport
 
 #: Prefix for a device this module creates.  Kept distinct from discovery's
