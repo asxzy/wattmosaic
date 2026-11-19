@@ -55,13 +55,10 @@ from datetime import datetime
 from typing import Any
 
 from ..contracts import (
-    CTChannel,
     DataQualityReport,
     Phase,
     Polarity,
     QualityStatus,
-    Reconciliation,
-    Topology,
     utcnow,
 )
 from ..synchronization.aligner import (
@@ -219,7 +216,7 @@ class _ChannelScore:
 
 
 def _is_unavailable(
-    name: str, entity_id: str | None, cfg: CTChannel | None, unavailable: set[str]
+    name: str, entity_id: str | None, cfg: Any | None, unavailable: set[str]
 ) -> bool:
     """Match unavailable entities by entity id or by the derived channel name."""
     if entity_id and entity_id in unavailable:
@@ -295,8 +292,8 @@ class DataQualityEngine:
         window: AlignedWindow,
         health: Mapping[str, ChannelHealth] | None = None,
         *,
-        topology: Topology | None = None,
-        reconciliation: Reconciliation | None = None,
+        topology: Any | None = None,
+        reconciliation: Any | None = None,
         unavailable: Iterable[str] | None = None,
         energy_window: EnergyWindow | None = None,
         energy_health: Mapping[str, EnergyHealth] | None = None,
@@ -472,7 +469,7 @@ class DataQualityEngine:
         name: str,
         ch: AlignedChannel,
         health: ChannelHealth | None,
-        cfg: CTChannel | None,
+        cfg: Any | None,
         unavailable: set[str],
         issues: list[str],
         overlap_codes: tuple[tuple[str, str], ...] = (),
@@ -733,7 +730,7 @@ class DataQualityEngine:
     def _power_overlap_issues(
         self,
         power_channels: Mapping[str, AlignedChannel],
-        channel_config: Mapping[str, CTChannel],
+        channel_config: Mapping[str, Any],
     ) -> tuple[
         dict[str, tuple[tuple[str, str], ...]],
         list[OverlapCluster],
@@ -812,7 +809,7 @@ class DataQualityEngine:
 
     def _apply_reconciliation(
         self,
-        reconciliation: Reconciliation | None,
+        reconciliation: Any | None,
         overall: float,
         issues: list[str],
         channels: dict[str, dict[str, Any]],
@@ -821,7 +818,12 @@ class DataQualityEngine:
         if reconciliation is None:
             return overall, logged
         t = self.thresholds
-        ratio = abs(reconciliation.reconciliation_error_ratio)
+        raw_ratio = getattr(reconciliation, "reconciliation_error_ratio", None)
+        if raw_ratio is None:
+            # An absent error ratio (v3 nullable reconciliation) is honest
+            # absence, not a fabricated zero or a penalty.
+            return overall, logged
+        ratio = abs(float(raw_ratio))
         if ratio > t.reconciliation_bad_ratio:
             overall = max(0.0, overall - t.reconciliation_penalty)
             _issue(issues, None, "reconciliation_error", f"ratio={ratio:.3f}")

@@ -382,3 +382,91 @@ def test_no_legacy_names_in_topology_disaggregation() -> None:
     assert not offenders, "legacy contract names remain in the area:\n" + "\n".join(
         offenders
     )
+
+
+def test_no_legacy_names_in_ingestion_runtime_backend() -> None:
+    """ZI: no production module in the ingestion/runtime/backend area may bind
+    a legacy contract name (architecture.md §5, contract 3.0.0).
+
+    The area is the ingestion / runtime / backend cutover (ZI).  Legacy contract
+    names that still describe the removed 2.x surface must not be imported or
+    defined by any module this area owns: the runtime ingests only
+    ``ReaderMeasurement`` / ``HAEvent`` and the v3 repositories/services.  The
+    contract facade itself and frozen migrations are intentionally excluded --
+    ZC owns those and reads historical field names as data.  Tests may name
+    legacy contracts when exercising migration/back-compat paths; they are not
+    production modules.
+
+    Only identifier *bindings* count (imports, definitions, annotations and
+    assignments), matching the AST-based approach of the other gate tests:
+    string literals such as provenance keys or SQL column names are data, not
+    live code paths.
+    """
+    import ast
+
+    area_files: list[Path] = []
+    for sub in ("ingestion", "quality", "synchronization", "backend"):
+        area_files.extend((ENGINE / sub).rglob("*.py"))
+    for rel in (
+        "core/runtime.py",
+        "core/rows.py",
+        "core/snapshot.py",
+        "core/models_api.py",
+        "core/mapping_api.py",
+        "core/diagnostics_api.py",
+        "main.py",
+        "api/facade.py",
+        "api/protocols.py",
+        "storage/database.py",
+        "storage/repositories/inference.py",
+        "inference/estimates.py",
+        "inference/evidence.py",
+        "inference/topology_filter.py",
+    ):
+        area_files.append(ENGINE / rel)
+
+    legacy_names = frozenset(
+        {
+            "CTChannel",
+            "DeviceTopology",
+            "Topology",  # legacy model (not TopologyEdgeV3/TopologyVersionV3)
+            "branch_ct_ids",
+            "parent_ct_id",
+            "paired_ct_id",
+            "alias_of_ct_id",
+            "Source",
+            "PowerState",
+            "ConfidenceTier",
+            "TopologyStatus",
+            "RelationKind",  # v1 (not RelationType)
+            "MappingObservability",
+            "MappingCellStatus",
+            "InferenceResult",
+            "Reconciliation",  # v1 (not ReconciliationV3)
+            "DeviceReaderMappingCell",
+            "DeviceModelVersion",
+            "DeviceModelParameters",
+            "LearningSample",
+            "Measurement",  # legacy (not ReaderMeasurement/MeasurementEndpoint/MeasurementType)
+            "DeviceEvent",
+            "EventEvidenceRecord",
+            "ConfigurationChangeEvent",  # legacy (not ConfigurationEvent v3)
+            "PowerLevel",  # legacy (not PowerLevelV3)
+            "ConfidenceVector",  # legacy (not ConfidenceVectorV3)
+        }
+    )
+
+    offenders: list[str] = []
+    for path in sorted(set(area_files)):
+        if not path.exists() or "__pycache__" in path.parts:
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        hits = _bound_names(tree) & legacy_names
+        for name in sorted(hits):
+            offenders.append(f"{path.relative_to(ROOT).as_posix()}: {name}")
+    assert not offenders, "legacy contract names still reachable in the ZI area:\n" + "\n".join(
+        offenders
+    )

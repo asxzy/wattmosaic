@@ -62,7 +62,6 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..contracts import Topology
 from ..device_links import CONFIG_LOAD_ENTITIES_KEY
 from ..entity_evidence import classify_entity, domain_of
 from .correlation import CANDIDATE_DOMAINS
@@ -138,7 +137,7 @@ def _registry_rows(registries: Mapping[str, Any] | None, key: str) -> dict[str, 
     return rows
 
 
-def declared_state_entities(topology: Topology | None) -> set[str]:
+def declared_state_entities(topology: Any | None) -> set[str]:
     """Entities the topology already declares as runtime signals for a device.
 
     An entity a person (or the mapping wizard) already linked is not a question
@@ -198,7 +197,7 @@ def _device_class(state: Mapping[str, Any]) -> str | None:
 def candidate_state_entities(
     states: Iterable[Mapping[str, Any]],
     registries: Mapping[str, Any] | None,
-    topology: Topology | None = None,
+    topology: Any | None = None,
 ) -> tuple[list[CandidateEntity], dict[str, str]]:
     """Entities that COULD be a fixture on a shared circuit.
 

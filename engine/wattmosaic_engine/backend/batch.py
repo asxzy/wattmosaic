@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ..contracts import InferenceResult, Reconciliation
+from ..contracts import DeviceEstimate, ReconciliationV3
 
 #: How many recent inference results may accumulate before the aggregator is
 #: flushed even when no cycle boundary is reached.
@@ -31,8 +31,8 @@ DEFAULT_REANALYSIS_HISTORY = 64
 class BackendBatch:
     """Shape ``main.py`` expects from a backend."""
 
-    results: list[InferenceResult]
-    reconciliation: Reconciliation
+    results: list[DeviceEstimate]
+    reconciliation: ReconciliationV3
     diagnostics: dict[str, Any]
 
 

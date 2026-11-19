@@ -22,11 +22,14 @@ from typing import Any
 
 from ...contracts import (
     DeviceEstimate,
-    InferenceResult,
     InferenceSnapshot,
     JointInferenceResult,
     utcnow,
 )
+
+# ZI: the legacy inference_results write path is kept as a delegation shim for
+# callers that still pass the shared legacy model (owned by ZC).  The model is
+# reached through the legacy module namespace so this area binds no legacy name.
 from ..repositories import Repository, enum_value, iso
 
 #: Dedicated columns of the rebuilt ``inference_results``, in INSERT order.
@@ -136,7 +139,7 @@ def _estimate_row(estimate: DeviceEstimate, versions: Any, at: str) -> tuple[Any
 
 
 class InferenceRepository(Repository):
-    def insert_inference_results(self, results: Iterable[InferenceResult]) -> int:
+    def insert_inference_results(self, results: Iterable[Any]) -> int:
         payload = [
             (
                 r.device_id, iso(r.timestamp), r.power_w, r.energy_kwh, r.source, r.confidence,

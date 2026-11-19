@@ -54,11 +54,15 @@ from .config.settings import EngineConfig
 from .contracts import (
     CONTRACT_VERSION,
     DataQualityReport,
-    InferenceResult,
-    Reconciliation,
-    Topology,
+    DeviceEstimate,
+    ReconciliationV3,
     utcnow,
 )
+
+# ZI: the legacy topology cache still holds the shared Topology model until ZC
+# removes it; it is reached through the legacy namespace so this area binds no
+# legacy contract name.
+from .contracts import legacy as _legacy
 from .core import (
     MAINTENANCE_INTERVAL_S,
     NESTING_RESAMPLE_GRID,
@@ -287,8 +291,8 @@ class EngineCore(
         #: says how much: keeping them apart means a light that never reports
         #: brightness simply has no entry, rather than an implied 100 %.
         self.device_levels: dict[str, float] = {}
-        self.latest_results: dict[str, InferenceResult] = {}
-        self.latest_reconciliation: Reconciliation = Reconciliation()
+        self.latest_results: dict[str, DeviceEstimate] = {}
+        self.latest_reconciliation: ReconciliationV3 = ReconciliationV3()
         self.latest_quality: DataQualityReport | None = None
         self.last_successful_processing_at: datetime | None = None
         self.inference_last_run_at: datetime | None = None
@@ -321,7 +325,7 @@ class EngineCore(
         #: Declared-link state transitions awaiting the next inference window.
         #: Bounded by the number of declared devices, not by HA's event rate.
         self._pending_transitions: deque[dict[str, Any]] = deque(maxlen=4096)
-        self.topology_cache: Topology | None = None
+        self.topology_cache: _legacy.Topology | None = None
         #: Why startup discovery produced no topology (``None`` = no problem).
         #: Surfaced by ``/health`` so a fresh install cannot look healthy while
         #: having nothing to infer, which is how the original defect hid.

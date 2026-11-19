@@ -8,7 +8,7 @@ import logging
 from collections.abc import Sequence
 from typing import Any
 
-from ..contracts import InferenceResult, Topology
+from ..contracts import DeviceEstimate, JointInferenceResult
 
 log = logging.getLogger("wattmosaic.integration")
 
@@ -19,8 +19,8 @@ class AuditMixin:
     def _analyze(
         self,
         window: Any,
-        topology: Topology,
-        results: Sequence[InferenceResult],
+        topology: Any,
+        results: Sequence[DeviceEstimate | JointInferenceResult],
         events: Sequence[Any],
     ) -> None:
         """One incremental pass: isolation → association → circuits → residual → hierarchy → record.

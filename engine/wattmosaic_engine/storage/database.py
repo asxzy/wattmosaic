@@ -45,26 +45,23 @@ from typing import Any
 
 from ..contracts import (
     Circuit,
-    CTChannel,
     DeviceConfiguration,
     DeviceConfigurationSet,
-    DeviceModelParameters,
-    DeviceModelVersion,
     EventIsolation,
     InferenceRecord,
-    InferenceResult,
-    LearningSample,
     MeasurementFactor,
     ModelStatus,
     ModelType,
-    Reconciliation,
-    RelationKind,
     ResidualPower,
-    Topology,
     TopologyRelation,
-    TopologyStatus,
     utcnow,
 )
+
+# ZI: the delegating methods below keep their legacy-compatible signatures for
+# the shared callers owned by other areas (topology service, learning, tests).
+# The shared legacy contract models are reached through the legacy module
+# namespace so this area binds no legacy contract name; ZC removes them.
+from ..contracts import legacy as _legacy
 from .migrations import LATEST_VERSION, apply_migrations, current_version, pending_migrations
 from .repositories import Repositories, backup_pattern, iso
 from .repositories.topology import TopologyRepository
@@ -379,7 +376,7 @@ class Database:
 
     # -- topology --------------------------------------------------------- #
     @staticmethod
-    def _insertion_order(channels: Iterable[CTChannel]) -> list[CTChannel]:
+    def _insertion_order(channels: Iterable[_legacy.CTChannel]) -> list[_legacy.CTChannel]:
         """Order channels so a parent is always written before its children.
 
         The rule lives on :class:`TopologyRepository` -- the SQL that needs it is
@@ -389,10 +386,10 @@ class Database:
         """
         return TopologyRepository._insertion_order(channels)
 
-    def save_topology(self, topology: Topology, note: str = "") -> int:
+    def save_topology(self, topology: _legacy.Topology, note: str = "") -> int:
         return self.repos.topology.save_topology(topology, note=note)
 
-    def load_topology(self) -> Topology | None:
+    def load_topology(self) -> _legacy.Topology | None:
         return self.repos.topology.load_topology()
 
     def upsert_circuit(self, circuit: Circuit) -> None:
@@ -446,7 +443,7 @@ class Database:
         self.repos.events.log_system_event(level, category, message, details)
 
     # -- inference -------------------------------------------------------- #
-    def insert_inference_results(self, results: Iterable[InferenceResult]) -> int:
+    def insert_inference_results(self, results: Iterable[_legacy.InferenceResult]) -> int:
         return self.repos.inference.insert_inference_results(results)
 
     def latest_inference_results(self) -> list[dict[str, Any]]:
@@ -487,7 +484,7 @@ class Database:
     def insert_topology_relation(self, relation: TopologyRelation) -> None:
         self.repos.associations.insert_topology_relation(relation)
 
-    def relations_of_kind(self, kind: RelationKind | str) -> list[dict[str, Any]]:
+    def relations_of_kind(self, kind: _legacy.RelationKind | str) -> list[dict[str, Any]]:
         return self.repos.associations.relations_of_kind(kind)
 
     # -- isolation verdicts (migration 10) --------------------------------- #
@@ -535,14 +532,14 @@ class Database:
         return self.repos.residual.residual_history(since, limit)
 
     # -- reconciliation --------------------------------------------------- #
-    def insert_reconciliation(self, rec: Reconciliation) -> None:
+    def insert_reconciliation(self, rec: _legacy.Reconciliation) -> None:
         self.repos.residual.insert_reconciliation(rec)
 
     def latest_reconciliation(self) -> dict[str, Any] | None:
         return self.repos.residual.latest_reconciliation()
 
     # -- learning --------------------------------------------------------- #
-    def insert_learning_sample(self, sample: LearningSample) -> None:
+    def insert_learning_sample(self, sample: _legacy.LearningSample) -> None:
         self.repos.learning.insert_learning_sample(sample)
 
     def learning_samples(
@@ -554,7 +551,7 @@ class Database:
         return self.repos.learning.count_learning_samples(device_id, accepted_only)
 
     # -- models ----------------------------------------------------------- #
-    def save_model_version(self, model: DeviceModelVersion, activate: bool = False) -> None:
+    def save_model_version(self, model: _legacy.DeviceModelVersion, activate: bool = False) -> None:
         self.repos.models.save_model_version(model, activate=activate)
 
     def active_model(self, device_id: str, model_type: str | None = None) -> dict[str, Any] | None:
@@ -629,8 +626,8 @@ class Database:
         return self.repos.aggregates.stats()
 
 
-def default_parameters() -> DeviceModelParameters:
-    return DeviceModelParameters()
+def default_parameters() -> _legacy.DeviceModelParameters:
+    return _legacy.DeviceModelParameters()
 
 
 __all__ = [
@@ -639,7 +636,6 @@ __all__ = [
     "Database",
     "LATEST_VERSION",
     "ModelType",
-    "TopologyStatus",
     "apply_migrations",
     "current_version",
     "default_parameters",
