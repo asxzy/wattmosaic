@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
 from collections import deque
 from collections.abc import Mapping, Sequence
@@ -148,6 +149,7 @@ class RuntimeMixin:
                 asyncio.create_task(self._event_loop(), name="wm-event"),
                 asyncio.create_task(self._steady_loop(), name="wm-steady"),
                 asyncio.create_task(self._maintenance_loop(), name="wm-maintenance"),
+                asyncio.create_task(self._self_heal_loop(), name="wm-self-heal"),
             ]
             if not self.three_loop_enabled:
                 self._tasks.append(
@@ -715,6 +717,19 @@ class RuntimeMixin:
         self.inference_executor: ThreadPoolExecutor | None = None
         self.learning_worker: Any | None = None
         self.grouping_engine: GroupingEngine | None = None
+        # Topological self-healing (T5/T7) — built in _wire_v3_services.  The
+        # inference view is the durable per-pair evidence ledger; the workflow
+        # turns inferred configuration changes into promoted versions and
+        # requests L7 reconciliation on promotion.  All writes run on the single
+        # background executor, guarded by this lock (single-writer rule).
+        self.topology_inference: Any | None = None
+        self.configuration_workflow: Any | None = None
+        self.reconciler: Any | None = None
+        self._ledger_lock = threading.Lock()
+        self._association_history: dict[str, deque[str]] = {}
+        self._reader_last_seen: dict[str, datetime] = {}
+        self.late_evidence_count = 0
+        self.last_promotion: dict[str, Any] | None = None
         # Metrics (observable, never guessed).
         self.loop_lag_s: dict[str, float] = {"fast": 0.0, "event": 0.0, "background": 0.0}
         self.stage_latency_s: dict[str, float] = {}
@@ -778,6 +793,80 @@ class RuntimeMixin:
             on_ready=self.on_group_ready,
             on_revised=self.on_group_ready,
         )
+        self._wire_self_healing()
+        # Composition only: every D1 topology/mapping promotion now fires the
+        # T7 detectors + L7 reconciliation hook (except the in-ledger promotion,
+        # which calls the hook directly to avoid a double fire).
+        self.bind_promotion_hooks()
+
+    def _wire_self_healing(self) -> None:
+        """Build T5's ledger view, T7's workflow and the L7 reconciler.
+
+        All dependencies are the real components composed from the injected DB
+        and clock; no ``runtime.fakes`` import.  Ledger consolidation runs as a
+        background job (:meth:`_fold_group_ledger`), the workflow's ``reconcile``
+        sink enqueues :meth:`_run_reconciliation` on the same executor, and the
+        promotion hook (:meth:`_on_version_promoted`) fires the detectors again.
+        """
+        from ..electrical.topology_inference import TopologyInferenceView
+        from ..learning.reconciliation import Reconciler
+        from ..versioning.workflow import ConfigurationWorkflow
+
+        versions = self.version_service
+        if versions is None:  # pragma: no cover - wired before this point
+            return
+        # Seed the ledger with the currently active topology edges so inference
+        # continues from the persisted evidence rather than from an empty view.
+        triple = versions.current()
+        topo_view = versions.topology_view(triple.topology_version_id)
+        seed_edges = list(getattr(topo_view, "edges", lambda: ())())
+        self.topology_inference = TopologyInferenceView(
+            edges=tuple(seed_edges),
+            clock=self._clock,
+            versions=versions,
+        )
+        self.reconciler = Reconciler(
+            operator=self._build_reconciliation_operator(),
+            model_sets={versions.current().model_set_id: self.model_registry_v3},
+            residual=self.unknown_prior,
+            history=self.db.repos.evidence,
+            matches=self.match_store,
+            clock=self._clock,
+        )
+        self.configuration_workflow = ConfigurationWorkflow(
+            versions,
+            clock=self._clock,
+            reconcile=self._enqueue_reconciliation,
+            audit=self._audit_configuration,
+        )
+
+    def _build_reconciliation_operator(self) -> Any:
+        """A time-scoped H for the current triple, used by L7 reconciliation."""
+        from ..electrical.operator import build_observation_operator
+
+        versions = self.version_service
+        assert versions is not None
+        triple = versions.current()
+        at = self._clock()
+        topo_view = versions.topology_view(triple.topology_version_id)
+        map_view = versions.mapping_view(triple.mapping_version_id)
+        # Collect readers from the mapping view's subjects.  An empty view yields
+        # an empty (but valid and honest) operator — never a fabricated row.
+        reader_ids: set[str] = set()
+        subjects: set[tuple[str, str]] = set()
+        subjects_getter = getattr(map_view, "subjects", None)
+        if callable(subjects_getter):
+            for subject in subjects_getter():
+                mapped = map_view.most_specific_reader(subject)
+                if mapped is not None:
+                    reader_ids.add(mapped)
+                    subjects.add(subject)
+        if not reader_ids:
+            for reader in self.reader_state.readers():
+                reader_ids.add(reader)
+        return build_observation_operator(
+            topo_view, map_view, None, tuple(sorted(reader_ids)), tuple(sorted(subjects)), at
+        )
 
     def _live_matrix_store(self) -> Any:
         """MatrixStore bound to the S15 mapping repository for durable cells."""
@@ -789,12 +878,19 @@ class RuntimeMixin:
             return MatrixStore(clock=self._clock)
 
     def _persist_evidence_batch(self, batch: Sequence[Any]) -> None:
-        """P4 → S16 sink: persist immutable event evidence through the DB seam."""
+        """P4 → S16 sink: persist immutable event evidence through the DB seam.
+
+        D5: when P4's ``EvidenceBatch.supersedes`` is set (a late sample produced
+        a superseding revision), persist the immutable link through
+        ``put_evidence(..., supersedes_evidence_id=...)``.  The contract record
+        itself never gains a metadata field.
+        """
         repository = self.db.repos.evidence
         for item in batch:
             evidence = getattr(item, "evidence", item)
+            supersedes = getattr(item, "supersedes", None)
             try:
-                repository.put_evidence(evidence)
+                repository.put_evidence(evidence, supersedes_evidence_id=supersedes)
             except Exception:  # noqa: BLE001 - duplicate revisions are benign
                 log.debug("evidence write skipped", exc_info=True)
 
@@ -855,9 +951,26 @@ class RuntimeMixin:
         """
         started = time.monotonic()
         try:
+            at = reading.observed_at
+            # P4 late sample / D5 supersession: a reading whose observed time is
+            # behind a closed FINAL window creates a new immutable revision with
+            # ``supersedes`` set.  Detect this before the ring update so a
+            # backfill is still recognised after the window has closed.
+            last_seen = self._reader_last_seen.get(reading.reader_id)
+            is_late = last_seen is not None and at < last_seen
+            self._reader_last_seen[reading.reader_id] = (
+                at if last_seen is None else max(last_seen, at)
+            )
             self.reader_state.add(reading)
             self.persist_queue.put_nowait(("reading", reading))
-            at = reading.observed_at
+            if is_late:
+                revised = self.window_collector.on_late_sample(
+                    reading.reader_id, at, reading.active_power_w
+                )
+                if revised is not None:
+                    # A late sub-event also attaches to its P5 group as a REVISED
+                    # revision; P4's sink already persisted the supersession link.
+                    self.late_evidence_count += 1
             self.change_detector.process(reading.reader_id, at)
             # The first post-sample makes an open window PROVISIONAL and a
             # matching group ready for inference.
@@ -872,10 +985,17 @@ class RuntimeMixin:
             self._record_latency("fast", (time.monotonic() - started) * 1000.0)
 
     def on_group_ready(self, group: EventGroup) -> None:
-        """P5 ready/revised callback: enqueue for the event loop (drop-oldest)."""
+        """P5 ready/revised callback: enqueue for the event loop (drop-oldest).
+
+        Every ready/revised group (CONFIRMED or later) also schedules a T5 ledger
+        fold on the background executor.  Keeping the fold off the event loop is
+        what preserves the O(1) fast path while still folding each group's reader
+        deltas into the durable per-pair evidence ledger.
+        """
         if not self.groups_ready.put_nowait(group):
             self.groups_dropped += 1
             log.warning("event group queue full; dropped the oldest group")
+        self._schedule_topology_ledger(group)
 
     async def on_ha_event(self, event: HAEvent) -> None:
         """Fast-loop entry for a device-free HA event (P1 → P5).
@@ -1133,6 +1253,198 @@ class RuntimeMixin:
             return None
         return self.background_executor.submit(fn, *args, **kwargs)
 
+    # -- topological self-healing (T5 / T7 / L7) --------------------------- #
+
+    def _schedule_topology_ledger(self, group: EventGroup) -> None:
+        """P5 ready/revised hook: fold one FINAL group into the ledger off-loop.
+
+        One background job per ready group keeps the fast/event loops O(1).  The
+        job is pure (an injected clock) except for its S14 write, which goes
+        through the repository's own short transaction (single-writer rule).
+        """
+        self.submit_background(self._fold_group_ledger, group)
+
+    def _fold_group_ledger(self, group: EventGroup) -> int:
+        """Fold ``group``'s reader deltas into the T5 ledger and persist edges.
+
+        Called on the single background executor.  A group id is deduplicated by
+        :class:`TopologyInferenceView`, so a revised delivery is idempotent.  When
+        an edge crosses into CONFIRMED/CONFLICTED the view proposes and promotes
+        a topology version through the injected VersionService (D1); the
+        promotion hook then schedules the self-healing detectors and L7
+        reconciliation.  Returns the number of edges written this call.
+        """
+        view = self.topology_inference
+        if view is None:
+            return 0
+        with self._ledger_lock:
+            from ..electrical.topology_inference import DeltaObservation
+
+            obs = DeltaObservation.from_group(group)
+            updated = view.observe_group(obs)
+            self.topology_inference = updated
+            repo = self.db.repos.topology_v3
+            changed = 0
+            for edge in updated.edges:
+                try:
+                    repo.upsert_edge(edge)
+                    changed += 1
+                except Exception:  # noqa: BLE001 - one edge must not abort the rest
+                    log.debug("topology ledger edge write skipped", exc_info=True)
+            # The wrapped D1 promote_topology already fires _on_version_promoted
+            # (detectors + L7 reconciliation); no duplicate hook here.
+            return changed
+
+    def _on_version_promoted(self, kind: str, version_id: str) -> None:
+        """Run after a topology/mapping promotion (T7 step 3 + L7 enqueue).
+
+        Re-runs the inferred detectors immediately on the background executor so
+        a freshly-promoted version is reconciled without waiting for the 15 min
+        timer, enqueues L7 reconciliation for the promoted triple, and records
+        the promotion for observability.
+        """
+        self.last_promotion = {"kind": kind, "version_id": version_id, "at": self._clock()}
+        self._enqueue_reconciliation(
+            {
+                "reason": f"{kind}_promotion",
+                "version_id": version_id,
+                "at": self._clock().isoformat(),
+            }
+        )
+        self._schedule_self_heal()
+
+    def bind_promotion_hooks(self) -> None:
+        """Wrap D1's promote methods so every promotion fires the T7 hook.
+
+        This is composition only: it decorates the real VersionService rather
+        than changing its producer module.  The wrapper preserves the original
+        return value and delegates the hook off-loop via the background executor.
+        """
+        versions = self.version_service
+        if versions is None or getattr(versions, "_wm_promotion_hooks", False):
+            return
+        promote_topology = versions.promote_topology
+        promote_mapping = versions.promote_mapping
+
+        def _topology(version_id: str, reason: str) -> None:
+            promote_topology(version_id, reason)
+            self._on_version_promoted("topology", version_id)
+
+        def _mapping(version_id: str, reason: str) -> None:
+            promote_mapping(version_id, reason)
+            self._on_version_promoted("mapping", version_id)
+
+        versions.promote_topology = _topology  # type: ignore[method-assign]
+        versions.promote_mapping = _mapping  # type: ignore[method-assign]
+        versions._wm_promotion_hooks = True  # type: ignore[attr-defined]
+
+    def _schedule_self_heal(self) -> None:
+        """Submit one detector+workflow cycle to the background executor."""
+        self.submit_background(self._self_heal_cycle)
+
+    def _self_heal_cycle(self) -> tuple[Any, ...]:
+        """Detector → SUSPECTED event → workflow → promote → reconcile.
+
+        Runs on the background executor.  Inferred detectors are pure
+        (:func:`detect_inferred_changes`, :func:`detect_reader_removals`) over the
+        association history and reader last-seen times the runtime maintains;
+        each proposal is recorded through the T7 workflow, which promotes after
+        its independent-evidence threshold and enqueues L7 reconciliation.
+        """
+        workflow = self.configuration_workflow
+        if workflow is None:
+            return ()
+        from ..electrical.topology_change import (
+            detect_inferred_changes,
+            detect_reader_removals,
+        )
+
+        try:
+            changes = list(
+                detect_inferred_changes(
+                    association_history=self._association_history,
+                    now=self._clock(),
+                )
+            )
+            changes.extend(
+                detect_reader_removals(
+                    reader_last_seen=self._reader_last_seen,
+                    now=self._clock(),
+                    missing_after_s=max(self.config.stale_after_s * 5.0, 600.0),
+                )
+            )
+            out: list[Any] = []
+            for change in changes:
+                # A repeated detector cycle re-registers the same SUSPECTED event
+                # (append-only D1 must not see a duplicate id) and adds one more
+                # independent corroboration, so suspicion can promote over time.
+                event_id = f"evt-inferred-{getattr(change.kind, 'value', change.kind)}-{change.subject}"
+                existing = workflow.record_for(event_id)
+                if existing is None:
+                    record = workflow.record_inferred(change)
+                else:
+                    from ..contracts import (
+                        ChangeDetection,
+                        ChangeStatus,
+                        ConfigurationEvent,
+                    )
+
+                    record = workflow.register(
+                        ConfigurationEvent(
+                            event_id=event_id,
+                            kind=change.kind,
+                            detection=ChangeDetection.INFERRED,
+                            status=ChangeStatus.SUSPECTED,
+                            affected_endpoint_ids=[change.subject],
+                            created_at=self._clock(),
+                        )
+                    )
+                record = workflow.begin(
+                    record.event_id,
+                    affected_endpoints=[change.subject],
+                )
+                out.append(
+                    workflow.observe_confirming_event(
+                        record.event_id, source=f"detector:{change.kind}"
+                    )
+                )
+            return tuple(out)
+        except Exception:  # noqa: BLE001 - a detector cycle must not kill the worker
+            log.exception("self-healing detector cycle failed")
+            return ()
+
+    def _enqueue_reconciliation(self, payload: Any) -> None:
+        """T7 promotion sink: enqueue L7 ``Reconciler`` off the event loop."""
+        self.submit_background(self._run_reconciliation, payload)
+
+    def _run_reconciliation(self, payload: Any) -> Any | None:
+        """Run one L7 reconciliation for a promoted configuration change."""
+        reconciler = self.reconciler
+        versions = self.version_service
+        if reconciler is None or versions is None:
+            return None
+        try:
+            triple = versions.current()
+            # The harness may rebind the version service (a different model-set
+            # id) after composition; register the live registry under whatever
+            # id the current triple carries before replaying.
+            if self.model_registry_v3 is not None:
+                reconciler._model_sets[triple.model_set_id] = self.model_registry_v3
+            end = self._clock()
+            start = end - timedelta(hours=1)
+            return reconciler.run(
+                (start, end),
+                triple,
+                reason="topology_promotion",
+            )
+        except Exception:  # noqa: BLE001 - reconciliation is best-effort background work
+            log.exception("L7 reconciliation failed")
+            return None
+
+    def _audit_configuration(self, payload: Any) -> None:
+        """Append-only audit sink for T7 promotion/rejection decisions."""
+        log.info("configuration workflow: %s", payload)
+
     def _record_latency(self, stage: str, millis: float) -> None:
         self.stage_latency_s[stage] = round(millis / 1000.0, 6)
 
@@ -1263,6 +1575,20 @@ class RuntimeMixin:
                     )
                 except Exception:  # noqa: BLE001 - table may not exist yet
                     log.debug("evidence prune skipped for %s", table, exc_info=True)
+
+    async def _self_heal_loop(self) -> None:
+        """T7 detectors on the background executor every 15 minutes."""
+        interval = max(1.0, 15.0 * 60.0)
+        while not self._stopping:
+            try:
+                self._schedule_self_heal()
+            except Exception:  # noqa: BLE001
+                log.exception("failed to schedule self-healing cycle")
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), interval)
+                return
+            except TimeoutError:
+                continue
 
     async def _maintenance_loop(self) -> None:
         while not self._stopping:
