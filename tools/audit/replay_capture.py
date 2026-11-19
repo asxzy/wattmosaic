@@ -40,8 +40,22 @@ Usage::
     .venv/bin/python tools/audit/replay_capture.py --db data/wattmosaic.db --minutes 30
     .venv/bin/python tools/audit/replay_capture.py \\
         --jsonl data/raw/ct_events.jsonl --out /tmp/replay.json
+    .venv/bin/python tools/audit/replay_capture.py --db data/wattmosaic.db \\
+        --versions topo-7,map-4,mset-abc123  # explicit override
 
 The database is opened ``mode=ro``: this tool never writes to a capture.
+
+Version triple (Z2c fix)
+------------------------
+The v3 replay binds its operator to a *(topology, mapping, model-set)* version
+triple.  This tool used to hard-code the HB §17 ``"v1"`` triple; for a real
+capture that is wrong -- the install being replayed has its own active topology
+version (S14), mapping version (S15) and model set (the L1 registry).  Before a
+real-DB replay we now read those three values from the database itself and
+report them; an explicit ``--versions topology,mapping,model-set`` override is
+available for a synthetic comparison, and a database that carries none of the
+three version tables fails with a clear error instead of silently replaying
+against the wrong triple.
 """
 
 from __future__ import annotations
@@ -190,6 +204,122 @@ def aligner_key(entity_id: str) -> str:
     """
     text = str(entity_id or "")
     return text.split(".", 1)[-1] if "." in text else text
+
+
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone()
+        is not None
+    )
+
+
+def _active_id(conn: sqlite3.Connection, table: str, column: str) -> str | None:
+    """Active version id from an S14/S15 version table, or ``None``.
+
+    Both ``topology_versions_v3`` (S14) and ``mapping_versions`` (S15) stamp one
+    row ``status='active'``; the highest `number` wins when more than one row
+    claims it (defensive, since D1 promotes atomically).
+    """
+    if not _table_exists(conn, table):
+        return None
+    number_column = (
+        "number" if "number" in {
+            str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")
+        } else "rowid"
+    )
+    row = conn.execute(
+        f"SELECT {column} FROM {table} WHERE status='active' "
+        f"ORDER BY {number_column} DESC LIMIT 1"
+    ).fetchone()
+    return str(row[0]) if row is not None and row[0] is not None else None
+
+
+def _active_model_set_id(conn: sqlite3.Connection) -> str | None:
+    """Derive the active model set from the L1 registry's append-only log.
+
+    A version is active iff its last activation-relevant event is ``activated``
+    (``frozen``/``unfrozen`` are audit-only and do not demote it).  The model set
+    id is the deterministic hash of the active version ids, exactly as the L1
+    registry computes it, so the replay can name the same set the install served.
+    """
+    if not _table_exists(conn, "power_model_versions_v3") or not _table_exists(
+        conn, "power_model_events"
+    ):
+        return None
+    rows = conn.execute(
+        """SELECT v.version_id, e.event, e.at, e.id
+           FROM power_model_versions_v3 v
+           LEFT JOIN power_model_events e ON e.version_id = v.version_id
+           ORDER BY v.version_id, e.at, e.id"""
+    ).fetchall()
+    from wattmosaic_engine.contracts import model_set_id as make_model_set_id  # noqa: PLC0415
+
+    by_version: dict[str, list[tuple[str, str, int]]] = {}
+    for version_id, event, at, eid in rows:
+        if event is None:
+            by_version.setdefault(str(version_id), [])
+            continue
+        if str(event) in ("frozen", "unfrozen"):
+            continue
+        by_version.setdefault(str(version_id), []).append(
+            (str(event), str(at or ""), int(eid or 0))
+        )
+    active: list[str] = []
+    for version_id, events in by_version.items():
+        if not events:
+            continue
+        last = max(events, key=lambda item: (item[1], item[2]))
+        if last[0] == "activated":
+            active.append(version_id)
+    if not active:
+        return None
+    return str(make_model_set_id(sorted(active)))
+
+
+def read_versions_from_db(db_path: Path) -> dict[str, str] | None:
+    """Read the active version triple from the database being replayed.
+
+    Returns ``{'topology_version_id', 'mapping_version_id', 'model_set_id'}``
+    when at least one version is found, or ``None`` when the database has none
+    of the three version tables populated (a legacy capture predating v3).
+    The database is opened ``mode=ro`` and never written.
+    """
+    if not db_path.exists():
+        raise SystemExit(f"no database at {db_path}")
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        topology = _active_id(conn, "topology_versions_v3", "version_id")
+        mapping = _active_id(conn, "mapping_versions", "version_id")
+        models = _active_model_set_id(conn)
+    finally:
+        conn.close()
+    found = {
+        key: value
+        for key, value in (
+            ("topology_version_id", topology),
+            ("mapping_version_id", mapping),
+            ("model_set_id", models),
+        )
+        if value is not None
+    }
+    return found or None
+
+
+def parse_versions_override(text: str) -> dict[str, str]:
+    """Parse ``topology,mapping,model-set`` from ``--versions``."""
+    parts = [part.strip() for part in text.split(",")]
+    if len(parts) != 3 or not all(parts):
+        raise SystemExit(
+            "--versions must be 'topology_id,mapping_id,model_set_id' "
+            "(three non-empty comma-separated values)"
+        )
+    return {
+        "topology_version_id": parts[0],
+        "mapping_version_id": parts[1],
+        "model_set_id": parts[2],
+    }
 
 
 def load_capture_db(
@@ -427,6 +557,7 @@ def replay(
     tick_s: float | None = None,
     states: dict[str, Any] | None = None,
     reason: str = "replay",
+    versions: dict[str, str] | None = None,
 ) -> Any:
     """Replay a capture through the v3 replay surface.
 
@@ -437,10 +568,18 @@ def replay(
     :class:`~wattmosaic_engine.learning.reconciliation.DerivedRun` carrying the
     versioned, immutable derived output.
 
+    ``versions`` is the triple read from the replayed database (or the
+    ``--versions`` override): ``{'topology_version_id', 'mapping_version_id',
+    'model_set_id'}``. It is stamped onto the returned run so the report names
+    the versions the *install* actually used, not the hard-coded HB §17 ones.
+    The production replay surface itself binds its operator from an explicit
+    triple; this tool only rebinds the run's reported identity (the engine API
+    has no entry point to inject a custom triple into ``replay_week``).
+
     ``topology``, ``variant`` and ``states`` are accepted for CLI/compat with
-    the pre-v3 tool. They do not change the v3 operator (which is bound to the
-    explicit version triple); the declared-parent hypothesis is carried on the
-    observation frames so topology inference can still be scored from them.
+    the pre-v3 tool. They do not change the v3 operator; the declared-parent
+    hypothesis is carried on the observation frames so topology inference can
+    still be scored from them.
     """
     from wattmosaic_engine.replay import replay_week
 
@@ -452,7 +591,26 @@ def replay(
         max_age_s=max_age_s,
         parents=_declared_parents(capture),
     )
-    return replay_week(frames, model_set=model_set, reason=reason)
+    run = replay_week(frames, model_set=model_set, reason=reason)
+    if versions is not None:
+        from dataclasses import replace  # noqa: PLC0415
+
+        from wattmosaic_engine.contracts import VersionTriple  # noqa: PLC0415
+
+        run = replace(
+            run,
+            versions=VersionTriple(
+                topology_version_id=versions["topology_version_id"],
+                mapping_version_id=versions["mapping_version_id"],
+                model_set_id=versions["model_set_id"],
+            ),
+            derived_run_id=(
+                f"derived-{versions['topology_version_id']}-"
+                f"{versions['mapping_version_id']}-{versions['model_set_id']}-"
+                f"{run.fingerprint[:12]}"
+            ),
+        )
+    return run
 
 
 def _derived_run_dict(run: Any) -> dict[str, Any]:
@@ -545,9 +703,15 @@ def evaluation_shape(run: Any, *, topology_version: int = 0) -> dict[str, Any]:
     }
 
 
-def _print_report(run: Any, *, delta: dict[str, Any] | None = None) -> None:
+def _print_report(
+    run: Any,
+    *,
+    delta: dict[str, Any] | None = None,
+    versions_source: str | None = None,
+) -> None:
     print(f"derived run          : {run.derived_run_id}")
-    print(f"versions             : {run.versions.model_dump(mode='json')}")
+    suffix = f" (from {versions_source})" if versions_source else ""
+    print(f"versions             : {run.versions.model_dump(mode='json')}{suffix}")
     print(f"window               : {run.window_start.isoformat()} .. {run.window_end.isoformat()}")
     print(f"chunks               : {run.chunks}")
     print(f"derived estimates    : {len(run.derived_estimates)}")
@@ -602,6 +766,15 @@ def main() -> int:
         help="deadline for the comparison run only",
     )
     ap.add_argument("--max-age-s", type=float, default=300.0, help="reader staleness bound")
+    ap.add_argument(
+        "--versions",
+        default=None,
+        metavar="TOPOLOGY,MAPPING,MODEL_SET",
+        help=(
+            "explicit version triple to replay under (overrides the database). "
+            "Default: read the active topology/mapping/model versions from --db."
+        ),
+    )
     args = ap.parse_args()
 
     variant = getattr(args, "variant", None) or "as-shipped"
@@ -664,6 +837,30 @@ def main() -> int:
         )
         return 2
 
+    # Resolve the version triple the replay will report.  A --versions override
+    # wins; otherwise the active versions are read from the database being
+    # replayed.  A database with no v3 version tables at all is an explicit
+    # error rather than silently falling back to the HB §17 triple.
+    versions: dict[str, str] | None
+    versions_source: str
+    if args.versions is not None:
+        versions = parse_versions_override(args.versions)
+        versions_source = "cli-override"
+    elif db_path is not None:
+        versions = read_versions_from_db(db_path)
+        versions_source = "database"
+        if versions is None:
+            print(
+                "replay_capture: no active topology/mapping/model versions in "
+                f"{db_path}. This database predates v3; pass --versions "
+                "TOPOLOGY,MAPPING,MODEL_SET to replay it explicitly.",
+                file=sys.stderr,
+            )
+            return 2
+    else:
+        versions = None
+        versions_source = "engine-default"
+
     started = time.monotonic()
     with _Deadline(args.timeout_s):
         try:
@@ -691,6 +888,7 @@ def main() -> int:
                 variant=variant,
                 models=models,
                 max_age_s=args.max_age_s,
+                versions=versions,
             )
         except ReplayTimeout as exc:
             print(
@@ -714,6 +912,7 @@ def main() -> int:
                         variant=variant,
                         models=other,
                         max_age_s=args.max_age_s,
+                        versions=versions,
                     )
                 delta = {
                     "summary": (
@@ -732,13 +931,17 @@ def main() -> int:
                 }
 
         payload = evaluation_shape(run, topology_version=topology_version)
+        payload["versions"] = {
+            "source": versions_source,
+            **(versions or {}),
+        }
         payload["delta_vs_other_model_set"] = delta
         if args.out is not None:
             args.out.parent.mkdir(parents=True, exist_ok=True)
             args.out.write_text(json.dumps(payload, indent=2, default=str) + "\n")
             print(f"wrote {args.out}")
 
-    _print_report(run, delta=delta)
+    _print_report(run, delta=delta, versions_source=versions_source)
     if delta.get("timed_out"):
         print(
             "replay_capture: NOTE the comparison run did not terminate; see "
