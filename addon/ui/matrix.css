@@ -155,3 +155,46 @@ table.data.matrix-grid th.matrix-grid-identity {
 .matrix-row-drill-item { padding: 8px 0; border-bottom: 1px solid var(--line); }
 .matrix-totals { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 14px; }
 
+/* --- Grid detail: frozen corner, "Now" column, row tree, total rows ------ */
+table.data.matrix-grid thead th.matrix-grid-corner { z-index: 5; vertical-align: bottom; }
+table.data.matrix-grid thead th.matrix-grid-now-head { vertical-align: bottom; text-align: right; }
+.matrix-hdr-id { font-size: 10px; color: var(--text-mute); font-weight: 400; }
+.matrix-row-label { white-space: nowrap; }
+.matrix-row-tag {
+  display: inline-block; margin-left: 6px; padding: 0 5px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  font-size: 10px; font-weight: 400; font-style: normal; color: var(--text-mute);
+}
+table.data.matrix-grid th.matrix-grid-identity[data-depth="1"] { padding-left: 24px; }
+table.data.matrix-grid th.matrix-grid-identity[data-depth="2"] { padding-left: 40px; }
+table.data.matrix-grid th.matrix-grid-identity[data-depth="3"] { padding-left: 56px; }
+.matrix-grid-now {
+  text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums;
+  border-right: 1px solid var(--line);
+}
+.matrix-now-value { display: block; font-weight: 600; }
+.matrix-now-status { display: block; font-size: 10px; color: var(--text-mute); }
+.matrix-grid-now-none { color: var(--text-mute); }
+.matrix-row-total th, .matrix-row-total td { background: var(--bg-elev-2); }
+.matrix-row-total-label { font-weight: 600; }
+.matrix-row-total-top td, .matrix-row-total-top th { border-bottom: 2px solid var(--line); }
+tr.matrix-row-total-bottom:first-of-type td,
+tr.matrix-row-total-bottom:first-of-type th { border-top: 2px solid var(--line); }
+.matrix-grid-total { text-align: left; white-space: nowrap; font-variant-numeric: tabular-nums; font-weight: 600; padding-left: 7px; }
+/* Body labels are names, not column captions: keep their own case. */
+table.data.matrix-grid tbody th {
+  text-transform: none; letter-spacing: normal; font-size: 13px; color: var(--text);
+}
+table.data.matrix-grid tbody th.matrix-row-total-label { color: var(--text-dim); }
+.matrix-cell-confidence { font-size: 10px; }
+.matrix-grid-stale { color: var(--warn); font-style: italic; }
+.matrix-cell-compact { display: flex; flex-direction: column; gap: 1px; min-width: 120px; white-space: nowrap; }
+.matrix-cell-line { display: flex; align-items: baseline; gap: 5px; white-space: nowrap; }
+.matrix-cell-value-none { color: var(--text-mute); font-weight: 400; }
+.matrix-cell-meta { font-size: 10.5px; color: var(--text-dim); white-space: nowrap; }
+.matrix-cell-compact .matrix-cell-age { margin-left: 0; }
+.matrix-notice {
+  margin: 8px 0; padding: 8px 10px; border: 1px dashed var(--line);
+  border-radius: var(--radius-sm); color: var(--text-dim); font-size: 12.5px;
+}
+

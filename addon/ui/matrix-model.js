@@ -317,8 +317,11 @@ function _confidenceGlyph(confidence) {
   const n = Object.keys(confidence).filter(
     (k) => !_isAbsent(confidence[k]) && typeof confidence[k] === 'number'
   ).length;
-  if (n >= 5) return '◈';
-  if (n >= 1) return '◇';
+  // How many confidence dimensions were assessed — never a blended score.
+  // Bars, so the meter cannot be mistaken for a category glyph (◇ provisional).
+  if (n >= 5) return '▰▰▰';
+  if (n >= 3) return '▰▰▱';
+  if (n >= 1) return '▰▱▱';
   return '—';
 }
 
@@ -362,14 +365,14 @@ function cellView(cell) {
   const value = noNumber ? '—' : watts(estimate);
   const low = bounds.lower_w !== undefined ? bounds.lower_w : bounds.low;
   const high = bounds.upper_w !== undefined ? bounds.upper_w : bounds.high;
-  const interval = _isAbsent(low) && _isAbsent(high)
-    ? null
-    : `${_isAbsent(low) ? '—' : watts(low)} – ${_isAbsent(high) ? '—' : watts(high)}`;
+  const interval = _interval(low, high);
 
   let text = meta.text;
   if (nonIdentifiable && category !== 'group_only') {
     text = `${meta.text} — non-identifiable`;
   }
+  const events = c.event_association || {};
+  const matched = Number(events.matched_event_count);
   return {
     category,
     text,
@@ -379,7 +382,41 @@ function cellView(cell) {
     interval,
     confidence: _confidenceGlyph(c.confidence),
     age: _age(timestamps.updated_at || timestamps.last_observed_at),
+    // HB §19.3: a cell also communicates its mapping status and observability,
+    // which stay meaningful when there is no current number to show.
+    mappingStatus: status || null,
+    observability: obs || null,
+    relation: mapping.relation_type ? String(mapping.relation_type).toLowerCase() : null,
+    matchedEvents: Number.isFinite(matched) && matched > 0 ? matched : 0,
   };
+}
+
+// A readable interval.  The bare non-negativity bound [0, —] says nothing a
+// person does not already know, so it is not shown; one-sided bounds read
+// "≥ x" / "≤ y" instead of a dangling dash.  No value is invented.
+function _interval(low, high) {
+  const lo = _isAbsent(low) ? null : Number(low);
+  const hi = _isAbsent(high) ? null : Number(high);
+  if (lo === null && hi === null) return null;
+  if (hi === null) return lo > 0 ? `≥ ${watts(lo)}` : null;
+  if (lo === null) return `≤ ${watts(hi)}`;
+  // A degenerate interval is just the point again; it adds nothing.
+  if (watts(lo) === watts(hi)) return null;
+  return `${watts(lo)} – ${watts(hi)}`;
+}
+
+// Short human text for a mapping status / observability pair, e.g.
+// "Confirmed · direct".  Absent parts are skipped, never guessed.
+function mappingSummary(view) {
+  const v = view || {};
+  const parts = [];
+  if (v.mappingStatus && v.mappingStatus !== 'unknown') {
+    parts.push(v.mappingStatus.charAt(0).toUpperCase() + v.mappingStatus.slice(1));
+  }
+  if (v.observability && v.observability !== 'unknown') {
+    parts.push(v.observability.replace(/_/g, ' '));
+  }
+  return parts.join(' · ');
 }
 
 function _leavesForLabel(columns, kind, needle) {
@@ -523,6 +560,7 @@ export {
   rowTree,
   flattenRows,
   cellView,
+  mappingSummary,
   applyFilters,
   matrixObserveVersion,
 };
