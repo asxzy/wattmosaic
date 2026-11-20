@@ -13,8 +13,9 @@ item is in [verification-report.md](verification-report.md) §8 and §10 and in
 - **Implied steady state** with the 3.0 defaults (raw 7 days, derived 90 days):
   ≈ 5 GB raw + ≈ 4.5 GB snapshots.
 - **TODO.**
-  - [ ] Store raw readings as change points (drop repeated values within the
-        reader's resolution/σ) or downsample after a short full-rate horizon.
+  - [ ] Raw CT readings are no longer persisted by default; see ADR-0042 and the
+        implementation plan in `docs/specs/raw-capture/`. Measure the reduced
+        per-table growth with `tools/dev/perf_runtime.py` and record the numbers.
   - [ ] Store snapshots as change points or deltas, or shorten the default
         snapshot horizon for Pi-class installs.
   - [ ] Expose the derived-table retention settings (`WM_RETENTION_DAYS_*`) as

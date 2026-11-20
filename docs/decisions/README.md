@@ -2197,3 +2197,46 @@ Covered by `docs/specs/retire-dedicated-ct-concept/design.md` AC-1 … AC-11, pr
 5. **Reconciliation and replay write only into the engine's versioned derived namespace.** HA long-term statistics are not rewritten.
 
 **Consequences.** Fixed loads become promotable under per-class criteria, and a legacy model can no longer masquerade as a validated estimate after reload. Versioned replay is reproducible without touching HA's append-only statistics. Rollback reactivates only the last version whose event log records activation, so a rejected candidate cannot come back.
+
+---
+
+## ADR-0042 — Raw CT capture is a debug option; the HA recorder is production history
+
+**Status:** Accepted · 2026-11-19 · Amends the raw-sample clause of DEC-30 (ADR-0035)
+
+**Context.** The engine persists every canonical CT reading into `ct_samples`, which
+accounts for about **0.71 of the 0.81 GB/day** of database growth in the full-scale
+benchmark (TODO §1 of the realtime-topology-disaggregation spec). No production path
+reads that table: detection, evidence windows and quality use in-memory rings, restart
+recovery reloads a reader-state blob, and no API endpoint, panel view or learning path
+queries it. Every CT reading also arrives as a Home Assistant `state_changed` event, so
+HA's recorder already holds the same stream with a default `purge_keep_days` of 10, and
+polarity and multiplier are re-derivable from the versioned topology and mapping. Storing
+a second full-rate history on Pi-class hosts is therefore a developer convenience, not a
+production requirement.
+
+**Decision.**
+
+1. Full-rate persistence of canonical CT readings is a **debug option**, controlled by
+   `raw_capture_days` (`WM_RAW_CAPTURE_DAYS`, App option `raw_capture_days`, range 0–90,
+   **default 0**). At 0 the engine does not persist CT readings; at N > 0 it persists them
+   and keeps N days.
+2. The **Home Assistant recorder is the production raw history**. Replaying from HA
+   history is a developer-tooling feature in `tools/`; engine code never reads HA history
+   or registries (ADR-0028) and stays read-only toward HA.
+3. `ct_samples` gets its own `capture` retention tier. The on-loop `db.prune` and the
+   evidence prune no longer delete from it; a batched background job is the only runtime
+   path that does, in bounded `BEGIN IMMEDIATE` transactions with a batch and time budget.
+4. This **amends DEC-30's raw-sample clause**: canonical CT readings are no longer
+   persisted by default. The `event_evidence.samples_json` thinning horizon
+   (`WM_EVIDENCE_RAW_RETENTION_DAYS`) is unchanged, as are `ha_events_v3` and the other
+   raw-tier tables.
+
+**Consequences.** Three caveats are accepted and documented: (a) users who exclude 1 Hz
+power sensors from the recorder or shorten `purge_keep_days` have no HA history and can
+set `raw_capture_days`; (b) HA history has no engine `received_at`, so a replay loses
+arrival delay and reordering and timing bugs need `raw_capture_days > 0`; (c) after a
+detector fix, previously missed events can only be re-detected within the recorder window
+(10 days by default). On upgrade, legacy `ct_samples` rows drain in the background. SQLite
+reuses freed pages, so the database file stops growing but does not shrink without a
+manual `VACUUM` taken with the engine stopped; no automated shrink is performed.
