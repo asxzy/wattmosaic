@@ -42,6 +42,26 @@ class PurgeResult:
     done: bool
 
 
+def _batch_select_sql(cutoff_iso: str | None) -> tuple[str, tuple[object, ...]]:
+    """The bounded SELECT whose rows a single batch deletes.
+
+    With a cutoff, order by ``received_at, id`` so ``idx_ct_samples_time``
+    answers both the range filter and the order: SQLite walks the index in age
+    order and stops as soon as no row older than the cutoff is left.  With no
+    cutoff there is no age key to seek, so the integer primary key (rows are
+    appended in time order) gives the oldest-first window instead.
+
+    Kept as a separate helper so the EXPLAIN-QUERY-PLAN test can assert the
+    chosen access path against exactly the SQL the purge executes.
+    """
+    if cutoff_iso is None:
+        return "SELECT id FROM ct_samples ORDER BY id LIMIT ?", ()
+    return (
+        "SELECT id FROM ct_samples WHERE received_at < ? ORDER BY received_at, id LIMIT ?",
+        (cutoff_iso,),
+    )
+
+
 def purge_ct_samples(
     conn: sqlite3.Connection,
     lock: threading.RLock | threading.Lock,
@@ -55,19 +75,19 @@ def purge_ct_samples(
     """Delete aged ``ct_samples`` rows in bounded, committed batches.
 
     Each batch acquires ``lock``, opens ``BEGIN IMMEDIATE``, deletes at most
-    ``batch_rows`` rows with the lowest ``id`` whose ``received_at < cutoff``
+    ``batch_rows`` rows with the lowest age whose ``received_at < cutoff``
     (every row when ``cutoff is None``), commits and releases the lock.  The
-    ascending-``id`` window uses the integer primary key so the scan stays
-    ordered even though the age filter is on ``received_at``; rows are appended
-    in time order, so lowest ``id`` is the oldest.
+    ascending-age window uses ``idx_ct_samples_time`` when a cutoff is present;
+    the oldest-appended ``id`` window is used when there is none.
 
     The pass stops when a batch deletes fewer than ``batch_rows`` (``done=True``),
     or when ``max_batches`` transactions or ``time_budget_s`` seconds have
     elapsed (``done=False``; a later call resumes).  On any SQL error the open
-    transaction is rolled back, the lock released and the exception re-raised so
-    the caller can degrade gracefully.  A missing table is a no-op
-    (:class:`PurgeResult` with ``done=True``), which keeps startup against an old
-    or partially migrated database safe.
+    transaction is rolled back (guarded by ``in_transaction`` so an automatic
+    SQLite rollback cannot mask the original error), the lock released and the
+    exception re-raised so the caller can degrade gracefully.  A missing table
+    is a no-op; if it disappears after earlier batches committed, the rows
+    already deleted are reported rather than discarded.
 
     ``cutoff`` is converted with :func:`~wattmosaic_engine.storage.repositories.iso`
     to the same ISO-8601 UTC string the tier prune compares against.
@@ -78,18 +98,9 @@ def purge_ct_samples(
         raise ValueError("max_batches must be None or >= 1")
 
     cutoff_iso = iso(cutoff)
-    if cutoff_iso is None:
-        where = ""
-        params: tuple[object, ...] = ()
-    else:
-        where = " WHERE received_at < ?"
-        params = (cutoff_iso,)
-
-    delete_sql = (
-        "DELETE FROM ct_samples WHERE id IN ("
-        "SELECT id FROM ct_samples" + where + " ORDER BY id LIMIT ?)"
-    )
-    insert_params: tuple[object, ...] = (*params, batch_rows)
+    select_sql, select_params = _batch_select_sql(cutoff_iso)
+    delete_sql = f"DELETE FROM ct_samples WHERE id IN ({select_sql})"
+    delete_params: tuple[object, ...] = (*select_params, batch_rows)
 
     start = monotonic()
     deleted = 0
@@ -100,19 +111,22 @@ def purge_ct_samples(
             try:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
-                    cursor = conn.execute(delete_sql, insert_params)
+                    cursor = conn.execute(delete_sql, delete_params)
                     removed = cursor.rowcount
                     conn.execute("COMMIT")
                 except Exception:
-                    conn.execute("ROLLBACK")
+                    # Guard the rollback: if SQLite already rolled the
+                    # transaction back, a second ROLLBACK would raise and hide
+                    # the original failure from the caller.
+                    if conn.in_transaction:
+                        conn.execute("ROLLBACK")
                     raise
             except sqlite3.OperationalError as exc:
-                # A missing table (e.g. a fresh or pre-migration database) is a
-                # no-op; re-raise every other operational error.  If the failure
-                # happened after BEGIN, ROLLBACK above already cleaned up.
                 if "no such table" not in str(exc).lower():
                     raise
-                return PurgeResult(0, 0, True)
+                # The table can vanish after earlier batches committed.  Report
+                # the progress this call already made instead of losing it.
+                return PurgeResult(deleted, batches, True)
 
         deleted += removed
         batches += 1
