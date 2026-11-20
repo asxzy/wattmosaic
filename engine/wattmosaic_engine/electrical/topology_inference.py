@@ -766,7 +766,35 @@ class TopologyInferenceView:
                         )
                     )
 
-        # -- lifecycle transitions with the absolute guards ----------------- #
+        version_transitions = self._settle(edges, causes, absolute_now, basis_now, meta_now, levels)
+
+        view = replace(
+            self,
+            edges=tuple(edges),
+            at=at,
+            seen_groups=frozenset({*self.seen_groups, obs.group_id}),
+            causes_by_edge={key: frozenset(values) for key, values in causes.items()},
+            co_response_causes={key: frozenset(values) for key, values in co_response.items()},
+            co_response_events=co_events,
+            absolute=absolute_now,
+            basis_by_reader=basis_now,
+            channel_meta=meta_now,
+        )
+        if version_transitions:
+            view = view._propose_version(version_transitions)
+        return view
+
+    # -- lifecycle / versioning internals ----------------------------------- #
+    def _settle(
+        self,
+        edges: list[TopologyEdgeV3],
+        causes: Mapping[tuple[str, str, str], set[str]],
+        absolute_now: Mapping[str, Sequence[float | None]],
+        basis_now: Mapping[str, MeasurementBasis | str],
+        meta_now: Mapping[str, Mapping[str, Any]],
+        levels: Mapping[str, float] | None,
+    ) -> list[str]:
+        """Apply lifecycle transitions in place; return the version-worthy ones."""
         transitions: list[str] = []
         for index, edge in enumerate(edges):
             if _relation(edge.relation) != _CONTAINS or edge.pinned or edge.lifecycle in _DORMANT:
@@ -789,7 +817,7 @@ class TopologyInferenceView:
         # Only a crossing into CONFIRMED or CONFLICTED promotes a topology
         # version (T5 step 3).  CANDIDATE/PROVISIONAL are soft and accumulate
         # silently; one event must never publish a new version.
-        version_transitions = [
+        return [
             text
             for text in transitions
             if text.endswith(f"-> {_value(EdgeLifecycleV3.CONFIRMED)}")
@@ -805,23 +833,61 @@ class TopologyInferenceView:
             )
         ]
 
+    def merge_evidence(
+        self,
+        learned: TopologyInferenceView,
+        *,
+        levels: Mapping[str, float] | None = None,
+    ) -> TopologyInferenceView:
+        """Fold a ledger learned elsewhere (a history replay) into this one.
+
+        Per CONTAINS pair the record with more decisive evidence (support +
+        conflict) wins, with its independent causes.  Evidence is never summed:
+        a replay of recorded history and the live ledger observe the same
+        events, so adding them would count each event twice.  The merge is
+        therefore idempotent -- running the same replay again changes nothing.
+        Pinned, user-declared and dormant (REJECTED/RETIRED) pairs keep this
+        ledger's record: user authority wins.  Lifecycles are then settled with
+        the normal rules and a version is proposed exactly as for a live event.
+        """
+        edges = list(self.edges)
+        by_key = {
+            (e.source_endpoint_id, e.target_endpoint_id, _relation(e.relation)): i
+            for i, e in enumerate(edges)
+        }
+        causes: dict[tuple[str, str, str], set[str]] = {
+            key: set(values) for key, values in self.causes_by_edge.items()
+        }
+        for edge in learned.edges:
+            if _relation(edge.relation) != _CONTAINS:
+                continue
+            key = (edge.source_endpoint_id, edge.target_endpoint_id, _CONTAINS)
+            learned_causes = set(learned.causes_by_edge.get(key, ()))
+            weight = edge.evidence.support + edge.evidence.conflict
+            position = by_key.get(key)
+            if position is None:
+                edges.append(edge.model_copy(update={"lifecycle": EdgeLifecycleV3.CANDIDATE}))
+                by_key[key] = len(edges) - 1
+                causes[key] = learned_causes
+                continue
+            current = edges[position]
+            if current.pinned or current.declared_by == "user" or current.lifecycle in _DORMANT:
+                continue
+            if weight > current.evidence.support + current.evidence.conflict:
+                edges[position] = current.model_copy(update={"evidence": edge.evidence})
+                causes[key] = learned_causes
+        version_transitions = self._settle(
+            edges, causes, self.absolute, self.basis_by_reader, self.channel_meta, levels
+        )
         view = replace(
             self,
             edges=tuple(edges),
-            at=at,
-            seen_groups=frozenset({*self.seen_groups, obs.group_id}),
             causes_by_edge={key: frozenset(values) for key, values in causes.items()},
-            co_response_causes={key: frozenset(values) for key, values in co_response.items()},
-            co_response_events=co_events,
-            absolute=absolute_now,
-            basis_by_reader=basis_now,
-            channel_meta=meta_now,
         )
         if version_transitions:
             view = view._propose_version(version_transitions)
         return view
 
-    # -- lifecycle / versioning internals ----------------------------------- #
     @staticmethod
     def _keep_direct_parents(
         edges: list[TopologyEdgeV3], levels: Mapping[str, float]

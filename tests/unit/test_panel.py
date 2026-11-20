@@ -616,7 +616,7 @@ def test_all_empty_discovery_does_not_claim_a_measurement_when_it_could_not_run(
     """
     script = _shipped_js()
     start = script.index("if (nothing) {")
-    end = script.index("return card('Discover devices', body, {", start)
+    end = script.index("return card(DISCOVER_TITLE, body, {", start)
     block = script[start:end]
     arms = re.search(
         r"if \(data\.ok === false\) \{(?P<hard>.*?)\n    \} else \{(?P<ran>.*?)\n    \}",

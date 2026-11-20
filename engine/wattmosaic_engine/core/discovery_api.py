@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import statistics
 import time
 from collections.abc import Iterable, Mapping
 from datetime import timedelta
@@ -226,6 +227,150 @@ class DiscoveryApiMixin:
         }
 
     async def discover_placements(
+        self,
+        *,
+        lookback_hours: float = 24.0,
+        apply: bool | None = None,
+        include_groups: bool = True,
+        max_candidates: int = 200,
+    ) -> dict[str, Any]:
+        """Discover devices *and* topology from the same recorded window.
+
+        Device placement (:meth:`_discover_device_placements`) is unchanged.  An
+        analysis run (``apply`` not true) then replays the window's recorded
+        power history through the T5 ledger
+        (:meth:`discover_topology_from_history`), so a fresh install does not
+        wait hours of live events for its first edge.  The topology ledger is
+        inference output that live T5 writes without a switch, so it is merged
+        on the analysis run; the apply run only writes the reviewed placements.
+        A topology failure never fails device discovery: it is reported in
+        ``result["topology"]``.
+        """
+        result = await self._discover_device_placements(
+            lookback_hours=lookback_hours,
+            apply=apply,
+            include_groups=include_groups,
+            max_candidates=max_candidates,
+        )
+        if apply is not True:
+            try:
+                result["topology"] = await self.discover_topology_from_history(
+                    lookback_hours=float(result.get("lookback_hours") or lookback_hours)
+                )
+            except Exception as exc:  # noqa: BLE001 - devices still reported
+                log.exception("topology discovery from history failed")
+                result["topology"] = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+        return result
+
+    async def discover_topology_from_history(self, *, lookback_hours: float = 24.0) -> dict[str, Any]:
+        """Replay recorded power history through the T5 ledger and merge it.
+
+        Read-only toward HA (recorder history only).  The replay starts from an
+        empty ledger seeded with the user's pinned/declared/rejected pairs, uses
+        the live rules (:mod:`electrical.topology_history`), and is merged with
+        :meth:`TopologyInferenceView.merge_evidence` -- per pair the stronger
+        record wins, never a sum, so re-running is idempotent.  A crossing into
+        CONFIRMED proposes and promotes a topology version exactly as live does.
+        """
+        from ..electrical.topology_history import learn_topology_from_history
+        from ..electrical.topology_inference import TopologyInferenceView
+        from ..ingestion.correlation import parse_history_payload
+
+        live = getattr(self, "topology_inference", None)
+        if live is None:
+            return {"ok": False, "detail": "the topology ledger is not running"}
+        endpoints = [
+            e for e in self._matrix_endpoints() if getattr(e, "enabled", True) and e.entity_id
+        ]
+        if not endpoints:
+            return {"ok": False, "detail": "no measurement endpoints with a power entity"}
+        reader_of = {str(e.entity_id): str(e.endpoint_id) for e in endpoints}
+        end = self._clock()
+        start = end - timedelta(hours=max(float(lookback_hours), 0.1))
+        payload = await self.hasource.history(
+            list(reader_of),
+            start=start,
+            end=end,
+            include_attributes=False,
+            timeout_s=max(HISTORY_TIMEOUT_BASE_S, HISTORY_TIMEOUT_PER_HOUR_S * lookback_hours),
+        )
+        if not payload:
+            detail = getattr(self.hasource, "last_history_error", None)
+            return {
+                "ok": False,
+                "detail": f"history query did not complete: {detail}" if detail else "no recorded history",
+            }
+
+        def _replay() -> tuple[Any, dict[str, Any], dict[str, float]]:
+            _states, readings, _levels = parse_history_payload(payload)
+            history = {
+                reader_of[entity]: rows for entity, rows in readings.items() if entity in reader_of
+            }
+            with self._ledger_lock:
+                authority = tuple(
+                    e
+                    for e in live.edges
+                    if e.pinned or e.declared_by == "user" or str(getattr(e.lifecycle, "value", e.lifecycle)) in ("rejected", "retired")
+                )
+            seed = TopologyInferenceView(
+                edges=authority,
+                clock=live.clock,
+                sigma_floor_w=live.sigma_floor_w,
+                require_direction=live.require_direction,
+            )
+            learned, stats = learn_topology_from_history(seed, history)
+            levels: dict[str, float] = {}
+            for reader, rows in history.items():
+                values = [abs(v) for _t, v in rows if v is not None]
+                if len(values) >= 3:
+                    levels[reader] = float(statistics.median(values))
+            return learned, stats.as_dict(), levels
+
+        learned, stats, levels = await asyncio.to_thread(_replay)
+
+        def _merge() -> dict[str, Any]:
+            with self._ledger_lock:
+                before = {
+                    e.edge_id: str(getattr(e.lifecycle, "value", e.lifecycle))
+                    for e in self.topology_inference.edges
+                }
+                merged = self.topology_inference.merge_evidence(learned, levels=levels)
+                self.topology_inference = merged
+                repo = self.db.repos.topology_v3
+                for edge in merged.edges:
+                    try:
+                        repo.upsert_edge(edge)
+                    except Exception:  # noqa: BLE001 - one edge must not abort the rest
+                        log.debug("topology edge write skipped", exc_info=True)
+            counts: dict[str, int] = {}
+            changed = 0
+            for edge in merged.edges:
+                if str(getattr(edge.relation, "value", edge.relation)) != "contains":
+                    continue
+                lifecycle = str(getattr(edge.lifecycle, "value", edge.lifecycle))
+                counts[lifecycle] = counts.get(lifecycle, 0) + 1
+                changed += int(before.get(edge.edge_id) != lifecycle)
+            confirmed = sorted(
+                (e.source_endpoint_id, e.target_endpoint_id)
+                for e in merged.edges
+                if str(getattr(e.lifecycle, "value", e.lifecycle)) == "confirmed"
+                and str(getattr(e.relation, "value", e.relation)) == "contains"
+            )
+            return {"counts": counts, "changed": changed, "confirmed": confirmed}
+
+        summary = await asyncio.to_thread(_merge)
+        return {
+            "ok": True,
+            "lookback_hours": float(lookback_hours),
+            "replay": stats,
+            "lifecycles": summary["counts"],
+            "changed_edges": summary["changed"],
+            "confirmed": [
+                {"parent": parent, "child": child} for parent, child in summary["confirmed"]
+            ],
+        }
+
+    async def _discover_device_placements(
         self,
         *,
         lookback_hours: float = 24.0,

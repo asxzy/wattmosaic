@@ -16,6 +16,10 @@ import { DISCOVER_WINDOWS, STRINGS, api, badge, card, clock, describeError, disc
  * ---------------------------------------------------------------------- */
 
 const DISCOVER_PATH = '/discover/placements';
+//: The button and card name.  One run learns both: device placements from
+//: fixture transitions, and topology (which circuit feeds which) from the same
+//: window of recorded power history.
+const DISCOVER_TITLE = 'Discover devices & topology';
 
 //: When the run in flight started, so a repaint mid-run (a poll, a route
 //: change) re-shows the true elapsed time instead of restarting at zero.
@@ -81,14 +85,14 @@ function withheldReason(reason) {
 const discoverSlotNode = () =>
   el('div', { class: 'card discover-slot', id: 'topology-discover' }, [
     el('div', { class: 'card-head' }, [
-      el('h2', {}, 'Discover devices'),
+      el('h2', {}, DISCOVER_TITLE),
       el('span', { class: 'spacer' }),
       el('span', { class: 'stat-hint' },
         `${discoverWindowLabel(state.discover.window)} window · not run yet`),
     ]),
     el('div', { class: 'card-body' }, [
       el('p', { class: 'stat-hint' },
-        'Find fixtures that sit on a shared circuit by comparing their transitions with the CT rows. Analysing writes nothing.'),
+        'Find fixtures that sit on a shared circuit by comparing their transitions with the CT rows, and learn which circuit feeds which by replaying the same window of recorded power history. Device placements are only written when you apply them; learned topology joins the live evidence the engine collects anyway.'),
       el('p', { class: 'stat-hint' },
         'A longer window is stronger evidence and slower: a week of history found the shared light-circuit groups a 24 h window could not, but it reads far more recorder history.'),
     ]),
@@ -169,7 +173,7 @@ function discoverLoadingCard() {
     el('div', { class: 'cand-loading', role: 'status' }, [
       el('span', { class: 'spinner', 'aria-hidden': 'true' }),
       el('span', {},
-        `Comparing fixture transitions with the CT rows over the last ${discoverWindowLabel(hours)}…`),
+        `Comparing fixture transitions with the CT rows and replaying circuit power for topology over the last ${discoverWindowLabel(hours)}…`),
     ]),
     //: Updated by runDiscovery's status callback on each status answer.
     el('p', { class: 'stat-hint discover-job-status', id: 'topology-discover-job-status' },
@@ -202,7 +206,7 @@ function discoverLoadingCard() {
   );
   body.push(el('div', { class: 'skeleton h-row' }));
   body.push(el('div', { class: 'skeleton h-row' }));
-  return card('Discover devices', body, {
+  return card(DISCOVER_TITLE, body, {
     id: 'topology-discover',
     foot: `Window: ${discoverWindowLabel(hours)}${long ? ' · long runs read the full window before answering' : ''}`,
   });
@@ -214,7 +218,7 @@ function discoverErrorCard(err) {
     ? 'This engine does not serve POST /api/v1/discover/placements (HTTP 404). Update the engine to find devices automatically; nothing was changed.'
     : `The comparison did not finish: ${describeError(err)}`;
   return card(
-    'Discover devices',
+    DISCOVER_TITLE,
     [
       el('p', { class: 'stat-hint', style: 'margin-bottom:12px' }, text),
       el('button', {
@@ -415,17 +419,59 @@ async function runDiscovery() {
       data, running: false, error: null, window: hours, ranWindow: hours,
     };
     swapDiscover(discoverCard(data));
+    // Learned topology moves circuits (and the devices on them) out of
+    // "Unassigned measurements": repaint so the hierarchy shows it.
+    if (data && data.topology && Number(data.topology.changed_edges) > 0) render();
   } finally {
     clearInterval(ticker);
     discoverStartedAt = 0;
     const button = document.getElementById('topology-discover-run');
     if (button) {
       button.disabled = false;
-      button.textContent = 'Discover devices';
+      button.textContent = DISCOVER_TITLE;
     }
     const windowSelect = document.getElementById('topology-discover-window');
     if (windowSelect) windowSelect.disabled = false;
   }
+}
+
+/**
+ * What the history replay taught the topology.  ``topology`` is absent from an
+ * apply run (it does not replay again) and from an older engine: no section.
+ */
+function discoverTopologySection(topology) {
+  if (!topology || typeof topology !== 'object') return null;
+  const head = el('div', { class: 'discover-section-head' }, [
+    el('h3', {}, 'Topology'),
+    el('span', { class: 'spacer' }),
+  ]);
+  if (topology.ok === false) {
+    return el('section', { class: 'discover-section' }, [
+      head,
+      el('p', { class: 'stat-hint' },
+        `Topology could not be learned from history: ${String(topology.detail || 'unknown reason')}. Live discovery continues.`),
+    ]);
+  }
+  const replay = topology.replay || {};
+  const counts = topology.lifecycles || {};
+  const confirmed = Array.isArray(topology.confirmed) ? topology.confirmed : [];
+  const summary = `Replayed ${num(replay.steps || 0)} power steps from ${num(replay.readers || 0)} circuits: `
+    + `${num(counts.confirmed || 0)} confirmed, ${num(counts.provisional || 0)} provisional, `
+    + `${num(counts.candidate || 0)} candidate, ${num(counts.conflicted || 0)} contradicted pairs.`;
+  const rows = confirmed.map((edge) =>
+    el('div', { class: 'discover-row' }, [
+      el('div', { class: 'discover-main' }, [
+        el('span', { class: 'hier-label' }, `${String(edge.parent)} → ${String(edge.child)}`),
+      ]),
+    ]));
+  return el('section', { class: 'discover-section' }, [
+    head,
+    el('p', { class: 'stat-hint' }, summary),
+    rows.length
+      ? el('div', { class: 'discover-list' }, rows)
+      : el('p', { class: 'stat-hint' },
+        'No feed is proven yet; a longer window gives more evidence. The hierarchy fills in as live events confirm edges.'),
+  ]);
 }
 
 function discoverCard(data) {
@@ -455,6 +501,8 @@ function discoverCard(data) {
   if (data.ok === false && data.detail) {
     body.push(notice('Discovery reported a problem', String(data.detail), 'bad'));
   }
+  const topologySection = discoverTopologySection(data.topology);
+  if (topologySection) body.push(topologySection);
 
   if (nothing) {
     // Empty collections mean two different things and only ``ok`` tells them
@@ -475,7 +523,7 @@ function discoverCard(data) {
         'The engine compared every fixture transition it has with every branch CT row and found nothing it could prove. That is a measurement result, not an error.'
       ));
     }
-    return card('Discover devices', body, {
+    return card(DISCOVER_TITLE, body, {
       id: 'topology-discover',
       foot: discoveryFoot(data, stats),
     });
@@ -563,7 +611,7 @@ function discoverCard(data) {
     ])
   );
 
-  return card('Discover devices', body, {
+  return card(DISCOVER_TITLE, body, {
     id: 'topology-discover',
     foot: discoveryFoot(data, stats),
   });

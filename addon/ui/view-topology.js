@@ -61,7 +61,7 @@ const topologyHead = (topology) =>
         type: 'button',
         onclick: () => slots.runDiscovery(),
         disabled: state.discover.running ? true : null,
-      }, state.discover.running ? 'Discovering…' : 'Discover devices'),
+      }, state.discover.running ? 'Discovering…' : 'Discover devices & topology'),
       // 3.0 has no blanket "confirm topology" write: confirmation is per edge
       // (POST /topology/edges/{id}/pin), from the edges card, on a user click.
       // This button only moves focus there; it never writes.
