@@ -826,10 +826,35 @@ class TopologyInferenceView:
         service = self.versions
         if service is None:
             return self
+        # A version is structure: CONFIRMED inferred edges plus anything a user
+        # declared or pinned.  CANDIDATE/PROVISIONAL/CONFLICTED ledger entries
+        # are evidence, not topology (design §5); proposing the whole ledger put
+        # hundreds of single-event and contradicted pairs into every version.
+        structural = [
+            edge
+            for edge in self.edges
+            if edge.pinned
+            or edge.declared_by != "inference"
+            or _value(edge.lifecycle) == _value(EdgeLifecycleV3.CONFIRMED)
+        ]
+        current = self._active_edge_ids(service)
+        if current is not None and {e.edge_id for e in structural} == current:
+            # Same structure as the active version: nothing to publish.
+            return self
         reason = "topology evidence ledger: " + "; ".join(transitions)
-        version_id = service.propose_topology(list(self.edges), None)
+        version_id = service.propose_topology(structural, None)
         service.promote_topology(version_id, reason)
         return replace(self, version_id=version_id)
+
+    @staticmethod
+    def _active_edge_ids(service: Any) -> set[str] | None:
+        """Edge ids of the active topology version, or None when unknown."""
+        try:
+            triple = service.current()
+            view = service.topology_view(triple.topology_version_id)
+            return {edge.edge_id for edge in view.edges()}
+        except Exception:  # noqa: BLE001 - unknown structure: propose as before
+            return None
 
 
 # --------------------------------------------------------------------------- #

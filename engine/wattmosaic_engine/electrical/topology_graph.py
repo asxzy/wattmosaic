@@ -40,6 +40,22 @@ def _enum_text(value: object) -> str:
     return str(getattr(value, "value", value))
 
 
+def _readable_id(endpoint_id: str) -> str:
+    """``refoss_main_panel_l2`` -> ``Refoss main panel L2``."""
+    words = [w for w in endpoint_id.replace("-", "_").split("_") if w]
+    if not words:
+        return endpoint_id
+    out = []
+    for i, word in enumerate(words):
+        if len(word) <= 3 and any(ch.isdigit() for ch in word):
+            out.append(word.upper())  # l2 -> L2, ct3 -> CT3
+        elif i == 0:
+            out.append(word.capitalize())
+        else:
+            out.append(word)
+    return " ".join(out)
+
+
 def topology_root_readers(topology: object) -> tuple[str, ...]:
     """The main reader(s) of a topology: the roots of its CONFIRMED hierarchy.
 
@@ -292,10 +308,24 @@ class TopologyGraph:
         self._by_id = {e.edge_id: e for e in self.active_edges}
 
     @staticmethod
-    def _edge_rank(edge: TopologyEdgeV3) -> tuple[int, int, str]:
+    def _edge_rank(edge: TopologyEdgeV3) -> tuple[int, int, float, int, str]:
+        """Strongest declaration first, then the most *specific* parent.
+
+        Containment is transitive: a feed also sees every step of its
+        grandchildren, so inference confirms grandparent edges too.  The direct
+        parent is the one whose own steps are best explained by this child:
+        ``support / (support + parent_only)``.  A busy main feed has many
+        parent-only steps and ranks below the sub-feed that actually carries the
+        circuit.  The edge id is only a final, deterministic tie break (it used
+        to be the whole rank, so the alphabetically first parent always won).
+        """
         user = 0 if edge.declared_by == "user" else 1
         pin = 0 if edge.pinned else 1
-        return (user, pin, edge.edge_id)
+        evidence = getattr(edge, "evidence", None)
+        support = int(getattr(evidence, "support", 0) or 0)
+        parent_only = int(getattr(evidence, "parent_only", 0) or 0)
+        specificity = support / (support + parent_only) if support + parent_only else 0.0
+        return (user, pin, -specificity, -support, edge.edge_id)
 
     def _break_cycles(self) -> None:
         parent = {
@@ -360,7 +390,11 @@ class TopologyGraph:
         for edge in self.active_edges:
             if edge.relation != RelationType.CONTAINS:
                 continue
-            if edge.lifecycle not in _STRUCTURAL:
+            # Only CONFIRMED (or user-pinned) edges shape the hierarchy; a
+            # PROVISIONAL edge is a soft alternative (module docstring).  Using
+            # it here gave a child a parent that is not a root of the confirmed
+            # tree, so whole confirmed subtrees fell into "Unassigned".
+            if edge.lifecycle != EdgeLifecycleV3.CONFIRMED and not edge.pinned:
                 continue
             child = edge.target_endpoint_id
             parent_id = edge.source_endpoint_id
@@ -612,9 +646,21 @@ class TopologyGraph:
         return DisplayNode(label=label, level=level, kind=kind, children=tuple(children))
 
     def _label(self, rid: str) -> str:
+        """The endpoint's display name, made unique across the tree.
+
+        Discovery names a CT after its channel ("l2", "lights"), so several
+        panels produce the same name and the hierarchy cannot be read.  A name
+        shared by more than one endpoint is replaced by a readable form of the
+        endpoint id ("Refoss main panel L2").
+        """
+        names = [ep.display_name for ep in self.endpoints if ep.display_name]
         for endpoint in self.endpoints:
-            if endpoint.endpoint_id == rid:
-                return endpoint.display_name or rid
+            if endpoint.endpoint_id != rid:
+                continue
+            name = endpoint.display_name
+            if name and names.count(name) == 1:
+                return name
+            return _readable_id(rid) if name else rid
         return rid
 
     # ------------------------------------------------------------------ #
