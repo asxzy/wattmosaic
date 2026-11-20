@@ -239,6 +239,11 @@ class EngineConfig:
     #: operating point; it is never a measurement and never 0 by default for a
     #: missing value.
     unknown_penalty_scale: float = 1.0
+    #: HA domains whose state changes are HA events for grouping (P1 -> P5).
+    #: ``None`` keeps the engine default (control/state-machine domains, see
+    #: ``ingestion.ha_source.DEFAULT_HA_EVENT_DOMAINS``); a linked entity is an
+    #: event source whatever its domain.  ``WM_HA_EVENT_DOMAINS`` replaces it.
+    ha_event_domains: tuple[str, ...] | None = None
     #: Evidence retention horizon in days (DEC-30).  Evidence is long-term and
     #: only an explicit operator action bounds it.
     evidence_retention_days: int = 400
@@ -417,6 +422,11 @@ class EngineConfig:
             get("WM_UNKNOWN_PENALTY_SCALE", default=str(cfg.unknown_penalty_scale))
             or cfg.unknown_penalty_scale
         )
+        domains = get("WM_HA_EVENT_DOMAINS")
+        if domains is not None:
+            cfg.ha_event_domains = tuple(
+                d.strip() for d in domains.split(",") if d.strip()
+            )
         cfg.evidence_retention_days = int(
             get("WM_EVIDENCE_RETENTION_DAYS", default=str(cfg.evidence_retention_days))
             or cfg.evidence_retention_days
@@ -684,6 +694,9 @@ class EngineConfig:
             "event_queue_max": self.event_queue_max,
             "steady_heartbeat_s": self.steady_heartbeat_s,
             "unknown_penalty_scale": self.unknown_penalty_scale,
+            "ha_event_domains": (
+                list(self.ha_event_domains) if self.ha_event_domains is not None else None
+            ),
             "evidence_retention_days": self.evidence_retention_days,
             "evidence_raw_retention_days": self.evidence_raw_retention_days,
             "retention_days_snapshots": self.retention_days_snapshots,

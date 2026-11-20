@@ -216,6 +216,81 @@ def compute_backoff(
     return max(0.05, min(cap, raw * factor))
 
 
+#: HA domains whose state changes are behavioural evidence: a control
+#: interface or state machine (HB §1 "HA Entity": ``light``, ``climate``,
+#: ``switch``, ``cover``; HB §6.6 "automation execution"; HB §7.1 sources 1-2).
+#: Everything else -- above all numeric ``sensor.*`` telemetry (a plug's
+#: current, power factor, apparent power), ``image``/``camera`` refreshes,
+#: ``weather``, ``sun``, ``update`` -- is a measurement or noise, not an event.
+#: Emitting those as HA events made ~96 % of the live HA stream unlinked
+#: telemetry: every reader step overlapped some telemetry "event" and the
+#: groups P5 built were HA noise, not device changes.  An entity with an
+#: ``ha_entity_links`` link with a behavioural role is an event source, whatever
+#: its domain (a measurement-only link declares a reading, not an event).
+#: Override with ``WM_HA_EVENT_DOMAINS`` (comma-separated; replaces this set).
+DEFAULT_HA_EVENT_DOMAINS: frozenset[str] = frozenset(
+    {
+        "alarm_control_panel",
+        "automation",
+        "binary_sensor",
+        "button",
+        "climate",
+        "cover",
+        "fan",
+        "humidifier",
+        "input_boolean",
+        "input_button",
+        "input_number",
+        "input_select",
+        "lawn_mower",
+        "light",
+        "lock",
+        "media_player",
+        "number",
+        "remote",
+        "scene",
+        "script",
+        "select",
+        "siren",
+        "switch",
+        "vacuum",
+        "valve",
+        "water_heater",
+    }
+)
+
+
+def is_event_domain(
+    entity_id: str,
+    attributes: Mapping[str, Any] | None,
+    domains: frozenset[str] = DEFAULT_HA_EVENT_DOMAINS,
+) -> bool:
+    """True when ``entity_id``'s state changes are HA events by domain alone.
+
+    A ``sensor`` whose ``device_class`` is ``enum`` is a state machine (an
+    appliance's operating state), so it counts too; a numeric sensor never
+    does.  Linked entities are admitted by the caller regardless.
+    """
+    domain = entity_id.split(".", 1)[0] if "." in entity_id else entity_id
+    if domain in domains:
+        return True
+    return domain == "sensor" and isinstance(attributes, Mapping) and attributes.get("device_class") == "enum"
+
+
+#: Seconds an entity's "has an ha_entity_links link" answer is reused, and the
+#: bound on cached entities.  A link declared later is seen within the TTL.
+LINK_CACHE_TTL_S = 30.0
+LINK_CACHE_MAX = 10_000
+
+
+#: Link roles that declare a measurement (a reading), not a behavioural change.
+MEASUREMENT_LINK_ROLES = frozenset({"power_measurement", "energy_counter"})
+
+
+def _link_field(link: Any, name: str) -> Any:
+    return link.get(name) if isinstance(link, Mapping) else getattr(link, name, None)
+
+
 def _ct_id_for(entity_id: str) -> str:
     """Stable CT id derived from the entity id (entity ids are unique)."""
     if "." in entity_id:
@@ -361,6 +436,7 @@ class HASource:
         clock: Callable[[], datetime] | None = None,
         reader_max_w: float | None = None,
         candidate_ring: Any | None = None,
+        ha_event_domains: Iterable[str] | None = None,
     ) -> None:
         if not token:
             raise ValueError("HASource requires a long-lived access token")
@@ -372,6 +448,13 @@ class HASource:
         self.deny_entities = tuple(deny_entities or ())
         self.include_energy = include_energy
         self.emit_measurement_events = emit_measurement_events
+        #: Domains whose state changes become HA events (P1 -> P5); linked
+        #: entities are admitted whatever their domain.
+        self.ha_event_domains: frozenset[str] = (
+            DEFAULT_HA_EVENT_DOMAINS
+            if ha_event_domains is None
+            else frozenset(str(d).strip() for d in ha_event_domains if str(d).strip())
+        )
         self.request_timeout_s = float(request_timeout_s)
         #: Why the most recent :meth:`history` call returned nothing, or ``None``
         #: when it returned a payload.  ``history`` deliberately returns an empty
@@ -394,6 +477,8 @@ class HASource:
         self._clock = clock or utcnow
         self._revision_lookup = revision_lookup
         self._link_lookup = link_lookup
+        self._link_cache: dict[str, tuple[datetime, tuple[str, ...]]] = {}
+        self._link_cache_owner: Any | None = link_lookup
         # Bounded in-memory ring for events of unlinked entities (DEC-17).
         # Supplied by the composition layer; nothing is persisted from it.
         self.candidate_ring = candidate_ring
@@ -509,6 +594,7 @@ class HASource:
             config.ha_token,
             verify_ssl=config.ha_verify_ssl,
             stale_after_s=config.stale_after_s,
+            ha_event_domains=getattr(config, "ha_event_domains", None),
         )
 
     # -- properties ------------------------------------------------------- #
@@ -1130,7 +1216,10 @@ class HASource:
         # sample into an unlinked HA sub-event and flooded P5 with groups.
         reader_id = self.reader_for(entity_id)
         if reader_id is None:
-            await self._emit_ha_event(entity_id, old_state, new_state, observed_at)
+            if self._is_ha_event_source(entity_id, attributes, observed_at):
+                await self._emit_ha_event(entity_id, old_state, new_state, observed_at)
+            else:
+                self.stats["ha_events_filtered"] = self.stats.get("ha_events_filtered", 0) + 1
 
         raw_value = new_state.get("state")
         value_text = raw_value.strip().lower() if isinstance(raw_value, str) else ""
@@ -1201,12 +1290,56 @@ class HASource:
             return result.measurement
         return None
 
+    def _is_ha_event_source(
+        self, entity_id: str, attributes: Mapping[str, Any], at: datetime
+    ) -> bool:
+        """Whether this entity's state change is an HA event (not telemetry).
+
+        The domain check is O(1) and runs first.  Outside the event domains an
+        entity is an event source when it has an ``ha_entity_links`` link with
+        a behavioural role; a link whose only roles are measurements
+        (``power_measurement``/``energy_counter``, e.g. a smart plug's power
+        sensor) declares a *reading*, not a device change, and its updates
+        every few seconds must not become HA sub-events.
+        """
+        if is_event_domain(entity_id, attributes, self.ha_event_domains):
+            return True
+        try:
+            roles = self._link_roles(entity_id, at)
+        except Exception:  # noqa: BLE001 - a link lookup failure means "unlinked"
+            log.debug("entity link lookup failed for %s", entity_id, exc_info=True)
+            return False
+        return any(role not in MEASUREMENT_LINK_ROLES for role in roles)
+
     def _is_linked(self, entity_id: str, at: datetime) -> bool:
         """True when the entity has any HA entity link valid at ``at``."""
+        return bool(self._link_roles(entity_id, at))
+
+    def _link_roles(self, entity_id: str, at: datetime) -> tuple[str, ...]:
+        """Roles of the entity's links valid at ``at`` (cached, see below)."""
         lookup = self._link_lookup
         if lookup is None:
-            return False
-        return bool(lookup.links_for_entity(entity_id, at))
+            return ()
+        # Cached for ``LINK_CACHE_TTL_S``: the lookup is a database read, and
+        # running it inline for every HA state change (hundreds per minute on
+        # a real install) stalled the asyncio loop that also serves /health.
+        if lookup is not self._link_cache_owner:
+            # A different link source (rebinding, a test swap): nothing cached
+            # from the old one applies.
+            self._link_cache.clear()
+            self._link_cache_owner = lookup
+        now = self._clock()
+        cached = self._link_cache.get(entity_id)
+        if cached is not None and abs((now - cached[0]).total_seconds()) < LINK_CACHE_TTL_S:
+            return cached[1]
+        roles = tuple(
+            str(getattr(_link_field(link, "role"), "value", _link_field(link, "role")) or "unknown")
+            for link in lookup.links_for_entity(entity_id, at) or ()
+        )
+        if len(self._link_cache) >= LINK_CACHE_MAX:
+            self._link_cache.clear()
+        self._link_cache[entity_id] = (now, roles)
+        return roles
 
     async def _emit_ha_event(
         self,
