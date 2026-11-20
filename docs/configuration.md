@@ -76,14 +76,20 @@ By default the engine does not persist raw CT readings (`WM_RAW_CAPTURE_DAYS=0`,
 ADR-0042). HA's recorder already holds the same `state_changed` stream, so it is
 the production raw history. To debug a production issue, first check that the
 recorder actually holds the CT entities, then replay from that history. Both
-tools operate on a **copy** of the database for the wiring and version triple;
-neither writes to a live install and neither reads HA registries.
+tools read HA history over the WebSocket API and take the HA connection from the
+environment (or a `.env` file): `HA_URL` (or `HA_HOST`) and a long-lived access
+token in `HA_TOKEN`. Neither writes to a live install and neither reads HA
+registries. On the database side, replay takes the wiring and the version triple
+from `--db`; the coverage probe takes only the CT entity ids from the latest
+`topology_versions` in `--db`.
 
 Check coverage (per CT entity: row count, first/last timestamp, largest gap and
-an `ok` / `short` / `missing` status; exits non-zero if any entity is `missing`):
+an `ok` / `short` / `missing` status; exits non-zero if any entity is `missing`).
+Options include `--days` (default 10), `--entities ID ...` to supply ids directly
+instead of reading them from `--db`, and `--json` for machine-readable output:
 
 ```bash
-python tools/audit/check_recorder_coverage.py --db <copy>
+python tools/audit/check_recorder_coverage.py --db <copy> [--days 10] [--entities ID ...] [--json]
 ```
 
 Replay the last hour of recorder history (wiring and versions come from `--db`):
