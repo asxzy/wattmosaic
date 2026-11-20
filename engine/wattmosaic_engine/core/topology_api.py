@@ -575,6 +575,24 @@ def topology_v3(service: Any, *, lifecycles: Sequence[str] | None = None) -> dic
     }
 
 
+def with_edge_health(result: dict[str, Any], book: Any) -> dict[str, Any]:
+    """Add ``health`` (M3 ``as_dict`` minus parent/child) to CONTAINS edge rows."""
+    entries = getattr(book, "entries", None)
+    if not entries:
+        return result
+    for row in result.get("edges", ()):
+        if row.get("relation") != RelationType.CONTAINS.value:
+            continue
+        entry = entries.get((row.get("source_endpoint_id"), row.get("target_endpoint_id")))
+        if entry is None:
+            continue
+        health = entry.as_dict()
+        health.pop("parent", None)
+        health.pop("child", None)
+        row["health"] = health
+    return result
+
+
 def topology_versions(service: Any, version_id: str | None = None) -> Any:
     """The version history, or one version when ``version_id`` is given."""
     rows = service._topo.versions()
@@ -762,8 +780,15 @@ class TopologyApiMixin:
         return service
 
     def topology_v3(self, *, lifecycles: Sequence[str] | None = None) -> dict[str, Any]:
-        """The active version, its edges (all lifecycles) and the primary tree."""
-        return self._v3_topology_service().topology(lifecycles=lifecycles)
+        """The active version, its edges (all lifecycles) and the primary tree.
+
+        CONTAINS rows with an edge-health record (topology linking v2, M3) gain
+        ``health``: the rolling verdict window, its timestamps and status.
+        """
+        result = self._v3_topology_service().topology(lifecycles=lifecycles)
+        ledger = getattr(self, "topology_inference", None)
+        book = getattr(ledger, "health", None)
+        return with_edge_health(result, book)
 
     def topology_versions(self, version_id: str | None = None) -> Any:
         return self._v3_topology_service().versions_history(version_id)

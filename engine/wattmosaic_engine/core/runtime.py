@@ -361,6 +361,12 @@ class RuntimeMixin:
         # Recent P3 step instants per reader, for T5's step-anchored parent
         # measurement (bounded: a few dozen steps per reader).
         self._t5_steps: dict[str, deque[tuple[str | None, datetime, datetime, float]]] = {}
+        # Last sample per 10 s bucket per reader over the structural window, the
+        # input of T5's aligned absolute series (topology linking v2).  The P2
+        # ring only covers minutes; this is O(1) per sample and bounded.
+        self._t5_history: dict[str, deque[tuple[int, datetime, float | None]]] = {}
+        self._t5_aligned: dict[str, list[float | None]] | None = None
+        self._t5_aligned_at: datetime | None = None
         self.change_detector = ChangeDetector(self.reader_state, self._on_reading_event)
         self.window_collector = WindowCollector(
             self.reader_state,
@@ -577,6 +583,7 @@ class RuntimeMixin:
             versions=versions,
             require_direction=True,
             causes_by_edge=causes,
+            health=self._load_edge_health(),
         )
         self.reconciler = Reconciler(
             operator=self._build_reconciliation_operator(),
@@ -790,6 +797,7 @@ class RuntimeMixin:
                 at if last_seen is None else max(last_seen, at)
             )
             self.reader_state.add(reading)
+            self._t5_record(reading.reader_id, at, reading.active_power_w)
             # ADR-0042: persistence is a debug option.  With capture off (the
             # default) the HA recorder is the production history, so skip the
             # write entirely -- one cheap attribute read on the O(1) fast path.
@@ -2279,6 +2287,114 @@ class RuntimeMixin:
                 out[child] = changes
         return out
 
+    def _group_level_changes(
+        self, group: EventGroup, observed: Mapping[str, Any]
+    ) -> dict[str, float] | None:
+        """reader -> level change across the whole group (multi-child groups only).
+
+        A parent explained by several children moved by their sum between the
+        earliest member's step and the latest one's (topology linking v2, M1),
+        so it is measured from before the first ``onset_lo`` to after the last
+        ``onset_hi``.  ``None`` for a single-member group: its one-to-one rule
+        uses the step-anchored change instead.
+        """
+        if len(group.reader_deltas) < 2:
+            return None
+        intervals = [
+            interval
+            for interval in (self._member_step(group, delta) for delta in group.reader_deltas)
+            if interval is not None
+        ]
+        if not intervals:
+            return None
+        lo = min(interval[0] for interval in intervals)
+        hi = max(interval[1] for interval in intervals)
+        readers = {str(reader) for reader in observed}
+        readers.update(str(delta.reader_id) for delta in group.reader_deltas)
+        out: dict[str, float] = {}
+        for reader in sorted(readers):
+            change = self._anchored_level_change(reader, lo, hi)
+            if change is not None:
+                out[reader] = change
+        return out
+
+    #: Structural window and grid of T5's aligned series, and how often the
+    #: aligned copy is rebuilt (design §5 T5, topology linking v2 W2).
+    _T5_ALIGN_WINDOW_S = 6 * 3600.0
+    _T5_ALIGN_STEP_S = 10.0
+    _T5_ALIGN_EVERY_S = 300.0
+    _T5_HEALTH_KEY = "t5_edge_health"
+
+    def _t5_record(self, reader: str, at: datetime, value: float | None) -> None:
+        """Keep the last sample per grid bucket (fast path: O(1), never raises)."""
+        try:
+            bucket = int(at.timestamp() // self._T5_ALIGN_STEP_S)
+            rows = self._t5_history.get(reader)
+            if rows is None:
+                maxlen = int(self._T5_ALIGN_WINDOW_S / self._T5_ALIGN_STEP_S) + 2
+                rows = self._t5_history[reader] = deque(maxlen=maxlen)
+            if rows:
+                last = rows[-1][0]
+                if bucket < last:
+                    return  # late sample: the aligned history only moves forward
+                if bucket == last:
+                    rows.pop()
+            rows.append((bucket, at, value))
+        except Exception:  # noqa: BLE001 - bookkeeping must not break ingestion
+            return
+
+    def _t5_aligned_series(self) -> dict[str, list[float | None]] | None:
+        """The aligned absolute series (10 s grid, last 6 h), rebuilt every 300 s.
+
+        The same object is returned between rebuilds so the ledger's structural
+        analysis stays cached.  Each reader is aligned in its own short step
+        with a GIL yield in between (ADR-0033: no long GIL holds; a convoy once
+        timed the gateway out).  Recorder semantics: a reader reports on change,
+        so a value is held until the next one (no hold cap).
+        """
+        now = self._clock()
+        if (
+            self._t5_aligned is not None
+            and self._t5_aligned_at is not None
+            and 0.0 <= (now - self._t5_aligned_at).total_seconds() < self._T5_ALIGN_EVERY_S
+        ):
+            return self._t5_aligned
+        from ..electrical.topology_regression import align
+
+        snapshot = {reader: list(rows) for reader, rows in list(self._t5_history.items())}
+        firsts = [rows[0][1] for rows in snapshot.values() if rows]
+        if not firsts:
+            return self._t5_aligned
+        step = self._T5_ALIGN_STEP_S
+        start = max(min(firsts), now - timedelta(seconds=self._T5_ALIGN_WINDOW_S))
+        start = datetime.fromtimestamp(
+            (start.timestamp() // step) * step, tz=start.tzinfo
+        )
+        aligned: dict[str, list[float | None]] = {}
+        for reader in sorted(snapshot):
+            rows = [(at, value) for _bucket, at, value in snapshot[reader]]
+            aligned.update(align({reader: rows}, start=start, end=now, step_s=step))
+            time.sleep(0)  # yield the GIL between readers
+        self._t5_aligned = aligned
+        self._t5_aligned_at = now
+        return aligned
+
+    def _load_edge_health(self) -> Any:
+        """The persisted T5 edge-health book (empty when absent or unreadable)."""
+        from ..electrical.topology_health import HealthBook
+
+        try:
+            text = self.db.get_state(self._T5_HEALTH_KEY)
+        except Exception:  # noqa: BLE001 - resuming is best effort
+            return HealthBook()
+        return HealthBook.from_json(text if isinstance(text, str) else None)
+
+    def _persist_edge_health(self, book: Any) -> None:
+        try:
+            self.db.set_state(self._T5_HEALTH_KEY, book.to_json())
+        except Exception:  # noqa: BLE001 - a state write must not abort the fold
+            log.debug("topology edge health write skipped", exc_info=True)
+
     def _fold_group_ledger(self, group: EventGroup) -> int:
         """Fold ``group``'s reader deltas into the T5 ledger and persist edges.
 
@@ -2310,8 +2426,12 @@ class RuntimeMixin:
                 observed=observed,
                 levels=self._typical_levels(),
                 measured_by_child=self._step_anchored_changes(group, observed),
+                group_moves=self._group_level_changes(group, observed),
+                aligned=self._t5_aligned_series(),
             )
             self.topology_inference = updated
+            if updated.health is not view.health:
+                self._persist_edge_health(updated.health)
             repo = self.db.repos.topology_v3
             changed = 0
             for edge in updated.edges:

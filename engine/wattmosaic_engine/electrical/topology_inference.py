@@ -79,6 +79,8 @@ from .nesting_math import (
     containment,
     duplicate_evidence,
 )
+from .topology_health import HealthBook, demotions
+from .topology_resolve import StructureAnalysis, analyse, resolve_structure, structure_series
 
 __all__: list[str] = [
     "CONTAINMENT_MIN",
@@ -416,6 +418,28 @@ def detect_same_conductor(
 # --------------------------------------------------------------------------- #
 
 
+class _StructureCache:
+    """Last :class:`StructureAnalysis`, reused while the series object is the same.
+
+    Shared (not copied) by every view derived with ``replace``: the analysis is a
+    pure function of the series, so sharing it never changes a result, and it
+    keeps the O(readers^2) detectors out of every fold (ADR-0033).
+    """
+
+    __slots__ = ("analysis",)
+
+    def __init__(self) -> None:
+        self.analysis: StructureAnalysis | None = None
+
+    def get(self, series: Mapping[str, Sequence[float | None]]) -> StructureAnalysis:
+        current = self.analysis
+        if current is not None and current.source is series:
+            return current
+        current = analyse(series)
+        self.analysis = current
+        return current
+
+
 @dataclass(frozen=True)
 class TopologyInferenceView:
     """An immutable snapshot of the per-pair evidence ledger.
@@ -441,6 +465,18 @@ class TopologyInferenceView:
     #: uncontradicted alternative (see :meth:`_direction_cap`).  The runtime
     #: sets it: an online ledger must never promote a containment cycle.
     require_direction: bool = False
+    #: Rolling per-edge health of CONFIRMED edges (M3): every decisive verdict
+    #: on a confirmed edge is recorded; a BROKEN inferred edge is demoted to
+    #: PROVISIONAL in :meth:`_settle` (topology linking v2).
+    health: HealthBook = field(default_factory=HealthBook)
+    #: Aligned absolute series (one grid, ``None`` = absent) used only for the
+    #: structural pass (:func:`~.topology_resolve.resolve_structure`).  Kept
+    #: apart from ``absolute`` so the per-edge containment gate is not run on
+    #: hours of samples at every fold.
+    aligned: Mapping[str, Sequence[float | None]] = field(default_factory=dict)
+    structure_cache: _StructureCache = field(
+        default_factory=lambda: _StructureCache(), compare=False, repr=False
+    )
 
     # -- reads -------------------------------------------------------------- #
     def edge(
@@ -503,8 +539,19 @@ class TopologyInferenceView:
         observed: Mapping[str, Any] | None = None,
         levels: Mapping[str, float] | None = None,
         measured_by_child: Mapping[str, Mapping[str, float]] | None = None,
+        group_moves: Mapping[str, float | None] | None = None,
+        aligned: Mapping[str, Sequence[float | None]] | None = None,
     ) -> TopologyInferenceView:
         """Fold one FINAL event group into every affected pair's ledger.
+
+        Several children stepping in one group (topology linking v2, M1): per
+        parent, the CONFIRMED children are explained away and verified (edge
+        health), and the other stepping readers are matched as a subset of the
+        remainder; a stepping 240 V leg pair counts as one candidate.  With a
+        single stepping candidate the classic one-to-one rule below applies
+        unchanged.  ``group_moves`` maps a parent to its level change across the
+        whole group (earliest member step to latest); ``aligned`` replaces the
+        aligned absolute series the structural pass resolves parents from.
 
         ``measured_by_child`` maps a stepping child to each candidate parent's
         level change measured across *that child's own step* (its last pre-step
@@ -548,9 +595,13 @@ class TopologyInferenceView:
             key: set(values) for key, values in self.co_response_causes.items()
         }
         co_events: dict[frozenset[str], int] = dict(self.co_response_events)
-        absolute_now = dict(self.absolute)
-        if absolute:
-            absolute_now.update(absolute)
+        # Keep the very same mapping when nothing new arrives: the structural
+        # analysis is cached per series object.
+        absolute_now: Mapping[str, Sequence[float | None]] = (
+            {**self.absolute, **absolute} if absolute else self.absolute
+        )
+        aligned_now = aligned if aligned is not None else self.aligned
+        health = self.health
         basis_now = dict(self.basis_by_reader)
         if basis_by_reader:
             basis_now.update(basis_by_reader)
@@ -576,6 +627,25 @@ class TopologyInferenceView:
                 edges[by_index[key]] = current.model_copy(update={"evidence": evidence})
 
         anchored_by_child = measured_by_child or {}
+        structure = self._structure_source(aligned_now, absolute_now)
+        multi = self._multi_child_verdicts(
+            decisive,
+            observed,
+            group_moves,
+            edges,
+            self.structure_cache.get(structure) if structure is not None else None,
+        )
+        confirmed_now = {
+            (e.source_endpoint_id, e.target_endpoint_id)
+            for e in edges
+            if _relation(e.relation) == _CONTAINS
+            and _value(e.lifecycle) == _value(EdgeLifecycleV3.CONFIRMED)
+        }
+
+        def _track(parent: str, child: str, verdict: str) -> None:
+            nonlocal health
+            if (parent, child) in confirmed_now or (parent, child) in health.entries:
+                health = health.record(parent, child, verdict, at)
 
         # -- child steps against every candidate parent --------------------- #
         for child, (child_delta, child_sigma) in decisive.items():
@@ -618,11 +688,15 @@ class TopologyInferenceView:
                 # parent's step also carries other loads changing in the same
                 # window -- neutral, not evidence against containment (live
                 # mains almost always carry concurrent changes).
-                verdict = _classify_step(
-                    parent_delta, child_delta, sigma_p=sigma_p, sigma_c=sigma_c, beta=beta
-                )
+                if key[:2] in multi:
+                    verdict = multi[key[:2]]
+                else:
+                    verdict = _classify_step(
+                        parent_delta, child_delta, sigma_p=sigma_p, sigma_c=sigma_c, beta=beta
+                    )
                 if verdict is None:
                     continue
+                _track(parent, child, verdict)
                 field_name, stamp = (
                     ("support", "last_support_at")
                     if verdict == "support"
@@ -656,15 +730,19 @@ class TopologyInferenceView:
                 # No measurement: P3 saw no step on an observed parent, i.e. it
                 # did not move.  A measured level (P3 may simply not have flagged
                 # a small step on a busy feed) is classified like a co-step.
-                verdict = _classify_step(
-                    0.0 if measured is None else measured,
-                    child_delta,
-                    sigma_p=sigma_p,
-                    sigma_c=child_sigma if child_sigma is not None else self.sigma_floor_w,
-                    beta=beta,
-                )
+                if (parent, child) in multi:
+                    verdict = multi[(parent, child)]
+                else:
+                    verdict = _classify_step(
+                        0.0 if measured is None else measured,
+                        child_delta,
+                        sigma_p=sigma_p,
+                        sigma_c=child_sigma if child_sigma is not None else self.sigma_floor_w,
+                        beta=beta,
+                    )
                 if verdict is None:
                     continue
+                _track(parent, child, verdict)
                 field_name, stamp = (
                     ("support", "last_support_at")
                     if verdict == "support"
@@ -699,12 +777,15 @@ class TopologyInferenceView:
                         measured = float(anchored[parent])
                     if measured is None:
                         continue
-                    verdict = _classify_step(
-                        measured,
-                        child_delta,
-                        sigma_p=max(sigma_p or self.sigma_floor_w, self.sigma_floor_w),
-                        sigma_c=child_sigma if child_sigma is not None else self.sigma_floor_w,
-                    )
+                    if (parent, child) in multi:
+                        verdict = multi[(parent, child)]
+                    else:
+                        verdict = _classify_step(
+                            measured,
+                            child_delta,
+                            sigma_p=max(sigma_p or self.sigma_floor_w, self.sigma_floor_w),
+                            sigma_c=child_sigma if child_sigma is not None else self.sigma_floor_w,
+                        )
                     if verdict != "support":
                         continue
                     causes.setdefault(key, set()).add(cause)
@@ -766,11 +847,23 @@ class TopologyInferenceView:
                         )
                     )
 
-        version_transitions = self._settle(edges, causes, absolute_now, basis_now, meta_now, levels)
+        version_transitions = self._settle(
+            edges,
+            causes,
+            absolute_now,
+            basis_now,
+            meta_now,
+            levels,
+            structure=structure,
+            health=health,
+        )
+        health = _prune_health(health, edges)
 
         view = replace(
             self,
             edges=tuple(edges),
+            health=health,
+            aligned=aligned_now,
             at=at,
             seen_groups=frozenset({*self.seen_groups, obs.group_id}),
             causes_by_edge={key: frozenset(values) for key, values in causes.items()},
@@ -793,9 +886,29 @@ class TopologyInferenceView:
         basis_now: Mapping[str, MeasurementBasis | str],
         meta_now: Mapping[str, Mapping[str, Any]],
         levels: Mapping[str, float] | None,
+        *,
+        structure: Mapping[str, Sequence[float | None]] | None = None,
+        health: HealthBook | None = None,
     ) -> list[str]:
-        """Apply lifecycle transitions in place; return the version-worthy ones."""
-        transitions: list[str] = []
+        """Apply lifecycle transitions in place; return the version-worthy ones.
+
+        Per edge, only the *net* change of this settle is reported (a stage may
+        undo what an earlier one did -- the evidence rule re-confirms an edge the
+        structural pass then demotes again -- which is no transition at all).
+        """
+        original = [_value(edge.lifecycle) for edge in edges]
+        labels: dict[int, str] = {}
+
+        def note(stage: Sequence[str], before: Sequence[TopologyEdgeV3]) -> None:
+            for index, (old, new) in enumerate(zip(before, edges, strict=True)):
+                if _value(old.lifecycle) == _value(new.lifecycle):
+                    continue
+                labels[index] = new.edge_id
+                for text in stage:
+                    head = text.rsplit(": ", 1)[0]
+                    if head == new.edge_id or head.startswith(new.edge_id + " ("):
+                        labels[index] = head
+
         for index, edge in enumerate(edges):
             if _relation(edge.relation) != _CONTAINS or edge.pinned or edge.lifecycle in _DORMANT:
                 continue
@@ -807,13 +920,45 @@ class TopologyInferenceView:
             ):
                 new_lifecycle = self._direction_cap(edge, edges, new_lifecycle, absolute_now)
             if new_lifecycle != edge.lifecycle:
-                transitions.append(
-                    f"{edge.edge_id}: {_value(edge.lifecycle)} -> {_value(new_lifecycle)}"
-                )
+                labels[index] = edge.edge_id
                 edges[index] = edge.model_copy(update={"lifecycle": new_lifecycle})
-        # One direct parent per child: a grandparent feed is transitive.
-        if levels:
-            transitions.extend(self._keep_direct_parents(edges, levels))
+        # One direct parent per child: a grandparent feed is transitive.  With
+        # aligned absolute series the structural pass decides (capacity, paired
+        # legs, duplicates, regression); without them the lowest level wins.
+        series = structure_series(structure)
+        before = list(edges)
+        if series is not None:
+            resolved, stage = resolve_structure(
+                edges, series, levels=levels, analysis=self.structure_cache.get(series)
+            )
+            edges[:] = resolved
+            note(stage, before)
+        elif levels:
+            note(self._keep_direct_parents(edges, levels), before)
+        # Edge health (M3): a confirmed inferred edge whose parent stopped
+        # following its child is no longer structural.
+        if health is not None and health.entries:
+            reasons = dict(demotions(health, edges))
+            if reasons:
+                before = list(edges)
+                stage = []
+                for index, edge in enumerate(edges):
+                    reason = reasons.get(edge.edge_id)
+                    if reason is None:
+                        continue
+                    stage.append(
+                        f"{edge.edge_id} ({reason}): {_value(edge.lifecycle)} -> "
+                        f"{_value(EdgeLifecycleV3.PROVISIONAL)}"
+                    )
+                    edges[index] = edge.model_copy(
+                        update={"lifecycle": EdgeLifecycleV3.PROVISIONAL}
+                    )
+                note(stage, before)
+        transitions = [
+            f"{labels[index]}: {original[index]} -> {_value(edges[index].lifecycle)}"
+            for index in sorted(labels)
+            if original[index] != _value(edges[index].lifecycle)
+        ]
         # Only a crossing into CONFIRMED or CONFLICTED promotes a topology
         # version (T5 step 3).  CANDIDATE/PROVISIONAL are soft and accumulate
         # silently; one event must never publish a new version.
@@ -877,7 +1022,14 @@ class TopologyInferenceView:
                 edges[position] = current.model_copy(update={"evidence": edge.evidence})
                 causes[key] = learned_causes
         version_transitions = self._settle(
-            edges, causes, self.absolute, self.basis_by_reader, self.channel_meta, levels
+            edges,
+            causes,
+            self.absolute,
+            self.basis_by_reader,
+            self.channel_meta,
+            levels,
+            structure=self._structure_source(self.aligned, self.absolute),
+            health=self.health,
         )
         view = replace(
             self,
@@ -887,6 +1039,164 @@ class TopologyInferenceView:
         if version_transitions:
             view = view._propose_version(version_transitions)
         return view
+
+    @staticmethod
+    def _structure_source(
+        aligned: Mapping[str, Sequence[float | None]],
+        absolute: Mapping[str, Sequence[float | None]],
+    ) -> Mapping[str, Sequence[float | None]] | None:
+        """The aligned series the structural pass runs on, or None.
+
+        ``aligned`` (fed by the runtime) wins; an ``absolute`` mapping that is
+        itself aligned and long enough (a history replay sets it) also counts.
+        """
+        return structure_series(aligned) or structure_series(absolute)
+
+    def _multi_child_verdicts(
+        self,
+        decisive: Mapping[str, tuple[float, float | None]],
+        observed: Mapping[str, Any] | None,
+        group_moves: Mapping[str, float | None] | None,
+        edges: Sequence[TopologyEdgeV3],
+        analysis: StructureAnalysis | None,
+    ) -> dict[tuple[str, str], str | None]:
+        """``(parent, child) -> verdict`` for parents with several stepping children.
+
+        Per parent with a usable move: ``known`` are stepping children with a
+        CONFIRMED edge from it, ``unknown`` every other stepping reader that is
+        not the parent, not a confirmed ancestor of it, not its duplicate meter
+        and not a confirmed descendant of a known child.  An unknown reader
+        stepping like a known child (the same load seen one level down) keeps
+        the one-to-one rule.  Unknown readers stepping alike -- a 240 V leg pair,
+        or a load seen at two nested levels -- are one candidate, credited to
+        each member: two legs are never summed into one parent.  Pairs absent
+        from the result use the classic one-to-one rule.
+        """
+        if len(decisive) < 2:
+            return {}
+        from .topology_explain import (
+            ChildStep,
+            classify_with_explanation,
+            match_tolerance,
+            verify_known,
+        )
+
+        children_of: dict[str, set[str]] = {}
+        parents_of: dict[str, set[str]] = {}
+        for edge in edges:
+            if (
+                _relation(edge.relation) == _CONTAINS
+                and _value(edge.lifecycle) == _value(EdgeLifecycleV3.CONFIRMED)
+            ):
+                children_of.setdefault(edge.source_endpoint_id, set()).add(edge.target_endpoint_id)
+                parents_of.setdefault(edge.target_endpoint_id, set()).add(edge.source_endpoint_id)
+
+        def closure(start: str, links: Mapping[str, set[str]]) -> set[str]:
+            seen: set[str] = set()
+            stack = list(links.get(start, ()))
+            while stack:
+                node = stack.pop()
+                if node not in seen:
+                    seen.add(node)
+                    stack.extend(links.get(node, ()))
+            return seen
+
+        floor = self.sigma_floor_w
+        steps = {
+            reader: ChildStep(reader, float(delta), float(sigma) if sigma is not None else floor)
+            for reader, (delta, sigma) in decisive.items()
+        }
+
+        def alike(a: ChildStep, b: ChildStep) -> bool:
+            if (a.delta > 0) != (b.delta > 0):
+                return False
+            return abs(a.delta - b.delta) <= match_tolerance(a.delta, [b.sigma], a.sigma)
+
+        def group_units(readers: Sequence[str], *, alike_too: bool) -> list[list[str]]:
+            """Detected 240 V pairs first, then (``alike_too``) readers stepping alike."""
+            units: list[list[str]] = []
+            placed: set[str] = set()
+            if analysis is not None:
+                for reader in readers:
+                    partner = analysis.partner(reader)
+                    if partner in readers and reader not in placed and partner not in placed:
+                        units.append(sorted((reader, partner)))
+                        placed.update((reader, partner))
+            for reader in sorted(readers, key=lambda r: (steps[r].delta, r)):
+                if reader in placed:
+                    continue
+                home = None
+                if alike_too:
+                    home = next((u for u in units if alike(steps[u[0]], steps[reader])), None)
+                if home is None:
+                    units.append([reader])
+                else:
+                    home.append(reader)
+                placed.add(reader)
+            return units
+
+        def unit_step(unit: Sequence[str]) -> ChildStep:
+            """One candidate: the members' mean delta and one member's sigma."""
+            return ChildStep(
+                "\x00".join(unit),
+                sum(steps[m].delta for m in unit) / len(unit),
+                max(steps[m].sigma for m in unit),
+            )
+
+        parents = sorted({*decisive, *(observed or {})})
+        out: dict[tuple[str, str], str | None] = {}
+        for parent in parents:
+            move: float | None = None
+            sigma_p: float = floor
+            if group_moves and group_moves.get(parent) is not None:
+                move = float(group_moves[parent])  # type: ignore[arg-type]
+            if parent in decisive:
+                delta, sigma = decisive[parent]
+                sigma_p = float(sigma) if sigma is not None else floor
+                move = float(delta) if move is None else move
+            elif observed and parent in observed:
+                sigma, measured = _observed_entry(observed[parent])
+                sigma_p = max(sigma or floor, floor)
+                if move is None:
+                    move = 0.0 if measured is None else measured
+            if move is None or not math.isfinite(move):
+                continue
+            ancestors = closure(parent, parents_of)
+            twins = analysis.twins(parent) if analysis is not None else frozenset()
+            candidates = [
+                reader
+                for reader in sorted(decisive)
+                if reader != parent and reader not in ancestors and reader not in twins
+            ]
+            known = [reader for reader in candidates if reader in children_of.get(parent, ())]
+            below_known: set[str] = set()
+            for child in known:
+                below_known |= closure(child, children_of)
+            unknown = [
+                reader
+                for reader in candidates
+                if reader not in known
+                and reader not in below_known
+                and not any(alike(steps[reader], steps[child]) for child in known)
+            ]
+            if len(known) + len(unknown) < 2:
+                continue
+            unknown_units = group_units(unknown, alike_too=True)
+            known_units = group_units(known, alike_too=False)
+            unit_steps = [unit_step(unit) for unit in unknown_units]
+            known_steps = [unit_step(unit) for unit in known_units]
+            verdicts = classify_with_explanation(
+                move, sigma_p, known=known_steps, unknown=unit_steps
+            )
+            for unit, step in zip(unknown_units, unit_steps, strict=True):
+                for member in unit:
+                    out[(parent, member)] = verdicts.get(step.reader_id)
+            if known_steps:
+                checked = verify_known(move, sigma_p, known=known_steps, unknown=unit_steps)
+                for unit, step in zip(known_units, known_steps, strict=True):
+                    for member in unit:
+                        out[(parent, member)] = checked.get(step.reader_id)
+        return out
 
     @staticmethod
     def _keep_direct_parents(
@@ -1060,6 +1370,20 @@ class TopologyInferenceView:
             return {edge.edge_id for edge in view.edges()}
         except Exception:  # noqa: BLE001 - unknown structure: propose as before
             return None
+
+
+def _prune_health(book: HealthBook, edges: Sequence[TopologyEdgeV3]) -> HealthBook:
+    """Drop health entries of edges the ledger no longer holds (bounded book)."""
+    if not book.entries:
+        return book
+    live = {
+        (edge.source_endpoint_id, edge.target_endpoint_id)
+        for edge in edges
+        if _relation(edge.relation) == _CONTAINS and edge.lifecycle not in _DORMANT
+    }
+    if all(key in live for key in book.entries):
+        return book
+    return book.prune(live)
 
 
 # --------------------------------------------------------------------------- #

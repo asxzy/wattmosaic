@@ -83,13 +83,17 @@ def capacity_violation(
     *,
     tol_w: float = CAPACITY_TOLERANCE_W,
     rel: float = CAPACITY_RELATIVE,
+    min_children_w: float = 0.0,
 ) -> tuple[float, int]:
     """``(violation_fraction, comparable_samples)`` of ``sum(|child|) <= |parent|``.
 
-    A sample is comparable when the parent and every child are present.  It
-    violates when ``sum(abs(c)) > abs(p) + tol_w + rel * abs(p)``.  With no
-    comparable sample the result is ``(0.0, 0)``; series of unequal length are
-    compared over their common prefix only.
+    A sample is comparable when the parent and every child are present and the
+    children together draw at least ``min_children_w`` (a load that is off says
+    nothing about where it is wired: live, a hot tub off 97 % of the time hid a
+    66 % violation rate while it ran).  It violates when
+    ``sum(abs(c)) > abs(p) + tol_w + rel * abs(p)``.  With no comparable sample
+    the result is ``(0.0, 0)``; series of unequal length are compared over their
+    common prefix only.
     """
     lengths = [len(parent), *(len(child) for child in children)]
     length = min(lengths) if lengths else 0
@@ -107,7 +111,7 @@ def capacity_violation(
                 complete = False
                 break
             total += magnitude
-        if not complete:
+        if not complete or total < min_children_w:
             continue
         comparable += 1
         limit = parent_magnitude + tol_w + rel * parent_magnitude
@@ -212,7 +216,9 @@ class _Cost:
         score: Mapping[tuple[str, str], float],
         options: Mapping[str, tuple[str, ...]],
         candidate_sets: Mapping[str, frozenset[str]],
+        min_children_w: float = 0.0,
     ) -> None:
+        self._min_children_w = float(min_children_w)
         self._series = series
         self._levels = levels
         self._pairs = pairs
@@ -247,7 +253,9 @@ class _Cost:
                 self._capacity[key] = 0.0
             else:
                 present = [self._series[c] for c in children if c in self._series]
-                self._capacity[key] = capacity_violation(parent_series, present)[0]
+                self._capacity[key] = capacity_violation(
+                    parent_series, present, min_children_w=self._min_children_w
+                )[0]
         return self._capacity[key]
 
     def of(
@@ -298,6 +306,7 @@ def assign_parents(
     pairs: Sequence[tuple[str, str]] = (),
     fixed: Mapping[str, str] | None = None,
     score: Mapping[tuple[str, str], float] | None = None,
+    min_children_w: float = 0.0,
 ) -> dict[str, str]:
     """Choose one parent per child, honouring capacity and paired legs.
 
@@ -335,7 +344,9 @@ def assign_parents(
     if not ambiguous:
         return assigned
 
-    cost = _Cost(series, levels, tuple(pairs), fixed_map, score_map, options, declared)
+    cost = _Cost(
+        series, levels, tuple(pairs), fixed_map, score_map, options, declared, min_children_w
+    )
     combinations = math.prod(len(options[child]) for child in ambiguous)
     if combinations <= _ASSIGNMENT_ENUMERATION_LIMIT:
         best_key: tuple[float, float, float, float, tuple[str, ...]] | None = None
