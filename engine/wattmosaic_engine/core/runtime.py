@@ -679,7 +679,11 @@ class RuntimeMixin:
                 at if last_seen is None else max(last_seen, at)
             )
             self.reader_state.add(reading)
-            self.persist_queue.put_nowait(("reading", reading))
+            # ADR-0042: persistence is a debug option.  With capture off (the
+            # default) the HA recorder is the production history, so skip the
+            # write entirely -- one cheap attribute read on the O(1) fast path.
+            if self.config.raw_capture_days > 0:
+                self.persist_queue.put_nowait(("reading", reading))
             if is_late:
                 revised = self.window_collector.on_late_sample(
                     reading.reader_id, at, reading.active_power_w
@@ -2298,15 +2302,17 @@ class RuntimeMixin:
         """Hook kept for stage-boundary instrumentation (no-op by default)."""
 
     def _prune_evidence(self) -> None:
-        """Background job: bound the L2 evidence and L1 raw tables (DEC-30).
+        """Background job: bound the L2 evidence tables (DEC-30, ADR-0042).
 
         Uses the shared :func:`apply_evidence_retention` decision layer so the
         two independent clocks are honoured: evidence rows (and their Δ/σ/
         baseline summary) live ``WM_EVIDENCE_RETENTION_DAYS``; the high-resolution
         points inside ``samples_json`` are thinned after
         ``WM_EVIDENCE_RAW_RETENTION_DAYS``.  Superseded rows still referenced by a
-        newer revision are protected.  Raw ``ct_samples`` are pruned on the same
-        raw horizon.  Runs on the single background executor, never the loop.
+        newer revision are protected.  Raw ``ct_samples`` are **no longer**
+        touched here: they have their own capture horizon and are drained only
+        by :meth:`_purge_raw_capture`.  Runs on the single background executor,
+        never the loop.
         """
         from ..storage.tiers import (  # noqa: PLC0415 - local to keep runtime import light
             apply_evidence_retention,
@@ -2329,20 +2335,46 @@ class RuntimeMixin:
                 )
             except Exception:  # noqa: BLE001 - table may not exist yet
                 log.debug("evidence retention prune skipped", exc_info=True)
-            # Raw measurement samples are bounded by the raw-evidence horizon.
-            if raw_days is not None:
-                try:
-                    columns = {
-                        str(row[1])
-                        for row in db._conn.execute("PRAGMA table_info(ct_samples)").fetchall()
-                    }
-                    col = "observed_at" if "observed_at" in columns else "received_at"
-                    db._conn.execute(  # noqa: SLF001 - storage seam
-                        f"DELETE FROM ct_samples WHERE {col} < ?",  # noqa: S608 - fixed names
-                        ((now - timedelta(days=raw_days)).isoformat(),),
-                    )
-                except Exception:  # noqa: BLE001 - table may not exist yet
-                    log.debug("ct_samples evidence prune skipped", exc_info=True)
+
+    def _purge_raw_capture(self, *, budget: Any | None = None) -> None:
+        """Background job: drain ``ct_samples`` on the capture horizon (ADR-0042).
+
+        This is the only runtime path that deletes raw CT readings.  With capture
+        off (``raw_capture_days <= 0``) ``cutoff`` is ``None`` and every row is
+        drained; with capture on only rows older than the horizon go.  The batched
+        purge takes the DB lock per batch and each batch commits on its own, so a
+        large legacy table never holds one giant WAL transaction or stalls the
+        asyncio loop (DEC-37).  ``budget`` is the DEC-37 CPU cap; when it exposes
+        a time allowance, that caps one pass and a later maintenance tick resumes.
+        Exceptions are logged and swallowed -- degraded, never a crash loop.
+        """
+        from ..storage.capture import (  # noqa: PLC0415 - local to keep runtime import light
+            purge_ct_samples,
+        )
+
+        days = self.config.raw_capture_days
+        cutoff = None if days <= 0 else self._clock() - timedelta(days=days)
+        kwargs: dict[str, Any] = {}
+        remaining = getattr(budget, "remaining_s", None)
+        if remaining is not None:
+            try:
+                allowance = float(remaining())
+            except Exception:  # noqa: BLE001 - a broken budget is not fatal
+                allowance = 0.0
+            if allowance > 0.0:
+                kwargs["time_budget_s"] = allowance
+        try:
+            result = purge_ct_samples(self.db._conn, self.db._lock, cutoff=cutoff, **kwargs)
+        except Exception:  # noqa: BLE001 - degraded, never a crash loop
+            log.warning("raw capture purge failed", exc_info=True)
+            return
+        self.raw_capture_purged += result.deleted
+        if result.deleted:
+            log.info(
+                "raw capture purge: deleted %d ct_samples rows (done=%s)",
+                result.deleted,
+                result.done,
+            )
 
     def _prune_derived(self, *, budget: Any | None = None) -> None:
         """Background job: age-prune the derived tables (Z11, DEC-30/DEC-37).
@@ -2399,10 +2431,16 @@ class RuntimeMixin:
         while not self._stopping:
             try:
                 self.aligner.prune()
-                self.db.prune(self.config.retention_days_raw, self.config.retention_days_aggregates)
-                # Evidence/raw + derived retention run off the event loop (DEC-37).
+                self.db.prune(
+                    self.config.retention_days_raw,
+                    self.config.retention_days_aggregates,
+                    capture_days=self.config.raw_capture_days,
+                )
+                # Evidence, derived and raw-capture retention all run off the
+                # event loop (DEC-37).  The capture purge owns ct_samples.
                 self.submit_background(self._prune_evidence)
                 self.submit_background(self._prune_derived)
+                self.submit_background(self._purge_raw_capture)
             except Exception:  # noqa: BLE001
                 log.exception("maintenance cycle failed")
             try:
