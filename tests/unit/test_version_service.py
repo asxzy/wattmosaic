@@ -128,6 +128,25 @@ def make_service(db: Database, clock: Clock) -> VersionService:
 # --------------------------------------------------------------------------- #
 
 
+def test_re_detected_configuration_event_is_recorded_once(tmp_path: Path) -> None:
+    """Live: a self-healing detector re-detected a reader removal after a
+    promotion and the repeated insert raised IntegrityError (event ids are
+    derived from what was detected).  Re-recording is a no-op, also after a
+    restart."""
+    db = make_db(tmp_path)
+    try:
+        svc = make_service(db, Clock())
+        ev = event("evt-inferred-reader_removal-kitchen_ckt")
+        assert svc.record_configuration_event(ev) == ev.event_id
+        assert svc.record_configuration_event(ev) == ev.event_id
+        restarted = make_service(db, Clock())
+        assert restarted.record_configuration_event(ev) == ev.event_id
+        stored = [e for e in db.repos.topology_v3.events() if e["event_id"] == ev.event_id]
+        assert len(stored) == 1
+    finally:
+        db.close()
+
+
 def test_service_satisfies_runtime_protocol(tmp_path: Path) -> None:
     db = make_db(tmp_path)
     try:

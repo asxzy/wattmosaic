@@ -298,6 +298,14 @@ class TopologyV3Repository(Repository):
                 self._conn.execute("ROLLBACK")
                 raise
 
+    def has_configuration_event(self, event_id: str) -> bool:
+        """Whether a configuration event with this id is already stored."""
+        with self._reader() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM configuration_events WHERE event_id = ? LIMIT 1", (str(event_id),)
+            ).fetchone()
+        return row is not None
+
     def events(self, status: str | None = None) -> list[dict[str, Any]]:
         """Configuration events, optionally filtered by ``ChangeStatus`` value."""
         query = f"SELECT {', '.join(_EVENT_COLUMNS)} FROM configuration_events"

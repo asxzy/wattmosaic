@@ -512,6 +512,17 @@ class VersionService:
     # -- configuration events ---------------------------------------------- #
 
     def record_configuration_event(self, ev: ConfigurationEvent) -> str:
+        """Record an event once; re-detecting the same event is a no-op.
+
+        Self-healing detectors derive event ids from what they detected (e.g.
+        ``evt-inferred-reader_removal-<reader>``), so a later detector cycle,
+        or one after a restart, re-detects the same event.  Events are
+        immutable: the stored one stands and no second row is inserted.
+        """
+        has = getattr(self._topo, "has_configuration_event", None)
+        if ev.event_id in self._events or (has is not None and has(ev.event_id)):
+            self._events.setdefault(ev.event_id, ev)
+            return ev.event_id
         self._topo.append_configuration_event(ev)
         self._events[ev.event_id] = ev
         return ev.event_id
