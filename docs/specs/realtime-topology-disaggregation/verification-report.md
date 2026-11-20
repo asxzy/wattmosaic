@@ -408,3 +408,19 @@ data with the previous engine opening the restored backup; open items R1–R3 (�
 - `565cd7c` — `fix(perf)`: candidate-ring prune instant passed by keyword.
 - this report, the `docs/acceptance_report.md` `lab_shared` update and the
   `tasks/progress.md` V2 row (next commit).
+
+## 10. Addendum — after Z11 (retention) and Z12 (version-allocation race), HEAD 0d22185
+
+Two follow-ups landed after the run above; the checks were repeated at `0d22185`.
+
+| Check | Result |
+|---|---|
+| `bash verify.sh` (ruff, panel, `validate_addon.sh --no-build`, full pytest) | PASS |
+| Full pytest | 3014 passed, 7 skipped (real-DB topology tests), 0 failed, 0 xfail |
+| `tools/dev/check_release.py` | PASS |
+| `tests/integration -k "z4 or z9 or z7 or three_loop"` × 30 | 30/30 pass (was ~2/15 failing before Z12) |
+| `tools/dev/perf_runtime.py` (full default scale, gates on) | `/healthz` p99 30.63 ms (< 100), fast path p99 0.0548 ms (< 0.2), event loop p50/p95/p99 467/1226/1353 ms, matrix 500×100 GET p95 222 ms, `background_jobs_failed` 0 |
+
+- **Z11:** derived tables (`inference_snapshots`, `event_inference_records`, `ha_events_v3`, `event_groups`/members, `reader_residual_series`) are now age-pruned in bounded chunks under the DEC-37 job budget, never removing rows a live snapshot, open group/evidence or active version references. Raw retention default is 7 days (was 30); the add-on schema bound is now 1–90, matching the engine.
+- **Z12:** version-number allocation for topology and mapping is one `BEGIN IMMEDIATE` transaction; every shared-connection read in VersionService takes the DB lock. Root cause was an unlocked read racing the Z9 matrix reconciler on the shared connection.
+- **Growth after Z11:** measured growth stays ~807 MB/day (a 1 h simulated run cannot age anything past a retention horizon). Implied steady state at 40 readers × 1 Hz: raw samples ≈ 7 × ~0.71 GB ≈ 5 GB; snapshots ≈ 90 × ~0.05 GB ≈ 4.5 GB. Recommended follow-up remains change-point/downsampled raw storage and a shorter snapshot horizon on Pi-class hosts.
