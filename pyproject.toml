@@ -35,6 +35,11 @@ wattmosaic-engine = "wattmosaic_engine.main:main"
 where = ["engine"]
 include = ["wattmosaic_engine*"]
 
+# Non-Python files the engine reads at runtime (e.g. inference/evidence_weights.json)
+# must ship in the wheel; tests/unit/test_wheel_contents.py builds the wheel and checks.
+[tool.setuptools.package-data]
+wattmosaic_engine = ["**/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
