@@ -397,6 +397,10 @@ class HASource:
         # Bounded in-memory ring for events of unlinked entities (DEC-17).
         # Supplied by the composition layer; nothing is persisted from it.
         self.candidate_ring = candidate_ring
+        #: entity_id -> endpoint_id of an enabled measurement endpoint, or None.
+        #: Supplied by the composition layer (``bind_ingestion``); discovery names
+        #: endpoints independently of the entity id, so the id must be looked up.
+        self._reader_resolver: Callable[[str], str | None] | None = None
         self._normalizer = None
         if revision_lookup is not None:
             # Local import breaks the ingestion → realtime → ingestion.normalize
@@ -460,6 +464,43 @@ class HASource:
         """
         meta = self._entity_meta.get(entity_id) or {}
         return is_own_entity(entity_id, meta.get("platform"))
+
+    def bind_ingestion(
+        self,
+        *,
+        revision_lookup: Any,
+        link_lookup: Any | None = None,
+        candidate_ring: Any | None = None,
+        reader_resolver: Callable[[str], str | None] | None = None,
+        reader_max_w: float | None = None,
+    ) -> None:
+        """Attach the P1 ingestion seam after construction (production wiring).
+
+        ``from_config`` builds the source before the database-backed services
+        exist, so the engine binds them here once they do.  Without this the
+        normalizer was never created in production and every reading was dropped.
+        """
+        from ..realtime.normalize import ReadingNormalizer
+
+        self._revision_lookup = revision_lookup
+        self._link_lookup = link_lookup
+        self.candidate_ring = candidate_ring
+        self._reader_resolver = reader_resolver
+        kwargs: dict[str, Any] = {}
+        if reader_max_w is not None:
+            kwargs["reader_max_w"] = float(reader_max_w)
+        self._normalizer = ReadingNormalizer(revision_lookup, **kwargs)
+
+    def reader_for(self, entity_id: str) -> str | None:
+        """The endpoint id an entity feeds, if it is a known measurement endpoint."""
+        resolver = self._reader_resolver
+        if resolver is None:
+            return None
+        try:
+            return resolver(entity_id)
+        except Exception:  # noqa: BLE001 - a lookup failure must not drop the stream
+            log.debug("reader lookup failed for %s", entity_id, exc_info=True)
+            return None
 
     @classmethod
     def from_config(cls, config: Any) -> HASource:
@@ -1084,7 +1125,12 @@ class HASource:
             or parse_state_timestamp(fired_at)
             or self._clock()
         )
-        await self._emit_ha_event(entity_id, old_state, new_state, observed_at)
+        # A measurement endpoint's state change is a reading (physics), not an HA
+        # context event: emitting it as an HA event as well turned every power
+        # sample into an unlinked HA sub-event and flooded P5 with groups.
+        reader_id = self.reader_for(entity_id)
+        if reader_id is None:
+            await self._emit_ha_event(entity_id, old_state, new_state, observed_at)
 
         raw_value = new_state.get("state")
         value_text = raw_value.strip().lower() if isinstance(raw_value, str) else ""
@@ -1103,7 +1149,8 @@ class HASource:
             # Z2: only the canonical P1 ReaderMeasurement is emitted.  The
             # removed 5 s solver's per-device event stream no longer exists.
             await self._emit_reading(
-                entity_id, raw_value, unit, new_state, fired_at, initial=initial
+                entity_id, raw_value, unit, new_state, fired_at, initial=initial,
+                reader_id=reader_id,
             )
             return
 
@@ -1116,12 +1163,13 @@ class HASource:
         fired_at: Any,
         *,
         initial: bool,
+        reader_id: str | None = None,
     ) -> ReaderMeasurement | None:
         """Normalize one raw value into a canonical ReaderMeasurement (P1)."""
         normalizer = self._normalizer
         if normalizer is None:
             return None
-        reader_id = _ct_id_for(entity_id)
+        reader_id = reader_id or self.reader_for(entity_id) or _ct_id_for(entity_id)
         observed_at = (
             parse_state_timestamp(new_state.get("last_updated"))
             or parse_state_timestamp(new_state.get("last_changed"))

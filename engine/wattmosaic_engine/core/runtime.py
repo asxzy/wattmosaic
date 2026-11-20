@@ -16,6 +16,7 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 from ..backend.loader import InferenceBackendUnavailable, load_inference_backend
@@ -95,6 +96,48 @@ def stale_sources_from_quality(report: DataQualityReport | None) -> list[str]:
     reason, never as a fabricated ``0 W`` estimate.
     """
     return [f"{reader}: {reason}" for reader, reason in excluded_readers(report).items()]
+
+
+class _RevisionLookup:
+    """S13 ``endpoint_revision_at`` rows as attribute objects for P1's normalizer."""
+
+    def __init__(self, entities: Any) -> None:
+        self._entities = entities
+
+    def endpoint_revision_at(self, endpoint_id: str, at: datetime) -> Any:
+        row = self._entities.endpoint_revision_at(endpoint_id, at)
+        return None if row is None else SimpleNamespace(**dict(row))
+
+
+class _EndpointResolver:
+    """entity_id -> endpoint_id of an enabled measurement endpoint.
+
+    Cached and refreshed at most every ``ttl_s`` (discovery adds endpoints after
+    the HA source starts), and immediately on a miss once the TTL has passed.
+    """
+
+    def __init__(self, entities: Any, *, clock: Any, ttl_s: float = 30.0) -> None:
+        self._entities = entities
+        self._clock = clock
+        self._ttl_s = float(ttl_s)
+        self._by_entity: dict[str, str] = {}
+        self._loaded_at: datetime | None = None
+
+    def _refresh(self, now: datetime) -> None:
+        mapping: dict[str, str] = {}
+        for row in self._entities.endpoints(enabled_only=True):
+            entity = row.get("entity_id")
+            if entity:
+                mapping[str(entity)] = str(row["endpoint_id"])
+        self._by_entity = mapping
+        self._loaded_at = now
+
+    def __call__(self, entity_id: str) -> str | None:
+        now = self._clock()
+        stale = self._loaded_at is None or (now - self._loaded_at).total_seconds() >= self._ttl_s
+        if stale or (entity_id not in self._by_entity and self._loaded_at is None):
+            self._refresh(now)
+        return self._by_entity.get(entity_id)
 
 
 class RuntimeMixin:
@@ -375,6 +418,7 @@ class RuntimeMixin:
         if self.version_service is not None:
             return
         db = self.db
+        self._bind_ha_ingestion()
         # One M2 store shared by D1 (a configuration event marks its cells
         # SUSPECTED_CHANGE) and the matrix updater (which publishes them).
         matrix_store = self._live_matrix_store()
@@ -1469,6 +1513,25 @@ class RuntimeMixin:
                 log.exception("steady pass failed")
             finally:
                 self._record_latency("background", (time.monotonic() - started) * 1000.0)
+
+    def _bind_ha_ingestion(self) -> None:
+        """Give the production HA source its P1 seam from the S13 repositories.
+
+        ``HASource.from_config`` runs before the database services exist, so it
+        had no revision lookup: the normalizer was never built and every reading
+        was dropped.  It also derived reader ids from entity ids, while discovery
+        names endpoints independently (``sensor.x_ct1_power`` -> ``vec_2_l1``).
+        """
+        bind = getattr(self.hasource, "bind_ingestion", None)
+        entities = getattr(getattr(self.db, "repos", None), "entities", None)
+        if bind is None or entities is None:
+            return
+        bind(
+            revision_lookup=_RevisionLookup(entities),
+            link_lookup=entities,
+            candidate_ring=self.candidate_ring,
+            reader_resolver=_EndpointResolver(entities, clock=self._clock),
+        )
 
     def _declared_single_subject_pairs(self) -> frozenset[tuple[str, str]]:
         """``{(reader_id, subject_id)}`` for declared single-subject endpoints.
