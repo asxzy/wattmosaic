@@ -18,6 +18,7 @@
 #   retention_days_aggregates -> WM_RETENTION_DAYS_AGGREGATES
 #   retention_days_evidence -> WM_RETENTION_DAYS_EVIDENCE (null = disabled)
 #   retention_days_versions -> WM_RETENTION_DAYS_VERSIONS (null = disabled)
+#   raw_capture_days       -> WM_RAW_CAPTURE_DAYS (0 = off; HA recorder is the history)
 #   queue_max_size         -> WM_QUEUE_MAX_SIZE
 #   auto_placement         -> WM_AUTO_PLACEMENT
 
@@ -124,6 +125,8 @@ options:
   # A set value must be at least retention_days_raw.
   retention_days_evidence: null
   retention_days_versions: null
+  # Debug only: days of full-rate CT readings kept locally. 0 = off.
+  raw_capture_days: 0
   queue_max_size: 5000
   # Creates devices for fixtures whose circuit membership was learned from
   # observed co-movement (ADR-0024). This writes device configurations, so it is
@@ -150,5 +153,6 @@ schema:
   retention_days_aggregates: "int(30,36500)"
   retention_days_evidence: "int(1,3650)?"
   retention_days_versions: "int(1,3650)?"
+  raw_capture_days: "int(0,90)"
   queue_max_size: "int(100,1000000)"
   auto_placement: bool
