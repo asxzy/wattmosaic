@@ -414,7 +414,9 @@ class Database:
         """
         return self.repos.aggregates.energy_total(device_id, bucket_s)
 
-    def prune(self, raw_days: int = 30, aggregate_days: int = 730) -> dict[str, int]:
+    def prune(
+        self, raw_days: int = 30, aggregate_days: int = 730, *, capture_days: int | None = None
+    ) -> dict[str, int]:
         """Delete rows past their horizon; never delete long-term state.
 
         Which tables are pruned, by which timestamp column and on which horizon,
@@ -428,11 +430,12 @@ class Database:
         with a count of ``0`` and left untouched**, so "deleted nothing" is
         visible rather than merely absent.
 
-        The signature and its defaults are unchanged: ``main.py``'s maintenance
-        loop still calls ``prune(retention_days_raw, retention_days_aggregates)``
-        and gets exactly the behaviour it had before.
+        ``capture_days`` is forwarded to the :data:`~wattmosaic_engine.storage.tiers.CAPTURE_HORIZON`
+        tier.  ``None`` keeps the legacy raw cutoff; any ``int`` (incl. 0) skips
+        those tables so the background purge owns them (ADR-0042).  Existing
+        positional callers and defaults are unchanged.
         """
-        return self.repos.aggregates.prune(raw_days, aggregate_days)
+        return self.repos.aggregates.prune(raw_days, aggregate_days, capture_days=capture_days)
 
     def export_device_data(self, device_id: str) -> dict[str, Any]:
         return self.repos.aggregates.export_device_data(device_id)

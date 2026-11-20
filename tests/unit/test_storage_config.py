@@ -39,8 +39,8 @@ from wattmosaic_engine.storage.payload import (
 )
 from wattmosaic_engine.storage.tiers import (
     AGGREGATE_HORIZON,
+    CAPTURE_HORIZON,
     PRUNABLE_TABLES,
-    RAW_HORIZON,
     TABLE_TIERS,
     TIER_TABLES,
     TIERS,
@@ -180,7 +180,9 @@ def test_prunable_tables_match_the_shipped_retention_pass(tmp_path) -> None:
     db = Database(tmp_path / "prune_registry.db")
     try:
         declared = {table: (col, horizon) for table, col, horizon in prunable_tables()}
-        assert declared["ct_samples"] == ("received_at", RAW_HORIZON)
+        # ADR-0042: ct_samples has its own capture horizon, handed to the
+        # background purge rather than the on-loop raw prune.
+        assert declared["ct_samples"] == ("received_at", CAPTURE_HORIZON)
         assert "device_events" not in declared
         assert "device_events_legacy" not in declared
         assert declared["power_aggregates"] == ("bucket_start", AGGREGATE_HORIZON)
