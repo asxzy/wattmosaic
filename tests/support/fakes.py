@@ -13,7 +13,7 @@ identical inputs, so Wave-3/4 tasks can build and test against them in parallel.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Any
@@ -227,7 +227,7 @@ class FakeTopology:
 class FakeMapping:
     """A read-only subject→reader mapping built from explicit pairs."""
 
-    pairs: Mapping[tuple[str, str], str] = MappingProxyType({})
+    pairs: Mapping[tuple[str, str], str] = field(default_factory=lambda: MappingProxyType({}))
 
     @classmethod
     def from_pairs(cls, pairs: Mapping[tuple[str, str], str]) -> FakeMapping:
@@ -351,8 +351,8 @@ def fake_operator(
 class FakeModelSet:
     """A ModelSetView with fixed ΔP priors and optional naive kernels."""
 
-    priors: Mapping[str, DeltaPrior] = MappingProxyType({})
-    kernels: Mapping[str, tuple[np.ndarray, np.ndarray]] = MappingProxyType({})
+    priors: Mapping[str, DeltaPrior] = field(default_factory=lambda: MappingProxyType({}))
+    kernels: Mapping[str, tuple[np.ndarray, np.ndarray]] = field(default_factory=lambda: MappingProxyType({}))
     model_set_id: ModelSetId = "mset-fake"
 
     @classmethod
@@ -439,7 +439,7 @@ class InMemoryHistory:
 class InMemoryMatchStore:
     """An immutable MatchStore; every apply returns a new store."""
 
-    states: Mapping[str, MatchState] = MappingProxyType({})
+    states: Mapping[str, MatchState] = field(default_factory=lambda: MappingProxyType({}))
 
     def snapshot(self) -> Mapping[str, MatchState]:
         return MappingProxyType(dict(self.states))
