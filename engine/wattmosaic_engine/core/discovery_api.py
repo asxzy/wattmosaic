@@ -5,11 +5,13 @@ Owned by D2 after X03 (endpoint discovery)."""
 from __future__ import annotations
 
 import asyncio
+import bisect
 import logging
 import math
 import statistics
 import time
 from collections.abc import Iterable, Mapping
+from dataclasses import fields, replace
 from datetime import timedelta
 from typing import Any
 
@@ -36,6 +38,11 @@ TOPOLOGY_BOOTSTRAP_WAIT_S = 30.0
 #: Minimum gap between discovery retries while none is configured.  Discovery is
 #: a full state scan, so retrying every inference cycle (5 s) would be wasteful.
 TOPOLOGY_RETRY_INTERVAL_S = 60.0
+#: Grid and span of the aligned absolute series a history replay hands the
+#: structural pass (W2 "History replay"): 10 s like the live view, capped to the
+#: most recent 24 h so a week-long lookback stays cheap (ADR-0033).
+HISTORY_ALIGNED_STEP_S = 10.0
+HISTORY_ALIGNED_MAX_S = 24 * 3600.0
 
 
 class DiscoveryApiMixin:
@@ -274,6 +281,7 @@ class DiscoveryApiMixin:
         """
         from ..electrical.topology_history import learn_topology_from_history
         from ..electrical.topology_inference import TopologyInferenceView
+        from ..electrical.topology_regression import align
         from ..ingestion.correlation import parse_history_payload
 
         live = getattr(self, "topology_inference", None)
@@ -301,7 +309,7 @@ class DiscoveryApiMixin:
                 "detail": f"history query did not complete: {detail}" if detail else "no recorded history",
             }
 
-        def _replay() -> tuple[Any, dict[str, Any], dict[str, float]]:
+        def _replay() -> tuple[Any, dict[str, Any], dict[str, float], dict[str, Any]]:
             _states, readings, _levels = parse_history_payload(payload)
             history = {
                 reader_of[entity]: rows for entity, rows in readings.items() if entity in reader_of
@@ -312,21 +320,55 @@ class DiscoveryApiMixin:
                     for e in live.edges
                     if e.pinned or e.declared_by == "user" or str(getattr(e.lifecycle, "value", e.lifecycle)) in ("rejected", "retired")
                 )
+                # Explain-away needs the parents' already-confirmed children.
+                known = tuple(
+                    (e.source_endpoint_id, e.target_endpoint_id)
+                    for e in live.edges
+                    if str(getattr(e.relation, "value", e.relation)) == "contains"
+                    and str(getattr(e.lifecycle, "value", e.lifecycle)) == "confirmed"
+                )
             seed = TopologyInferenceView(
                 edges=authority,
                 clock=live.clock,
                 sigma_floor_w=live.sigma_floor_w,
                 require_direction=live.require_direction,
             )
-            learned, stats = learn_topology_from_history(seed, history)
             levels: dict[str, float] = {}
             for reader, rows in history.items():
                 values = [abs(v) for _t, v in rows if v is not None]
                 if len(values) >= 3:
                     levels[reader] = float(statistics.median(values))
-            return learned, stats.as_dict(), levels
+            learned, stats = learn_topology_from_history(seed, history, known=known, levels=levels)
+            return learned, stats.as_dict(), levels, _aligned(history)
 
-        learned, stats, levels = await asyncio.to_thread(_replay)
+        def _aligned(history: Mapping[str, Any]) -> dict[str, Any]:
+            """Aligned absolute series for the structural pass (W2, M4 ``align``).
+
+            Recorder rows are change-only, so the hold is unlimited; the grid is
+            10 s over the most recent :data:`HISTORY_ALIGNED_MAX_S` of the
+            lookback -- a week x 46 readers would be 2.8 M points (ADR-0033).
+            Each reader keeps its last row before the window: that held value is
+            its level at the window's start.
+            """
+            window_start = max(start, end - timedelta(seconds=HISTORY_ALIGNED_MAX_S))
+            trimmed: dict[str, list[Any]] = {}
+            for reader, rows in history.items():
+                ordered = sorted(
+                    ((t, v) for t, v in rows if v is not None), key=lambda row: row[0]
+                )
+                times = [t for t, _v in ordered]
+                first = max(bisect.bisect_right(times, window_start) - 1, 0)
+                if ordered:
+                    trimmed[reader] = ordered[first:]
+            return align(
+                trimmed,
+                start=window_start,
+                end=end,
+                step_s=HISTORY_ALIGNED_STEP_S,
+                max_hold_s=None,
+            )
+
+        learned, stats, levels, aligned = await asyncio.to_thread(_replay)
 
         def _merge() -> dict[str, Any]:
             with self._ledger_lock:
@@ -334,7 +376,20 @@ class DiscoveryApiMixin:
                     e.edge_id: str(getattr(e.lifecycle, "value", e.lifecycle))
                     for e in self.topology_inference.edges
                 }
-                merged = self.topology_inference.merge_evidence(learned, levels=levels)
+                current = self.topology_inference
+                # The structural pass in ``_settle`` (linking v2 W2a) reads the
+                # view's ``aligned`` series -- not ``absolute``, which would also
+                # switch on the per-edge containment >= 0.995 gate that
+                # unsynchronised recorder samples can fail.  The live view keeps
+                # its own series afterwards: the live runtime feeds a recent
+                # window, and a day of history would make every live fold work
+                # over 8640 points (ADR-0033).
+                # W2a-HOOK: the guard goes once both branches are merged.
+                has_aligned = "aligned" in {f.name for f in fields(current)}
+                staged = replace(current, aligned=aligned) if has_aligned else current
+                merged = staged.merge_evidence(learned, levels=levels)
+                if has_aligned:
+                    merged = replace(merged, aligned=current.aligned)
                 self.topology_inference = merged
                 repo = self.db.repos.topology_v3
                 for edge in merged.edges:
