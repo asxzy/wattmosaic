@@ -119,3 +119,15 @@ def test_a_user_decision_wins_over_the_replay() -> None:
     merged = live.merge_evidence(learned)
     assert _lifecycle(merged, "feed", "branch_hrv") == "rejected"
     assert merged.edge("feed", "branch_hrv").evidence.support == 0
+
+
+def test_the_replay_never_folds_steps_through_the_live_ledger(monkeypatch) -> None:
+    # Live: folding each of a week's ~27k steps through observe_group copied the
+    # whole ledger per step and held the GIL for minutes, so the engine's event
+    # loop starved and the gateway timed requests out (upstream_timeout).
+    def _refuse(*_args, **_kwargs):
+        raise AssertionError("history replay must count, not fold through observe_group")
+
+    monkeypatch.setattr(TopologyInferenceView, "observe_group", _refuse)
+    learned, stats = learn_topology_from_history(_empty(), _house())
+    assert stats.steps > 40 and learned.edge("feed", "branch_hrv") is not None
