@@ -331,6 +331,21 @@ class EvidenceRepository(Repository):
                 self._conn.execute("ROLLBACK")
                 raise
 
+    def has_group_revision(self, group_id: str, revision: int) -> bool:
+        """Whether ``(group_id, revision)`` is already stored.
+
+        Group ids are content-derived (a hash of the member sub-event ids), so a
+        restarted engine that replays HA states or backfills history re-derives
+        groups it stored before.  P5 asks this before appending a revision so a
+        replay adopts the stored row instead of violating the primary key.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM event_groups WHERE group_id=? AND revision=? LIMIT 1",
+                (str(group_id), int(revision)),
+            ).fetchone()
+        return row is not None
+
     def update_group_lifecycle(self, group: EventGroup) -> None:
         """Record a lifecycle transition of an already-stored revision.
 

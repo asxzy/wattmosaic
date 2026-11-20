@@ -521,6 +521,10 @@ class GroupingEngine:
         self._persisted: set[tuple[str, int]] = set()
         self._lifecycle: dict[tuple[str, int], tuple[str, datetime | None]] = {}
         self._update_lifecycle = getattr(repository, "update_group_lifecycle", None)
+        # ``_persisted`` starts empty on every process start, but group ids are
+        # content-derived: a restart that replays HA states or backfills history
+        # re-derives groups already on disk.  Ask the store before appending.
+        self._has_revision = getattr(repository, "has_group_revision", None)
 
     # -- introspection ----------------------------------------------------- #
     def groups(self, status: EventGroupStatus | None = None) -> list[EventGroup]:
@@ -552,6 +556,14 @@ class GroupingEngine:
             if self._lifecycle.get(key) != lifecycle and self._update_lifecycle is not None:
                 self._update_lifecycle(group)
                 self._lifecycle[key] = lifecycle
+            return
+        if self._has_revision is not None and self._has_revision(*key):
+            # Re-derived after a restart: the stored revision stays the audit
+            # record (revisions are immutable); only a lifecycle move is written.
+            self._persisted.add(key)
+            if self._update_lifecycle is not None:
+                self._update_lifecycle(group)
+            self._lifecycle[key] = lifecycle
             return
         self._put_group(group)
         self._persisted.add(key)
