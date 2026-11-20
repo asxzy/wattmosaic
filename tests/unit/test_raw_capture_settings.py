@@ -3,7 +3,7 @@
 0 disables persistence of canonical CT readings entirely (the HA recorder is
 the production history); N in 1-90 keeps full-rate debug capture for N days.
 This module pins the default, env parsing (including the explicit-``0`` trap),
-validation bounds and both config views.
+validation bounds and the log-safe ``redacted()`` view.
 """
 
 from __future__ import annotations
@@ -47,10 +47,13 @@ def test_validate_rejects_out_of_range() -> None:
         assert message not in _config(WM_RAW_CAPTURE_DAYS=str(good)).validate()
 
 
-def test_to_dict_and_redacted_include_key() -> None:
-    cfg = _config(WM_RAW_CAPTURE_DAYS="3")
-    assert cfg.to_dict()["raw_capture_days"] == 3
-    assert cfg.redacted()["raw_capture_days"] == 3
+def test_redacted_includes_key() -> None:
+    cfg = _config(WM_RAW_CAPTURE_DAYS="3", WM_API_TOKEN="secret-token")
+    redacted = cfg.redacted()
+    assert redacted["raw_capture_days"] == 3
+    # redacted() is the log-safe view: credentials stay masked.
+    assert redacted["api_token"] == "***"
+    assert "secret-token" not in redacted.values()
 
 
 def test_retention_days_raw_unchanged() -> None:

@@ -11,7 +11,7 @@ import logging
 import math
 import os
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -662,10 +662,6 @@ class EngineConfig:
                         "of class labels"
                     )
         return problems
-
-    def to_dict(self) -> dict[str, Any]:
-        """A full view of every setting.  Use :meth:`redacted` for logging."""
-        return asdict(self)
 
     def redacted(self) -> dict[str, Any]:
         return {
