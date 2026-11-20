@@ -1,3 +1,3 @@
 """WattMosaic engine package."""
 
-__version__ = "0.2.1-dev.42"
+__version__ = "0.3.0-dev.1"

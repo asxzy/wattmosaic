@@ -430,6 +430,11 @@ fixed and re-verified.
 
 ## 7. What is *not* done (explicit)
 
+- **3.0 (realtime-topology-disaggregation) future work** is tracked in
+  [`docs/specs/realtime-topology-disaggregation/TODO.md`](docs/specs/realtime-topology-disaggregation/TODO.md):
+  disk use on Pi-class hosts (~807 MB/day at 40 readers × 1 Hz; change-point raw
+  storage), group estimates needing co-switch history, the constant-other-loads
+  group value, matrix GET latency, operator-run real-data replay and rollback.
 - No production install or configuration change has been made.
 - No per-device accuracy claim is made against the real home;
   `docs/real_ha_validation.md` and `docs/acceptance_report.md` §7 say
