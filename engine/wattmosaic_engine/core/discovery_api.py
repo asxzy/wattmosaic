@@ -11,7 +11,7 @@ import math
 import statistics
 import time
 from collections.abc import Iterable, Mapping
-from dataclasses import fields, replace
+from dataclasses import replace
 from datetime import timedelta
 from typing import Any
 
@@ -384,12 +384,11 @@ class DiscoveryApiMixin:
                 # its own series afterwards: the live runtime feeds a recent
                 # window, and a day of history would make every live fold work
                 # over 8640 points (ADR-0033).
-                # W2a-HOOK: the guard goes once both branches are merged.
-                has_aligned = "aligned" in {f.name for f in fields(current)}
-                staged = replace(current, aligned=aligned) if has_aligned else current
+                # The structural pass (capacity, paired legs, regression) reads
+                # the replay's aligned history; the live view keeps its own.
+                staged = replace(current, aligned=aligned)
                 merged = staged.merge_evidence(learned, levels=levels)
-                if has_aligned:
-                    merged = replace(merged, aligned=current.aligned)
+                merged = replace(merged, aligned=current.aligned)
                 self.topology_inference = merged
                 repo = self.db.repos.topology_v3
                 for edge in merged.edges:
