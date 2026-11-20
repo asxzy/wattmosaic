@@ -27,6 +27,7 @@ import logging
 import math
 import random
 import ssl
+import time
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from enum import Enum
@@ -140,6 +141,15 @@ HISTORY_BOUNDARY_NUDGE = timedelta(microseconds=1)
 #: is nearly seven times the observed cost while keeping a 7-day query (14
 #: slices, 420 s budget) at 30 s per slice.
 HISTORY_SLICE_MIN_TIMEOUT_S = 15.0
+#: Frames at least this large are JSON-decoded on a worker thread instead of the
+#: event loop (ADR-0033).  A 12 h recorder slice with attributes is ~20 MB and
+#: decoding it inline stalled the loop long enough for ``GET /health`` to miss
+#: the gateway's 4 s budget during a 168 h Discover.  State-change frames are a
+#: few hundred bytes, so the hop to a thread is only paid for the bulk answers.
+LARGE_FRAME_BYTES = 64 * 1024
+#: ``merge_history_slices`` releases the GIL (``time.sleep(0)``) after this many
+#: rows so the event loop is scheduled while a week of history is merged.
+MERGE_YIELD_EVERY_ROWS = 20_000
 
 READ_ONLY_COMMANDS = frozenset(
     {
@@ -381,6 +391,8 @@ def merge_history_slices(parts: Iterable[Mapping[str, Any]]) -> dict[str, list[A
     #: Only a slice boundary consults it, so a same-instant pair that genuinely
     #: lives inside one answer is preserved.
     youngest: dict[str, float | None] = {}
+    #: Rows visited since the GIL was last released; see MERGE_YIELD_EVERY_ROWS.
+    budget = MERGE_YIELD_EVERY_ROWS
 
     for index, payload in enumerate(parts):
         for entity_id, rows in (payload or {}).items():
@@ -395,6 +407,11 @@ def merge_history_slices(parts: Iterable[Mapping[str, Any]]) -> dict[str, list[A
             boundary = youngest.get(entity_id) if index else None
             latest: float | None = None
             for row in rows if isinstance(rows, (list, tuple)) else ():
+                budget -= 1
+                if budget <= 0:
+                    # Runs on a worker thread (``history``); let the event loop in.
+                    time.sleep(0)
+                    budget = MERGE_YIELD_EVERY_ROWS
                 if not isinstance(row, Mapping):
                     continue
                 stamp = _history_row_stamp(row)
@@ -858,7 +875,10 @@ class HASource:
 
         if len(parts) == 1:
             return parts[0]
-        return merge_history_slices(parts)
+        # ~1 M rows at 168 h: pure-Python work that must not run on the event
+        # loop (ADR-0033).  The merge is a pure function of ``parts``, so the
+        # result is identical on a worker thread.
+        return await asyncio.to_thread(merge_history_slices, parts)
 
     async def registries(self) -> dict[str, Any]:
         """Return entity/device/area/floor registries (cached)."""
@@ -1028,7 +1048,13 @@ class HASource:
         raw = await ws.recv()
         self.stats["frames_received"] += 1
         try:
-            msg = json.loads(raw)
+            # Large frames (recorder history) are decoded off the event loop
+            # (ADR-0033).  The reader awaits each frame before reading the next,
+            # so frame order -- and therefore dispatch order -- is unchanged.
+            if raw is not None and len(raw) >= LARGE_FRAME_BYTES:
+                msg = await asyncio.to_thread(json.loads, raw)
+            else:
+                msg = json.loads(raw)
         except (TypeError, ValueError) as exc:
             raise ConnectionError("invalid JSON frame from Home Assistant") from exc
         if not isinstance(msg, dict):

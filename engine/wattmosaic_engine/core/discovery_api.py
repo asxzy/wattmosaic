@@ -677,6 +677,10 @@ class DiscoveryApiMixin:
         ]:
             """The CPU-bound half of discovery, run off the event loop."""
             state_history, readings, levels = parse_history_payload(payload)
+            # Each phase below is long pure-Python work holding the GIL; yield it
+            # between phases so the event loop (health probes, SQLite calls that
+            # re-acquire the GIL per statement) is scheduled promptly (ADR-0033).
+            time.sleep(0)
             # Readings are keyed by entity id in the payload; remap to ct_id so the
             # correlation (and the placement) speak the topology's vocabulary.
             by_entity = {
@@ -699,7 +703,9 @@ class DiscoveryApiMixin:
                 entity_levels=levels,
             )
             stats["observations"] = len(observations)
+            time.sleep(0)
             report = correlate(observations, now=end, row_noise_w=row_noise)
+            time.sleep(0)
 
             # Contract §3.1: a write needs **both** the request's consent and the
             # stored opt-in.  ``apply`` defaults to false, so ``None`` is read-only;
@@ -746,18 +752,20 @@ class DiscoveryApiMixin:
                 # returning at all: the old code dropped the connection first.  The
                 # real fix belongs in ``group_fit``'s row parser; filtering here keeps
                 # discovery from handing a wattage fit a row that has no wattage.
+                #
+                # The recorder rows are handed over as-is (``_fit_rows``): the
+                # fit only reads them, and copying ~1 M rows into fresh dicts was
+                # the hottest line of a 168 h Discover (ADR-0033).
                 fitted = fit_shared_rows(
                     row_readings={
-                        endpoint.endpoint_id: [
-                            dict(row)
-                            for row in payload.get(endpoint.entity_id, ())
-                            if isinstance(row, Mapping) and _is_numeric_state(row)
-                        ]
+                        endpoint.endpoint_id: _fit_rows(
+                            payload.get(endpoint.entity_id, ()), numeric_only=True
+                        )
                         for endpoint in row_channels.values()
                         if endpoint.endpoint_id not in excluded_ct_ids and endpoint.entity_id
                     },
                     entity_states={
-                        entity: [dict(row) for row in rows if isinstance(row, Mapping)]
+                        entity: _fit_rows(rows)
                         for entity, rows in payload.items()
                         if entity in entity_ids
                     },
@@ -768,6 +776,7 @@ class DiscoveryApiMixin:
                     },
                     row_noise_w=row_noise,
                 )
+                time.sleep(0)
                 for group in fitted:
                     ct_label, panel_name = _channel_label(group.ct_id)
                     # A fixture that tier A placed already owns a device with a
@@ -994,6 +1003,41 @@ class DiscoveryApiMixin:
         return result
 
 
+#: ``_fit_rows`` releases the GIL (``time.sleep(0)``) after this many rows, so a
+#: Discover over ~1 M recorder rows on a worker thread lets the event loop run.
+FIT_ROWS_YIELD_EVERY = 20_000
+
+
+def _fit_rows(rows: Any, *, numeric_only: bool = False) -> list[Mapping[str, Any]]:
+    """The recorder rows the group fit may read, without copying them.
+
+    Keeps every :class:`Mapping` row (and, with ``numeric_only``, only rows whose
+    state is a finite number -- see :func:`_is_numeric_state`) in recorder
+    order.  The rows themselves are passed through by reference: the fit only
+    reads them, and a per-row ``dict(row)`` over a 168 h window (~1 M rows) was
+    the dominant GIL holder during Discover.  It runs on the analysis worker
+    thread, and it yields the GIL periodically so the event loop is not starved
+    (ADR-0033).
+    """
+    if not isinstance(rows, (list, tuple)):
+        rows = list(rows) if isinstance(rows, Iterable) else []
+    out: list[Mapping[str, Any]] = []
+    append = out.append
+    for start in range(0, len(rows), FIT_ROWS_YIELD_EVERY):
+        if start:
+            time.sleep(0)
+        chunk = rows[start : start + FIT_ROWS_YIELD_EVERY]
+        if numeric_only:
+            for row in chunk:
+                if isinstance(row, Mapping) and _is_numeric_state(row):
+                    append(row)
+        else:
+            for row in chunk:
+                if isinstance(row, Mapping):
+                    append(row)
+    return out
+
+
 def _is_numeric_state(row: Mapping[str, Any]) -> bool:
     """True when a recorder row's state is a number, i.e. an actual measurement.
 
@@ -1007,6 +1051,8 @@ def _is_numeric_state(row: Mapping[str, Any]) -> bool:
     raw = row.get("s", row.get("state"))
     if raw is None or isinstance(raw, bool):
         return False
+    if isinstance(raw, (int, float)):
+        return math.isfinite(raw)
     try:
         value = float(str(raw).strip())
     except (TypeError, ValueError):
