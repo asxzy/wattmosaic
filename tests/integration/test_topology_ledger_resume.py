@@ -15,8 +15,8 @@ from pathlib import Path
 from wattmosaic_engine.config.settings import EngineConfig
 from wattmosaic_engine.contracts import (
     EdgeEvidence,
-    EdgeLifecycleV3,
     RelationType,
+    TopologyEdgeState,
     TopologyEdgeV3,
 )
 from wattmosaic_engine.electrical.topology_inference import DeltaObservation
@@ -30,7 +30,7 @@ T0 = datetime(2026, 11, 20, 7, 0, 0, tzinfo=UTC)
 
 def _edge(edge_id: str, parent: str, child: str, *, declared_by: str = "inference",
           pinned: bool = False, support: int = 5, causes: int = 2,
-          lifecycle: EdgeLifecycleV3 = EdgeLifecycleV3.PROVISIONAL) -> TopologyEdgeV3:
+          lifecycle: TopologyEdgeState = TopologyEdgeState.PROVISIONAL) -> TopologyEdgeV3:
     return TopologyEdgeV3(
         edge_id=edge_id,
         relation=RelationType.CONTAINS,
@@ -77,7 +77,7 @@ def test_version_edges_keep_their_lifecycle_after_a_restart_and_a_fold(tmp_path:
     """
     db = Database(tmp_path / "resume2.db")
     edge = _edge("te-inf::feed_l1::kitchen_ckt", "feed_l1", "kitchen_ckt",
-                 support=9, causes=3, lifecycle=EdgeLifecycleV3.CONFIRMED)
+                 support=9, causes=3, lifecycle=TopologyEdgeState.STRUCTURAL)
     db.repos.topology_v3.upsert_edge(edge)
     core = EngineCore(EngineConfig(database_path=str(tmp_path / "resume2.db"), ha_token="x"),
                       db, clock=lambda: T0)
@@ -92,7 +92,7 @@ def test_version_edges_keep_their_lifecycle_after_a_restart_and_a_fold(tmp_path:
     )
     resumed = view.edge("feed_l1", "kitchen_ckt")
     assert resumed is not None
-    assert resumed.lifecycle == EdgeLifecycleV3.CONFIRMED
+    assert resumed.lifecycle == TopologyEdgeState.STRUCTURAL
     assert resumed.evidence.independent_causes == 3
 
 
@@ -128,12 +128,12 @@ def test_migration_28_relearns_every_inferred_edge_outside_user_authority(tmp_pa
     repo.upsert_edge(_edge("te-inf::feed_l1::kitchen_ckt", "feed_l1", "kitchen_ckt"))
     repo.upsert_edge(_edge("pinned", "feed_l1", "laundry_ckt", pinned=True))
     repo.upsert_edge(_edge("declared", "feed_l2", "garage_ckt", declared_by="user",
-                           lifecycle=EdgeLifecycleV3.CONFIRMED))
+                           lifecycle=TopologyEdgeState.STRUCTURAL))
     repo.upsert_edge(_edge("te-inf::feed_l2::office_ckt", "feed_l2", "office_ckt", support=22,
-                           lifecycle=EdgeLifecycleV3.CONFIRMED))
+                           lifecycle=TopologyEdgeState.STRUCTURAL))
     # Backfilled by v014 from the legacy relations table: not a T5 ledger edge.
     repo.upsert_edge(_edge("te-0123456789ab", "feed_l1", "pantry_ckt",
-                           lifecycle=EdgeLifecycleV3.CONFIRMED))
+                           lifecycle=TopologyEdgeState.STRUCTURAL))
     conn = db._conn  # noqa: SLF001 - drive the migration body directly
     conn.execute("UPDATE topology_versions_v3 SET status = 'superseded' WHERE status = 'active'")
     conn.execute(
@@ -149,8 +149,8 @@ def test_migration_28_relearns_every_inferred_edge_outside_user_authority(tmp_pa
         for row in conn.execute("SELECT edge_id, lifecycle, evidence_json FROM topology_edges")
     }
     assert set(rows) == {"pinned", "declared", "te-inf::feed_l2::office_ckt", "te-0123456789ab"}
-    assert rows["te-0123456789ab"][0] == "confirmed"
+    assert rows["te-0123456789ab"][0] == "structural"
     assert rows["te-inf::feed_l2::office_ckt"][0] == "candidate"
     assert rows["te-inf::feed_l2::office_ckt"][1]["support"] == 0
-    assert rows["declared"] == ("confirmed", rows["declared"][1])
+    assert rows["declared"] == ("structural", rows["declared"][1])
     assert rows["declared"][1]["support"] == 5

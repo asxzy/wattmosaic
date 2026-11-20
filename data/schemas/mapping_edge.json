@@ -55,7 +55,7 @@
       "type": "object"
     },
     "EdgeLifecycleV3": {
-      "description": "Lifecycle of a single v3 topology or mapping edge (HB \u00a74.3).\n\nA seven-state vocabulary.  One event never moves an edge past CANDIDATE\n(DEC-10).",
+      "description": "Lifecycle of a single v3 topology or mapping edge (HB \u00a74.3).\n\nA seven-state vocabulary.  One event never moves an edge past CANDIDATE\n(DEC-10).  Topology edges use :class:`TopologyEdgeState` instead; this enum\nis retained for mapping edges, whose confirmation is a different concept.",
       "enum": [
         "candidate",
         "provisional",
@@ -159,5 +159,5 @@
   "title": "MappingEdge",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/mapping_edge.json",
-  "x-contract-version": "3.0.0"
+  "x-contract-version": "4.0.0"
 }

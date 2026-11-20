@@ -28,6 +28,7 @@ from wattmosaic_engine.contracts import (
     MappingEdge,
     Observability,
     RelationType,
+    TopologyEdgeState,
     TopologyEdgeV3,
     VersionTriple,
 )
@@ -70,7 +71,7 @@ def topo_edge(edge_id: str, parent: str, child: str, *, at: datetime = T0) -> To
         relation=RelationType.CONTAINS,
         source_endpoint_id=parent,
         target_endpoint_id=child,
-        lifecycle=EdgeLifecycleV3.CONFIRMED,
+        lifecycle=TopologyEdgeState.STRUCTURAL,
         declared_by="user",
         beta=1.0,
         beta_basis="unity",

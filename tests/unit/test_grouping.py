@@ -149,14 +149,14 @@ def test_co_movement_requires_confirmed_or_provisional_contains() -> None:
     # CONTAINS path.
     assert co_movement_reason(parent, [child_a, child_b], topo) == "reader_comovement"
     # A CORRELATED-only pair never co-moves structurally.
-    from wattmosaic_engine.contracts import EdgeLifecycleV3, RelationType, TopologyEdgeV3
+    from wattmosaic_engine.contracts import RelationType, TopologyEdgeState, TopologyEdgeV3
 
     correlated = TopologyEdgeV3(
         edge_id="e-corr",
         relation=RelationType.CORRELATED,
         source_endpoint_id="Main",
         target_endpoint_id="Circuit C",
-        lifecycle=EdgeLifecycleV3.CONFIRMED,
+        lifecycle=TopologyEdgeState.STRUCTURAL,
         declared_by="migration",
         beta=None,
         beta_basis=None,

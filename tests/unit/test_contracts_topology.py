@@ -19,6 +19,7 @@ from wattmosaic_engine.contracts.topology import (
     Observability,
     ReaderResidualPoint,
     RelationType,
+    TopologyEdgeState,
     TopologyEdgeV3,
     TopologyVersionV3,
     UnknownLoadProfileV3,
@@ -72,6 +73,46 @@ def test_edge_lifecycle_v3_is_the_new_seven_state_enum() -> None:
         "retired",
     }
     assert "under_review" not in {m.value for m in EdgeLifecycleV3}
+
+
+def test_topology_edge_state_splits_confirmed_into_structural() -> None:
+    """Contract 4.0: topology uses STRUCTURAL; mapping keeps CONFIRMED."""
+    assert {member.value for member in TopologyEdgeState} == {
+        "candidate",
+        "provisional",
+        "structural",
+        "conflicted",
+        "suspected_change",
+        "rejected",
+        "retired",
+    }
+    assert "confirmed" not in {m.value for m in TopologyEdgeState}
+    assert "structural" not in {m.value for m in EdgeLifecycleV3}
+
+
+def _topology_edge(**overrides: object) -> TopologyEdgeV3:
+    defaults = dict(
+        edge_id="e1",
+        relation="contains",
+        source_endpoint_id="parent",
+        target_endpoint_id="child",
+        lifecycle="structural",
+        declared_by="user",
+        evidence=EdgeEvidence(),
+        valid_from=T0,
+        pinned=False,
+    )
+    defaults.update(overrides)
+    return TopologyEdgeV3(**defaults)  # type: ignore[arg-type]
+
+
+def test_legacy_confirmed_lifecycle_loads_as_structural() -> None:
+    """Old stored JSON / version payloads used ``confirmed``; D1 maps it."""
+    assert _topology_edge(lifecycle="confirmed").lifecycle == TopologyEdgeState.STRUCTURAL
+    assert (
+        _topology_edge(lifecycle=EdgeLifecycleV3.CONFIRMED).lifecycle
+        == TopologyEdgeState.STRUCTURAL
+    )
 
 
 def test_observability_has_exactly_the_seven_hb_9_7_states() -> None:

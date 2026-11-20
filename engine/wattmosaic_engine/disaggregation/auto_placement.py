@@ -37,12 +37,12 @@ from datetime import datetime
 
 from wattmosaic_engine.contracts import (
     EdgeEvidence,
-    EdgeLifecycleV3,
     HaEntityLink,
     HaEntityRole,
     MappingEdge,
     Observability,
     PhysicalDevice,
+    TopologyEdgeState,
 )
 from wattmosaic_engine.ingestion.correlation import CorrelationReport
 
@@ -280,7 +280,7 @@ def mapping_edges_for_plan(
             subject_id=placement.device_id,
             endpoint_id=placement.reader_id,
             observability=Observability.INFERRED,
-            lifecycle=EdgeLifecycleV3.CANDIDATE,
+            lifecycle=TopologyEdgeState.CANDIDATE,
             declared_by="auto_placement",
             evidence=EdgeEvidence(
                 support=len(placement.evidence),

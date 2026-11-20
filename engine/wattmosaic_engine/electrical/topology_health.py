@@ -224,7 +224,7 @@ def demotions(book: HealthBook, edges: Iterable[Any]) -> list[tuple[str, str]]:
     for edge in edges:
         if _attr(edge, "relation") != "contains":
             continue
-        if _attr(edge, "lifecycle") != "confirmed":
+        if _attr(edge, "lifecycle") not in ("structural", "confirmed"):
             continue
         if _attr(edge, "declared_by") != "inference":
             continue

@@ -24,7 +24,6 @@ import numpy as np
 from wattmosaic_engine.contracts import (
     ConfigurationEvent,
     DeltaPrior,
-    EdgeLifecycleV3,
     EventGroup,
     JointInferenceResult,
     MappingEdge,
@@ -35,6 +34,7 @@ from wattmosaic_engine.contracts import (
     PowerLevelV3,
     PowerPrediction,
     RelationType,
+    TopologyEdgeState,
     TopologyEdgeV3,
     TopologyVersionId,
     VersionTriple,
@@ -65,9 +65,9 @@ __all__: list[str] = [
     "InferSteady",
 ]
 
-# The default lifecycle set for structural graph walks: only CONFIRMED edges
+# The default lifecycle set for structural graph walks: only STRUCTURAL edges
 # are hard structure (PROVISIONAL edges are soft alternatives).
-CONFIRMED: tuple[EdgeLifecycleV3, ...] = (EdgeLifecycleV3.CONFIRMED,)
+STRUCTURAL: tuple[TopologyEdgeState, ...] = (TopologyEdgeState.STRUCTURAL,)
 
 Clock = Callable[[], datetime]
 
@@ -83,7 +83,7 @@ class EntryMeta:
 
     coefficient: float
     observability: Observability
-    edge_lifecycle: EdgeLifecycleV3 | None  # weakest edge on the path; None for DIRECT
+    edge_lifecycle: TopologyEdgeState | None  # weakest edge on the path; None for DIRECT
     edge_ids: tuple[str, ...]
 
 
@@ -106,7 +106,7 @@ class AlternativeEdge:
     source_endpoint_id: str
     target_endpoint_id: str
     relation: RelationType
-    lifecycle: EdgeLifecycleV3
+    lifecycle: TopologyEdgeState
     beta: float | None = None
 
 
@@ -134,19 +134,19 @@ class TopologyView(Protocol):
     """A read-only topology graph filtered by edge lifecycle."""
 
     def edges(
-        self, lifecycles: Collection[EdgeLifecycleV3] | None = None
+        self, lifecycles: Collection[TopologyEdgeState] | None = None
     ) -> tuple[TopologyEdgeV3, ...]: ...
 
     def parent(
-        self, reader_id: str, lifecycles: Collection[EdgeLifecycleV3] = CONFIRMED
+        self, reader_id: str, lifecycles: Collection[TopologyEdgeState] = STRUCTURAL
     ) -> str | None: ...
 
     def ancestors(
-        self, reader_id: str, lifecycles: Collection[EdgeLifecycleV3] = CONFIRMED
+        self, reader_id: str, lifecycles: Collection[TopologyEdgeState] = STRUCTURAL
     ) -> tuple[str, ...]: ...
 
     def children(
-        self, reader_id: str, lifecycles: Collection[EdgeLifecycleV3] = CONFIRMED
+        self, reader_id: str, lifecycles: Collection[TopologyEdgeState] = STRUCTURAL
     ) -> tuple[str, ...]: ...
 
     def soft_alternatives(self) -> tuple[TopologyEdgeV3, ...]: ...

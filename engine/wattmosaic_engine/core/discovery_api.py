@@ -325,12 +325,12 @@ class DiscoveryApiMixin:
                     for e in live.edges
                     if e.pinned or e.declared_by == "user" or str(getattr(e.lifecycle, "value", e.lifecycle)) in ("rejected", "retired")
                 )
-                # Explain-away needs the parents' already-confirmed children.
+                # Explain-away needs the parents' already-structural children.
                 known = tuple(
                     (e.source_endpoint_id, e.target_endpoint_id)
                     for e in live.edges
                     if str(getattr(e.relation, "value", e.relation)) == "contains"
-                    and str(getattr(e.lifecycle, "value", e.lifecycle)) == "confirmed"
+                    and str(getattr(e.lifecycle, "value", e.lifecycle)) in ("structural", "confirmed")
                 )
             seed = TopologyInferenceView(
                 edges=authority,
@@ -422,7 +422,7 @@ class DiscoveryApiMixin:
             confirmed = sorted(
                 (e.source_endpoint_id, e.target_endpoint_id)
                 for e in merged.edges
-                if str(getattr(e.lifecycle, "value", e.lifecycle)) == "confirmed"
+                if str(getattr(e.lifecycle, "value", e.lifecycle)) in ("structural", "confirmed")
                 and str(getattr(e.relation, "value", e.relation)) == "contains"
             )
             return {"counts": counts, "changed": changed, "confirmed": confirmed}

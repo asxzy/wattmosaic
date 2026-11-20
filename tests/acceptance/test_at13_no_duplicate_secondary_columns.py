@@ -19,8 +19,8 @@ from wattmosaic_engine.contracts import (
     ColumnAnnotation,
     ColumnNode,
     EdgeEvidence,
-    EdgeLifecycleV3,
     RelationType,
+    TopologyEdgeState,
     TopologyEdgeV3,
 )
 from wattmosaic_engine.mapping import build_columns  # real M1 surface
@@ -49,7 +49,7 @@ def _edge(relation: RelationType, source: str, target: str) -> TopologyEdgeV3:
         relation=relation,
         source_endpoint_id=source,
         target_endpoint_id=target,
-        lifecycle=EdgeLifecycleV3.CONFIRMED,
+        lifecycle=TopologyEdgeState.STRUCTURAL,
         declared_by="user",
         evidence=EdgeEvidence(),
         valid_from=T0,

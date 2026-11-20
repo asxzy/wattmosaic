@@ -30,10 +30,10 @@ from wattmosaic_engine.api.server import API_PREFIX, APIServer, create_app
 from wattmosaic_engine.config.settings import EngineConfig
 from wattmosaic_engine.contracts import (
     EdgeEvidence,
-    EdgeLifecycleV3,
     EndpointConfigRevision,
     MeasurementEndpoint,
     RelationType,
+    TopologyEdgeState,
     TopologyEdgeV3,
 )
 from wattmosaic_engine.main import EngineCore
@@ -100,7 +100,7 @@ def core(tmp_path: Path) -> Any:
         db.close()
 
 
-def _contains(edge_id: str, parent: str, child: str, lifecycle: EdgeLifecycleV3) -> TopologyEdgeV3:
+def _contains(edge_id: str, parent: str, child: str, lifecycle: TopologyEdgeState) -> TopologyEdgeV3:
     return TopologyEdgeV3(
         edge_id=edge_id,
         relation=RelationType.CONTAINS,
@@ -167,8 +167,8 @@ def test_topology_v3_with_endpoint_metadata_returns_edges_and_tree(core: Any) ->
     _promote(
         core,
         [
-            _contains("e-sub", "ct_feed", "ct_sub", EdgeLifecycleV3.CONFIRMED),
-            _contains("e-oven", "ct_sub", "ct_oven", EdgeLifecycleV3.PROVISIONAL),
+            _contains("e-sub", "ct_feed", "ct_sub", TopologyEdgeState.STRUCTURAL),
+            _contains("e-oven", "ct_sub", "ct_oven", TopologyEdgeState.PROVISIONAL),
         ],
     )
 

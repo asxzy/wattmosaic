@@ -34,12 +34,13 @@ from wattmosaic_engine.contracts import (
     PowerPrediction,
     PredictionStatus,
     RelationType,
+    TopologyEdgeState,
     TopologyEdgeV3,
     TopologyVersionId,
     VersionTriple,
 )
 from wattmosaic_engine.runtime.interfaces import (
-    CONFIRMED,
+    STRUCTURAL,
     AlternativeEdge,
     Clock,
     EntryMeta,
@@ -96,13 +97,13 @@ def _evidence() -> EdgeEvidence:
 
 
 def _contains_edge(parent: str, child: str, edge_id: str, *, at: datetime) -> TopologyEdgeV3:
-    """Build one CONFIRMED CONTAINS edge (source = parent, target = child)."""
+    """Build one STRUCTURAL CONTAINS edge (source = parent, target = child)."""
     return TopologyEdgeV3(
         edge_id=edge_id,
         relation=RelationType.CONTAINS,
         source_endpoint_id=parent,
         target_endpoint_id=child,
-        lifecycle=EdgeLifecycleV3.CONFIRMED,
+        lifecycle=TopologyEdgeState.STRUCTURAL,
         declared_by="user",
         beta=1.0,
         beta_basis="unity",
@@ -128,7 +129,7 @@ class FakeTopology:
         """Build the HB §17 house (or any nested tree) in one call.
 
         ``spec`` maps a reader id to a nested map of its children; a leaf maps
-        to an empty map.  Every parent→child pair becomes a CONFIRMED CONTAINS
+        to an empty map.  Every parent→child pair becomes a STRUCTURAL CONTAINS
         edge with coefficient 1.
         """
         edges: list[TopologyEdgeV3] = []
@@ -149,14 +150,14 @@ class FakeTopology:
     # -- TopologyView -------------------------------------------------------- #
 
     def edges(
-        self, lifecycles: Sequence[EdgeLifecycleV3] | None = None
+        self, lifecycles: Sequence[TopologyEdgeState] | None = None
     ) -> tuple[TopologyEdgeV3, ...]:
         if lifecycles is None:
             return self.edges_all
         wanted = frozenset(lifecycles)
         return tuple(e for e in self.edges_all if e.lifecycle in wanted)
 
-    def _contains(self, lifecycles: Sequence[EdgeLifecycleV3]) -> tuple[TopologyEdgeV3, ...]:
+    def _contains(self, lifecycles: Sequence[TopologyEdgeState]) -> tuple[TopologyEdgeV3, ...]:
         wanted = frozenset(lifecycles)
         return tuple(
             e
@@ -167,7 +168,7 @@ class FakeTopology:
     def parent(
         self,
         reader_id: str,
-        lifecycles: Sequence[EdgeLifecycleV3] = CONFIRMED,
+        lifecycles: Sequence[TopologyEdgeState] = STRUCTURAL,
     ) -> str | None:
         for edge in self._contains(lifecycles):
             if edge.target_endpoint_id == reader_id:
@@ -177,7 +178,7 @@ class FakeTopology:
     def ancestors(
         self,
         reader_id: str,
-        lifecycles: Sequence[EdgeLifecycleV3] = CONFIRMED,
+        lifecycles: Sequence[TopologyEdgeState] = STRUCTURAL,
     ) -> tuple[str, ...]:
         """Nearest ancestor first, root last."""
         result: list[str] = []
@@ -192,7 +193,7 @@ class FakeTopology:
     def children(
         self,
         reader_id: str,
-        lifecycles: Sequence[EdgeLifecycleV3] = CONFIRMED,
+        lifecycles: Sequence[TopologyEdgeState] = STRUCTURAL,
     ) -> tuple[str, ...]:
         return tuple(
             e.target_endpoint_id
@@ -201,7 +202,7 @@ class FakeTopology:
         )
 
     def path_from(self, ancestor: str, reader: str) -> tuple[str, ...]:
-        """Edge ids on the CONFIRMED chain from ``ancestor`` down to ``reader``."""
+        """Edge ids on the STRUCTURAL chain from ``ancestor`` down to ``reader``."""
         edges: list[str] = []
         seen: set[str] = set()
         current = reader
@@ -209,7 +210,7 @@ class FakeTopology:
             seen.add(current)
             hits = [
                 e
-                for e in self._contains(CONFIRMED)
+                for e in self._contains(STRUCTURAL)
                 if e.target_endpoint_id == current
             ]
             if not hits:
@@ -220,7 +221,7 @@ class FakeTopology:
         return tuple(reversed(edges)) if not seen.__contains__(ancestor) or current == ancestor else ()
 
     def soft_alternatives(self) -> tuple[TopologyEdgeV3, ...]:
-        return self.edges((EdgeLifecycleV3.PROVISIONAL,))
+        return self.edges((TopologyEdgeState.PROVISIONAL,))
 
 
 @dataclass(frozen=True)
@@ -269,10 +270,10 @@ def fake_operator(
     topology_version_id: str = "topo-1",
     mapping_version_id: str = "map-1",
 ) -> ObservationOperator:
-    """A naive-but-correct H for CONFIRMED CONTAINS chains (coefficient 1).
+    """A naive-but-correct H for STRUCTURAL CONTAINS chains (coefficient 1).
 
     A subject mapped to reader ``R`` enters the row of ``R`` (DIRECT) and the
-    row of every CONFIRMED CONTAINS ancestor of ``R`` (EXPECTED), always with
+    row of every STRUCTURAL CONTAINS ancestor of ``R`` (EXPECTED), always with
     coefficient 1.  Nothing else is inferred: no residualisation, no unknown
     columns, no leg coefficients.
     """
@@ -317,7 +318,7 @@ def fake_operator(
             entries[(r, j)] = EntryMeta(
                 coefficient=1.0,
                 observability=Observability.EXPECTED,
-                edge_lifecycle=EdgeLifecycleV3.CONFIRMED,
+                edge_lifecycle=TopologyEdgeState.STRUCTURAL,
                 edge_ids=edge_ids,
             )
 

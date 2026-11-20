@@ -11,12 +11,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from wattmosaic_engine.contracts import (
-    EdgeLifecycleV3,
     EndpointKind,
     EndpointScope,
     MeasurementEndpoint,
     RelationType,
     ScopeStatus,
+    TopologyEdgeState,
     TopologyEdgeV3,
 )
 from wattmosaic_engine.electrical.topology_graph import TopologyGraph
@@ -46,7 +46,7 @@ def _edge(parent: str, child: str) -> TopologyEdgeV3:
         relation=RelationType.CONTAINS,
         source_endpoint_id=parent,
         target_endpoint_id=child,
-        lifecycle=EdgeLifecycleV3.CONFIRMED,
+        lifecycle=TopologyEdgeState.STRUCTURAL,
         declared_by="user",
         evidence=EdgeEvidence(),
         valid_from=T0,

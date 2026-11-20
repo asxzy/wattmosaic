@@ -15,9 +15,9 @@ from typing import Any
 
 from wattmosaic_engine.contracts import (
     EdgeEvidence,
-    EdgeLifecycleV3,
     MeasurementEndpoint,
     RelationType,
+    TopologyEdgeState,
     TopologyEdgeV3,
 )
 from wattmosaic_engine.contracts.entities import EndpointKind, EndpointScope, ScopeStatus
@@ -27,7 +27,7 @@ from wattmosaic_engine.electrical.topology_inference import TopologyInferenceVie
 T0 = datetime(2026, 11, 20, tzinfo=UTC)
 
 
-def _edge(source: str, target: str, lifecycle: EdgeLifecycleV3, *, support: int = 8,
+def _edge(source: str, target: str, lifecycle: TopologyEdgeState, *, support: int = 8,
           parent_only: int = 0) -> TopologyEdgeV3:
     return TopologyEdgeV3(
         edge_id=f"te-inf::{source}::{target}",
@@ -70,8 +70,8 @@ def _tree_readers(nodes: Any) -> dict[str, list[str]]:
 
 def test_a_provisional_parent_does_not_hide_a_confirmed_subtree() -> None:
     edges = [
-        _edge("main_l1", "sub_l2", EdgeLifecycleV3.PROVISIONAL),
-        _edge("sub_l2", "hrv", EdgeLifecycleV3.CONFIRMED),
+        _edge("main_l1", "sub_l2", TopologyEdgeState.PROVISIONAL),
+        _edge("sub_l2", "hrv", TopologyEdgeState.STRUCTURAL),
     ]
     graph = TopologyGraph.from_edges(edges, (), T0)
     assert _tree_readers(graph.primary_display_tree()).get("sub_l2") == ["hrv"]
@@ -80,8 +80,8 @@ def test_a_provisional_parent_does_not_hide_a_confirmed_subtree() -> None:
 def test_the_direct_parent_wins_over_a_busier_grandparent_feed() -> None:
     # main_l2 also sees the plug (transitive) but steps on its own far more often.
     edges = [
-        _edge("main_l2", "plug", EdgeLifecycleV3.CONFIRMED, support=9, parent_only=40),
-        _edge("sub_l1", "plug", EdgeLifecycleV3.CONFIRMED, support=8, parent_only=3),
+        _edge("main_l2", "plug", TopologyEdgeState.STRUCTURAL, support=9, parent_only=40),
+        _edge("sub_l1", "plug", TopologyEdgeState.STRUCTURAL, support=8, parent_only=3),
     ]
     graph = TopologyGraph.from_edges(edges, (), T0)
     assert graph.parent("plug") == "sub_l1"
@@ -93,7 +93,7 @@ def test_duplicate_channel_names_get_readable_unique_labels() -> None:
         _endpoint("refoss_sub_panel_l2", "l2"),
         _endpoint("refoss_sub_panel_upper_floor_hrv", "upper floor hrv"),
     ]
-    edges = [_edge("refoss_sub_panel_l2", "refoss_sub_panel_upper_floor_hrv", EdgeLifecycleV3.CONFIRMED)]
+    edges = [_edge("refoss_sub_panel_l2", "refoss_sub_panel_upper_floor_hrv", TopologyEdgeState.STRUCTURAL)]
     graph = TopologyGraph.from_edges(edges, endpoints, T0)
     labels = {graph._label(e.endpoint_id) for e in endpoints}  # noqa: SLF001
     assert labels == {"Refoss main panel L2", "Refoss sub panel L2", "upper floor hrv"}
@@ -103,8 +103,8 @@ def test_the_lower_level_parent_is_the_direct_one_and_the_grandparent_is_demoted
     from wattmosaic_engine.electrical.topology_inference import DeltaObservation
 
     edges = (
-        _edge("main_l2", "plug", EdgeLifecycleV3.CONFIRMED, support=14, parent_only=21),
-        _edge("sub_l1", "plug", EdgeLifecycleV3.CONFIRMED, support=19, parent_only=33),
+        _edge("main_l2", "plug", TopologyEdgeState.STRUCTURAL, support=14, parent_only=21),
+        _edge("sub_l1", "plug", TopologyEdgeState.STRUCTURAL, support=19, parent_only=33),
     )
     causes = {
         ("main_l2", "plug", "contains"): frozenset({"a", "b"}),
@@ -115,33 +115,33 @@ def test_the_lower_level_parent_is_the_direct_one_and_the_grandparent_is_demoted
         DeltaObservation(group_id="g", deltas={"other": (40.0, 2.0)}, at=T0, cause_id="c"),
         levels={"main_l2": 3100.0, "sub_l1": 820.0, "plug": 60.0},
     )
-    assert view.edge("sub_l1", "plug").lifecycle == EdgeLifecycleV3.CONFIRMED
-    assert view.edge("main_l2", "plug").lifecycle == EdgeLifecycleV3.PROVISIONAL
+    assert view.edge("sub_l1", "plug").lifecycle == TopologyEdgeState.STRUCTURAL
+    assert view.edge("main_l2", "plug").lifecycle == TopologyEdgeState.PROVISIONAL
     # Without levels nothing is decided.
     same = TopologyInferenceView(edges=edges, clock=lambda: T0, causes_by_edge=causes).observe_group(
         DeltaObservation(group_id="g2", deltas={"other": (40.0, 2.0)}, at=T0, cause_id="c2")
     )
-    assert same.edge("main_l2", "plug").lifecycle == EdgeLifecycleV3.CONFIRMED
+    assert same.edge("main_l2", "plug").lifecycle == TopologyEdgeState.STRUCTURAL
 
 
 def test_a_confirmed_edge_does_not_flap_on_one_extra_conflict() -> None:
     from wattmosaic_engine.electrical.topology_inference import DeltaObservation
 
-    def _with(lifecycle: EdgeLifecycleV3) -> TopologyEdgeV3:
+    def _with(lifecycle: TopologyEdgeState) -> TopologyEdgeV3:
         edge = _edge("sub_l2", "hrv", lifecycle, support=30)
         return edge.model_copy(update={"evidence": edge.evidence.model_copy(update={"conflict": 2})})
 
     causes = {("sub_l2", "hrv", "contains"): frozenset({"a", "b", "c"})}
     group = DeltaObservation(group_id="g", deltas={"other": (40.0, 2.0)}, at=T0, cause_id="x")
     kept = TopologyInferenceView(
-        edges=(_with(EdgeLifecycleV3.CONFIRMED),), clock=lambda: T0, causes_by_edge=causes
+        edges=(_with(TopologyEdgeState.STRUCTURAL),), clock=lambda: T0, causes_by_edge=causes
     ).observe_group(group)
-    assert kept.edge("sub_l2", "hrv").lifecycle == EdgeLifecycleV3.CONFIRMED
+    assert kept.edge("sub_l2", "hrv").lifecycle == TopologyEdgeState.STRUCTURAL
     # The same 6.3 % conflict does not *promote* a new edge to CONFIRMED.
     fresh = TopologyInferenceView(
-        edges=(_with(EdgeLifecycleV3.PROVISIONAL),), clock=lambda: T0, causes_by_edge=causes
+        edges=(_with(TopologyEdgeState.PROVISIONAL),), clock=lambda: T0, causes_by_edge=causes
     ).observe_group(group)
-    assert fresh.edge("sub_l2", "hrv").lifecycle == EdgeLifecycleV3.PROVISIONAL
+    assert fresh.edge("sub_l2", "hrv").lifecycle == TopologyEdgeState.PROVISIONAL
 
 
 class _RecordingVersions:
@@ -173,10 +173,10 @@ class _RecordingVersions:
 def test_a_version_holds_only_structure_and_is_not_republished() -> None:
     service = _RecordingVersions(active=set())
     edges = (
-        _edge("feed", "kitchen", EdgeLifecycleV3.CONFIRMED),
-        _edge("feed", "laundry", EdgeLifecycleV3.CANDIDATE, support=1),
-        _edge("kitchen", "feed", EdgeLifecycleV3.CONFLICTED),
-        _edge("feed", "garage", EdgeLifecycleV3.PROVISIONAL, support=3),
+        _edge("feed", "kitchen", TopologyEdgeState.STRUCTURAL),
+        _edge("feed", "laundry", TopologyEdgeState.CANDIDATE, support=1),
+        _edge("kitchen", "feed", TopologyEdgeState.CONFLICTED),
+        _edge("feed", "garage", TopologyEdgeState.PROVISIONAL, support=3),
     )
     view = TopologyInferenceView(edges=edges, clock=lambda: T0, versions=service)
     view = view._propose_version(["te-inf::feed::kitchen: provisional -> confirmed"])  # noqa: SLF001

@@ -101,5 +101,5 @@
   "title": "HAEvent",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/ha_event.json",
-  "x-contract-version": "3.0.0"
+  "x-contract-version": "4.0.0"
 }

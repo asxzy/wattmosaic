@@ -78,9 +78,9 @@ async def test_discover_merges_recorded_topology_into_the_live_ledger(tmp_path: 
     assert {"parent": "feed", "child": "branch_hrv"} in topology["confirmed"]
     assert {"parent": "feed", "child": "branch_heater"} in topology["confirmed"]
     # Into the live ledger and its storage, not only the response.
-    assert str(core.topology_inference.edge("feed", "branch_hrv").lifecycle.value) == "confirmed"
+    assert str(core.topology_inference.edge("feed", "branch_hrv").lifecycle.value) == "structural"
     stored = {str(row["edge_id"]): row for row in core.db.repos.topology_v3.edges()}
-    assert stored["te-inf::feed::branch_hrv"]["lifecycle"] == "confirmed"
+    assert stored["te-inf::feed::branch_hrv"]["lifecycle"] == "structural"
     # The confirmation published a topology version, as a live event would.
     active = core.db.repos.topology_v3.active_version()
     assert "te-inf::feed::branch_hrv" in str(active.get("edge_ids_json"))

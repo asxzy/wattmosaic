@@ -90,5 +90,5 @@
   "title": "ReaderResidualPoint",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/reader_residual_point.json",
-  "x-contract-version": "3.0.0"
+  "x-contract-version": "4.0.0"
 }

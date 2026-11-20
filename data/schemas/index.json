@@ -1,5 +1,5 @@
 {
-  "contract_version": "3.0.0",
+  "contract_version": "4.0.0",
   "schemas": {
     "data_quality_report": "data_quality_report.json",
     "health_response": "health_response.json",

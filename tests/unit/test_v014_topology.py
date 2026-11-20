@@ -22,8 +22,8 @@ from wattmosaic_engine.contracts import (
     ConfigurationChangeKind,
     ConfigurationEvent,
     EdgeEvidence,
-    EdgeLifecycleV3,
     RelationType,
+    TopologyEdgeState,
     TopologyEdgeV3,
     TopologyVersionV3,
 )
@@ -143,7 +143,7 @@ def test_pointer_fixtures_produce_the_expected_edges(tmp_path: Path) -> None:
 
         # parent_ct_id -> CONTAINS; confirmed child -> CONFIRMED, unconfirmed -> PROVISIONAL
         nested = by_key[("c-parent", "c-nest", "contains")]
-        assert nested["lifecycle"] == "confirmed"
+        assert nested["lifecycle"] == "structural"
         provisional = by_key[("c-parent", "c-provisional", "contains")]
         assert provisional["lifecycle"] == "provisional"
 
@@ -176,9 +176,9 @@ def test_relations_backfill_preserves_lifecycle_and_kind_mapping(tmp_path: Path)
         confirmed = by_source["c-parent-a"]
         assert confirmed["relation"] == "contains"
         assert confirmed["target_endpoint_id"] == "c-child-a"
-        assert confirmed["lifecycle"] == "confirmed"
+        assert confirmed["lifecycle"] == "structural"
         both = [r for r in rows if r["source_endpoint_id"] == "c-parent-a"]
-        assert {r["lifecycle"] for r in both} == {"confirmed", "candidate"}
+        assert {r["lifecycle"] for r in both} == {"structural", "candidate"}
         assert {r["target_endpoint_id"] for r in both} == {"c-child-a", "c-child-b"}
 
         # CT_MEASUREMENT_OVERLAP -> CORRELATED; never containment.
@@ -205,7 +205,7 @@ def test_lifecycle_survives_a_reopen(tmp_path: Path) -> None:
             "SELECT lifecycle FROM topology_edges WHERE relation = 'contains' "
             "AND target_endpoint_id = 'c-child-a'"
         ).fetchone()
-        assert row["lifecycle"] == "confirmed"
+        assert row["lifecycle"] == "structural"
     finally:
         second.close()
 
@@ -325,7 +325,7 @@ def test_failure_mid_apply_leaves_user_version_unchanged(
 # --------------------------------------------------------------------------- #
 
 
-def _edge(edge_id: str, relation: RelationType, lifecycle: EdgeLifecycleV3) -> TopologyEdgeV3:
+def _edge(edge_id: str, relation: RelationType, lifecycle: TopologyEdgeState) -> TopologyEdgeV3:
     return TopologyEdgeV3(
         edge_id=edge_id,
         relation=relation,
@@ -345,19 +345,19 @@ def test_repository_edges_lifecycles_and_history(tmp_path: Path) -> None:
     db = _open(path)
     try:
         repo = db.repos.topology_v3
-        repo.upsert_edge(_edge("e-confirm", RelationType.CONTAINS, EdgeLifecycleV3.CONFIRMED))
-        repo.upsert_edge(_edge("e-candidate", RelationType.CONTAINS, EdgeLifecycleV3.CANDIDATE))
+        repo.upsert_edge(_edge("e-confirm", RelationType.CONTAINS, TopologyEdgeState.STRUCTURAL))
+        repo.upsert_edge(_edge("e-candidate", RelationType.CONTAINS, TopologyEdgeState.CANDIDATE))
 
         all_edges = repo.edges()
         ids = {e["edge_id"] for e in all_edges}
         assert {"e-confirm", "e-candidate"} <= ids
 
-        confirmed = repo.edges(lifecycles=[EdgeLifecycleV3.CONFIRMED])
+        confirmed = repo.edges(lifecycles=[TopologyEdgeState.STRUCTURAL])
         assert {e["edge_id"] for e in confirmed} >= {"e-confirm"}
 
         history = repo.edge_history("e-confirm")
         assert len(history) == 1
-        assert history[0]["lifecycle"] == "confirmed"
+        assert history[0]["lifecycle"] == "structural"
         assert history[0]["evidence_json"]
     finally:
         db.close()

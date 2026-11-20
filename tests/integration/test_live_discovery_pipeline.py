@@ -25,7 +25,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from wattmosaic_engine.config.settings import EngineConfig
-from wattmosaic_engine.contracts import EdgeLifecycleV3
+from wattmosaic_engine.contracts import TopologyEdgeState
 from wattmosaic_engine.main import EngineCore
 from wattmosaic_engine.storage.database import Database
 
@@ -236,14 +236,14 @@ def test_discovery_and_disaggregation_run_on_live_shaped_stream() -> None:
         view = core.topology_inference
         edge = view.edge(PARENT, CHILD_A)
         assert edge is not None, "T5 never saw the parent/child co-steps"
-        assert edge.lifecycle == EdgeLifecycleV3.PROVISIONAL, edge.evidence
+        assert edge.lifecycle == TopologyEdgeState.PROVISIONAL, edge.evidence
         assert view.edge(PARENT, CHILD_B) is not None
-        assert view.edge(PARENT, CHILD_B).lifecycle == EdgeLifecycleV3.PROVISIONAL
+        assert view.edge(PARENT, CHILD_B).lifecycle == TopologyEdgeState.PROVISIONAL
         persisted = {
             (str(row["source_endpoint_id"]), str(row["target_endpoint_id"])): str(row["lifecycle"])
             for row in core.db.repos.topology_v3.edges()
         }
-        assert persisted.get((PARENT, CHILD_A)) == EdgeLifecycleV3.PROVISIONAL.value
+        assert persisted.get((PARENT, CHILD_A)) == TopologyEdgeState.PROVISIONAL.value
         # One event never promotes past CANDIDATE: the noise readers never
         # stepped and have no edge at all.
         assert all("ct_1" not in pair[0] for pair in persisted)

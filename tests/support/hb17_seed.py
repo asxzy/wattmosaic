@@ -27,6 +27,7 @@ from wattmosaic_engine.contracts import (
     MappingEdge,
     Observability,
     RelationType,
+    TopologyEdgeState,
     TopologyEdgeV3,
 )
 from wattmosaic_engine.versioning.service import VersionService
@@ -104,7 +105,7 @@ def seed_hb17_versions(
             relation=RelationType.CONTAINS,
             source_endpoint_id=parent,
             target_endpoint_id=child,
-            lifecycle=EdgeLifecycleV3.CONFIRMED,
+            lifecycle=TopologyEdgeState.STRUCTURAL,
             declared_by="user",
             beta=1.0,
             beta_basis="unity",

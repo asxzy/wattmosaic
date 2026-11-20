@@ -13,11 +13,11 @@ the *structure*, once per settle:
    capacity (KCL) evaluated only while the children draw
    :data:`CAPACITY_ACTIVE_W`, the differenced regression (M4) as extra score.
 4. **Structural confirmation** of a PROVISIONAL chosen parent when the
-   regression clearly singles it out and capacity fits; every losing CONFIRMED
+   regression clearly singles it out and capacity fits; every losing STRUCTURAL
    candidate drops to PROVISIONAL.
 5. **Sticky decisions.**  The chosen direct parent of each child is returned
    (:class:`StructureResolution` ``decided``) and the caller keeps it across
-   settles.  A decided CONFIRMED parent stays the direct parent until the
+   settles.  A decided STRUCTURAL parent stays the direct parent until the
    structure *positively* disagrees on adequate data (capacity violation, a
    rival with a higher regression r, or its own r below
    :data:`STRUCTURAL_UNCONFIRM_R`): confirm at r >= 0.3 with a 0.1 margin,
@@ -49,7 +49,7 @@ from typing import Any
 
 import numpy as np
 
-from wattmosaic_engine.contracts import EdgeLifecycleV3, TopologyEdgeV3
+from wattmosaic_engine.contracts import TopologyEdgeState, TopologyEdgeV3
 
 from .topology_capacity import (
     CAPACITY_MAX_VIOLATION,
@@ -109,7 +109,7 @@ DEFAULT_STEP_S = 10.0
 STRUCTURAL_MIN_R = 0.3
 STRUCTURAL_SLOPE = (0.3, 1.3)
 STRUCTURAL_MARGIN = 0.1
-#: Hysteresis: a decided (sticky) CONFIRMED parent is only un-confirmed when its
+#: Hysteresis: a decided (sticky) STRUCTURAL parent is only un-confirmed when its
 #: r drops below this, or a rival's r exceeds its own (margin < 0).
 STRUCTURAL_UNCONFIRM_R = 0.2
 STRUCTURAL_UNCONFIRM_MARGIN = 0.0
@@ -145,9 +145,9 @@ STRUCTURE_DIFF_SPAN = 3
 STRUCTURE_DIFF_SPAN_S = 30.0
 
 _CONTAINS = "contains"
-_CONFIRMED = EdgeLifecycleV3.CONFIRMED.value
-_PROVISIONAL = EdgeLifecycleV3.PROVISIONAL.value
-_DORMANT = frozenset((EdgeLifecycleV3.REJECTED.value, EdgeLifecycleV3.RETIRED.value))
+_STRUCTURAL = TopologyEdgeState.STRUCTURAL.value
+_PROVISIONAL = TopologyEdgeState.PROVISIONAL.value
+_DORMANT = frozenset((TopologyEdgeState.REJECTED.value, TopologyEdgeState.RETIRED.value))
 
 Series = Sequence[float | None]
 
@@ -340,7 +340,7 @@ class StructureAnalysis:
         lopsided (r 0.40 / 0.25) although both meter one wire; over 5 min they
         agree (r 0.85 / 0.85, slopes 0.88 / 0.79).  Only used where the ledger
         gives the two readers no containment direction at all (a parent with one
-        dominant child has a CONFIRMED edge to it).
+        dominant child has a STRUCTURAL edge to it).
         """
         p, c = self.full.get(a), self.full.get(b)
         if p is None or c is None:
@@ -383,14 +383,14 @@ class StructureAnalysis:
             lifecycle = str(_value(edge.lifecycle))
             if lifecycle in _DORMANT:
                 continue
-            if lifecycle not in (_CONFIRMED, _PROVISIONAL):
+            if lifecycle not in (_STRUCTURAL, _PROVISIONAL):
                 # A CANDIDATE is one equal-delta step; every leg collects a
                 # reversed one toward its main.  Not evidence of children.
                 continue
             parent, child = edge.source_endpoint_id, edge.target_endpoint_id
             children.setdefault(parent, set()).add(child)
             parents.setdefault(child, {})[parent] = (
-                1 if lifecycle == _CONFIRMED else 0,
+                1 if lifecycle == _STRUCTURAL else 0,
                 float(edge.evidence.support) - 2.0 * float(edge.evidence.conflict),
             )
 
@@ -404,7 +404,7 @@ class StructureAnalysis:
             conflict and their counts differ only by a few unpaired steps
             (live: 391/1 vs 384/0 must not make one leg the other's parent).
             ``twin`` counts like any other reader: a parent with one dominant
-            child (a CONFIRMED edge to it, or a reverse edge contradicted by
+            child (a STRUCTURAL edge to it, or a reverse edge contradicted by
             the parent's own steps) is not a leaf.
             """
             del twin
@@ -440,7 +440,7 @@ class StructureAnalysis:
             )
 
         def undirected(a: str, b: str) -> bool:
-            """No CONFIRMED/PROVISIONAL containment between ``a`` and ``b`` either way."""
+            """No STRUCTURAL/PROVISIONAL containment between ``a`` and ``b`` either way."""
             return b not in parents.get(a, {}) and a not in parents.get(b, {})
 
         raw_pairs = {(a, b) for a, b, _r in self.pairs}
@@ -678,7 +678,7 @@ def _ancestry(edges: Sequence[TopologyEdgeV3]) -> Callable[[str, str], bool]:
     """``nested(a, b)``: ``a`` is a (transitive) confirmed ancestor of ``b``."""
     parents: dict[str, set[str]] = {}
     for edge in edges:
-        if _is_contains(edge) and str(_value(edge.lifecycle)) == _CONFIRMED:
+        if _is_contains(edge) and str(_value(edge.lifecycle)) == _STRUCTURAL:
             parents.setdefault(edge.target_endpoint_id, set()).add(edge.source_endpoint_id)
     memo: dict[str, frozenset[str]] = {}
 
@@ -752,12 +752,12 @@ def resolve(
     ``(parent, child)``.
 
     ``decided`` are the previous settles' decisions: a decided parent whose
-    edge is CONFIRMED stays the direct parent unless the structure positively
+    edge is STRUCTURAL stays the direct parent unless the structure positively
     disagrees (:func:`_disagreement`).  ``sticky`` are the decided edges that
-    are CONFIRMED *only* because of that decision; on disagreement they drop
+    are STRUCTURAL *only* because of that decision; on disagreement they drop
     to PROVISIONAL.  ``previous`` (edge id -> lifecycle before this settle)
     limits structural confirmation to edges that were already PROVISIONAL:
-    never CANDIDATE -> CONFIRMED in one settle.  ``excluded`` pairs (BROKEN
+    never CANDIDATE -> STRUCTURAL in one settle.  ``excluded`` pairs (BROKEN
     health) are no candidates at all.  ``allow_confirm`` is an extra gate for
     structural confirmation (the ledger's direction cap).
     """
@@ -785,7 +785,7 @@ def resolve(
         if str(_value(edge.lifecycle)) == new:
             return
         transitions.append(_transition(edge, new, why))
-        out[index] = edge.model_copy(update={"lifecycle": EdgeLifecycleV3(new)})
+        out[index] = edge.model_copy(update={"lifecycle": TopologyEdgeState(new)})
 
     fixed: dict[str, str] = {}
     inferred: dict[str, list[int]] = {}
@@ -797,23 +797,23 @@ def resolve(
             continue
         parent, child = edge.source_endpoint_id, edge.target_endpoint_id
         if edge.pinned or edge.declared_by != "inference":
-            if lifecycle == _CONFIRMED:
+            if lifecycle == _STRUCTURAL:
                 fixed.setdefault(child, parent)
             continue
         if frozenset((parent, child)) in twin_pairs:
             # One wire measured twice is never parent and child.
-            if lifecycle == _CONFIRMED:
+            if lifecycle == _STRUCTURAL:
                 set_lifecycle(index, _PROVISIONAL, "duplicate meter")
             continue
         if pair_of.get(parent) == child:
             # The two legs of one 240 V load are never parent and child.
-            if lifecycle == _CONFIRMED:
+            if lifecycle == _STRUCTURAL:
                 set_lifecycle(index, _PROVISIONAL, "240 V leg pair")
             continue
         if (parent, child) in excluded_set:
             # A BROKEN edge never competes: it must not win and demote its rival.
             continue
-        if lifecycle in (_CONFIRMED, _PROVISIONAL):
+        if lifecycle in (_STRUCTURAL, _PROVISIONAL):
             inferred.setdefault(child, []).append(index)
 
     def score_of(index: int) -> float:
@@ -844,7 +844,7 @@ def resolve(
         a_index, b_index = edge_index(p, a), edge_index(p, b)
         if a_index is None or b_index is None:
             continue
-        if lifecycle_of(a_index) != _CONFIRMED or lifecycle_of(b_index) != _CONFIRMED:
+        if lifecycle_of(a_index) != _STRUCTURAL or lifecycle_of(b_index) != _STRUCTURAL:
             continue
         if info.fits_capacity(p, [a, b]):
             continue
@@ -862,7 +862,7 @@ def resolve(
         if child in fixed or kept is None or kept in ignored_parents or child in released:
             continue
         kept_index = next((i for i in indices if out[i].source_endpoint_id == kept), None)
-        if kept_index is None or lifecycle_of(kept_index) != _CONFIRMED:
+        if kept_index is None or lifecycle_of(kept_index) != _STRUCTURAL:
             continue
         rivals = [
             out[i].source_endpoint_id
@@ -874,7 +874,7 @@ def resolve(
                 out[i].source_endpoint_id
                 for i in indices
                 if i != kept_index
-                and lifecycle_of(i) == _CONFIRMED
+                and lifecycle_of(i) == _STRUCTURAL
                 and nested(kept, out[i].source_endpoint_id)
             ),
             None,
@@ -901,7 +901,7 @@ def resolve(
             and edge.target_endpoint_id == parent
             and str(_value(edge.lifecycle)) not in _DORMANT
             and (
-                str(_value(edge.lifecycle)) == _CONFIRMED
+                str(_value(edge.lifecycle)) == _STRUCTURAL
                 or edge.pinned
                 or edge.declared_by != "inference"
             )
@@ -911,7 +911,7 @@ def resolve(
     active_links = {
         (edge.source_endpoint_id, edge.target_endpoint_id)
         for edge in out
-        if _is_contains(edge) and str(_value(edge.lifecycle)) in (_CONFIRMED, _PROVISIONAL)
+        if _is_contains(edge) and str(_value(edge.lifecycle)) in (_STRUCTURAL, _PROVISIONAL)
     }
 
     def confirmable(index: int, parents: Sequence[str]) -> bool:
@@ -928,10 +928,10 @@ def resolve(
         )
 
     def lower_level(index: int, confirmed: Sequence[int], parents: Sequence[str]) -> bool:
-        """A PROVISIONAL parent below a CONFIRMED one that the structure singles out.
+        """A PROVISIONAL parent below a STRUCTURAL one that the structure singles out.
 
         A grandparent feed sees every step of its grandchildren, so its edge
-        reaches CONFIRMED on step counts while the direct parent's edge (the
+        reaches STRUCTURAL on step counts while the direct parent's edge (the
         busier sub-panel) may stay PROVISIONAL.  Left out of the assignment,
         the child would sit under the grandparent and be counted twice in its
         capacity (once itself, once inside the sub-panel), which then refuses
@@ -960,12 +960,12 @@ def resolve(
         # the leg's own circuits).
         over = [i for i in usable if not info.fits_alone(out[i].source_endpoint_id, child)]
         for i in over:
-            if lifecycle_of(i) == _CONFIRMED:
+            if lifecycle_of(i) == _STRUCTURAL:
                 set_lifecycle(i, _PROVISIONAL, "structure disagrees: capacity")
         usable = [i for i in usable if i not in over]
         if not usable:
             continue
-        confirmed = [i for i in usable if lifecycle_of(i) == _CONFIRMED]
+        confirmed = [i for i in usable if lifecycle_of(i) == _STRUCTURAL]
         provisional = [i for i in usable if lifecycle_of(i) == _PROVISIONAL]
         if child in pair_of:
             chosen = confirmed + provisional
@@ -1030,8 +1030,8 @@ def resolve(
             )
             and (allow_confirm is None or allow_confirm(chosen_edge, out))
         ):
-            set_lifecycle(chosen_index, _CONFIRMED, "structural")
-        if (parent, child) in soft_lower and lifecycle_of(chosen_index) != _CONFIRMED:
+            set_lifecycle(chosen_index, _STRUCTURAL, "structural")
+        if (parent, child) in soft_lower and lifecycle_of(chosen_index) != _STRUCTURAL:
             # A lower-level parent that did not confirm after all (its
             # siblings' capacity) never orphans the child: the confirmed
             # grandparent stays until a later settle decides.
@@ -1041,7 +1041,7 @@ def resolve(
             if other == parent:
                 continue
             other_index = index_of[(other, child)]
-            if lifecycle_of(other_index) == _CONFIRMED:
+            if lifecycle_of(other_index) == _STRUCTURAL:
                 set_lifecycle(other_index, _PROVISIONAL, f"structure: direct parent is {parent}")
         # Confirmed edges from an ignored duplicate twin lose to the kept twin.
         for i in inferred.get(child, ()):
@@ -1049,11 +1049,11 @@ def resolve(
             if (
                 edge.source_endpoint_id in ignored_parents
                 and edge.source_endpoint_id != parent
-                and str(_value(edge.lifecycle)) == _CONFIRMED
+                and str(_value(edge.lifecycle)) == _STRUCTURAL
             ):
                 set_lifecycle(i, _PROVISIONAL, "duplicate meter")
 
-    # 240 V pair completion: one leg CONFIRMED under P, the other leg's direct
+    # 240 V pair completion: one leg STRUCTURAL under P, the other leg's direct
     # parent Q a non-nested sibling of P.  Regression cannot separate the legs
     # (both mains follow both legs equally), so no r margin is required: the
     # partner's placement, low conflict and capacity while on decide.
@@ -1064,7 +1064,7 @@ def resolve(
                 continue
             leg_index = index_of.get((p, leg))
             q_index = index_of.get((q, other_leg))
-            if leg_index is None or q_index is None or lifecycle_of(leg_index) != _CONFIRMED:
+            if leg_index is None or q_index is None or lifecycle_of(leg_index) != _STRUCTURAL:
                 continue
             q_edge = out[q_index]
             before = (previous or {}).get(q_edge.edge_id, str(_value(q_edge.lifecycle)))
@@ -1076,7 +1076,7 @@ def resolve(
                 and info.fits_capacity(q, [other_leg])
                 and (allow_confirm is None or allow_confirm(q_edge, out))
             ):
-                set_lifecycle(q_index, _CONFIRMED, f"structural: 240 V pair of {leg} under {p}")
+                set_lifecycle(q_index, _STRUCTURAL, f"structural: 240 V pair of {leg} under {p}")
     return StructureResolution(out, transitions, decided_out)
 
 

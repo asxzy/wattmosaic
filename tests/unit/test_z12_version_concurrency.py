@@ -36,6 +36,7 @@ from wattmosaic_engine.contracts import (
     MappingEdge,
     Observability,
     RelationType,
+    TopologyEdgeState,
     TopologyEdgeV3,
 )
 from wattmosaic_engine.storage.database import Database
@@ -79,7 +80,7 @@ class _WindowClock:
 def _topo_edge(edge_id: str, parent: str, child: str) -> TopologyEdgeV3:
     return TopologyEdgeV3(
         edge_id=edge_id, relation=RelationType.CONTAINS, source_endpoint_id=parent,
-        target_endpoint_id=child, lifecycle=EdgeLifecycleV3.CONFIRMED, declared_by="user",
+        target_endpoint_id=child, lifecycle=TopologyEdgeState.STRUCTURAL, declared_by="user",
         beta=1.0, beta_basis="unity", evidence=EdgeEvidence(support=8, independent_causes=2),
         valid_from=T0, pinned=True,
     )

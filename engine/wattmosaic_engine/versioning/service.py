@@ -40,6 +40,7 @@ from wattmosaic_engine.contracts import (
     ConfigurationEvent,
     EdgeLifecycleV3,
     MappingEdge,
+    TopologyEdgeState,
     TopologyEdgeV3,
     VersionTriple,
 )
@@ -143,13 +144,13 @@ class _FrozenTopologyView:
             if _value(edge.relation) == "contains" and _value(edge.lifecycle) in wanted
         )
 
-    def parent(self, reader_id: str, lifecycles: Any = ("confirmed",)) -> str | None:
+    def parent(self, reader_id: str, lifecycles: Any = ("structural", "confirmed")) -> str | None:
         for edge in self._contains(lifecycles):
             if edge.target_endpoint_id == reader_id:
                 return edge.source_endpoint_id
         return None
 
-    def ancestors(self, reader_id: str, lifecycles: Any = ("confirmed",)) -> tuple[str, ...]:
+    def ancestors(self, reader_id: str, lifecycles: Any = ("structural", "confirmed")) -> tuple[str, ...]:
         result: list[str] = []
         seen = {reader_id}
         current = self.parent(reader_id, lifecycles)
@@ -159,7 +160,7 @@ class _FrozenTopologyView:
             current = self.parent(current, lifecycles)
         return tuple(result)
 
-    def children(self, reader_id: str, lifecycles: Any = ("confirmed",)) -> tuple[str, ...]:
+    def children(self, reader_id: str, lifecycles: Any = ("structural", "confirmed")) -> tuple[str, ...]:
         wanted = frozenset(_value(item) for item in lifecycles)
         return tuple(
             edge.target_endpoint_id
@@ -170,7 +171,7 @@ class _FrozenTopologyView:
         )
 
     def soft_alternatives(self) -> tuple[TopologyEdgeV3, ...]:
-        return self.edges((EdgeLifecycleV3.PROVISIONAL,))
+        return self.edges((TopologyEdgeState.PROVISIONAL,))
 
 
 class _FrozenMappingView:
@@ -566,7 +567,7 @@ class VersionService:
                 continue
             current = rows[-1]
             suspected = dict(current)
-            suspected["lifecycle"] = EdgeLifecycleV3.SUSPECTED_CHANGE.value
+            suspected["lifecycle"] = TopologyEdgeState.SUSPECTED_CHANGE.value
             self._topo.upsert_edge(suspected)
 
         for mapping_edge_id in mapping_edge_ids:

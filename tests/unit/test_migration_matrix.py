@@ -58,8 +58,10 @@ RESERVED: frozenset[int] = frozenset(
 )
 
 #: The highest migration present is derived from the registry, not hard-coded:
-#: Z8 adds v026 (evidence revision) on top of Z1's v025.  Pinning 25 here would
-#: make every later, legitimate migration fail this guard.
+#: Z8 adds v026 (evidence revision) and D1 adds v029 (dynamic topology) on top
+#: of v028.  Pinning a number here would make every later, legitimate migration
+#: fail this guard.  v029 is covered by the matrix like every other version and
+#: by its focused tests in ``test_migration_v029.py``.
 MAX_WAVE_VERSION = LATEST_VERSION
 
 SENTINEL_KEY = "migration_matrix_sentinel"

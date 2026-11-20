@@ -13,9 +13,9 @@ from datetime import UTC, datetime
 import pytest
 from wattmosaic_engine.contracts import (
     EdgeEvidence,
-    EdgeLifecycleV3,
     MeasurementEndpoint,
     RelationType,
+    TopologyEdgeState,
     TopologyEdgeV3,
 )
 from wattmosaic_engine.contracts.entities import (
@@ -36,7 +36,7 @@ def _edge(
     source: str,
     target: str,
     *,
-    lifecycle: EdgeLifecycleV3 = EdgeLifecycleV3.CONFIRMED,
+    lifecycle: TopologyEdgeState = TopologyEdgeState.STRUCTURAL,
     declared_by: str = "user",
     pinned: bool = False,
     at: datetime = T0,
@@ -96,7 +96,7 @@ def test_provisional_contains_excluded_from_ancestors_and_is_soft() -> None:
             RelationType.CONTAINS,
             "subpanel",
             "kitchen",
-            lifecycle=EdgeLifecycleV3.PROVISIONAL,
+            lifecycle=TopologyEdgeState.PROVISIONAL,
         ),
     ]
     graph = TopologyGraph.from_edges(edges, (), T0)
@@ -109,9 +109,9 @@ def test_provisional_contains_excluded_from_ancestors_and_is_soft() -> None:
     assert len(soft) == 1
     assert soft[0].source_endpoint_id == "subpanel"
     assert soft[0].target_endpoint_id == "kitchen"
-    assert soft[0].lifecycle == EdgeLifecycleV3.PROVISIONAL
+    assert soft[0].lifecycle == TopologyEdgeState.PROVISIONAL
     # Explicitly asking for PROVISIONAL does expose it as a parent.
-    assert graph.parent("kitchen", (EdgeLifecycleV3.PROVISIONAL,)) == "subpanel"
+    assert graph.parent("kitchen", (TopologyEdgeState.PROVISIONAL,)) == "subpanel"
 
 
 def test_candidate_and_correlated_are_never_structural() -> None:
@@ -120,7 +120,7 @@ def test_candidate_and_correlated_are_never_structural() -> None:
             RelationType.CONTAINS,
             "main",
             "a",
-            lifecycle=EdgeLifecycleV3.CANDIDATE,
+            lifecycle=TopologyEdgeState.CANDIDATE,
         ),
         _edge(RelationType.CORRELATED, "main", "b"),
     ]
@@ -158,7 +158,7 @@ def test_two_confirmed_parents_move_weaker_edge_to_conflicted() -> None:
         RelationType.CONTAINS,
         "garage",
         "kitchen",
-        lifecycle=EdgeLifecycleV3.PROVISIONAL,
+        lifecycle=TopologyEdgeState.PROVISIONAL,
         declared_by="inference",
     )
     graph = TopologyGraph.from_edges([strong, weak], (), T0)
@@ -173,14 +173,14 @@ def test_pin_overrides_inference_for_same_pair() -> None:
         RelationType.CONTAINS,
         "main",
         "kitchen",
-        lifecycle=EdgeLifecycleV3.PROVISIONAL,
+        lifecycle=TopologyEdgeState.PROVISIONAL,
         declared_by="inference",
     )
     pinned = _edge(
         RelationType.CONTAINS,
         "main",
         "kitchen",
-        lifecycle=EdgeLifecycleV3.CONFIRMED,
+        lifecycle=TopologyEdgeState.STRUCTURAL,
         declared_by="user",
         pinned=True,
     )
@@ -196,14 +196,14 @@ def test_rejected_user_edge_overrides_inference_for_same_pair() -> None:
         RelationType.CONTAINS,
         "main",
         "kitchen",
-        lifecycle=EdgeLifecycleV3.CONFIRMED,
+        lifecycle=TopologyEdgeState.STRUCTURAL,
         declared_by="inference",
     )
     rejected = _edge(
         RelationType.CONTAINS,
         "main",
         "kitchen",
-        lifecycle=EdgeLifecycleV3.REJECTED,
+        lifecycle=TopologyEdgeState.REJECTED,
         declared_by="user",
     ).model_copy(update={"edge_id": "e::rejected"})
     graph = TopologyGraph.from_edges([inferred, rejected], (), T0)

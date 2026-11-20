@@ -1181,15 +1181,16 @@ class RuntimeMixin:
             rows = list(repo.edges()) if repo is not None else []
         except Exception:  # noqa: BLE001
             return frozenset()
-        # Only CONFIRMED structure makes a parent: T5 persists CANDIDATE and
+        # Only STRUCTURAL structure makes a parent: T5 persists CANDIDATE and
         # PROVISIONAL suggestions to the same table, and a suggestion must not
-        # silence a declared endpoint's association history.
+        # silence a declared endpoint's association history.  Old stores used
+        # "confirmed", which is the legacy spelling of "structural".
         return frozenset(
             str(row.get("source_endpoint_id", ""))
             for row in rows
             if isinstance(row, Mapping)
             and str(row.get("relation", "")) == "contains"
-            and str(row.get("lifecycle", "confirmed")) == "confirmed"
+            and str(row.get("lifecycle", "structural")) in ("structural", "confirmed")
         )
 
     async def on_ha_event(self, event: HAEvent) -> None:

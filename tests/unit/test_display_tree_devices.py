@@ -15,9 +15,9 @@ from typing import Any
 
 from wattmosaic_engine.contracts import (
     EdgeEvidence,
-    EdgeLifecycleV3,
     MeasurementEndpoint,
     RelationType,
+    TopologyEdgeState,
     TopologyEdgeV3,
 )
 from wattmosaic_engine.contracts.entities import EndpointKind, EndpointScope, ScopeStatus
@@ -41,7 +41,7 @@ def _contains(parent: str, child: str) -> TopologyEdgeV3:
     return TopologyEdgeV3(
         edge_id=f"te-inf::{parent}::{child}", relation=RelationType.CONTAINS,
         source_endpoint_id=parent, target_endpoint_id=child,
-        lifecycle=EdgeLifecycleV3.CONFIRMED, declared_by="inference",
+        lifecycle=TopologyEdgeState.STRUCTURAL, declared_by="inference",
         evidence=EdgeEvidence(support=9, independent_causes=3), valid_from=T0, pinned=False,
     )
 

@@ -9,12 +9,12 @@ which is what makes a factor change reconstructable instead of retroactive
 The operator follows interfaces.md §4:
 
 * a subject's most specific reader comes from :class:`MappingView`;
-* CONFIRMED CONTAINS ancestors see the subject as ``EXPECTED`` with the product
+* STRUCTURAL CONTAINS ancestors see the subject as ``EXPECTED`` with the product
   of the path coefficients β (unity for an uncalibrated edge);
 * a PAIRED_LEG endpoint carries the verified leg coefficient (0.5);
-* a CONFIRMED SHARED_LOAD puts the subject in both readers' rows;
+* a STRUCTURAL SHARED_LOAD puts the subject in both readers' rows;
 * unknown columns are scope-located and enter a reader's row plus every
-  CONFIRMED ancestor row; a CONTAINS child that is not among ``reader_ids`` is
+  STRUCTURAL ancestor row; a CONTAINS child that is not among ``reader_ids`` is
   a *missing child* and gets its own unknown column so the parent row is never
   dropped (DEC-12);
 * ``RowMeta.sigma_inflation`` is ``√k`` for correlated (same CONTAINS chain or
@@ -44,9 +44,9 @@ from typing import Any
 import numpy as np
 
 from wattmosaic_engine.contracts import (
-    EdgeLifecycleV3,
     Observability,
     RelationType,
+    TopologyEdgeState,
     TopologyEdgeV3,
 )
 from wattmosaic_engine.electrical.factors import FactorRegistry
@@ -87,7 +87,7 @@ def _enum_value(value: Any) -> str:
 
 
 def _edges_of_lifecycle(
-    topology: TopologyView, lifecycle: EdgeLifecycleV3
+    topology: TopologyView, lifecycle: TopologyEdgeState
 ) -> tuple[TopologyEdgeV3, ...]:
     """Edges of one lifecycle, independent of whether the view filters by it."""
     try:
@@ -97,12 +97,12 @@ def _edges_of_lifecycle(
 
 
 def _edges_of_relation(topology: TopologyView, relation: RelationType) -> tuple[TopologyEdgeV3, ...]:
-    return tuple(e for e in _edges_of_lifecycle(topology, EdgeLifecycleV3.CONFIRMED)
+    return tuple(e for e in _edges_of_lifecycle(topology, TopologyEdgeState.STRUCTURAL)
                  if _relation_is(e, relation))
 
 
 def _parent_edge_map(topology: TopologyView) -> dict[str, TopologyEdgeV3]:
-    """child -> the CONFIRMED CONTAINS edge that makes it a child."""
+    """child -> the STRUCTURAL CONTAINS edge that makes it a child."""
     result: dict[str, TopologyEdgeV3] = {}
     for edge in sorted(_edges_of_relation(topology, RelationType.CONTAINS), key=lambda e: e.edge_id):
         result.setdefault(edge.target_endpoint_id, edge)
@@ -146,13 +146,13 @@ def _path_to_root(reader: str, parent_edge: dict[str, TopologyEdgeV3]) -> list[T
 
 
 def _ancestor_ids(reader: str, parent_edge: dict[str, TopologyEdgeV3]) -> set[str]:
-    """All CONFIRMED CONTAINS ancestors of ``reader``."""
+    """All STRUCTURAL CONTAINS ancestors of ``reader``."""
     return {e.source_endpoint_id for e in _path_to_root(reader, parent_edge)}
 
 
 def _mapping_edge_lifecycle(
     mapping: MappingView, subject: tuple[str, str]
-) -> EdgeLifecycleV3 | None:
+) -> TopologyEdgeState | None:
     """The mapping edge's lifecycle when the view exposes it."""
     fn = getattr(mapping, "edge_lifecycle", None)
     if callable(fn):
@@ -162,7 +162,7 @@ def _mapping_edge_lifecycle(
             value = None
         if value is not None:
             try:
-                return EdgeLifecycleV3(value)
+                return TopologyEdgeState(value)
             except ValueError:
                 return None
     edges_fn = getattr(mapping, "edges", None)
@@ -337,7 +337,7 @@ def _build(
         path = _path_to_root(own_reader, parent_edge)  # nearest ancestor first
 
         def put(row: int, col: int, coeff: float, obs: Observability,
-                lifecycle: EdgeLifecycleV3 | None, edge_ids: tuple[str, ...]) -> None:
+                lifecycle: TopologyEdgeState | None, edge_ids: tuple[str, ...]) -> None:
             """Write one non-zero entry; a subject appears at most once per row."""
             key = (row, col)
             if not np.isfinite(coeff) or coeff == 0.0 or key in entries:
@@ -353,7 +353,7 @@ def _build(
         # (1) The most specific reader observes the subject directly.
         put(own_row, column, base_coeff, base_obs, None, ())
 
-        # (2) CONFIRMED CONTAINS ancestors see it as EXPECTED with β^path.
+        # (2) STRUCTURAL CONTAINS ancestors see it as EXPECTED with β^path.
         coeff = base_coeff
         for depth, edge in enumerate(path, start=1):
             coeff *= _edge_beta(edge, factors, at)
@@ -367,7 +367,7 @@ def _build(
                 column,
                 coeff,
                 Observability.PARTIAL if partial else Observability.EXPECTED,
-                EdgeLifecycleV3.CONFIRMED,
+                TopologyEdgeState.STRUCTURAL,
                 tuple(e.edge_id for e in path_slice),
             )
 
@@ -409,7 +409,7 @@ def _build(
 
     # -- unknown scopes ------------------------------------------------------- #
     # One column per reader scope, entering that reader's row and all its
-    # CONFIRMED ancestors.  A CONTAINS child that is not a row is a missing
+    # STRUCTURAL ancestors.  A CONTAINS child that is not a row is a missing
     # child: its own unknown column is scoped to the parent chain so the parent
     # row is never dropped (DEC-12; the soft prior value comes from T3/I3).
     unknown_scopes: dict[str, tuple[int, ...]] = {}

@@ -223,9 +223,11 @@ const edgeInForce = (edge) =>
   && _absent(edge.valid_until);
 
 // The authority test the engine's ``_topology_health`` uses: an edge counts
-// as confirmed when its lifecycle is CONFIRMED or a user pinned it.
+// as structural when its lifecycle is STRUCTURAL (legacy "confirmed") or a
+// user pinned it.  D1 accepts both spellings; D2 removes the legacy wording.
 const edgeConfirmed = (edge) =>
-  edgeInForce(edge) && (_lower(edge.lifecycle) === 'confirmed' || edge.pinned === true);
+  edgeInForce(edge)
+  && (['structural', 'confirmed'].includes(_lower(edge.lifecycle)) || edge.pinned === true);
 
 // "confirmed" when any active edge is CONFIRMED or pinned, else "candidate".
 const topologyStatusFromEdges = (edges) =>

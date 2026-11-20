@@ -3,7 +3,7 @@
 Edges are the authority: a :class:`TopologyGraph` is built from a set of
 reader↔reader :class:`~wattmosaic_engine.contracts.TopologyEdgeV3` rows and a
 set of :class:`~wattmosaic_engine.contracts.MeasurementEndpoint` rows.  Only
-CONFIRMED CONTAINS edges form hard structure.  PROVISIONAL CONTAINS edges are
+STRUCTURAL CONTAINS edges form hard structure.  PROVISIONAL CONTAINS edges are
 *soft alternatives*: they are never applied to hierarchy walks, but are exposed
 through :meth:`TopologyGraph.soft_alternatives` for T2's operator.  CANDIDATE
 and CORRELATED edges never shape the hierarchy.
@@ -13,7 +13,7 @@ and no database.  It implements the :class:`~wattmosaic_engine.runtime.interface
 Protocol and is the production counterpart of the K08 ``FakeTopology``.
 
 Validation (ported from ``hierarchy.py:930-1050``) rejects self edges, cycles
-and a second CONFIRMED parent for one reader.  A contradictory edge is moved to
+and a second STRUCTURAL parent for one reader.  A contradictory edge is moved to
 CONFLICTED with a recorded reason rather than silently deleted.  A pinned or
 rejected *user* edge overrides an inference edge for the same (parent, child)
 pair (DEC-10).
@@ -26,12 +26,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from wattmosaic_engine.contracts import (
-    EdgeLifecycleV3,
     MeasurementEndpoint,
     RelationType,
+    TopologyEdgeState,
     TopologyEdgeV3,
 )
-from wattmosaic_engine.runtime.interfaces import CONFIRMED
+from wattmosaic_engine.runtime.interfaces import STRUCTURAL
 
 __all__: list[str] = ["TopologyGraph", "DisplayNode", "topology_root_readers"]
 
@@ -57,9 +57,9 @@ def _readable_id(endpoint_id: str) -> str:
 
 
 def topology_root_readers(topology: object) -> tuple[str, ...]:
-    """The main reader(s) of a topology: the roots of its CONFIRMED hierarchy.
+    """The main reader(s) of a topology: the roots of its STRUCTURAL hierarchy.
 
-    A root is a reader that is the source of a CONFIRMED ``CONTAINS`` edge and
+    A root is a reader that is the source of a STRUCTURAL ``CONTAINS`` edge and
     the target of none.  Several roots (parallel mains) are all returned; so is
     the verified partner of a root's complete ``PAIRED_LEG`` pair (the legs of
     a multi-leg main observe the household together and are summed).  A
@@ -67,7 +67,7 @@ def topology_root_readers(topology: object) -> tuple[str, ...]:
     is counted twice.
 
     Only the topology decides -- never a reader's name.  A topology with no
-    CONFIRMED ``CONTAINS`` edge has no root and returns ``()``; callers then
+    STRUCTURAL ``CONTAINS`` edge has no root and returns ``()``; callers then
     publish ``main_w`` / ``residual_w`` as ``None`` (HB §18) rather than pick
     an arbitrary reader.  Works on any :class:`TopologyView` duck type.
     """
@@ -75,8 +75,8 @@ def topology_root_readers(topology: object) -> tuple[str, ...]:
         edges = tuple(topology.edges())  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001 - no usable view: no roots
         return ()
-    confirmed = _enum_text(EdgeLifecycleV3.CONFIRMED)
-    active = [e for e in edges if _enum_text(e.lifecycle) == confirmed]
+    structural = _enum_text(TopologyEdgeState.STRUCTURAL)
+    active = [e for e in edges if _enum_text(e.lifecycle) in (structural, "confirmed")]
 
     def of(relation: RelationType) -> list[TopologyEdgeV3]:
         return [e for e in active if _enum_text(e.relation) == relation.value]
@@ -123,12 +123,12 @@ class DisplayNode:
 
 
 # Lifecycles that participate in structure when explicitly requested.  Only
-# CONFIRMED is structural by default; PROVISIONAL is a soft alternative that a
+# STRUCTURAL is structural by default; PROVISIONAL is a soft alternative that a
 # caller may opt into via the ``lifecycles`` argument.
 _STRUCTURAL = frozenset(
-    (EdgeLifecycleV3.CONFIRMED, EdgeLifecycleV3.PROVISIONAL)
+    (TopologyEdgeState.STRUCTURAL, TopologyEdgeState.PROVISIONAL)
 )
-_SOFT = EdgeLifecycleV3.PROVISIONAL
+_SOFT = TopologyEdgeState.PROVISIONAL
 
 
 @dataclass(slots=True)
@@ -196,7 +196,7 @@ class TopologyGraph:
     # -- lifecycle / validity filtering --------------------------------------
     def _in_force(self, edge: TopologyEdgeV3) -> bool:
         """Whether an edge is currently valid (ignores lifecycle)."""
-        if edge.lifecycle in (EdgeLifecycleV3.REJECTED, EdgeLifecycleV3.RETIRED):
+        if edge.lifecycle in (TopologyEdgeState.REJECTED, TopologyEdgeState.RETIRED):
             return False
         if self.at is not None:
             if edge.valid_until is not None and edge.valid_until <= self.at:
@@ -229,7 +229,7 @@ class TopologyGraph:
         # Drop inference edges for any pair that a user has pinned or rejected.
         overridden: set[str] = set()
         for key, user_edges in user_by_pair.items():
-            if any(u.pinned or u.lifecycle == EdgeLifecycleV3.REJECTED for u in user_edges):
+            if any(u.pinned or u.lifecycle == TopologyEdgeState.REJECTED for u in user_edges):
                 for inference in inference_by_pair.get(key, ()):
                     overridden.add(inference.edge_id)
         if overridden:
@@ -251,7 +251,7 @@ class TopologyGraph:
 
     # -- validation -----------------------------------------------------------
     def _validate_active_edges(self) -> None:
-        """Reject self edges, cycles and a second CONFIRMED parent.
+        """Reject self edges, cycles and a second STRUCTURAL parent.
 
         A contradictory weaker edge is *moved to CONFLICTED* with a reason; it
         is no longer applied to structure but is not silently deleted.
@@ -267,7 +267,7 @@ class TopologyGraph:
             kept.append(edge)
         self.active_edges = tuple(kept)
 
-        # 2. At most one CONFIRMED CONTAINS parent per child.  We keep the
+        # 2. At most one STRUCTURAL CONTAINS parent per child.  We keep the
         #    strongest declaration: a pinned user edge, then user, then the
         #    strongest lifecycle, then the edge id as a deterministic tie break.
         #    A weaker edge for the *same child but a different parent* is moved
@@ -280,14 +280,14 @@ class TopologyGraph:
                 contains_by_child.setdefault(edge.target_endpoint_id, []).append(edge)
         dropped: set[str] = set()
         for _child, edges in contains_by_child.items():
-            confirmed = [
-                e for e in edges if e.lifecycle == EdgeLifecycleV3.CONFIRMED
+            structural = [
+                e for e in edges if e.lifecycle == TopologyEdgeState.STRUCTURAL
             ]
-            winner = min(confirmed or edges, key=self._edge_rank)
+            winner = min(structural or edges, key=self._edge_rank)
             for edge in edges:
                 if edge.edge_id == winner.edge_id:
                     continue
-                if edge.lifecycle != EdgeLifecycleV3.CONFIRMED and edge.source_endpoint_id == winner.source_endpoint_id:
+                if edge.lifecycle != TopologyEdgeState.STRUCTURAL and edge.source_endpoint_id == winner.source_endpoint_id:
                     # A soft alternative to the same parent is kept, not moved.
                     continue
                 reason = f"conflicting_contains_parent; winner={winner.edge_id}"
@@ -332,7 +332,7 @@ class TopologyGraph:
             e.target_endpoint_id: e.source_endpoint_id
             for e in self.active_edges
             if e.relation == RelationType.CONTAINS
-            and e.lifecycle == EdgeLifecycleV3.CONFIRMED
+            and e.lifecycle == TopologyEdgeState.STRUCTURAL
         }
         while True:
             cycle = self._find_cycle(parent)
@@ -344,7 +344,7 @@ class TopologyGraph:
                 e
                 for e in self.active_edges
                 if e.relation == RelationType.CONTAINS
-                and e.lifecycle == EdgeLifecycleV3.CONFIRMED
+                and e.lifecycle == TopologyEdgeState.STRUCTURAL
                 and e.target_endpoint_id in cycle
                 and e.source_endpoint_id in cycle
             ]
@@ -390,11 +390,11 @@ class TopologyGraph:
         for edge in self.active_edges:
             if edge.relation != RelationType.CONTAINS:
                 continue
-            # Only CONFIRMED (or user-pinned) edges shape the hierarchy; a
+            # Only STRUCTURAL (or user-pinned) edges shape the hierarchy; a
             # PROVISIONAL edge is a soft alternative (module docstring).  Using
             # it here gave a child a parent that is not a root of the confirmed
             # tree, so whole confirmed subtrees fell into "Unassigned".
-            if edge.lifecycle != EdgeLifecycleV3.CONFIRMED and not edge.pinned:
+            if edge.lifecycle != TopologyEdgeState.STRUCTURAL and not edge.pinned:
                 continue
             child = edge.target_endpoint_id
             parent_id = edge.source_endpoint_id
@@ -482,14 +482,14 @@ class TopologyGraph:
     # TopologyView Protocol.
     # ------------------------------------------------------------------ #
     def edges(
-        self, lifecycles: Sequence[EdgeLifecycleV3] | None = None
+        self, lifecycles: Sequence[TopologyEdgeState] | None = None
     ) -> tuple[TopologyEdgeV3, ...]:
         if lifecycles is None:
             return self.active_edges
         wanted = frozenset(lifecycles)
         return tuple(e for e in self.active_edges if e.lifecycle in wanted)
 
-    def _contains(self, lifecycles: Sequence[EdgeLifecycleV3]):
+    def _contains(self, lifecycles: Sequence[TopologyEdgeState]):
         wanted = frozenset(lifecycles)
         return tuple(
             e
@@ -500,7 +500,7 @@ class TopologyGraph:
     def parent(
         self,
         reader_id: str,
-        lifecycles: Sequence[EdgeLifecycleV3] = CONFIRMED,
+        lifecycles: Sequence[TopologyEdgeState] = STRUCTURAL,
     ) -> str | None:
         for edge in self._contains(lifecycles):
             if edge.target_endpoint_id == reader_id:
@@ -510,9 +510,9 @@ class TopologyGraph:
     def ancestors(
         self,
         reader_id: str,
-        lifecycles: Sequence[EdgeLifecycleV3] = CONFIRMED,
+        lifecycles: Sequence[TopologyEdgeState] = STRUCTURAL,
     ) -> tuple[str, ...]:
-        """Nearest ancestor first, root last (CONFIRMED by default)."""
+        """Nearest ancestor first, root last (STRUCTURAL by default)."""
         result: list[str] = []
         seen = {reader_id}
         current = self.parent(reader_id, lifecycles)
@@ -525,7 +525,7 @@ class TopologyGraph:
     def children(
         self,
         reader_id: str,
-        lifecycles: Sequence[EdgeLifecycleV3] = CONFIRMED,
+        lifecycles: Sequence[TopologyEdgeState] = STRUCTURAL,
     ) -> tuple[str, ...]:
         return tuple(
             e.target_endpoint_id
@@ -584,9 +584,9 @@ class TopologyGraph:
     # Primary display tree (input to M1 build_columns).
     # ------------------------------------------------------------------ #
     def primary_display_tree(self) -> tuple[DisplayNode, ...]:
-        """Explicit L1–L4 level nodes for the CONFIRMED CONTAINS hierarchy.
+        """Explicit L1–L4 level nodes for the STRUCTURAL CONTAINS hierarchy.
 
-        Each CONFIRMED CONTAINS node becomes a grouping node at L1/L2/L3 by
+        Each STRUCTURAL CONTAINS node becomes a grouping node at L1/L2/L3 by
         depth, with its own L4 reader leaf as a child.  This is the explicit
         level-node shape M1's ``build_columns`` consumes; on the HB §17 tree it
         yields the five levels L0..L4.  Any declared endpoint not placed by a
@@ -614,7 +614,7 @@ class TopologyGraph:
         return tuple(nodes)
 
     def _roots(self) -> tuple[str, ...]:
-        """CONFIRMED CONTAINS roots (readers with no confirmed parent)."""
+        """STRUCTURAL CONTAINS roots (readers with no confirmed parent)."""
         return tuple(
             rid
             for rid in sorted(self._endpoint_ids)

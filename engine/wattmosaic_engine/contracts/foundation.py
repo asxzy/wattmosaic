@@ -25,10 +25,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-#: Contract version.  Canonical source for the 3.0.0 cutover (DEC-01).  The
+#: Contract version.  Canonical source for the cutover (DEC-01).  The
 #: integration mirrors this value in ``custom_components/wattmosaic/const.py``;
 #: a major mismatch is refused by the integration's ``_check_contract``.
-CONTRACT_VERSION = "3.0.0"
+#: 4.0.0 splits the topology state enum from the mapping lifecycle enum.
+CONTRACT_VERSION = "4.0.0"
 
 __all__: list[str] = [
     # Base, clock and version

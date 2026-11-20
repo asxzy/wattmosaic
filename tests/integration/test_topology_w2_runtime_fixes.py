@@ -17,13 +17,13 @@ from pathlib import Path
 from wattmosaic_engine.config.settings import EngineConfig
 from wattmosaic_engine.contracts import (
     EdgeEvidence,
-    EdgeLifecycleV3,
     EventGroup,
     EventGroupStatus,
     EvidenceRef,
     ReaderDelta,
     ReaderMeasurement,
     RelationType,
+    TopologyEdgeState,
     TopologyEdgeV3,
     VersionTriple,
 )
@@ -88,7 +88,7 @@ def test_a_fold_never_overwrites_a_concurrent_merge(tmp_path: Path) -> None:
     marker = TopologyEdgeV3(
         edge_id="te-user::merged::marker", relation=RelationType.CONTAINS,
         source_endpoint_id="merged", target_endpoint_id="marker",
-        lifecycle=EdgeLifecycleV3.CONFIRMED, declared_by="user",
+        lifecycle=TopologyEdgeState.STRUCTURAL, declared_by="user",
         evidence=EdgeEvidence(), valid_from=T0, pinned=False,
     )
     inner.acquire()  # a history merge holds the lock ...
@@ -168,7 +168,7 @@ def test_confirmed_edges_show_health_in_the_topology_api(tmp_path: Path) -> None
     edge = TopologyEdgeV3(
         edge_id="te-inf::feed::load", relation=RelationType.CONTAINS,
         source_endpoint_id="feed", target_endpoint_id="load",
-        lifecycle=EdgeLifecycleV3.CONFIRMED, declared_by="inference", beta=1.0, beta_basis="unity",
+        lifecycle=TopologyEdgeState.STRUCTURAL, declared_by="inference", beta=1.0, beta_basis="unity",
         evidence=EdgeEvidence(support=20, independent_causes=3), valid_from=T0, pinned=False,
     )
     core.db.repos.topology_v3.upsert_edge(edge)

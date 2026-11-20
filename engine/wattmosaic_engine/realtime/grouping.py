@@ -45,7 +45,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..contracts import (
-    EdgeLifecycleV3,
     EventEvidence,
     EventGroup,
     EventGroupStatus,
@@ -55,13 +54,14 @@ from ..contracts import (
     ReaderDelta,
     SubEvent,
     SubEventKind,
+    TopologyEdgeState,
     VersionTriple,
 )
 from ..runtime.interfaces import TopologyView
 from .candidate_ring import CandidateRing
 
 __all__ = [
-    "CONFIRMED_LIFECYCLES",
+    "STRUCTURAL_LIFECYCLES",
     "DEFAULT_CONTEXT_MAX_SPREAD_S",
     "DEFAULT_QUIET_S",
     "DEFAULT_TOLERANCE_S",
@@ -80,7 +80,7 @@ __all__ = [
 
 # Only these edge lifecycles may supply topology evidence for co-movement
 # (design §4: CONFIRMED structure, PROVISIONAL soft alternatives).
-CONFIRMED_LIFECYCLES = (EdgeLifecycleV3.CONFIRMED, EdgeLifecycleV3.PROVISIONAL)
+STRUCTURAL_LIFECYCLES = (TopologyEdgeState.STRUCTURAL, TopologyEdgeState.PROVISIONAL)
 
 DEFAULT_CONTEXT_MAX_SPREAD_S = 60.0
 DEFAULT_TOLERANCE_S = 5.0
@@ -235,7 +235,7 @@ def ha_temporal_reason(
 
 
 def _related(reader_a: str, reader_b: str, topology: TopologyView) -> bool:
-    """True when two readers are joined by a CONFIRMED/PROVISIONAL CONTAINS edge.
+    """True when two readers are joined by a STRUCTURAL/PROVISIONAL CONTAINS edge.
 
     A reader is related to any node on its containment ancestry (e.g. ``Main``
     contains ``Subpanel`` which contains ``Circuit A``), so an ancestor observing
@@ -243,7 +243,7 @@ def _related(reader_a: str, reader_b: str, topology: TopologyView) -> bool:
     """
     contains = {
         (edge.source_endpoint_id, edge.target_endpoint_id)
-        for edge in topology.edges(CONFIRMED_LIFECYCLES)
+        for edge in topology.edges(STRUCTURAL_LIFECYCLES)
         if getattr(edge.relation, "value", edge.relation) == "contains"
     }
     if (reader_a, reader_b) in contains or (reader_b, reader_a) in contains:

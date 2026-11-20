@@ -26,7 +26,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from wattmosaic_engine.contracts import EdgeLifecycleV3, RelationType, TopologyEdgeV3
+from wattmosaic_engine.contracts import (
+    EdgeLifecycleV3,
+    RelationType,
+    TopologyEdgeState,
+    TopologyEdgeV3,
+)
 from wattmosaic_engine.runtime.interfaces import MappingView, ObservationOperator
 
 logger = logging.getLogger(__name__)
@@ -50,7 +55,7 @@ class PathEdge:
     """The minimal view of an edge needed for a topology verdict."""
 
     relation: RelationType | None
-    lifecycle: EdgeLifecycleV3 | None
+    lifecycle: TopologyEdgeState | None
     edge_id: str = ""
 
 
@@ -84,11 +89,15 @@ class FilterVerdict:
         return self.action == "soft_keep"
 
 
-def _lifecycle(value: Any) -> EdgeLifecycleV3 | None:
+def _lifecycle(value: Any) -> TopologyEdgeState | None:
+    """Normalise a topology lifecycle, accepting the legacy ``confirmed``."""
     if value is None:
         return None
+    text = str(getattr(value, "value", value))
+    if text == "confirmed":
+        return TopologyEdgeState.STRUCTURAL
     try:
-        return EdgeLifecycleV3(value)
+        return TopologyEdgeState(text)
     except ValueError:
         return None
 
@@ -102,10 +111,20 @@ def _relation(value: Any) -> RelationType | None:
         return None
 
 
+def _mapping_edge_lifecycle(value: Any) -> EdgeLifecycleV3 | None:
+    """Parse a *mapping* edge lifecycle (which keeps ``confirmed``)."""
+    if value is None:
+        return None
+    try:
+        return EdgeLifecycleV3(str(getattr(value, "value", value)))
+    except ValueError:
+        return None
+
+
 def _mapping_lifecycle(mapping: MappingView, subject: tuple[str, str]) -> EdgeLifecycleV3 | None:
     """Best-effort lookup of the mapping edge's lifecycle for ``subject``."""
     if isinstance(mapping, MappingLifecycleView):
-        return _lifecycle(mapping.edge_lifecycle(subject))
+        return _mapping_edge_lifecycle(mapping.edge_lifecycle(subject))
 
     edges_fn = getattr(mapping, "edges", None)
     if callable(edges_fn):
@@ -119,7 +138,7 @@ def _mapping_lifecycle(mapping: MappingView, subject: tuple[str, str]) -> EdgeLi
             kind = getattr(edge, "subject_kind", None)
             if kind is not None and kind != subject[0]:
                 continue
-            return _lifecycle(getattr(edge, "lifecycle", None))
+            return _mapping_edge_lifecycle(getattr(edge, "lifecycle", None))
     return None
 
 
@@ -210,7 +229,7 @@ def _path_edges(
     return _entries_path_edges(source, target, subject, operator)
 
 
-def _non_containing(edge: PathEdge, lifecycle: EdgeLifecycleV3) -> bool:
+def _non_containing(edge: PathEdge, lifecycle: TopologyEdgeState) -> bool:
     return edge.lifecycle is lifecycle and edge.relation in _NON_CONTAINING
 
 
@@ -224,7 +243,7 @@ def _soft_or_keep(
     for reader in affected:
         start = mapped if mapped is not None else reader
         edges = _path_edges(start, reader, subject, operator, mapping)
-        if any(_non_containing(edge, EdgeLifecycleV3.PROVISIONAL) for edge in edges):
+        if any(_non_containing(edge, TopologyEdgeState.PROVISIONAL) for edge in edges):
             return FilterVerdict(
                 "soft_keep", "provisional non-containing topology path (soft, kept)"
             )
@@ -267,7 +286,7 @@ def evaluate_topology(
         edges = _path_edges(start, reader, subject, operator, mapping)
         if edges:
             saw_path = True
-        if not any(_non_containing(edge, EdgeLifecycleV3.CONFIRMED) for edge in edges):
+        if not any(_non_containing(edge, TopologyEdgeState.STRUCTURAL) for edge in edges):
             return _soft_or_keep(subject, affected, mapped, operator, mapping)
 
     if saw_path:

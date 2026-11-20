@@ -26,6 +26,7 @@ from wattmosaic_engine.contracts import (
     RelationType,
     SubEvent,
     SubEventKind,
+    TopologyEdgeState,
     TopologyEdgeV3,
     UnknownLoadProfileV3,
     VersionTriple,
@@ -155,7 +156,7 @@ class PathMapping(LifecycleMapping):
         return self.topology.path_edges(source, target)
 
 
-def _edge(source: str, target: str, relation: RelationType, lifecycle: EdgeLifecycleV3) -> TopologyEdgeV3:
+def _edge(source: str, target: str, relation: RelationType, lifecycle: TopologyEdgeState) -> TopologyEdgeV3:
     from wattmosaic_engine.contracts import EdgeEvidence
 
     return TopologyEdgeV3(
@@ -234,7 +235,7 @@ def test_provisional_incompatible_candidate_is_kept_and_flagged() -> None:
     subject = ("device", "dev-light")
     topo = PathTopology(
         HB17_TREE,
-        {("Circuit A", "Circuit B"): [_edge("Circuit B", "Circuit A", RelationType.SHARED_LOAD, EdgeLifecycleV3.PROVISIONAL)]},
+        {("Circuit A", "Circuit B"): [_edge("Circuit B", "Circuit A", RelationType.SHARED_LOAD, TopologyEdgeState.PROVISIONAL)]},
     )
     mapping = PathMapping({subject: "Circuit A"}, EdgeLifecycleV3.CONFIRMED, topo)
     operator = fake_operator(
@@ -256,7 +257,7 @@ def test_confirmed_incompatible_candidate_is_rejected_with_a_reason() -> None:
     subject = ("device", "dev-light")
     topo = PathTopology(
         HB17_TREE,
-        {("Circuit A", "Circuit B"): [_edge("Circuit B", "Circuit A", RelationType.SHARED_LOAD, EdgeLifecycleV3.CONFIRMED)]},
+        {("Circuit A", "Circuit B"): [_edge("Circuit B", "Circuit A", RelationType.SHARED_LOAD, TopologyEdgeState.STRUCTURAL)]},
     )
     mapping = PathMapping({subject: "Circuit A"}, EdgeLifecycleV3.CONFIRMED, topo)
     operator = fake_operator(

@@ -19,8 +19,8 @@ from wattmosaic_engine.contracts import (
     ChangeStatus,
     ConfigurationChangeKind,
     ConfigurationEvent,
-    EdgeLifecycleV3,
     RelationType,
+    TopologyEdgeState,
     TopologyEdgeV3,
     VersionTriple,
 )
@@ -275,7 +275,7 @@ def _user_edge() -> TopologyEdgeV3:
         relation=RelationType.CONTAINS,
         source_endpoint_id="main",
         target_endpoint_id="sub",
-        lifecycle=EdgeLifecycleV3.CONFIRMED,
+        lifecycle=TopologyEdgeState.STRUCTURAL,
         declared_by="user",
         beta=1.0,
         beta_basis="unity",
@@ -301,7 +301,7 @@ def test_user_declared_conflicted_edge_downgrades_not_deleted() -> None:
         )
     edge = view.edge("main", "sub")
     assert edge is not None
-    assert edge.lifecycle == EdgeLifecycleV3.CONFLICTED
+    assert edge.lifecycle == TopologyEdgeState.CONFLICTED
     # The edge row is retained, not deleted.
     assert any(e.edge_id == "te-user" for e in view.edges)
 

@@ -81,5 +81,5 @@
   "title": "FixedSpec",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/fixed_spec.json",
-  "x-contract-version": "3.0.0"
+  "x-contract-version": "4.0.0"
 }

@@ -54,20 +54,6 @@
       "title": "EdgeEvidence",
       "type": "object"
     },
-    "EdgeLifecycleV3": {
-      "description": "Lifecycle of a single v3 topology or mapping edge (HB \u00a74.3).\n\nA seven-state vocabulary.  One event never moves an edge past CANDIDATE\n(DEC-10).",
-      "enum": [
-        "candidate",
-        "provisional",
-        "confirmed",
-        "conflicted",
-        "suspected_change",
-        "rejected",
-        "retired"
-      ],
-      "title": "EdgeLifecycleV3",
-      "type": "string"
-    },
     "RelationType": {
       "description": "The five reader\u2194reader relation kinds of HB \u00a74.2 (DEC-10, DEC-11).",
       "enum": [
@@ -78,6 +64,20 @@
         "same_conductor"
       ],
       "title": "RelationType",
+      "type": "string"
+    },
+    "TopologyEdgeState": {
+      "description": "Lifecycle of a single topology edge (HB \u00a74.3, contract 4.0).\n\nA seven-state vocabulary.  One event never moves an edge past CANDIDATE\n(DEC-10).  ``STRUCTURAL`` replaces the old ``CONFIRMED`` and means only that\nthe observation operator H uses the edge right now; it is not a terminal\ntruth.  Mapping edges keep :class:`EdgeLifecycleV3` and its ``CONFIRMED``.",
+      "enum": [
+        "candidate",
+        "provisional",
+        "structural",
+        "conflicted",
+        "suspected_change",
+        "rejected",
+        "retired"
+      ],
+      "title": "TopologyEdgeState",
       "type": "string"
     }
   },
@@ -100,7 +100,7 @@
       "type": "string"
     },
     "lifecycle": {
-      "$ref": "#/$defs/EdgeLifecycleV3"
+      "$ref": "#/$defs/TopologyEdgeState"
     },
     "declared_by": {
       "enum": [
@@ -180,5 +180,5 @@
   "title": "TopologyEdgeV3",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/topology_edge_v3.json",
-  "x-contract-version": "3.0.0"
+  "x-contract-version": "4.0.0"
 }

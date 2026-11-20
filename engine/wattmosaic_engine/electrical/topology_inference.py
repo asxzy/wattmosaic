@@ -36,7 +36,7 @@ Ported guards (design §5, analysis C traps T8/T9/T10/T13)
 
 Topology versions are proposed (and promoted) through the injected
 :class:`~wattmosaic_engine.runtime.interfaces.VersionService` Protocol when an
-edge crosses into CONFIRMED or CONFLICTED.  User-pinned and REJECTED pairs are
+edge crosses into STRUCTURAL or CONFLICTED.  User-pinned and REJECTED pairs are
 never modified by inference.
 """
 
@@ -52,10 +52,10 @@ import numpy as np
 
 from wattmosaic_engine.contracts import (
     EdgeEvidence,
-    EdgeLifecycleV3,
     EventGroup,
     MeasurementBasis,
     RelationType,
+    TopologyEdgeState,
     TopologyEdgeV3,
 )
 
@@ -87,7 +87,7 @@ __all__: list[str] = [
     "NestingCandidate",
     "infer_nesting",
     "MIN_INDEPENDENT_CAUSES",
-    "MIN_SUPPORT_CONFIRMED",
+    "MIN_SUPPORT_STRUCTURAL",
     "MIN_SUPPORT_PROVISIONAL",
     "TopologyEvidence",
     "DeltaObservation",
@@ -103,10 +103,10 @@ __all__: list[str] = [
 
 MIN_SUPPORT_CANDIDATE = 1
 MIN_SUPPORT_PROVISIONAL = 3
-MIN_SUPPORT_CONFIRMED = 8
+MIN_SUPPORT_STRUCTURAL = 8
 MIN_INDEPENDENT_CAUSES = 2
 CONFLICT_RATIO_PROVISIONAL = 0.10
-CONFLICT_RATIO_CONFIRMED = 0.05
+CONFLICT_RATIO_STRUCTURAL = 0.05
 CONFLICT_RATIO_CONFLICTED = 0.25
 MIN_EVENTS_CONFLICTED = 6
 MIN_CORRELATED_EVENTS = 5
@@ -129,7 +129,7 @@ MATCH_RELATIVE_TOLERANCE = 0.20
 _CONTAINS = "contains"
 _CORRELATED = "correlated"
 _SAME_CONDUCTOR = "same_conductor"
-_DORMANT = frozenset((EdgeLifecycleV3.REJECTED, EdgeLifecycleV3.RETIRED))
+_DORMANT = frozenset((TopologyEdgeState.REJECTED, TopologyEdgeState.RETIRED))
 
 
 def _value(item: Any) -> Any:
@@ -406,7 +406,7 @@ def detect_same_conductor(
                     relation=RelationType.SAME_CONDUCTOR,
                     source_endpoint_id=canonical,
                     target_endpoint_id=alias,
-                    lifecycle=EdgeLifecycleV3.CANDIDATE,
+                    lifecycle=TopologyEdgeState.CANDIDATE,
                     declared_by="inference",
                     evidence=TopologyEvidence(),
                     valid_from=at or datetime(2026, 1, 1, tzinfo=UTC),
@@ -468,7 +468,7 @@ class TopologyInferenceView:
     #: uncontradicted alternative (see :meth:`_direction_cap`).  The runtime
     #: sets it: an online ledger must never promote a containment cycle.
     require_direction: bool = False
-    #: Rolling per-edge health of CONFIRMED edges (M3): every decisive verdict
+    #: Rolling per-edge health of STRUCTURAL edges (M3): every decisive verdict
     #: on a confirmed edge is recorded; a BROKEN inferred edge is demoted to
     #: PROVISIONAL in :meth:`_settle` (topology linking v2).
     health: HealthBook = field(default_factory=HealthBook)
@@ -478,8 +478,8 @@ class TopologyInferenceView:
     #: hours of samples at every fold.
     aligned: Mapping[str, Sequence[float | None]] = field(default_factory=dict)
     #: Sticky structural decisions (child -> direct parent) of earlier settles.
-    #: A decided parent the structure CONFIRMED stays CONFIRMED (even below
-    #: MIN_SUPPORT_CONFIRMED, and while no aligned series are available) until
+    #: A decided parent the structure STRUCTURAL stays STRUCTURAL (even below
+    #: MIN_SUPPORT_STRUCTURAL, and while no aligned series are available) until
     #: the structure positively disagrees, its conflict ratio passes the
     #: PROVISIONAL bound or its health is BROKEN (design §5 T5, linking v2).
     #: The runtime persists it next to the edge-health book.
@@ -502,7 +502,7 @@ class TopologyInferenceView:
                 return edge
         return None
 
-    def contains_edges(self, *, lifecycles: Sequence[EdgeLifecycleV3] | None = None) -> tuple[TopologyEdgeV3, ...]:
+    def contains_edges(self, *, lifecycles: Sequence[TopologyEdgeState] | None = None) -> tuple[TopologyEdgeV3, ...]:
         wanted = frozenset(lifecycles) if lifecycles else None
         return tuple(
             e
@@ -555,7 +555,7 @@ class TopologyInferenceView:
         """Fold one FINAL event group into every affected pair's ledger.
 
         Several children stepping in one group (topology linking v2, M1): per
-        parent, the CONFIRMED children are explained away and verified (edge
+        parent, the STRUCTURAL children are explained away and verified (edge
         health), and the other stepping readers are matched as a subset of the
         remainder; a stepping 240 V leg pair counts as one candidate.  With a
         single stepping candidate the classic one-to-one rule below applies
@@ -572,7 +572,7 @@ class TopologyInferenceView:
         unrelated changes (live: true parents read flat or off-size).
 
         ``levels`` maps readers to their typical (recent median) power.  When a
-        child ends up with several CONFIRMED inferred parents, containment is
+        child ends up with several STRUCTURAL inferred parents, containment is
         transitive (a grandparent feed sees every step of its grandchildren), so
         only the parent with the lowest level is the direct one; the others are
         kept as PROVISIONAL soft alternatives.
@@ -649,7 +649,7 @@ class TopologyInferenceView:
             (e.source_endpoint_id, e.target_endpoint_id)
             for e in edges
             if _relation(e.relation) == _CONTAINS
-            and _value(e.lifecycle) == _value(EdgeLifecycleV3.CONFIRMED)
+            and _value(e.lifecycle) == _value(TopologyEdgeState.STRUCTURAL)
         }
 
         def _track(parent: str, child: str, verdict: str) -> None:
@@ -674,7 +674,7 @@ class TopologyInferenceView:
                         relation=RelationType.CONTAINS,
                         source_endpoint_id=parent,
                         target_endpoint_id=child,
-                        lifecycle=EdgeLifecycleV3.CANDIDATE,
+                        lifecycle=TopologyEdgeState.CANDIDATE,
                         declared_by="inference",
                         beta=1.0,
                         beta_basis="unity",
@@ -805,7 +805,7 @@ class TopologyInferenceView:
                             relation=RelationType.CONTAINS,
                             source_endpoint_id=parent,
                             target_endpoint_id=child,
-                            lifecycle=EdgeLifecycleV3.CANDIDATE,
+                            lifecycle=TopologyEdgeState.CANDIDATE,
                             declared_by="inference",
                             beta=1.0,
                             beta_basis="unity",
@@ -849,7 +849,7 @@ class TopologyInferenceView:
                             relation=RelationType.CORRELATED,
                             source_endpoint_id=src,
                             target_endpoint_id=dst,
-                            lifecycle=EdgeLifecycleV3.CANDIDATE,
+                            lifecycle=TopologyEdgeState.CANDIDATE,
                             declared_by="inference",
                             evidence=TopologyEvidence(),
                             valid_from=at,
@@ -909,7 +909,7 @@ class TopologyInferenceView:
         structural pass then demotes again -- which is no transition at all).
 
         Stages: (1) the evidence rule per edge, with a decided structural parent
-        kept CONFIRMED while the evidence still holds it PROVISIONAL (sticky);
+        kept STRUCTURAL while the evidence still holds it PROVISIONAL (sticky);
         (2) edge health: BROKEN edges are demoted and leave the candidates;
         (3) one direct parent per child -- the structural pass on adequate
         aligned series, else the remembered decisions plus the lowest-level
@@ -938,20 +938,20 @@ class TopologyInferenceView:
             new_lifecycle = self._lifecycle(edge, causes, absolute_now, basis_now, meta_now)
             if (
                 self.require_direction
-                and new_lifecycle == EdgeLifecycleV3.CONFIRMED
+                and new_lifecycle == TopologyEdgeState.STRUCTURAL
                 and edge.declared_by != "user"
             ):
                 new_lifecycle = self._direction_cap(edge, edges, new_lifecycle, absolute_now)
             if (
-                new_lifecycle == EdgeLifecycleV3.PROVISIONAL
-                and edge.lifecycle == EdgeLifecycleV3.CONFIRMED
+                new_lifecycle == TopologyEdgeState.PROVISIONAL
+                and edge.lifecycle == TopologyEdgeState.STRUCTURAL
                 and edge.declared_by == "inference"
                 and decided.get(edge.target_endpoint_id) == edge.source_endpoint_id
             ):
                 # Sticky structural confirmation: the evidence still holds the
                 # edge (gates pass, conflict below the PROVISIONAL bound), and
                 # the structure decided it; support alone never undoes that.
-                new_lifecycle = EdgeLifecycleV3.CONFIRMED
+                new_lifecycle = TopologyEdgeState.STRUCTURAL
                 sticky.add((edge.source_endpoint_id, edge.target_endpoint_id))
             if new_lifecycle != edge.lifecycle:
                 labels[index] = edge.edge_id
@@ -973,10 +973,10 @@ class TopologyInferenceView:
                         continue
                     stage.append(
                         f"{edge.edge_id} ({reason}): {_value(edge.lifecycle)} -> "
-                        f"{_value(EdgeLifecycleV3.PROVISIONAL)}"
+                        f"{_value(TopologyEdgeState.PROVISIONAL)}"
                     )
                     edges[index] = edge.model_copy(
-                        update={"lifecycle": EdgeLifecycleV3.PROVISIONAL}
+                        update={"lifecycle": TopologyEdgeState.PROVISIONAL}
                     )
                 note(stage, before)
         for parent, child in broken:
@@ -1004,7 +1004,7 @@ class TopologyInferenceView:
             result = None
             for _round in range(STRUCTURE_ROUNDS):
                 trial = [
-                    edge.model_copy(update={"lifecycle": EdgeLifecycleV3.CONFIRMED})
+                    edge.model_copy(update={"lifecycle": TopologyEdgeState.STRUCTURAL})
                     if edge.edge_id in promoted
                     else edge
                     for edge in before
@@ -1024,8 +1024,8 @@ class TopologyInferenceView:
                 fresh = {
                     edge.edge_id
                     for old, edge in zip(before, result.edges, strict=True)
-                    if _value(edge.lifecycle) == _value(EdgeLifecycleV3.CONFIRMED)
-                    and _value(old.lifecycle) != _value(EdgeLifecycleV3.CONFIRMED)
+                    if _value(edge.lifecycle) == _value(TopologyEdgeState.STRUCTURAL)
+                    and _value(old.lifecycle) != _value(TopologyEdgeState.STRUCTURAL)
                 }
                 if fresh <= promoted:
                     break
@@ -1044,22 +1044,22 @@ class TopologyInferenceView:
             for index in sorted(labels)
             if original[index] != _value(edges[index].lifecycle)
         ]
-        # Only a crossing into CONFIRMED or CONFLICTED promotes a topology
+        # Only a crossing into STRUCTURAL or CONFLICTED promotes a topology
         # version (T5 step 3).  CANDIDATE/PROVISIONAL are soft and accumulate
         # silently; one event must never publish a new version.
         return [
             text
             for text in transitions
-            if text.endswith(f"-> {_value(EdgeLifecycleV3.CONFIRMED)}")
+            if text.endswith(f"-> {_value(TopologyEdgeState.STRUCTURAL)}")
             # A structural edge becoming CONFLICTED changes the topology; a
             # never-structural suggestion (CANDIDATE/PROVISIONAL) that is
             # contradicted changes nothing H uses, so it is no new version.
             or text.endswith(
-                f"{_value(EdgeLifecycleV3.CONFIRMED)} -> {_value(EdgeLifecycleV3.CONFLICTED)}"
+                f"{_value(TopologyEdgeState.STRUCTURAL)} -> {_value(TopologyEdgeState.CONFLICTED)}"
             )
             # A confirmed grandparent edge demoted to a soft alternative.
             or text.endswith(
-                f"{_value(EdgeLifecycleV3.CONFIRMED)} -> {_value(EdgeLifecycleV3.PROVISIONAL)}"
+                f"{_value(TopologyEdgeState.STRUCTURAL)} -> {_value(TopologyEdgeState.PROVISIONAL)}"
             )
         ], decided
 
@@ -1071,8 +1071,8 @@ class TopologyInferenceView:
             return None
 
         def gate(edge: TopologyEdgeV3, edges: Sequence[TopologyEdgeV3]) -> bool:
-            capped = self._direction_cap(edge, edges, EdgeLifecycleV3.CONFIRMED, absolute)
-            return capped == EdgeLifecycleV3.CONFIRMED
+            capped = self._direction_cap(edge, edges, TopologyEdgeState.STRUCTURAL, absolute)
+            return capped == TopologyEdgeState.STRUCTURAL
 
         return gate
 
@@ -1084,7 +1084,7 @@ class TopologyInferenceView:
     ) -> list[str]:
         """Re-apply remembered decisions when no adequate series are available.
 
-        A decided parent stays the direct parent: every other CONFIRMED inferred
+        A decided parent stays the direct parent: every other STRUCTURAL inferred
         candidate of its child drops to PROVISIONAL (as the structural pass did).
         A decision whose edge is gone, dormant, CANDIDATE/CONFLICTED or BROKEN
         is forgotten (``decided`` is updated in place).
@@ -1093,7 +1093,7 @@ class TopologyInferenceView:
         for edge in edges:
             if _relation(edge.relation) == _CONTAINS and edge.lifecycle not in _DORMANT:
                 live[(edge.source_endpoint_id, edge.target_endpoint_id)] = _value(edge.lifecycle)
-        kept = (_value(EdgeLifecycleV3.CONFIRMED), _value(EdgeLifecycleV3.PROVISIONAL))
+        kept = (_value(TopologyEdgeState.STRUCTURAL), _value(TopologyEdgeState.PROVISIONAL))
         for child, parent in list(decided.items()):
             if live.get((parent, child)) not in kept or (parent, child) in broken:
                 del decided[child]
@@ -1106,14 +1106,14 @@ class TopologyInferenceView:
                 or _relation(edge.relation) != _CONTAINS
                 or edge.declared_by != "inference"
                 or edge.pinned
-                or edge.lifecycle != EdgeLifecycleV3.CONFIRMED
+                or edge.lifecycle != TopologyEdgeState.STRUCTURAL
             ):
                 continue
             transitions.append(
                 f"{edge.edge_id} (structure: direct parent is {parent}): "
-                f"{_value(edge.lifecycle)} -> {_value(EdgeLifecycleV3.PROVISIONAL)}"
+                f"{_value(edge.lifecycle)} -> {_value(TopologyEdgeState.PROVISIONAL)}"
             )
-            edges[index] = edge.model_copy(update={"lifecycle": EdgeLifecycleV3.PROVISIONAL})
+            edges[index] = edge.model_copy(update={"lifecycle": TopologyEdgeState.PROVISIONAL})
         return transitions
 
     def merge_evidence(
@@ -1158,7 +1158,7 @@ class TopologyInferenceView:
                     # worth a CONFLICTED ledger row (live: 625 of ~760 replay
                     # edges).  An absent pair says the same to every rule.
                     continue
-                edges.append(edge.model_copy(update={"lifecycle": EdgeLifecycleV3.CANDIDATE}))
+                edges.append(edge.model_copy(update={"lifecycle": TopologyEdgeState.CANDIDATE}))
                 by_key[key] = len(edges) - 1
                 causes[key] = learned_causes
                 continue
@@ -1211,7 +1211,7 @@ class TopologyInferenceView:
         """``(parent, child) -> verdict`` for parents with several stepping children.
 
         Per parent with a usable move: ``known`` are stepping children with a
-        CONFIRMED edge from it, ``unknown`` every other stepping reader that is
+        STRUCTURAL edge from it, ``unknown`` every other stepping reader that is
         not the parent, not a confirmed ancestor of it, not its duplicate meter
         and not a confirmed descendant of a known child.  An unknown reader
         stepping like a known child (the same load seen one level down) keeps
@@ -1234,7 +1234,7 @@ class TopologyInferenceView:
         for edge in edges:
             if (
                 _relation(edge.relation) == _CONTAINS
-                and _value(edge.lifecycle) == _value(EdgeLifecycleV3.CONFIRMED)
+                and _value(edge.lifecycle) == _value(TopologyEdgeState.STRUCTURAL)
             ):
                 children_of.setdefault(edge.source_endpoint_id, set()).add(edge.target_endpoint_id)
                 parents_of.setdefault(edge.target_endpoint_id, set()).add(edge.source_endpoint_id)
@@ -1355,7 +1355,7 @@ class TopologyInferenceView:
         *,
         skip: frozenset[str] = frozenset(),
     ) -> list[str]:
-        """Demote all but the lowest-level CONFIRMED inferred parent per child.
+        """Demote all but the lowest-level STRUCTURAL inferred parent per child.
 
         A direct parent always carries no more power than the feed above it, so
         among confirmed parents the one with the lowest typical level is the
@@ -1370,7 +1370,7 @@ class TopologyInferenceView:
                 and _relation(edge.relation) == _CONTAINS
                 and edge.declared_by == "inference"
                 and not edge.pinned
-                and _value(edge.lifecycle) == _value(EdgeLifecycleV3.CONFIRMED)
+                and _value(edge.lifecycle) == _value(TopologyEdgeState.STRUCTURAL)
             ):
                 by_child.setdefault(edge.target_endpoint_id, []).append(index)
         transitions: list[str] = []
@@ -1390,9 +1390,9 @@ class TopologyInferenceView:
                 edge = edges[i]
                 transitions.append(
                     f"{edge.edge_id}: {_value(edge.lifecycle)} -> "
-                    f"{_value(EdgeLifecycleV3.PROVISIONAL)}"
+                    f"{_value(TopologyEdgeState.PROVISIONAL)}"
                 )
-                edges[i] = edge.model_copy(update={"lifecycle": EdgeLifecycleV3.PROVISIONAL})
+                edges[i] = edge.model_copy(update={"lifecycle": TopologyEdgeState.PROVISIONAL})
         return transitions
 
     @staticmethod
@@ -1402,7 +1402,7 @@ class TopologyInferenceView:
         absolute: Mapping[str, Sequence[float | None]],
         basis: Mapping[str, MeasurementBasis | str],
         meta: Mapping[str, Mapping[str, Any]],
-    ) -> EdgeLifecycleV3:
+    ) -> TopologyEdgeState:
         evidence = edge.evidence
         support, conflict = evidence.support, evidence.conflict
         decisive = support + conflict
@@ -1411,12 +1411,12 @@ class TopologyInferenceView:
         n_causes = len(causes.get(key, ()))
 
         if decisive >= MIN_EVENTS_CONFLICTED and ratio > CONFLICT_RATIO_CONFLICTED:
-            # DEC-10 (T7): a user-declared CONFIRMED CONTAINS edge is a fact, but
+            # DEC-10 (T7): a user-declared STRUCTURAL CONTAINS edge is a fact, but
             # persistent, strong contradiction (>= 6 independent events with a
             # conflict ratio > 0.25) must move it to CONFLICTED — never delete it.
             # The edge row and its history are retained; only the lifecycle moves
             # so downstream confidence is degraded while the user can re-affirm.
-            return EdgeLifecycleV3.CONFLICTED
+            return TopologyEdgeState.CONFLICTED
 
         parent, child = edge.source_endpoint_id, edge.target_endpoint_id
         gates_ok = (
@@ -1428,44 +1428,44 @@ class TopologyInferenceView:
         )
         if (
             gates_ok
-            and support >= MIN_SUPPORT_CONFIRMED
-            and ratio < CONFLICT_RATIO_CONFIRMED
+            and support >= MIN_SUPPORT_STRUCTURAL
+            and ratio < CONFLICT_RATIO_STRUCTURAL
         ):
-            return EdgeLifecycleV3.CONFIRMED
+            return TopologyEdgeState.STRUCTURAL
         if (
             gates_ok
-            and _value(edge.lifecycle) == _value(EdgeLifecycleV3.CONFIRMED)
-            and support >= MIN_SUPPORT_CONFIRMED
+            and _value(edge.lifecycle) == _value(TopologyEdgeState.STRUCTURAL)
+            and support >= MIN_SUPPORT_STRUCTURAL
             and ratio < CONFLICT_RATIO_PROVISIONAL
         ):
             # Hysteresis: confirming needs < 5 % conflict, but an already
-            # CONFIRMED edge keeps that status until conflict passes the 10 %
+            # STRUCTURAL edge keeps that status until conflict passes the 10 %
             # suggestion limit.  Live, one extra conflicting event (30 support,
             # 2 conflict = 6.3 %) dropped a real branch out of the hierarchy and
             # the next supporting event put it back.
-            return EdgeLifecycleV3.CONFIRMED
+            return TopologyEdgeState.STRUCTURAL
         if (
             gates_ok
             and support >= MIN_SUPPORT_PROVISIONAL
             and ratio < CONFLICT_RATIO_PROVISIONAL
         ):
-            return EdgeLifecycleV3.PROVISIONAL
+            return TopologyEdgeState.PROVISIONAL
         if support >= MIN_SUPPORT_CANDIDATE:
-            if edge.lifecycle == EdgeLifecycleV3.CONFIRMED and edge.declared_by == "user":
+            if edge.lifecycle == TopologyEdgeState.STRUCTURAL and edge.declared_by == "user":
                 # DEC-10: a user-declared parent is a fact.  Inference never
                 # downgrades it; only the user may pin/reject it.  Absence of
                 # delta evidence is not evidence against a wiring fact.
-                return EdgeLifecycleV3.CONFIRMED
-            return EdgeLifecycleV3.CANDIDATE
+                return TopologyEdgeState.STRUCTURAL
+            return TopologyEdgeState.CANDIDATE
         return edge.lifecycle
 
     @staticmethod
     def _direction_cap(
         edge: TopologyEdgeV3,
         edges: Sequence[TopologyEdgeV3],
-        proposed: EdgeLifecycleV3,
+        proposed: TopologyEdgeState,
         absolute: Mapping[str, Sequence[float | None]],
-    ) -> EdgeLifecycleV3:
+    ) -> TopologyEdgeState:
         """Never CONFIRM a containment whose reverse is equally supported.
 
         Equal parent/child deltas support both ``p CONTAINS c`` and
@@ -1482,21 +1482,21 @@ class TopologyInferenceView:
                 and other.source_endpoint_id == edge.target_endpoint_id
                 and other.target_endpoint_id == edge.source_endpoint_id
                 and other.lifecycle not in _DORMANT
-                and other.lifecycle != EdgeLifecycleV3.CONFLICTED
+                and other.lifecycle != TopologyEdgeState.CONFLICTED
                 and other.evidence.support > 0
                 and other.evidence.conflict_ratio < CONFLICT_RATIO_PROVISIONAL
                 and _containment_gate(
                     absolute.get(other.source_endpoint_id), absolute.get(other.target_endpoint_id)
                 )
             ):
-                return EdgeLifecycleV3.PROVISIONAL
+                return TopologyEdgeState.PROVISIONAL
         return proposed
 
     def _propose_version(self, transitions: Sequence[str]) -> TopologyInferenceView:
         service = self.versions
         if service is None:
             return self
-        # A version is structure: CONFIRMED inferred edges plus anything a user
+        # A version is structure: STRUCTURAL inferred edges plus anything a user
         # declared or pinned.  CANDIDATE/PROVISIONAL/CONFLICTED ledger entries
         # are evidence, not topology (design §5); proposing the whole ledger put
         # hundreds of single-event and contradicted pairs into every version.
@@ -1505,7 +1505,7 @@ class TopologyInferenceView:
             for edge in self.edges
             if edge.pinned
             or edge.declared_by != "inference"
-            or _value(edge.lifecycle) == _value(EdgeLifecycleV3.CONFIRMED)
+            or _value(edge.lifecycle) == _value(TopologyEdgeState.STRUCTURAL)
         ]
         current = self._active_edge_ids(service)
         if current is not None and {e.edge_id for e in structural} == current:
@@ -1585,7 +1585,7 @@ def infer_topology(
     ``observation`` is either a sequence of HB §17 observation records (each
     carrying ``reader_samples``), a sequence of ``EventGroup`` contracts, or a
     single record/group.  Declared parents in the sample metadata become pinned
-    CONFIRMED CONTAINS edges (H2 writes user edges that way); everything else is
+    STRUCTURAL CONTAINS edges (H2 writes user edges that way); everything else is
     inferred from signed deltas.  The function is pure for a fixed clock.
     """
     now = clock() if clock is not None else datetime(2026, 1, 1, tzinfo=UTC)
@@ -1669,7 +1669,7 @@ def infer_topology(
                 relation=RelationType.CONTAINS,
                 source_endpoint_id=parent,
                 target_endpoint_id=child,
-                lifecycle=EdgeLifecycleV3.CONFIRMED,
+                lifecycle=TopologyEdgeState.STRUCTURAL,
                 declared_by="user",
                 beta=1.0,
                 beta_basis="unity",

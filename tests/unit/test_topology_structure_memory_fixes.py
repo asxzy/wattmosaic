@@ -5,7 +5,7 @@ An offline replay of a week of recorder history showed why the structural pass
 errors.  Each test reproduces one root cause with synthetic data shaped like
 the real facts:
 
-* a 240 V pair whose legs were both CONFIRMED (and sticky) under one main was
+* a 240 V pair whose legs were both STRUCTURAL (and sticky) under one main was
   never split, although the main cannot carry both legs while they run;
 * a confirmed grandparent kept a sub-panel's circuits, so the grandparent's
   capacity counted them twice and refused the sub-panel's own confirmation;
@@ -33,8 +33,8 @@ from wattmosaic_engine.main import EngineCore
 from wattmosaic_engine.storage.database import Database
 
 from tests.unit.test_topology_w2_fixes import (
-    CONFIRMED,
     PROVISIONAL,
+    STRUCTURAL,
     _edge,
     _hot_tub,
     _life,
@@ -54,12 +54,12 @@ T0 = datetime(2026, 11, 20, tzinfo=UTC)
 
 def test_a_pair_held_under_one_main_is_split_when_the_main_cannot_carry_both() -> None:
     series = _hot_tub()
-    # Both legs CONFIRMED under main_1 and decided there by earlier settles
+    # Both legs STRUCTURAL under main_1 and decided there by earlier settles
     # (live: support 288/289, both sticky).  main_1 cannot carry 2 x 1500 W.
     assert not tr.analyse(series).fits_capacity("main_1", ["leg_a", "leg_b"])
     edges = [
-        _edge("main_1", "leg_a", CONFIRMED, support=40),
-        _edge("main_1", "leg_b", CONFIRMED, support=40),
+        _edge("main_1", "leg_a", STRUCTURAL, support=40),
+        _edge("main_1", "leg_b", STRUCTURAL, support=40),
         _edge("main_2", "leg_a", PROVISIONAL, support=6),
         _edge("main_2", "leg_b", PROVISIONAL, support=6),
         # The legs step together: an edge each way, a few unpaired steps apart
@@ -72,7 +72,7 @@ def test_a_pair_held_under_one_main_is_split_when_the_main_cannot_carry_both() -
         _view(edges, require_direction=True, structure_decisions=decided), "g", aligned=series
     )
     parents = {
-        leg: [p for p in ("main_1", "main_2") if _life(view, p, leg) == "confirmed"]
+        leg: [p for p in ("main_1", "main_2") if _life(view, p, leg) == "structural"]
         for leg in ("leg_a", "leg_b")
     }
     assert sorted(sum(parents.values(), [])) == ["main_1", "main_2"], parents
@@ -107,15 +107,15 @@ def test_a_sub_panel_is_the_direct_parent_over_a_confirmed_grandparent() -> None
     # Kept under main_2 directly, the circuit is counted twice in main_2.
     assert not info.fits_capacity("main_2", ["sub_1", "circuit"])
     edges = [
-        # The grandparent sees every circuit step: CONFIRMED on counts alone.
-        _edge("main_2", "circuit", CONFIRMED, support=40),
+        # The grandparent sees every circuit step: STRUCTURAL on counts alone.
+        _edge("main_2", "circuit", STRUCTURAL, support=40),
         _edge("sub_1", "circuit", PROVISIONAL, support=6),
         _edge("main_2", "sub_1", PROVISIONAL, support=6),
     ]
     view = _quiet(_view(edges, require_direction=True), "g", aligned=series)
-    assert _life(view, "sub_1", "circuit") == "confirmed"
+    assert _life(view, "sub_1", "circuit") == "structural"
     assert _life(view, "main_2", "circuit") == "provisional"
-    assert _life(view, "main_2", "sub_1") == "confirmed"
+    assert _life(view, "main_2", "sub_1") == "structural"
     assert view.structure_decisions["circuit"] == "sub_1"
 
 
@@ -147,7 +147,7 @@ def test_a_load_that_outdraws_its_candidate_parent_alone_is_never_assigned_to_it
     ]
     view = _quiet(_view(edges, require_direction=True), "g", aligned=series)
     # The rack no longer poisons the leg's capacity: the circuit confirms.
-    assert _life(view, "leg", "circuit") == "confirmed"
+    assert _life(view, "leg", "circuit") == "structural"
     assert view.structure_decisions.get("rack") != "leg"
 
 
@@ -181,14 +181,14 @@ def test_a_sparsely_sampled_second_meter_is_a_duplicate_never_a_parent() -> None
     # reported yet) ...
     assert not info.symmetric_twins("main", "meter")
     edges = [
-        _edge("main", "load", CONFIRMED, support=30),
+        _edge("main", "load", STRUCTURAL, support=30),
         # Coincidences with the sparse meter's lumped steps.
-        _edge("meter", "load", CONFIRMED, support=60),
+        _edge("meter", "load", STRUCTURAL, support=60),
     ]
     # ... the 5 min one does, and the ledger gives the two no direction.
     assert info.classify(edges).duplicates == (("main", "meter"),)
     resolved, _transitions = tr.resolve_structure(edges, series, analysis=info)
-    assert _life(resolved, "main", "load") == "confirmed"
+    assert _life(resolved, "main", "load") == "structural"
     assert _life(resolved, "meter", "load") == "provisional"
 
 
@@ -221,19 +221,19 @@ def test_a_settle_resolves_a_grandparent_found_in_the_same_settle() -> None:
     edges = [
         _edge("main_2", "sub_1", PROVISIONAL, support=6),
         _edge("sub_1", "big", PROVISIONAL, support=6),
-        _edge("main_2", "big", CONFIRMED, support=40),
-        # Both parents of the screen are CONFIRMED on counts; the earlier
+        _edge("main_2", "big", STRUCTURAL, support=40),
+        # Both parents of the screen are STRUCTURAL on counts; the earlier
         # settle decided the grandparent (the sub-panel was not known yet).
-        _edge("main_2", "screen", CONFIRMED, support=60),
-        _edge("sub_1", "screen", CONFIRMED, support=30),
+        _edge("main_2", "screen", STRUCTURAL, support=60),
+        _edge("sub_1", "screen", STRUCTURAL, support=30),
     ]
     view = _quiet(
         _view(edges, require_direction=True, structure_decisions={"screen": "main_2"}),
         "g",
         aligned=series,
     )
-    assert _life(view, "main_2", "sub_1") == "confirmed"
-    assert _life(view, "sub_1", "screen") == "confirmed"
+    assert _life(view, "main_2", "sub_1") == "structural"
+    assert _life(view, "sub_1", "screen") == "structural"
     assert _life(view, "main_2", "screen") == "provisional"
     assert view.structure_decisions["screen"] == "sub_1"
 

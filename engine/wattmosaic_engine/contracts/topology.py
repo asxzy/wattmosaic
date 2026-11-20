@@ -17,7 +17,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from .foundation import EvidenceRef, MappingVersionId, Model, TopologyVersionId
 from .measurement import MeasurementBasis
@@ -29,6 +29,7 @@ __all__: list[str] = [
     # Enums
     "RelationType",
     "EdgeLifecycleV3",
+    "TopologyEdgeState",
     "Observability",
     # Evidence
     "EdgeEvidence",
@@ -136,12 +137,31 @@ class EdgeLifecycleV3(str, Enum):
     """Lifecycle of a single v3 topology or mapping edge (HB §4.3).
 
     A seven-state vocabulary.  One event never moves an edge past CANDIDATE
-    (DEC-10).
+    (DEC-10).  Topology edges use :class:`TopologyEdgeState` instead; this enum
+    is retained for mapping edges, whose confirmation is a different concept.
     """
 
     CANDIDATE = "candidate"
     PROVISIONAL = "provisional"
     CONFIRMED = "confirmed"
+    CONFLICTED = "conflicted"
+    SUSPECTED_CHANGE = "suspected_change"
+    REJECTED = "rejected"
+    RETIRED = "retired"
+
+
+class TopologyEdgeState(str, Enum):
+    """Lifecycle of a single topology edge (HB §4.3, contract 4.0).
+
+    A seven-state vocabulary.  One event never moves an edge past CANDIDATE
+    (DEC-10).  ``STRUCTURAL`` replaces the old ``CONFIRMED`` and means only that
+    the observation operator H uses the edge right now; it is not a terminal
+    truth.  Mapping edges keep :class:`EdgeLifecycleV3` and its ``CONFIRMED``.
+    """
+
+    CANDIDATE = "candidate"
+    PROVISIONAL = "provisional"
+    STRUCTURAL = "structural"
     CONFLICTED = "conflicted"
     SUSPECTED_CHANGE = "suspected_change"
     REJECTED = "rejected"
@@ -206,7 +226,7 @@ class TopologyEdgeV3(Model):
     relation: RelationType
     source_endpoint_id: str
     target_endpoint_id: str
-    lifecycle: EdgeLifecycleV3
+    lifecycle: TopologyEdgeState
     declared_by: Literal["user", "inference", "migration"]
     beta: float | None = None
     beta_basis: Literal["unity", "recorded_factor", "estimated"] | None = None
@@ -215,10 +235,21 @@ class TopologyEdgeV3(Model):
     valid_until: datetime | None = None
     pinned: bool
 
+    @field_validator("lifecycle", mode="before")
+    @classmethod
+    def _legacy_confirmed(cls, value: Any) -> Any:
+        """Old stored JSON / version payloads used ``confirmed``; map to
+        ``structural`` so they still load (D1 is behaviour-preserving)."""
+        if isinstance(value, str) and value.lower() == "confirmed":
+            return TopologyEdgeState.STRUCTURAL.value
+        if isinstance(value, Enum) and value.name == "CONFIRMED":
+            return TopologyEdgeState.STRUCTURAL.value
+        return value
+
     @model_validator(mode="after")
     def _retired_edges_carry_an_end(self) -> TopologyEdgeV3:
         """A RETIRED edge must say *when* it closed (its validity interval)."""
-        if self.lifecycle == EdgeLifecycleV3.RETIRED and self.valid_until is None:
+        if self.lifecycle == TopologyEdgeState.RETIRED and self.valid_until is None:
             raise ValueError("a RETIRED edge must carry a valid_until")
         return self
 

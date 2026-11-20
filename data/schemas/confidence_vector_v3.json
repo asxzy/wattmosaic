@@ -104,5 +104,5 @@
   "title": "ConfidenceVectorV3",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/confidence_vector_v3.json",
-  "x-contract-version": "3.0.0"
+  "x-contract-version": "4.0.0"
 }

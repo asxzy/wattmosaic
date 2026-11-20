@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from wattmosaic_engine.config.settings import EngineConfig
-from wattmosaic_engine.contracts import EdgeEvidence, EdgeLifecycleV3, RelationType, TopologyEdgeV3
+from wattmosaic_engine.contracts import EdgeEvidence, RelationType, TopologyEdgeState, TopologyEdgeV3
 from wattmosaic_engine.core.topology_api import with_edge_health
 from wattmosaic_engine.electrical.topology_health import HealthBook
 from wattmosaic_engine.main import EngineCore
@@ -71,7 +71,7 @@ def test_topology_v3_rows_gain_health() -> None:
     edge = TopologyEdgeV3(
         edge_id="te-inf::feed::load", relation=RelationType.CONTAINS,
         source_endpoint_id="feed", target_endpoint_id="load",
-        lifecycle=EdgeLifecycleV3.CONFIRMED, declared_by="inference",
+        lifecycle=TopologyEdgeState.STRUCTURAL, declared_by="inference",
         evidence=EdgeEvidence(support=9, independent_causes=2), valid_from=T0, pinned=False,
     )
     result = {"edges": [

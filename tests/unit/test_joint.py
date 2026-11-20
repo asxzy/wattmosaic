@@ -28,9 +28,9 @@ import pytest
 from wattmosaic_engine.contracts import (
     CandidateHypothesis,
     DeltaPrior,
-    EdgeLifecycleV3,
     Observability,
     RelationType,
+    TopologyEdgeState,
 )
 from wattmosaic_engine.electrical.solver import (
     HUBER_DELTA,
@@ -881,7 +881,7 @@ def test_soft_alternatives_are_carried_not_applied() -> None:
                 source_endpoint_id="Circuit B",
                 target_endpoint_id="lamp",
                 relation=RelationType.CONTAINS,
-                lifecycle=EdgeLifecycleV3.PROVISIONAL,
+                lifecycle=TopologyEdgeState.PROVISIONAL,
             ),
         ),
     )

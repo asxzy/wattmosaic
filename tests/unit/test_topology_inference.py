@@ -11,8 +11,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from wattmosaic_engine.contracts import (
-    EdgeLifecycleV3,
     RelationType,
+    TopologyEdgeState,
     TopologyEdgeV3,
 )
 from wattmosaic_engine.electrical.topology_inference import (
@@ -64,7 +64,7 @@ def test_20_parent_only_steps_leave_support_conflict_and_lifecycle_unchanged():
                 relation=RelationType.CONTAINS,
                 source_endpoint_id="main",
                 target_endpoint_id="sub",
-                lifecycle=EdgeLifecycleV3.CONFIRMED,
+                lifecycle=TopologyEdgeState.STRUCTURAL,
                 declared_by="user",
                 beta=1.0,
                 beta_basis="unity",
@@ -89,7 +89,7 @@ def test_20_parent_only_steps_leave_support_conflict_and_lifecycle_unchanged():
     assert edge.evidence.conflict == 0
     assert edge.evidence.conflicting == 0
     assert edge.evidence.parent_only == 20
-    assert edge.lifecycle == EdgeLifecycleV3.CONFIRMED
+    assert edge.lifecycle == TopologyEdgeState.STRUCTURAL
 
 
 def test_a_parent_only_step_in_a_group_is_neutral():
@@ -100,7 +100,7 @@ def test_a_parent_only_step_in_a_group_is_neutral():
                 relation=RelationType.CONTAINS,
                 source_endpoint_id="main",
                 target_endpoint_id="sub",
-                lifecycle=EdgeLifecycleV3.CONFIRMED,
+                lifecycle=TopologyEdgeState.STRUCTURAL,
                 declared_by="user",
                 evidence=TopologyEvidence(support=3, conflict=0),
                 valid_from=T0,
@@ -132,7 +132,7 @@ def test_one_coincident_event_leaves_the_pair_candidate():
     view = _chain_view().observe_group(_delta("g1", {"main": 30.0, "sub": 30.0}, cause="c1"))
     edge = view.edge("main", "sub")
     assert edge is not None
-    assert edge.lifecycle == EdgeLifecycleV3.CANDIDATE
+    assert edge.lifecycle == TopologyEdgeState.CANDIDATE
     assert edge.evidence.support == 1
     assert edge.evidence.independent_causes == 1
 
@@ -149,7 +149,7 @@ def test_eight_mirrored_child_steps_from_two_causes_confirm():
     assert edge.evidence.support == 8
     assert edge.evidence.independent_causes == 2
     assert edge.evidence.conflict_ratio == 0.0
-    assert edge.lifecycle == EdgeLifecycleV3.CONFIRMED
+    assert edge.lifecycle == TopologyEdgeState.STRUCTURAL
 
 
 def test_three_support_from_two_causes_becomes_provisional():
@@ -158,7 +158,7 @@ def test_three_support_from_two_causes_becomes_provisional():
         view = view.observe_group(_delta(f"g{i}", {"main": 10.0, "sub": 10.0}, cause=cause))
     edge = view.edge("main", "sub")
     assert edge is not None
-    assert edge.lifecycle == EdgeLifecycleV3.PROVISIONAL
+    assert edge.lifecycle == TopologyEdgeState.PROVISIONAL
 
 
 def test_eight_support_from_one_cause_never_confirms():
@@ -171,7 +171,7 @@ def test_eight_support_from_one_cause_never_confirms():
     edge = view.edge("main", "sub")
     assert edge is not None
     assert edge.evidence.independent_causes == 1
-    assert edge.lifecycle != EdgeLifecycleV3.CONFIRMED
+    assert edge.lifecycle != TopologyEdgeState.STRUCTURAL
 
 
 def test_a_child_moving_without_the_parent_counts_against_the_edge():
@@ -184,7 +184,7 @@ def test_a_child_moving_without_the_parent_counts_against_the_edge():
     assert edge is not None
     assert edge.evidence.conflict == 8
     assert edge.evidence.support == 0
-    assert edge.lifecycle == EdgeLifecycleV3.CONFLICTED
+    assert edge.lifecycle == TopologyEdgeState.CONFLICTED
 
 
 def test_versions_proposed_and_promoted_on_confirmation():
@@ -224,7 +224,7 @@ def test_pinned_and_rejected_pairs_are_never_edited():
         relation=RelationType.CONTAINS,
         source_endpoint_id="main",
         target_endpoint_id="sub",
-        lifecycle=EdgeLifecycleV3.CONFIRMED,
+        lifecycle=TopologyEdgeState.STRUCTURAL,
         declared_by="user",
         evidence=TopologyEvidence(),
         valid_from=T0,
@@ -235,7 +235,7 @@ def test_pinned_and_rejected_pairs_are_never_edited():
         relation=RelationType.CONTAINS,
         source_endpoint_id="main",
         target_endpoint_id="other",
-        lifecycle=EdgeLifecycleV3.REJECTED,
+        lifecycle=TopologyEdgeState.REJECTED,
         declared_by="user",
         evidence=TopologyEvidence(),
         valid_from=T0,
@@ -285,7 +285,7 @@ def test_branch_ct_parents_can_be_inferred_from_delta_evidence():
         )
     edge = view.edge("main", "branch")
     assert edge is not None
-    assert edge.lifecycle == EdgeLifecycleV3.CONFIRMED
+    assert edge.lifecycle == TopologyEdgeState.STRUCTURAL
 
 
 def test_containment_gate_is_never_lowered():
@@ -309,7 +309,7 @@ def test_scaled_copy_refuses_to_promote():
         )
     edge = view.edge("main", "sub")
     assert edge is not None
-    assert edge.lifecycle != EdgeLifecycleV3.CONFIRMED
+    assert edge.lifecycle != TopologyEdgeState.STRUCTURAL
 
 
 def test_unknown_basis_refuses_to_promote():
@@ -321,7 +321,7 @@ def test_unknown_basis_refuses_to_promote():
         )
     edge = view.edge("main", "sub")
     assert edge is not None
-    assert edge.lifecycle != EdgeLifecycleV3.CONFIRMED
+    assert edge.lifecycle != TopologyEdgeState.STRUCTURAL
 
 
 def test_declared_phase_label_is_not_trusted():
@@ -347,7 +347,7 @@ def test_same_conductor_edge_is_emitted_and_not_structural():
     assert len(edges) >= 1
     edge = edges[0]
     assert edge.relation == RelationType.SAME_CONDUCTOR
-    assert edge.lifecycle == EdgeLifecycleV3.CANDIDATE
+    assert edge.lifecycle == TopologyEdgeState.CANDIDATE
     view = _view(edges=tuple(edges))
     assert view.contains_edges() == ()
 
@@ -382,7 +382,7 @@ def test_infer_topology_accepts_hb17_observation_records():
     assert view.edge("ct_sub", "ct_b") is not None
     assert view.edge("ct_main", "ct_c") is not None
     for edge in view.contains_edges():
-        assert edge.lifecycle in (EdgeLifecycleV3.CONFIRMED, EdgeLifecycleV3.CANDIDATE)
+        assert edge.lifecycle in (TopologyEdgeState.STRUCTURAL, TopologyEdgeState.CANDIDATE)
 
 
 def test_infer_topology_accepts_event_group_contracts():
@@ -438,7 +438,7 @@ def test_infer_topology_accepts_event_group_contracts():
     # groups from 2 causes still confirm.
     edge = view.edge("main", "sub")
     assert edge is not None
-    assert edge.lifecycle == EdgeLifecycleV3.CONFIRMED
+    assert edge.lifecycle == TopologyEdgeState.STRUCTURAL
     assert _containment_gate(None, None) is True
 
 

@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 from wattmosaic_engine.config.settings import EngineConfig
-from wattmosaic_engine.contracts import EdgeEvidence, EdgeLifecycleV3, RelationType, TopologyEdgeV3
+from wattmosaic_engine.contracts import EdgeEvidence, RelationType, TopologyEdgeState, TopologyEdgeV3
 from wattmosaic_engine.main import EngineCore
 from wattmosaic_engine.storage.database import Database
 
@@ -35,7 +35,7 @@ def _inferred(
     edge_id: str,
     parent: str,
     child: str,
-    lifecycle: EdgeLifecycleV3,
+    lifecycle: TopologyEdgeState,
     *,
     support: int = 0,
     conflict: int = 0,
@@ -87,7 +87,7 @@ def _version_edge(edge_id: str, parent: str, child: str) -> TopologyEdgeV3:
         relation=RelationType.CONTAINS,
         source_endpoint_id=parent,
         target_endpoint_id=child,
-        lifecycle=EdgeLifecycleV3.CONFIRMED,
+        lifecycle=TopologyEdgeState.STRUCTURAL,
         declared_by="user",
         beta=1.0,
         beta_basis="unity",
@@ -103,11 +103,11 @@ def test_inferred_edges_outside_version_are_suggestions(core: EngineCore) -> Non
     # outside it (the live-ledger behaviour).
     version_edge = _version_edge("v1", "ct_main", "ct_a")
     provisional = _inferred(
-        "inf-prov", "ct_main", "ct_b", EdgeLifecycleV3.PROVISIONAL,
+        "inf-prov", "ct_main", "ct_b", TopologyEdgeState.PROVISIONAL,
         support=4, conflict=0, independent_causes=2,
     )
     candidate = _inferred(
-        "inf-cand", "ct_main", "ct_c", EdgeLifecycleV3.CANDIDATE,
+        "inf-cand", "ct_main", "ct_c", TopologyEdgeState.CANDIDATE,
         support=1, conflict=0, independent_causes=1,
     )
     repo.upsert_edge(version_edge)
@@ -119,7 +119,7 @@ def test_inferred_edges_outside_version_are_suggestions(core: EngineCore) -> Non
     by_id = {e["edge_id"]: e for e in payload["edges"]}
     # Version edges are unchanged and marked as in the version.
     assert by_id["v1"]["in_version"] is True
-    assert by_id["v1"]["lifecycle"] == "confirmed"
+    assert by_id["v1"]["lifecycle"] == "structural"
     # The PROVISIONAL suggestion appears, marked as not in the version.
     assert by_id["inf-prov"]["in_version"] is False
     assert by_id["inf-prov"]["lifecycle"] == "provisional"
@@ -131,18 +131,18 @@ def test_inferred_edges_outside_version_are_suggestions(core: EngineCore) -> Non
 
     discovery = payload["discovery"]
     assert discovery["counts"] == {
-        "candidate": 1, "provisional": 1, "confirmed": 0, "conflicted": 0,
+        "candidate": 1, "provisional": 1, "structural": 0, "conflicted": 0,
     }
     assert discovery["thresholds"]["MIN_SUPPORT_PROVISIONAL"] == 3
     assert discovery["thresholds"]["MIN_INDEPENDENT_CAUSES"] == 2
-    assert discovery["thresholds"]["MIN_SUPPORT_CONFIRMED"] == 8
+    assert discovery["thresholds"]["MIN_SUPPORT_STRUCTURAL"] == 8
     top_pairs = discovery["top_pairs"]
     assert len(top_pairs) == 2
     assert top_pairs[0]["edge_id"] == "inf-prov"
     assert top_pairs[0]["support"] == 4
     assert top_pairs[0]["conflict"] == 0
     assert top_pairs[0]["independent_causes"] == 2
-    assert top_pairs[0]["needed"]["confirmed"]["support"] == 4
+    assert top_pairs[0]["needed"]["structural"]["support"] == 4
     cand = next(p for p in top_pairs if p["edge_id"] == "inf-cand")
     assert cand["needed"]["provisional"]["support"] == 2
     assert cand["needed"]["provisional"]["independent_causes"] == 1
@@ -152,11 +152,11 @@ def test_candidate_visible_only_when_lifecycles_requested(core: EngineCore) -> N
     repo = core.db.repos.topology_v3
     version_edge = _version_edge("v1", "ct_main", "ct_a")
     candidate = _inferred(
-        "inf-cand", "ct_main", "ct_c", EdgeLifecycleV3.CANDIDATE,
+        "inf-cand", "ct_main", "ct_c", TopologyEdgeState.CANDIDATE,
         support=1, independent_causes=1,
     )
     provisional = _inferred(
-        "inf-prov", "ct_main", "ct_b", EdgeLifecycleV3.PROVISIONAL,
+        "inf-prov", "ct_main", "ct_b", TopologyEdgeState.PROVISIONAL,
         support=3, independent_causes=2,
     )
     repo.upsert_edge(version_edge)
@@ -184,7 +184,7 @@ def test_read_is_pure(core: EngineCore) -> None:
     repo = core.db.repos.topology_v3
     version_edge = _version_edge("v1", "ct_main", "ct_a")
     provisional = _inferred(
-        "inf-prov", "ct_main", "ct_b", EdgeLifecycleV3.PROVISIONAL,
+        "inf-prov", "ct_main", "ct_b", TopologyEdgeState.PROVISIONAL,
         support=3, independent_causes=2,
     )
     repo.upsert_edge(version_edge)
@@ -203,12 +203,12 @@ def test_version_edges_lifecycle_filter_unchanged(core: EngineCore) -> None:
     repo = core.db.repos.topology_v3
     confirmed = _version_edge("v1", "ct_main", "ct_a")
     provisional_in_version = _inferred(
-        "v2", "ct_main", "ct_b", EdgeLifecycleV3.PROVISIONAL, support=3,
+        "v2", "ct_main", "ct_b", TopologyEdgeState.PROVISIONAL, support=3,
     )
     repo.upsert_edge(confirmed)
     repo.upsert_edge(provisional_in_version)
     _promote(core, [confirmed, provisional_in_version])
 
-    payload = core.topology_v3(lifecycles=["confirmed"])
+    payload = core.topology_v3(lifecycles=["structural"])
     version_edges = [e for e in payload["edges"] if e["in_version"]]
     assert [e["edge_id"] for e in version_edges] == ["v1"]

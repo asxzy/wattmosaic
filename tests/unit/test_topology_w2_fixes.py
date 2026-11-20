@@ -17,7 +17,7 @@ from __future__ import annotations
 import random
 from datetime import UTC, datetime, timedelta
 
-from wattmosaic_engine.contracts import EdgeEvidence, EdgeLifecycleV3, RelationType, TopologyEdgeV3
+from wattmosaic_engine.contracts import EdgeEvidence, RelationType, TopologyEdgeState, TopologyEdgeV3
 from wattmosaic_engine.electrical import topology_capacity as tc
 from wattmosaic_engine.electrical import topology_resolve as tr
 from wattmosaic_engine.electrical.topology_health import HealthBook
@@ -32,12 +32,12 @@ from wattmosaic_engine.electrical.topology_inference import (
 from wattmosaic_engine.electrical.topology_regression import RegressionFit
 
 T0 = datetime(2026, 11, 20, tzinfo=UTC)
-CONFIRMED = EdgeLifecycleV3.CONFIRMED
-PROVISIONAL = EdgeLifecycleV3.PROVISIONAL
-CANDIDATE = EdgeLifecycleV3.CANDIDATE
+STRUCTURAL = TopologyEdgeState.STRUCTURAL
+PROVISIONAL = TopologyEdgeState.PROVISIONAL
+CANDIDATE = TopologyEdgeState.CANDIDATE
 
 
-def _edge(parent: str, child: str, lifecycle: EdgeLifecycleV3, *, support: int = 20,
+def _edge(parent: str, child: str, lifecycle: TopologyEdgeState, *, support: int = 20,
           conflict: int = 0, declared_by: str = "inference") -> TopologyEdgeV3:
     return TopologyEdgeV3(
         edge_id=f"te-inf::{parent}::{child}",
@@ -140,8 +140,8 @@ def _structurally_confirmed() -> tuple[TopologyInferenceView, _Versions, dict[st
         _edge("main_2", "sub_2", PROVISIONAL, support=5),
     ]
     view = _quiet(_view(edges, versions=versions, require_direction=True), "g0", aligned=series)
-    assert _life(view, "main_2", "sub_1") == "confirmed"
-    assert _life(view, "main_1", "sub_2") == "confirmed"
+    assert _life(view, "main_2", "sub_1") == "structural"
+    assert _life(view, "main_1", "sub_2") == "structural"
     return view, versions, series
 
 
@@ -208,7 +208,7 @@ def test_unconfirm_hysteresis_band() -> None:
     series = _crossed()
     edges = [
         _edge("main_1", "sub_1", PROVISIONAL, support=5),
-        _edge("main_2", "sub_1", CONFIRMED, support=5),
+        _edge("main_2", "sub_1", STRUCTURAL, support=5),
     ]
     sticky = {("main_2", "sub_1")}
     decided = {"sub_1": "main_2"}
@@ -222,7 +222,7 @@ def test_unconfirm_hysteresis_band() -> None:
 
     # r 0.25 (below the 0.3 confirm bar) with a 0.05 margin: kept.
     kept = run(0.25, 0.20)
-    assert _life(kept.edges, "main_2", "sub_1") == "confirmed"
+    assert _life(kept.edges, "main_2", "sub_1") == "structural"
     assert kept.transitions == [] and kept.decided == decided
     # r below 0.2: un-confirmed.
     weak = run(0.15, 0.05)
@@ -243,7 +243,7 @@ def test_conflict_above_the_provisional_bound_drops_a_sticky_edge() -> None:
         edges=tuple(edges), causes_by_edge=view.causes_by_edge, at=T0,
         structure_decisions=dict(view.structure_decisions),
     ), "conflicted", aligned={})
-    assert _life(view, "main_2", "sub_1") != "confirmed"
+    assert _life(view, "main_2", "sub_1") != "structural"
     assert "sub_1" not in view.structure_decisions
 
 
@@ -258,15 +258,15 @@ def test_a_broken_edge_cannot_win_and_demote_its_rival() -> None:
     # as sub_1's parent: the rivalry is decided by health, not capacity.
     series["main_1"] = [v + 2500.0 for v in series["main_1"]]
     edges = [
-        _edge("main_1", "sub_1", CONFIRMED, support=30),
-        _edge("main_2", "sub_1", CONFIRMED, support=30),
+        _edge("main_1", "sub_1", STRUCTURAL, support=30),
+        _edge("main_2", "sub_1", STRUCTURAL, support=30),
     ]
     book = HealthBook()
     for i in range(6):
         book = book.record("main_2", "sub_1", "conflict", T0 + timedelta(seconds=i))
     view = _quiet(_view(edges, health=book), "g", aligned=series)
     assert _life(view, "main_2", "sub_1") == "provisional"
-    assert _life(view, "main_1", "sub_1") == "confirmed"
+    assert _life(view, "main_1", "sub_1") == "structural"
 
 
 # --------------------------------------------------------------------------- #
@@ -294,8 +294,8 @@ def test_tub_legs_under_both_mains_are_a_pair_not_a_duplicate() -> None:
     assert ("leg_a", "leg_b") in {(a, b) for a, b, _r, _o in analysis.duplicates}
     assert analysis.symmetric_twins("leg_a", "leg_b")
     edges = [
-        _edge("main_1", "leg_a", CONFIRMED),
-        _edge("main_1", "leg_b", CONFIRMED),
+        _edge("main_1", "leg_a", STRUCTURAL),
+        _edge("main_1", "leg_b", STRUCTURAL),
         _edge("main_2", "leg_a", PROVISIONAL, support=6),
         _edge("main_2", "leg_b", PROVISIONAL, support=6),
         # Equal deltas also give the legs (soft) edges both ways: no direction.
@@ -307,7 +307,7 @@ def test_tub_legs_under_both_mains_are_a_pair_not_a_duplicate() -> None:
     assert links.duplicates == ()
     resolved, _transitions = tr.resolve_structure(edges, series, analysis=analysis)
     assert sorted(_life(resolved, "main_1", leg) for leg in ("leg_a", "leg_b")) == [
-        "confirmed", "provisional"
+        "provisional", "structural"
     ]
 
 
@@ -332,12 +332,12 @@ def test_a_second_meter_on_a_feed_is_a_duplicate_never_split_like_a_leg_pair() -
     series = _feeder()
     analysis = tr.analyse(series)
     edges = [
-        _edge("main_2", "feed", CONFIRMED),
-        _edge("main_2", "feed_meter", CONFIRMED),
+        _edge("main_2", "feed", STRUCTURAL),
+        _edge("main_2", "feed_meter", STRUCTURAL),
         _edge("main_1", "feed", PROVISIONAL, support=6),
         _edge("main_1", "feed_meter", PROVISIONAL, support=6),
-        _edge("feed", "load", CONFIRMED),
-        _edge("feed", "feed_meter", CONFIRMED),
+        _edge("feed", "load", STRUCTURAL),
+        _edge("feed", "feed_meter", STRUCTURAL),
         _edge("feed_meter", "feed", PROVISIONAL, support=6),
     ]
     links = analysis.classify(edges)
@@ -345,11 +345,11 @@ def test_a_second_meter_on_a_feed_is_a_duplicate_never_split_like_a_leg_pair() -
     assert links.pairs == ()
     resolved, _transitions = tr.resolve_structure(edges, series, analysis=analysis)
     # Not split across the mains like a 240 V pair: both stay under main_2.
-    assert _life(resolved, "main_2", "feed") == "confirmed"
-    assert _life(resolved, "main_2", "feed_meter") == "confirmed"
+    assert _life(resolved, "main_2", "feed") == "structural"
+    assert _life(resolved, "main_2", "feed_meter") == "structural"
     # One wire measured twice is never parent and child.
-    assert _life(resolved, "feed", "feed_meter") != "confirmed"
-    assert _life(resolved, "feed_meter", "feed") != "confirmed"
+    assert _life(resolved, "feed", "feed_meter") != "structural"
+    assert _life(resolved, "feed_meter", "feed") != "structural"
 
 
 def test_a_circuit_with_one_dominant_child_stays_its_parent() -> None:
@@ -366,28 +366,28 @@ def test_a_circuit_with_one_dominant_child_stays_its_parent() -> None:
     assert ("appliance", "circuit") in {(a, b) for a, b, _r, _o in analysis.duplicates}
     # ... but the circuit steps on its own too: the reverse fit differs.
     assert not analysis.symmetric_twins("appliance", "circuit")
-    edges = [_edge("circuit", "appliance", CONFIRMED)]
+    edges = [_edge("circuit", "appliance", STRUCTURAL)]
     resolved, transitions = tr.resolve_structure(edges, series, analysis=analysis)
-    assert _life(resolved, "circuit", "appliance") == "confirmed", transitions
+    assert _life(resolved, "circuit", "appliance") == "structural", transitions
     assert analysis.classify(edges).duplicates == ()
     assert analysis.classify(edges).pairs == ()
 
 
 # --------------------------------------------------------------------------- #
-# Findings 6 + 7: acyclicity and no CANDIDATE -> CONFIRMED in one settle.
+# Findings 6 + 7: acyclicity and no CANDIDATE -> STRUCTURAL in one settle.
 # --------------------------------------------------------------------------- #
 
 
 def test_no_structural_confirmation_against_a_user_declared_reverse_edge() -> None:
     series = _crossed()
     edges = [
-        _edge("sub_1", "main_2", CONFIRMED, declared_by="user"),
+        _edge("sub_1", "main_2", STRUCTURAL, declared_by="user"),
         _edge("main_1", "sub_1", PROVISIONAL, support=5),
         _edge("main_2", "sub_1", PROVISIONAL, support=5),
     ]
     resolved, _transitions = tr.resolve_structure(edges, series)
-    assert _life(resolved, "main_2", "sub_1") != "confirmed"
-    assert _life(resolved, "sub_1", "main_2") == "confirmed"
+    assert _life(resolved, "main_2", "sub_1") != "structural"
+    assert _life(resolved, "sub_1", "main_2") == "structural"
 
 
 def test_no_structural_confirmation_against_the_direction_cap() -> None:
@@ -399,7 +399,7 @@ def test_no_structural_confirmation_against_the_direction_cap() -> None:
         _edge("sub_1", "main_2", PROVISIONAL, support=5),
     ]
     view = _quiet(_view(edges, require_direction=True), "g", aligned=series)
-    assert _life(view, "main_2", "sub_1") != "confirmed"
+    assert _life(view, "main_2", "sub_1") != "structural"
 
 
 def test_a_candidate_is_never_confirmed_structurally_in_one_settle() -> None:
@@ -411,7 +411,7 @@ def test_a_candidate_is_never_confirmed_structurally_in_one_settle() -> None:
     view = _quiet(_view(edges), "g0", aligned=series)
     assert _life(view, "main_2", "sub_1") == "provisional"
     view = _quiet(view, "g1")
-    assert _life(view, "main_2", "sub_1") == "confirmed"
+    assert _life(view, "main_2", "sub_1") == "structural"
 
 
 # --------------------------------------------------------------------------- #
@@ -486,7 +486,7 @@ def test_replay_pass_two_skips_parents_absent_from_a_group() -> None:
     learned, stats = learn_topology_from_history(seed, history)
     assert stats.passes == 2
     view = seed.merge_evidence(learned, levels={"grand": 900.0, "other": 200.0, "branch": 120.0})
-    assert _life(view, "grand", "branch") == "confirmed"
+    assert _life(view, "grand", "branch") == "structural"
 
 
 # --------------------------------------------------------------------------- #
@@ -495,18 +495,18 @@ def test_replay_pass_two_skips_parents_absent_from_a_group() -> None:
 
 
 def test_the_second_leg_of_a_pair_is_confirmed_under_the_sibling_main() -> None:
-    """Live: CT1 CONFIRMED under L1, CT2 left PROVISIONAL under both mains."""
+    """Live: CT1 STRUCTURAL under L1, CT2 left PROVISIONAL under both mains."""
     assert tr.PAIR_MAX_CONFLICT_RATIO == CONFLICT_RATIO_PROVISIONAL
     series = _hot_tub()
     edges = [
-        _edge("main_1", "leg_a", CONFIRMED, support=300, conflict=4),
+        _edge("main_1", "leg_a", STRUCTURAL, support=300, conflict=4),
         _edge("main_1", "leg_b", PROVISIONAL, support=289, conflict=6),
         _edge("main_2", "leg_a", PROVISIONAL, support=300, conflict=25),
         _edge("main_2", "leg_b", PROVISIONAL, support=312, conflict=25),
     ]
     view = _quiet(_view(edges, require_direction=True), "g0", aligned=series)
-    assert _life(view, "main_1", "leg_a") == "confirmed"
-    assert _life(view, "main_2", "leg_b") == "confirmed"
+    assert _life(view, "main_1", "leg_a") == "structural"
+    assert _life(view, "main_2", "leg_b") == "structural"
     assert _life(view, "main_1", "leg_b") == "provisional"
     assert _life(view, "main_2", "leg_a") == "provisional"
     settled = _lifecycles(view)
@@ -587,8 +587,8 @@ def test_crossed_sub_panels_confirm_under_unsynchronised_sampling() -> None:
         _edge("main_l2", "sub_l2", PROVISIONAL, support=800, conflict=60),
     ]
     resolved, transitions = tr.resolve_structure(edges, series, analysis=analysis)
-    assert _life(resolved, "main_l2", "sub_l1") == "confirmed", transitions
-    assert _life(resolved, "main_l1", "sub_l2") == "confirmed", transitions
+    assert _life(resolved, "main_l2", "sub_l1") == "structural", transitions
+    assert _life(resolved, "main_l1", "sub_l2") == "structural", transitions
     assert _life(resolved, "main_l1", "sub_l1") == "provisional"
     assert _life(resolved, "main_l2", "sub_l2") == "provisional"
 
@@ -649,7 +649,7 @@ def test_a_replay_merge_keeps_no_coincidence_level_noise_rows() -> None:
     assert noise == []
     confirmed = {
         (e.source_endpoint_id, e.target_endpoint_id)
-        for e in merged.edges if _life(merged, e.source_endpoint_id, e.target_endpoint_id) == "confirmed"
+        for e in merged.edges if _life(merged, e.source_endpoint_id, e.target_endpoint_id) == "structural"
     }
     # The real wiring is still learned: every branch under its main.
     expected = {("main_a" if i % 2 else "main_b", f"b{i}") for i in range(12)}

@@ -343,9 +343,9 @@ def _observability_and_status(
         status = MappingStatus.RETIRED
     elif lifecycle_value == "suspected_change":
         status = MappingStatus.SUSPECTED_CHANGE
-    elif lifecycle_value == "confirmed":
-        # A CONFIRMED CONTAINS path makes the EXPECTED ancestor mapping
-        # CONFIRMED too (design §8: ESTIMATED + CONFIRMED -> CONFIRMED_INFERRED).
+    elif lifecycle_value in ("structural", "confirmed"):
+        # A STRUCTURAL (legacy "confirmed") CONTAINS path makes the EXPECTED
+        # ancestor mapping CONFIRMED too (design §8).
         status = MappingStatus.CONFIRMED
     else:
         status = MappingStatus.UNKNOWN

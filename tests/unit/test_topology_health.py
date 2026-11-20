@@ -9,8 +9,8 @@ from types import SimpleNamespace
 import pytest
 from wattmosaic_engine.contracts import (
     EdgeEvidence,
-    EdgeLifecycleV3,
     RelationType,
+    TopologyEdgeState,
     TopologyEdgeV3,
 )
 from wattmosaic_engine.electrical.topology_health import (
@@ -90,7 +90,7 @@ def _edge(
     edge_id: str,
     *,
     relation: object = RelationType.CONTAINS,
-    lifecycle: object = EdgeLifecycleV3.CONFIRMED,
+    lifecycle: object = TopologyEdgeState.STRUCTURAL,
     declared_by: str = "inference",
     pinned: bool = False,
     parent: str = "p",
@@ -115,12 +115,12 @@ def test_demotions_only_lists_confirmed_inferred_unpinned_broken_edges() -> None
         _edge("good"),                                              # demote
         _edge("user", declared_by="user", child="user"),             # user-declared
         _edge("pinned", pinned=True, child="pinned"),              # pinned
-        _edge("candidate", lifecycle=EdgeLifecycleV3.CANDIDATE),    # not confirmed
+        _edge("candidate", lifecycle=TopologyEdgeState.CANDIDATE),    # not confirmed
         _edge("other-rel", relation=RelationType.SHARED_LOAD),      # not contains
         SimpleNamespace(
             edge_id="ns-good",
             relation="contains",
-            lifecycle="confirmed",
+            lifecycle="structural",
             declared_by="inference",
             pinned=False,
             source_endpoint_id="p",

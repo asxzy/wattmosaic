@@ -35,7 +35,6 @@ import pytest
 from wattmosaic_engine.contracts import (
     DataQualityReport,
     DeviceEstimate,
-    EdgeLifecycleV3,
     EstimateStatus,
     EventGroupStatus,
     IdentifiabilityStatus,
@@ -49,6 +48,7 @@ from wattmosaic_engine.contracts import (
     ReaderResidualPoint,
     RelationType,
     StepClass,
+    TopologyEdgeState,
     TopologyEdgeV3,
     VersionTriple,
 )
@@ -99,7 +99,7 @@ def _edge(relation: RelationType, source: str, target: str) -> TopologyEdgeV3:
         relation=relation,
         source_endpoint_id=source,
         target_endpoint_id=target,
-        lifecycle=EdgeLifecycleV3.CONFIRMED,
+        lifecycle=TopologyEdgeState.STRUCTURAL,
         declared_by="user",
         beta=1.0,
         beta_basis="unity",

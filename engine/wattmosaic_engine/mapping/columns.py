@@ -29,8 +29,8 @@ from typing import Any
 from wattmosaic_engine.contracts import (
     ColumnAnnotation,
     ColumnNode,
-    EdgeLifecycleV3,
     RelationType,
+    TopologyEdgeState,
 )
 
 __all__: list[str] = ["build_columns"]
@@ -227,7 +227,7 @@ def _annotations_for(
         kind: str | None = _SECONDARY_KINDS.get(rel)
         if kind is None and (
             rel == RelationType.CONTAINS.value
-            and life == EdgeLifecycleV3.PROVISIONAL.value
+            and life == TopologyEdgeState.PROVISIONAL.value
         ):
             kind = "CONTAINS"
         if kind is None:

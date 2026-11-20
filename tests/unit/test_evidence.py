@@ -22,7 +22,6 @@ from wattmosaic_engine.contracts import (
     CandidateHypothesis,
     CandidateSource,
     DeltaPrior,
-    EdgeLifecycleV3,
     EventGroup,
     EventGroupStatus,
     EvidenceRef,
@@ -31,6 +30,7 @@ from wattmosaic_engine.contracts import (
     ReaderDelta,
     SubEvent,
     SubEventKind,
+    TopologyEdgeState,
     VersionTriple,
 )
 from wattmosaic_engine.inference.evidence import (
@@ -371,7 +371,7 @@ def test_off_transition_negative_delta_is_not_hard_rejected() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _operator_with_edge_lifecycle(lifecycle: EdgeLifecycleV3) -> ObservationOperator:
+def _operator_with_edge_lifecycle(lifecycle: TopologyEdgeState) -> ObservationOperator:
     rows = (RowMeta(reader_id=READER, kind="reader", sigma_w=10.0, sigma_inflation=1.0),)
     entries = {
         (0, 0): EntryMeta(
@@ -398,13 +398,13 @@ def test_provisional_edge_is_soft_and_confirmed_is_stronger() -> None:
     group = _group()
     inputs_conf = EvidenceInputs(
         group=group,
-        operator=_operator_with_edge_lifecycle(EdgeLifecycleV3.CONFIRMED),
+        operator=_operator_with_edge_lifecycle(TopologyEdgeState.STRUCTURAL),
         models=_models(),
         samples_by_reader={READER: _samples(0.0)},
     )
     inputs_prov = EvidenceInputs(
         group=group,
-        operator=_operator_with_edge_lifecycle(EdgeLifecycleV3.PROVISIONAL),
+        operator=_operator_with_edge_lifecycle(TopologyEdgeState.PROVISIONAL),
         models=_models(),
         samples_by_reader={READER: _samples(0.0)},
     )

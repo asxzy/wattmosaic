@@ -33,6 +33,7 @@ from wattmosaic_engine.contracts import (
     MappingEdge,
     Observability,
     RelationType,
+    TopologyEdgeState,
     TopologyEdgeV3,
 )
 from wattmosaic_engine.core.topology_api import TopologyService
@@ -58,7 +59,7 @@ def _edge(
     parent: str,
     child: str,
     *,
-    lifecycle: EdgeLifecycleV3 = EdgeLifecycleV3.CONFIRMED,
+    lifecycle: TopologyEdgeState = TopologyEdgeState.STRUCTURAL,
     declared_by: str = "migration",
     at: datetime = T0,
     pinned: bool = False,
@@ -168,7 +169,7 @@ def test_declaration_records_a_declared_configuration_event(env) -> None:
 def test_rejected_inferred_edge_survives_inference_rerun(env) -> None:
     db, clock, service = env
     repo = db.repos.topology_v3
-    inferred = _edge("inf-1", "main", "ct_a", lifecycle=EdgeLifecycleV3.PROVISIONAL, declared_by="inference")
+    inferred = _edge("inf-1", "main", "ct_a", lifecycle=TopologyEdgeState.PROVISIONAL, declared_by="inference")
     repo.upsert_edge(inferred)
     vid = service.versions.propose_topology([inferred], None)
     service.versions.promote_topology(vid, "seed inferred edge")
@@ -176,7 +177,7 @@ def test_rejected_inferred_edge_survives_inference_rerun(env) -> None:
     rej = service.reject("inf-1")
     assert rej["version_id"] != vid
     history = repo.edge_history("inf-1")
-    assert history[-1]["lifecycle"] == EdgeLifecycleV3.REJECTED.value
+    assert history[-1]["lifecycle"] == TopologyEdgeState.REJECTED.value
     assert history[-1]["valid_until"] is not None
 
     # A fresh view built from the stored edges treats the rejected edge as gone.
@@ -187,7 +188,7 @@ def test_rejected_inferred_edge_survives_inference_rerun(env) -> None:
 def test_pin_makes_an_inferred_edge_structural(env) -> None:
     db, _clock, service = env
     repo = db.repos.topology_v3
-    inferred = _edge("inf-1", "main", "ct_a", lifecycle=EdgeLifecycleV3.CANDIDATE, declared_by="inference")
+    inferred = _edge("inf-1", "main", "ct_a", lifecycle=TopologyEdgeState.CANDIDATE, declared_by="inference")
     repo.upsert_edge(inferred)
     vid = service.versions.propose_topology([inferred], None)
     service.versions.promote_topology(vid, "seed")
@@ -195,7 +196,7 @@ def test_pin_makes_an_inferred_edge_structural(env) -> None:
     assert pin["version_id"] != vid
     row = repo.edge_history("inf-1")[-1]
     assert row["pinned"] == 1
-    assert row["lifecycle"] == EdgeLifecycleV3.CONFIRMED.value
+    assert row["lifecycle"] == TopologyEdgeState.STRUCTURAL.value
 
 
 # --------------------------------------------------------------------------- #
@@ -208,7 +209,7 @@ def test_payload_exposes_provisional_edges_and_primary_tree(env) -> None:
     repo = db.repos.topology_v3
     confirmed = _edge("e1", "main", "ct_a", declared_by="user")
     provisional = _edge(
-        "e2", "main", "ct_b", lifecycle=EdgeLifecycleV3.PROVISIONAL, declared_by="inference"
+        "e2", "main", "ct_b", lifecycle=TopologyEdgeState.PROVISIONAL, declared_by="inference"
     )
     repo.upsert_edge(confirmed)
     repo.upsert_edge(provisional)
@@ -306,7 +307,7 @@ def test_edges_confirmed_for_is_per_subject(env) -> None:
         "e2",
         "main",
         "ct_b",
-        lifecycle=EdgeLifecycleV3.PROVISIONAL,
+        lifecycle=TopologyEdgeState.PROVISIONAL,
         declared_by="inference",
     )
     vid = service.versions.propose_topology([confirmed, provisional], None)

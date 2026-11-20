@@ -396,5 +396,5 @@
   "title": "DeviceEstimate",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/device_estimate_v3.json",
-  "x-contract-version": "3.0.0"
+  "x-contract-version": "4.0.0"
 }

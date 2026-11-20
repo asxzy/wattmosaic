@@ -489,10 +489,10 @@ def _build_report(
     thresholds = {
         "MIN_SUPPORT_CANDIDATE": ti.MIN_SUPPORT_CANDIDATE,
         "MIN_SUPPORT_PROVISIONAL": ti.MIN_SUPPORT_PROVISIONAL,
-        "MIN_SUPPORT_CONFIRMED": ti.MIN_SUPPORT_CONFIRMED,
+        "MIN_SUPPORT_STRUCTURAL": ti.MIN_SUPPORT_STRUCTURAL,
         "MIN_INDEPENDENT_CAUSES": ti.MIN_INDEPENDENT_CAUSES,
         "CONFLICT_RATIO_PROVISIONAL": ti.CONFLICT_RATIO_PROVISIONAL,
-        "CONFLICT_RATIO_CONFIRMED": ti.CONFLICT_RATIO_CONFIRMED,
+        "CONFLICT_RATIO_STRUCTURAL": ti.CONFLICT_RATIO_STRUCTURAL,
         "COINCIDENCE_WINDOW_S": COINCIDENCE_WINDOW_S,
     }
     top_pairs: list[dict[str, Any]] = []
@@ -506,8 +506,8 @@ def _build_report(
             short.append(f"support {pair['support']}/{ti.MIN_SUPPORT_PROVISIONAL} (PROVISIONAL)")
         if ratio >= ti.CONFLICT_RATIO_PROVISIONAL:
             short.append(f"conflict_ratio {ratio:.2f} >= {ti.CONFLICT_RATIO_PROVISIONAL}")
-        if pair["support"] < ti.MIN_SUPPORT_CONFIRMED:
-            short.append(f"support {pair['support']}/{ti.MIN_SUPPORT_CONFIRMED} (CONFIRMED)")
+        if pair["support"] < ti.MIN_SUPPORT_STRUCTURAL:
+            short.append(f"support {pair['support']}/{ti.MIN_SUPPORT_STRUCTURAL} (STRUCTURAL)")
         top_pairs.append({**pair, "conflict_ratio": round(ratio, 4), "short_of": short})
 
     snapshot = core._v3_snapshot()

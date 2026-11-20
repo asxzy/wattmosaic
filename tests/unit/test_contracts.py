@@ -51,7 +51,7 @@ def test_contract_version_is_3_0_0() -> None:
     Other version assertions compare against this exported constant so they
     stay correct across future additive bumps; the pin lives here.
     """
-    assert contracts.CONTRACT_VERSION == "3.0.0"
+    assert contracts.CONTRACT_VERSION == "4.0.0"
 
 
 def test_schema_files_match_contract_version() -> None:

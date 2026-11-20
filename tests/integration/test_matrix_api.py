@@ -43,7 +43,6 @@ from wattmosaic_engine.contracts import (
     CellVisual,
     ConfidenceVectorV3,
     EdgeEvidence,
-    EdgeLifecycleV3,
     EstimateStatus,
     IdentifiabilityStatus,
     MappingCell,
@@ -54,6 +53,7 @@ from wattmosaic_engine.contracts import (
     RelationType,
     RowDetail,
     RowKind,
+    TopologyEdgeState,
     TopologyEdgeV3,
 )
 from wattmosaic_engine.core.mapping_api import MappingApiMixin
@@ -182,7 +182,7 @@ def _seed_hb17_topology(db: Database) -> None:
                 relation=RelationType.CONTAINS,
                 source_endpoint_id=parent,
                 target_endpoint_id=child,
-                lifecycle=EdgeLifecycleV3.CONFIRMED,
+                lifecycle=TopologyEdgeState.STRUCTURAL,
                 declared_by="user",
                 evidence=EdgeEvidence(),
                 valid_from=_ORIGIN,

@@ -16,9 +16,9 @@ from ..api.facade import InvalidRequest, NotFound
 from ..contracts import (
     ConfigurationEvent,
     EdgeEvidence,
-    EdgeLifecycleV3,
     EndpointConfigRevision,
     RelationType,
+    TopologyEdgeState,
     TopologyEdgeV3,
 )
 from ..devices.service import endpoints_from_repo
@@ -331,7 +331,7 @@ def declare_edge(
         relation=relation_type,
         source_endpoint_id=source,
         target_endpoint_id=target,
-        lifecycle=EdgeLifecycleV3.CONFIRMED,
+        lifecycle=TopologyEdgeState.STRUCTURAL,
         declared_by="user",
         evidence=EdgeEvidence(),
         valid_from=at,
@@ -367,7 +367,7 @@ def _set_edge_authority(service: Any, edge_id: str, *, pin: bool) -> dict[str, A
     Both operations record a DECLARED configuration event and promote a version
     carrying the resulting edge set.  A rejection closes the edge with
     ``valid_until`` and moves it to REJECTED; a pin flips ``pinned`` and keeps it
-    CONFIRMED.  T1's override rule makes a pinned/rejected user edge survive a
+    STRUCTURAL.  T1's override rule makes a pinned/rejected user edge survive a
     later inference re-run (DEC-10).
     """
     at = _now(service)
@@ -379,13 +379,13 @@ def _set_edge_authority(service: Any, edge_id: str, *, pin: bool) -> dict[str, A
     edge = TopologyEdgeV3(**current)
 
     if pin:
-        updated = edge.model_copy(update={"pinned": True, "lifecycle": EdgeLifecycleV3.CONFIRMED})
+        updated = edge.model_copy(update={"pinned": True, "lifecycle": TopologyEdgeState.STRUCTURAL})
     else:
         # Reject moves the edge to REJECTED and closes its validity interval.
         if current.get("valid_until") is None:
             current["valid_until"] = at
         updated = edge.model_copy(
-            update={"valid_until": at, "lifecycle": EdgeLifecycleV3.REJECTED}
+            update={"valid_until": at, "lifecycle": TopologyEdgeState.REJECTED}
         )
         repo.upsert_edge(updated)
 
@@ -433,16 +433,16 @@ def _display_node_dict(node: DisplayNode) -> dict[str, Any]:
 # ``?lifecycles=candidate``.
 _SUGGESTION_LIFECYCLES = frozenset(
     {
-        EdgeLifecycleV3.PROVISIONAL.value,
-        EdgeLifecycleV3.CONFIRMED.value,
-        EdgeLifecycleV3.CONFLICTED.value,
+        TopologyEdgeState.PROVISIONAL.value,
+        TopologyEdgeState.STRUCTURAL.value,
+        TopologyEdgeState.CONFLICTED.value,
     }
 )
 _SUMMARY_LIFECYCLES = (
-    EdgeLifecycleV3.CANDIDATE.value,
-    EdgeLifecycleV3.PROVISIONAL.value,
-    EdgeLifecycleV3.CONFIRMED.value,
-    EdgeLifecycleV3.CONFLICTED.value,
+    TopologyEdgeState.CANDIDATE.value,
+    TopologyEdgeState.PROVISIONAL.value,
+    TopologyEdgeState.STRUCTURAL.value,
+    TopologyEdgeState.CONFLICTED.value,
 )
 
 
@@ -466,12 +466,12 @@ def _discovery_summary(stored_inferred: Sequence[TopologyEdgeV3]) -> dict[str, A
 
     The thresholds are reported from the engine's own normative constants so a
     caller can see what is still needed to move a pair to PROVISIONAL or
-    CONFIRMED.  Nothing here writes or promotes an edge.
+    STRUCTURAL.  Nothing here writes or promotes an edge.
     """
     from ..electrical.topology_inference import (
         MIN_INDEPENDENT_CAUSES,
-        MIN_SUPPORT_CONFIRMED,
         MIN_SUPPORT_PROVISIONAL,
+        MIN_SUPPORT_STRUCTURAL,
     )
 
     by_lifecycle = {name: 0 for name in _SUMMARY_LIFECYCLES}
@@ -481,8 +481,8 @@ def _discovery_summary(stored_inferred: Sequence[TopologyEdgeV3]) -> dict[str, A
         if lifecycle in by_lifecycle:
             by_lifecycle[lifecycle] += 1
         if lifecycle not in (
-            EdgeLifecycleV3.CANDIDATE.value,
-            EdgeLifecycleV3.PROVISIONAL.value,
+            TopologyEdgeState.CANDIDATE.value,
+            TopologyEdgeState.PROVISIONAL.value,
         ):
             continue
         counts = _evidence_counts(edge)
@@ -501,8 +501,8 @@ def _discovery_summary(stored_inferred: Sequence[TopologyEdgeV3]) -> dict[str, A
                         "support": max(0, MIN_SUPPORT_PROVISIONAL - support),
                         "independent_causes": max(0, MIN_INDEPENDENT_CAUSES - independent),
                     },
-                    "confirmed": {
-                        "support": max(0, MIN_SUPPORT_CONFIRMED - support),
+                    "structural": {
+                        "support": max(0, MIN_SUPPORT_STRUCTURAL - support),
                         "independent_causes": max(0, MIN_INDEPENDENT_CAUSES - independent),
                     },
                 },
@@ -515,7 +515,7 @@ def _discovery_summary(stored_inferred: Sequence[TopologyEdgeV3]) -> dict[str, A
         "thresholds": {
             "MIN_SUPPORT_PROVISIONAL": MIN_SUPPORT_PROVISIONAL,
             "MIN_INDEPENDENT_CAUSES": MIN_INDEPENDENT_CAUSES,
-            "MIN_SUPPORT_CONFIRMED": MIN_SUPPORT_CONFIRMED,
+            "MIN_SUPPORT_STRUCTURAL": MIN_SUPPORT_STRUCTURAL,
         },
     }
 
@@ -525,7 +525,7 @@ def topology_v3(service: Any, *, lifecycles: Sequence[str] | None = None) -> dic
 
     The active version's edges are returned unchanged (each with
     ``in_version: true``).  Stored inferred edges that are *not* referenced by
-    the active version and whose lifecycle is PROVISIONAL, CONFIRMED or
+    the active version and whose lifecycle is PROVISIONAL, STRUCTURAL or
     CONFLICTED are appended as soft suggestions with ``in_version: false`` —
     this read never promotes them into a version.  A single-event CANDIDATE pair
     is hidden unless the caller passes ``lifecycles`` containing ``candidate``
@@ -555,7 +555,7 @@ def topology_v3(service: Any, *, lifecycles: Sequence[str] | None = None) -> dic
     ]
     eligible = set(_SUGGESTION_LIFECYCLES)
     if wanted is not None and "candidate" in wanted:
-        eligible = eligible | {EdgeLifecycleV3.CANDIDATE.value}
+        eligible = eligible | {TopologyEdgeState.CANDIDATE.value}
     for edge in stored_inferred:
         lifecycle = _value(edge.lifecycle)
         if lifecycle not in eligible:
@@ -578,7 +578,7 @@ def topology_v3(service: Any, *, lifecycles: Sequence[str] | None = None) -> dic
 def with_edge_health(result: dict[str, Any], book: Any) -> dict[str, Any]:
     """Add ``health`` (M3 ``as_dict`` minus parent/child) to CONTAINS edge rows.
 
-    Every CONFIRMED CONTAINS row carries ``health``: an edge with no decisive
+    Every STRUCTURAL CONTAINS row carries ``health``: an edge with no decisive
     verdict yet (its child has not stepped since it was confirmed -- live, a
     hot tub is off 97 % of the time, and a busy main often reads a child's step
     as neutral) shows an empty window with status ``unknown`` instead of no
@@ -593,7 +593,7 @@ def with_edge_health(result: dict[str, Any], book: Any) -> dict[str, Any]:
         parent, child = row.get("source_endpoint_id"), row.get("target_endpoint_id")
         entry = entries.get((parent, child))
         if entry is None:
-            if row.get("lifecycle") != EdgeLifecycleV3.CONFIRMED.value or not parent or not child:
+            if row.get("lifecycle") not in (TopologyEdgeState.STRUCTURAL.value, "confirmed") or not parent or not child:
                 continue
             entry = EdgeHealth(parent=str(parent), child=str(child))
         health = entry.as_dict()
@@ -700,8 +700,8 @@ def edit_endpoint_config(
 def edges_confirmed_for(service: Any, subject_id: str) -> bool:
     """Per-subject learning gate (replaces the aggregate topology flag, T11).
 
-    A subject may learn when every CONTAINS edge on the CONFIRMED chain from the
-    subject's mapped reader up through its ancestors is CONFIRMED.  When the
+    A subject may learn when every CONTAINS edge on the STRUCTURAL chain from the
+    subject's mapped reader up through its ancestors is STRUCTURAL.  When the
     subject has no mapped reader, or no structural edges at all, the gate is
     open: there is no *contradictory* structure to block learning.  A subject
     with a CANDIDATE or PROVISIONAL parent is not yet established.
@@ -725,7 +725,7 @@ def edges_confirmed_for(service: Any, subject_id: str) -> bool:
         return True
 
     # Walk the structural chain from the mapped reader upward.  Every parent
-    # edge must be CONFIRMED; a softer lifecycle on the path closes the gate.
+    # edge must be STRUCTURAL; a softer lifecycle on the path closes the gate.
     current = mapped
     seen = {current}
     while True:
@@ -734,14 +734,14 @@ def edges_confirmed_for(service: Any, subject_id: str) -> bool:
             for e in edges
             if e.target_endpoint_id == current
             and _value(e.relation) == "contains"
-            and e.lifecycle not in (EdgeLifecycleV3.REJECTED, EdgeLifecycleV3.RETIRED)
+            and e.lifecycle not in (TopologyEdgeState.REJECTED, TopologyEdgeState.RETIRED)
         ]
         if not parent_edges:
             return True
-        if not any(e.lifecycle == EdgeLifecycleV3.CONFIRMED for e in parent_edges):
+        if not any(e.lifecycle == TopologyEdgeState.STRUCTURAL for e in parent_edges):
             return False
-        confirmed = next(e for e in parent_edges if e.lifecycle == EdgeLifecycleV3.CONFIRMED)
-        current = confirmed.source_endpoint_id
+        structural = next(e for e in parent_edges if e.lifecycle == TopologyEdgeState.STRUCTURAL)
+        current = structural.source_endpoint_id
         if current in seen:
             return True
         seen.add(current)
@@ -828,7 +828,7 @@ class TopologyApiMixin:
         ``configured`` means at least one v3 :class:`MeasurementEndpoint` exists:
         a fresh install with none answers every probe and infers nothing, so it
         must not report ``ok``.  ``status`` is ``confirmed`` once the active
-        topology version holds a CONFIRMED (or pinned) edge, else ``candidate``.
+        topology version holds a STRUCTURAL (or pinned) edge, else ``candidate``.
         """
         repos = self.db.repos
         try:
@@ -849,8 +849,8 @@ class TopologyApiMixin:
                 edges = repos.topology_v3.edges(version_id) if version_id else []
         except Exception:  # noqa: BLE001 - health must never fail
             edges = []
-        confirmed = any(
-            str(_value(edge.get("lifecycle"))) == EdgeLifecycleV3.CONFIRMED.value
+        structural = any(
+            str(_value(edge.get("lifecycle"))) == TopologyEdgeState.STRUCTURAL.value
             or bool(edge.get("pinned"))
             for edge in edges
         )
@@ -860,7 +860,7 @@ class TopologyApiMixin:
             devices = 0
         return {
             "configured": True,
-            "status": "confirmed" if confirmed else "candidate",
+            "status": "confirmed" if structural else "candidate",
             "version": version_id,
             "endpoints": len(endpoints),
             "edges": len(edges),

@@ -27,12 +27,12 @@ import numpy as np
 from wattmosaic_engine.contracts import (
     CandidateHypothesis,
     DeltaPrior,
-    EdgeLifecycleV3,
     EventGroup,
     HAEvent,
     Observability,
     PredictionStatus,
     ReaderDelta,
+    TopologyEdgeState,
 )
 from wattmosaic_engine.runtime.interfaces import (
     ModelSetView,
@@ -77,9 +77,10 @@ _CORRECTION_FACTOR: float = float(
 
 # Edge/observability confidences used by term E.  PROVISIONAL is soft (0.5).
 _EDGE_CONFIDENCE: Mapping[str, float] = {
-    EdgeLifecycleV3.CONFIRMED.value: 1.0,
-    EdgeLifecycleV3.PROVISIONAL.value: 0.5,
-    EdgeLifecycleV3.CANDIDATE.value: 0.25,
+    TopologyEdgeState.STRUCTURAL.value: 1.0,
+    "confirmed": 1.0,  # legacy spelling of structural
+    TopologyEdgeState.PROVISIONAL.value: 0.5,
+    TopologyEdgeState.CANDIDATE.value: 0.25,
 }
 _OBSERVABILITY_CONFIDENCE: Mapping[str, float] = {
     Observability.DIRECT.value: 1.0,

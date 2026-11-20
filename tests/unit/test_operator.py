@@ -20,10 +20,10 @@ import numpy as np
 import pytest
 from wattmosaic_engine.contracts import (
     EdgeEvidence,
-    EdgeLifecycleV3,
     MeasurementFactor,
     Observability,
     RelationType,
+    TopologyEdgeState,
     TopologyEdgeV3,
 )
 from wattmosaic_engine.electrical.factors import FactorRegistry
@@ -63,7 +63,7 @@ def _edge(
     target: str,
     *,
     edge_id: str,
-    lifecycle: EdgeLifecycleV3 = EdgeLifecycleV3.CONFIRMED,
+    lifecycle: TopologyEdgeState = TopologyEdgeState.STRUCTURAL,
     beta: float | None = None,
     beta_basis: str | None = None,
     at: datetime = T0,
@@ -112,7 +112,7 @@ def test_circuit_a_device_in_four_nested_rows_with_coefficient_one() -> None:
             assert entry.edge_lifecycle is None
         else:
             assert entry.observability is Observability.EXPECTED
-            assert entry.edge_lifecycle is EdgeLifecycleV3.CONFIRMED
+            assert entry.edge_lifecycle is TopologyEdgeState.STRUCTURAL
 
     # The kettle is on Circuit C and only sees Circuit C and Main.
     kettle = op.subjects.index(("device", "kettle"))
@@ -137,7 +137,7 @@ def test_provisional_edge_is_soft_not_applied() -> None:
             "Subpanel",
             "Circuit A",
             edge_id="e2",
-            lifecycle=EdgeLifecycleV3.PROVISIONAL,
+            lifecycle=TopologyEdgeState.PROVISIONAL,
         ),
     )
     topology = FakeTopology.from_edges(edges)
@@ -152,7 +152,7 @@ def test_provisional_edge_is_soft_not_applied() -> None:
     # It is listed as an alternative, never as a structural entry.
     assert len(op.soft_alternatives) == 1
     assert op.soft_alternatives[0].edge_id == "e2"
-    assert op.soft_alternatives[0].lifecycle == EdgeLifecycleV3.PROVISIONAL
+    assert op.soft_alternatives[0].lifecycle == TopologyEdgeState.PROVISIONAL
 
 
 def test_paired_leg_carries_half_coefficient() -> None:

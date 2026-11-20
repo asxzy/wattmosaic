@@ -115,7 +115,7 @@ def _health(configured: bool, *, endpoints: int = 3, edges: int = 0) -> dict:
         if configured
         else {"configured": False, "reason": "no measurement endpoints configured"}
     )
-    return {"status": "ok", "contract_version": "3.0.0", "details": {"topology": topology}}
+    return {"status": "ok", "contract_version": "4.0.0", "details": {"topology": topology}}
 
 
 def _api(*, edges: list[dict] | None = None, endpoints: list[dict] | None = None,

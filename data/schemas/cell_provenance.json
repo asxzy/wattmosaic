@@ -77,5 +77,5 @@
   "title": "CellProvenance",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/cell_provenance.json",
-  "x-contract-version": "3.0.0"
+  "x-contract-version": "4.0.0"
 }

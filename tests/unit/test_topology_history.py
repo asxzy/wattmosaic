@@ -13,7 +13,7 @@ import random
 import time
 from datetime import UTC, datetime, timedelta
 
-from wattmosaic_engine.contracts import EdgeEvidence, EdgeLifecycleV3, RelationType, TopologyEdgeV3
+from wattmosaic_engine.contracts import EdgeEvidence, RelationType, TopologyEdgeState, TopologyEdgeV3
 from wattmosaic_engine.electrical.topology_history import (
     clean_steps,
     learn_topology_from_history,
@@ -93,12 +93,12 @@ def test_a_history_replay_confirms_the_wiring_and_nothing_else() -> None:
     assert stats.steps > 40
     levels = {"feed": 900.0, "branch_hrv": 170.0, "branch_heater": 450.0, "other_panel_pump": 220.0}
     view = _empty().merge_evidence(learned, levels=levels)
-    assert _lifecycle(view, "feed", "branch_hrv") == "confirmed"
-    assert _lifecycle(view, "feed", "branch_heater") == "confirmed"
+    assert _lifecycle(view, "feed", "branch_hrv") == "structural"
+    assert _lifecycle(view, "feed", "branch_heater") == "structural"
     confirmed = {
         (e.source_endpoint_id, e.target_endpoint_id)
         for e in view.edges
-        if e.lifecycle == EdgeLifecycleV3.CONFIRMED
+        if e.lifecycle == TopologyEdgeState.STRUCTURAL
     }
     assert confirmed == {("feed", "branch_hrv"), ("feed", "branch_heater")}
 
@@ -114,7 +114,7 @@ def test_a_user_decision_wins_over_the_replay() -> None:
     rejected = TopologyEdgeV3(
         edge_id="te-inf::feed::branch_hrv", relation=RelationType.CONTAINS,
         source_endpoint_id="feed", target_endpoint_id="branch_hrv",
-        lifecycle=EdgeLifecycleV3.REJECTED, declared_by="user",
+        lifecycle=TopologyEdgeState.REJECTED, declared_by="user",
         evidence=EdgeEvidence(), valid_from=T0, pinned=False,
     )
     live = TopologyInferenceView(edges=(rejected,), clock=lambda: T0, at=T0)
@@ -182,7 +182,7 @@ def test_example_1_one_child_explains_the_parent_step() -> None:
     assert _support(learned, "p", "y") >= 8
     assert _support(learned, "p", "q") == 0
     view = _empty().merge_evidence(learned, levels={"p": 400.0, "y": 50.0, "q": 120.0})
-    assert _lifecycle(view, "p", "y") == "confirmed"
+    assert _lifecycle(view, "p", "y") == "structural"
 
 
 def test_example_2_two_children_stepping_together_explain_the_parent() -> None:
@@ -201,9 +201,9 @@ def test_example_2_two_children_stepping_together_explain_the_parent() -> None:
     # The lone-step rule never credited these: neither child matches alone.
     assert _support(learned, "y", "p") == 0
     view = _empty().merge_evidence(learned, levels={"p": 250.0, "y": 15.0, "z": 35.0})
-    assert _lifecycle(view, "p", "y") == "confirmed"
+    assert _lifecycle(view, "p", "y") == "structural"
     # (A stray reverse support can hold P -> Z at PROVISIONAL: direction rule.)
-    assert _lifecycle(view, "p", "z") in ("provisional", "confirmed")
+    assert _lifecycle(view, "p", "z") in ("provisional", "structural")
 
 
 def _explain_away_house() -> dict[str, list[tuple[datetime, float]]]:
@@ -224,7 +224,7 @@ def _confirmed_edge(parent: str, child: str) -> TopologyEdgeV3:
     return TopologyEdgeV3(
         edge_id=f"te-inf::{parent}::{child}", relation=RelationType.CONTAINS,
         source_endpoint_id=parent, target_endpoint_id=child,
-        lifecycle=EdgeLifecycleV3.CONFIRMED, declared_by="user",
+        lifecycle=TopologyEdgeState.STRUCTURAL, declared_by="user",
         evidence=EdgeEvidence(), valid_from=T0, pinned=False,
     )
 

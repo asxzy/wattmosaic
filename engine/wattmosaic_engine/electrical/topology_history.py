@@ -19,7 +19,7 @@ holds the same evidence: this module replays it through the *same* ledger.
   ``docs/specs/topology-linking-v2/W2-integration.md``: one stepping candidate
   keeps the ledger's own rule (``topology_inference._classify_step``); several
   use explain-away and multi-child matching (:mod:`.topology_explain`, M1) with
-  the parent's CONFIRMED children as the known part.  The two legs of a 240 V
+  the parent's STRUCTURAL children as the known part.  The two legs of a 240 V
   load (M2 ``paired_legs``) stepping together are ONE candidate (their mean
   delta) credited to both legs, never summed into one parent; a duplicate meter
   (M4 ``duplicate_meters``) is never counted as a child of its twin.
@@ -51,7 +51,7 @@ from typing import Any
 
 import numpy as np
 
-from wattmosaic_engine.contracts import EdgeLifecycleV3, RelationType, TopologyEdgeV3
+from wattmosaic_engine.contracts import RelationType, TopologyEdgeState, TopologyEdgeV3
 
 from .topology_capacity import LEG_MIN_ACTIVE_SAMPLES, LEG_MIN_ACTIVE_W, LEG_MIN_CORRELATION, paired_legs
 from .topology_explain import (
@@ -761,7 +761,7 @@ def _learned_view(view: TopologyInferenceView, counts: _Counts) -> TopologyInfer
             relation=RelationType.CONTAINS,
             source_endpoint_id=parent,
             target_endpoint_id=child,
-            lifecycle=EdgeLifecycleV3.CANDIDATE,
+            lifecycle=TopologyEdgeState.CANDIDATE,
             declared_by="inference",
             beta=1.0,
             beta_basis="unity",
@@ -793,7 +793,7 @@ def _confirmed(view: TopologyInferenceView) -> frozenset[tuple[str, str]]:
     return frozenset(
         (e.source_endpoint_id, e.target_endpoint_id)
         for e in view.edges
-        if _relation(e.relation) == "contains" and e.lifecycle == EdgeLifecycleV3.CONFIRMED
+        if _relation(e.relation) == "contains" and e.lifecycle == TopologyEdgeState.STRUCTURAL
     )
 
 
@@ -808,9 +808,9 @@ def learn_topology_from_history(
 
     ``view`` is normally an empty ledger seeded with the user's pinned,
     declared and rejected pairs: those pairs are never counted (user authority).
-    ``known`` are parent->child pairs already CONFIRMED in the live ledger: the
+    ``known`` are parent->child pairs already STRUCTURAL in the live ledger: the
     known children explained away when several children step together.  The
-    seed's own CONFIRMED CONTAINS edges are known too.  ``levels`` (median
+    seed's own STRUCTURAL CONTAINS edges are known too.  ``levels`` (median
     absolute watts per reader) settle the first pass's scratch ledger; they are
     computed from ``history`` when omitted.
 

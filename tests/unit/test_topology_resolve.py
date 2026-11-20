@@ -16,7 +16,7 @@ import random
 import time
 from datetime import UTC, datetime
 
-from wattmosaic_engine.contracts import EdgeEvidence, EdgeLifecycleV3, RelationType, TopologyEdgeV3
+from wattmosaic_engine.contracts import EdgeEvidence, RelationType, TopologyEdgeState, TopologyEdgeV3
 from wattmosaic_engine.electrical import topology_resolve as tr
 from wattmosaic_engine.electrical.topology_capacity import capacity_violation, fits, paired_legs
 from wattmosaic_engine.electrical.topology_health import HealthStatus
@@ -24,11 +24,11 @@ from wattmosaic_engine.electrical.topology_inference import DeltaObservation, To
 from wattmosaic_engine.electrical.topology_regression import diff_regression, duplicate_meters
 
 T0 = datetime(2026, 11, 20, tzinfo=UTC)
-CONFIRMED = EdgeLifecycleV3.CONFIRMED
-PROVISIONAL = EdgeLifecycleV3.PROVISIONAL
+STRUCTURAL = TopologyEdgeState.STRUCTURAL
+PROVISIONAL = TopologyEdgeState.PROVISIONAL
 
 
-def _edge(parent: str, child: str, lifecycle: EdgeLifecycleV3, *, support: int = 20,
+def _edge(parent: str, child: str, lifecycle: TopologyEdgeState, *, support: int = 20,
           conflict: int = 0) -> TopologyEdgeV3:
     return TopologyEdgeV3(
         edge_id=f"te-inf::{parent}::{child}",
@@ -105,8 +105,8 @@ def test_hot_tub_legs_are_split_across_both_mains_never_both_on_one() -> None:
         frozenset(("leg_a", "leg_b"))
     }
     edges = [
-        _edge("main_1", "leg_a", CONFIRMED),
-        _edge("main_1", "leg_b", CONFIRMED),
+        _edge("main_1", "leg_a", STRUCTURAL),
+        _edge("main_1", "leg_b", STRUCTURAL),
         _edge("main_2", "leg_a", PROVISIONAL, support=6),
         _edge("main_2", "leg_b", PROVISIONAL, support=6),
     ]
@@ -125,16 +125,16 @@ def test_hot_tub_legs_are_split_across_both_mains_never_both_on_one() -> None:
         for leg in ("leg_a", "leg_b"):
             edge = view.edge(main, leg)
             assert edge is not None and edge.evidence.support >= 7, (main, leg)
-    # Never both legs CONFIRMED under one main.
+    # Never both legs STRUCTURAL under one main.
     for main in ("main_1", "main_2"):
-        confirmed = [leg for leg in ("leg_a", "leg_b") if _life(view, main, leg) == "confirmed"]
+        confirmed = [leg for leg in ("leg_a", "leg_b") if _life(view, main, leg) == "structural"]
         assert len(confirmed) <= 1, main
     # main_1 is too small to carry both legs: one leg stays there, the other is
     # resolved to main_2 (soft: which leg is which is not identifiable).
     assert sorted(
         _life(view, "main_1", leg) for leg in ("leg_a", "leg_b")
-    ) == ["confirmed", "provisional"]
-    assert view.edge("leg_a", "leg_b") is None or _life(view, "leg_a", "leg_b") != "confirmed"
+    ) == ["provisional", "structural"]
+    assert view.edge("leg_a", "leg_b") is None or _life(view, "leg_a", "leg_b") != "structural"
 
 
 def test_a_stepping_leg_pair_is_never_summed_into_one_parent() -> None:
@@ -175,7 +175,7 @@ def test_parent_step_explained_by_two_children_supports_both() -> None:
 
 
 def test_a_confirmed_child_is_explained_away_and_its_health_recorded() -> None:
-    edges = [_edge("p", "a", CONFIRMED)]
+    edges = [_edge("p", "a", STRUCTURAL)]
     view = _view(edges)
     view = view.observe_group(
         DeltaObservation(
@@ -187,7 +187,7 @@ def test_a_confirmed_child_is_explained_away_and_its_health_recorded() -> None:
     assert view.edge("p", "b").evidence.support == 1
     assert view.edge("p", "a").evidence.support == 21
     assert view.health.get("p", "a").recent == ("s",)
-    assert _life(view, "p", "a") == "confirmed"
+    assert _life(view, "p", "a") == "structural"
 
 
 def test_single_child_groups_keep_the_one_to_one_rule() -> None:
@@ -229,8 +229,8 @@ def test_crossed_sub_panels_are_confirmed_structurally() -> None:
         _edge("main_2", "sub_2", PROVISIONAL, support=5),
     ]
     resolved, transitions = tr.resolve_structure(edges, series, levels={})
-    assert _life(resolved, "main_2", "sub_1") == "confirmed"
-    assert _life(resolved, "main_1", "sub_2") == "confirmed"
+    assert _life(resolved, "main_2", "sub_1") == "structural"
+    assert _life(resolved, "main_1", "sub_2") == "structural"
     assert _life(resolved, "main_1", "sub_1") == "provisional"
     assert _life(resolved, "main_2", "sub_2") == "provisional"
     assert all("structural" in text for text in transitions)
@@ -261,7 +261,7 @@ def test_structural_confirmation_proposes_a_version_through_the_view() -> None:
         DeltaObservation(group_id="g", deltas={"other": (50.0, 2.0)}, at=T0, cause_id="x"),
         aligned=series,
     )
-    assert _life(view, "main_2", "sub_1") == "confirmed"
+    assert _life(view, "main_2", "sub_1") == "structural"
     assert proposals and "te-inf::main_2::sub_1" in proposals[-1][0]
     assert "structural" in proposals[-1][1]
 
@@ -272,7 +272,7 @@ def test_structural_confirmation_proposes_a_version_through_the_view() -> None:
 
 
 def test_a_confirmed_edge_whose_parent_stops_following_is_demoted_via_health() -> None:
-    edges = [_edge("p", "c", CONFIRMED, support=300)]
+    edges = [_edge("p", "c", STRUCTURAL, support=300)]
     view = _view(edges)
     for i in range(6):
         view = view.observe_group(
@@ -302,16 +302,16 @@ def test_a_duplicate_meter_is_never_made_a_child() -> None:
         "load": _noise(rng, load),
     }
     edges = [
-        _edge("meter_a", "meter_b", CONFIRMED),
+        _edge("meter_a", "meter_b", STRUCTURAL),
         _edge("meter_b", "meter_a", PROVISIONAL),
-        _edge("meter_a", "load", CONFIRMED),
-        _edge("meter_b", "load", CONFIRMED),
+        _edge("meter_a", "load", STRUCTURAL),
+        _edge("meter_b", "load", STRUCTURAL),
     ]
     resolved, _transitions = tr.resolve_structure(edges, series, levels={})
     assert _life(resolved, "meter_a", "meter_b") == "provisional"
     assert _life(resolved, "meter_b", "meter_a") == "provisional"
     # One meter suffices: the larger id is never a parent.
-    assert _life(resolved, "meter_a", "load") == "confirmed"
+    assert _life(resolved, "meter_a", "load") == "structural"
     assert _life(resolved, "meter_b", "load") == "provisional"
 
 
@@ -368,7 +368,7 @@ def test_settle_with_46_readers_and_six_hours_is_fast() -> None:
     edges = []
     for child in readers[4:]:
         for parent in readers[:4]:
-            lifecycle = CONFIRMED if rng.random() < 0.3 else PROVISIONAL
+            lifecycle = STRUCTURAL if rng.random() < 0.3 else PROVISIONAL
             edges.append(_edge(parent, child, lifecycle, support=rng.randint(3, 40)))
     view = _view(edges)
     levels = {r: 500.0 for r in readers}
