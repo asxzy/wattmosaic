@@ -74,9 +74,19 @@ class MappingApiMixin:
         exists, and a missing source contributes nothing (never an invented row).
         Building is pure; the injected clock supplies the graph's validity time.
         """
+        # Rows: only sources that actually exist; missing ones contribute nothing.
+        devices = self._matrix_devices()
+        components = self._matrix_components()
+        groups = self._matrix_groups()
+        profiles = self._matrix_profiles()
+        # The version pair alone is not enough: a device created, a group
+        # formed or an unknown profile learned does not bump either version,
+        # and a pair-only key served the first-built rows until restart.  The
+        # key therefore also digests the row and column sources themselves.
         key = (
             str(versions.get("topology_version_id") or ""),
             str(versions.get("mapping_version_id") or ""),
+            self._matrix_source_digest(devices, components, groups, profiles),
         )
         cache = getattr(self, "_matrix_tree_cache", None)
         if cache is None:
@@ -95,11 +105,6 @@ class MappingApiMixin:
         topology_view = self._matrix_topology_graph(endpoints, key[0])
         columns = build_columns(topology_view, endpoints)
 
-        # Rows: only sources that actually exist; missing ones contribute nothing.
-        devices = self._matrix_devices()
-        components = self._matrix_components()
-        groups = self._matrix_groups()
-        profiles = self._matrix_profiles()
         readers = self._matrix_readers(endpoints)
         rows = build_rows(
             devices=devices,
@@ -110,8 +115,22 @@ class MappingApiMixin:
         )
 
         trees = (columns, rows)
+        # Only the latest key is useful; older source states never come back.
+        cache.clear()
         cache[key] = trees
         return trees
+
+    def _matrix_source_digest(self, *sources: Any) -> str:
+        """A stable digest of the row sources plus the raw endpoint rows."""
+        import hashlib
+        import json
+
+        try:
+            endpoints = [dict(row) for row in self.db.repos.entities.endpoints()]
+        except Exception:  # noqa: BLE001 - no S13 source -> no endpoints
+            endpoints = []
+        blob = json.dumps([*sources, endpoints], sort_keys=True, default=str)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
     def _matrix_endpoints(self) -> list[Any]:
         """Canonical S13 measurement endpoints as contract models."""
@@ -272,14 +291,32 @@ class MappingApiMixin:
         return etag_for(self._matrix_version_id(), self.matrix_fingerprint())
 
     def matrix_payload(self, query: Mapping[str, str] | None = None) -> Any:
-        """The full typed matrix payload, filtered and paged from query params."""
+        """The full typed matrix payload, filtered and paged from query params.
+
+        The current view folds in the published snapshot, so each reader column
+        carries its measured power and residual and the physical total its
+        estimates, groups and root residual (HB §19.4).  A historical ``at=``
+        view has no snapshot for that instant and keeps the cell-only totals.
+        """
         filters = MatrixFilters.from_query(dict(query or {}))
-        payload = self._matrix_service().payload(filters)
         if filters.at is not None:
-            return payload
+            return self._matrix_service().payload(filters)
+        try:
+            snapshot = getattr(self, "_v3_snapshot", lambda: None)()
+        except Exception:  # noqa: BLE001 - no snapshot yet: cell-only totals
+            snapshot = None
+        roots: tuple[str, ...] = ()
+        root_readers = getattr(self, "_root_readers", None)
+        if snapshot is not None and callable(root_readers):
+            try:
+                roots = tuple(root_readers(getattr(snapshot, "versions", None)))
+            except Exception:  # noqa: BLE001 - unknown topology: no root residual
+                roots = ()
+        payload = self._matrix_service().payload(
+            filters, snapshot=snapshot, root_reader_ids=roots
+        )
         # The current view carries the published snapshot's stale readers, so a
         # null column total always comes with its reason (HB §18, AT-17).
-        snapshot = getattr(self, "_v3_snapshot", lambda: None)()
         stale = list(getattr(snapshot, "stale_sources", None) or [])
         return payload.model_copy(update={"stale_sources": stale}) if stale else payload
 
