@@ -64,6 +64,12 @@ class FactorsRepository(Repository):
                 self._conn.execute("ROLLBACK")
                 raise
 
+    def count(self) -> int:
+        """Number of factor rows (cheap cache-invalidation signal for the fold)."""
+        with self._reader() as conn:
+            row = conn.execute("SELECT COUNT(*) FROM ct_measurement_factors").fetchone()
+        return int(row[0]) if row is not None else 0
+
     def factors_for_ct(self, ct_id: str) -> list[dict[str, Any]]:
         """Every factor interval for a CT, oldest ``effective_from`` first."""
         with self._lock:

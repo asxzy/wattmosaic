@@ -175,24 +175,42 @@ def _classify_step(
     sigma_p: float,
     sigma_c: float,
     beta: float = 1.0,
+    parent_spread: float | None = None,
 ) -> str | None:
     """``"support"``, ``"conflict"`` or ``None`` (neutral) for one child step.
 
     * support: the parent *moved* (beyond its own 3 sigma) by the child's step,
-      within the combined 3-sigma noise plus :data:`MATCH_RELATIVE_TOLERANCE`.
+      within the combined 3-sigma noise plus :data:`MATCH_RELATIVE_TOLERANCE`,
+      *and* the child's step is resolvable at the parent (spec P7).
     * conflict: the parent stayed within its 3-sigma noise while the child moved
       beyond it, and the parent's change is outside the support tolerance
       (design §5 T5: "a child step with no matching parent step beyond
       3 sigma_p").  The bands are disjoint, so one reading is never both.
     * neutral: anything else -- a parent that moved by another amount carries
       concurrent loads, and a child step inside the parent's noise is invisible.
+
+    ``parent_spread`` is the larger of the parent's pre-/post-window spreads,
+    measured by the runtime's anchor.  A net-zero level change whose windows
+    are *not* themselves flat is a concurrent opposite step on a sibling: it
+    proves nothing, so the verdict is neutral instead of conflict (spec P6).
+    ``None`` means no spread is known (a direct caller that did not measure it),
+    which keeps the historical single-number behaviour.
     """
     scaled = beta * child_delta
     flat_band = _SIGMA_FACTOR * sigma_p
     tolerance = _SIGMA_FACTOR * math.sqrt(sigma_p**2 + (beta * sigma_c) ** 2)
     tolerance += MATCH_RELATIVE_TOLERANCE * abs(scaled)
+    if parent_spread is not None and parent_spread > flat_band:
+        # The parent's window contains its own steps.  Its level change (even a
+        # net zero one) cannot be read as "the parent did/did not follow".
+        return None
+    # P7: a step smaller than the combined noise of parent and child is not
+    # resolvable at the parent, so matching it is coincidence, not evidence.
+    resolvable = _SIGMA_FACTOR * math.sqrt(sigma_p**2 + sigma_c**2)
     if abs(parent_move) > flat_band and abs(parent_move - scaled) <= tolerance:
-        return "support"
+        if abs(scaled) > resolvable:
+            return "support"
+        return None
     if (
         abs(parent_move) <= flat_band
         and abs(scaled) > flat_band
@@ -484,6 +502,10 @@ class TopologyInferenceView:
     #: PROVISIONAL bound or its health is BROKEN (design §5 T5, linking v2).
     #: The runtime persists it next to the edge-health book.
     structure_decisions: Mapping[str, str] = field(default_factory=dict)
+    #: Children whose crossing was kept soft because a balanced 240 V load fits
+    # two sibling parents alike (spec P5).  Kept off the persisted decisions:
+    # it is a fresh, per-settle structural observation, not a sticky decision.
+    leg_unidentified: frozenset[str] = frozenset()
     structure_cache: _StructureCache = field(
         default_factory=lambda: _StructureCache(), compare=False, repr=False
     )
@@ -551,6 +573,10 @@ class TopologyInferenceView:
         measured_by_child: Mapping[str, Mapping[str, float]] | None = None,
         group_moves: Mapping[str, float | None] | None = None,
         aligned: Mapping[str, Sequence[float | None]] | None = None,
+        scales: Mapping[str, float] | None = None,
+        parent_spreads: Mapping[str, tuple[float, float] | float] | None = None,
+        declared_pairs: frozenset[frozenset[str]] = frozenset(),
+        alias_canonical: Mapping[str, str] | None = None,
     ) -> TopologyInferenceView:
         """Fold one FINAL event group into every affected pair's ledger.
 
@@ -586,6 +612,21 @@ class TopologyInferenceView:
         parent also steps for its other loads, so the reversed edge collects
         conflict.  Without ``observed`` (no reader health known) a non-moving
         reader is never evidence either way.
+
+        ``scales`` maps a child reader to ``1 / multiplier`` for a
+        monitor-applied measurement factor in force at its step (spec P3): the
+        child's delta and sigma are divided by ``multiplier`` before any
+        classification, so a x2 child under parents that move r / 2 is compared
+        on the same basis.  A missing factor means scale 1.0; engine factors
+        (already removed in P1) are never in this mapping.
+
+        ``parent_spreads`` maps a parent to its pre/post-window spread (spec
+        P6): a parent whose anchor window is not flat is neutral, however its
+        net level change reads.  ``declared_pairs`` are user-declared
+        PAIRED_LEG/SAME_CONDUCTOR pairs (spec P4): CONTAINS between their legs
+        is never scored.  ``alias_canonical`` maps a SAME_CONDUCTOR alias to the
+        canonical reader in force; an alias whose canonical reader is present
+        never becomes a CONTAINS parent or child.
         """
         obs = _coerce_group(group, self.sigma_floor_w)
         if obs.group_id in self.seen_groups:
@@ -622,6 +663,42 @@ class TopologyInferenceView:
         decisive = {
             reader: values for reader, values in obs.deltas.items() if values[0] is not None
         }
+        # P3: divide a monitor-applied factor out of the child's step before any
+        # classification (delta *and* sigma); absent factor means scale 1.0.
+        if scales:
+            decisive = {
+                reader: (
+                    float(delta) * float(scales.get(reader, 1.0)),
+                    None if sigma is None else float(sigma) * float(scales.get(reader, 1.0)),
+                )
+                for reader, (delta, sigma) in decisive.items()
+            }
+        # P4: declared pairs and present aliases never take part in CONTAINS.
+        # Normalise pairs to unordered reader sets in either direction.
+        blocked: set[frozenset[str]] = {frozenset(pair) for pair in declared_pairs}
+        canonical = dict(alias_canonical or {})
+        if canonical:
+            blocked |= {frozenset((alias, target)) for alias, target in canonical.items()}
+            # Only skip the alias while its canonical reader actually holds a
+            # reading this group (HB §18: absent is not zero).
+            suppressed = {alias for alias, target in canonical.items() if target in decisive}
+        else:
+            suppressed = set()
+
+        def _pair_blocked(a: str, b: str) -> bool:
+            return a != b and frozenset((a, b)) in blocked
+
+        def _suppressed(reader: str) -> bool:
+            return reader in suppressed
+
+        def _spread(parent: str) -> float | None:
+            """Max pre/post anchor spread of ``parent`` (P6), or None."""
+            entry = (parent_spreads or {}).get(parent)
+            if entry is None:
+                return None
+            if isinstance(entry, (tuple, list)):
+                return max(float(entry[0]), float(entry[1]))
+            return float(entry)
 
         # -- parent-only steps: neutral residual evidence -------------------- #
         for edge in list(edges):
@@ -659,9 +736,11 @@ class TopologyInferenceView:
 
         # -- child steps against every candidate parent --------------------- #
         for child, (child_delta, child_sigma) in decisive.items():
+            if _suppressed(child):
+                continue
             anchored = anchored_by_child.get(child) or {}
             for parent, (parent_delta, parent_sigma) in decisive.items():
-                if parent == child:
+                if parent == child or _suppressed(parent) or _pair_blocked(parent, child):
                     continue
                 if parent in anchored and anchored[parent] is not None:
                     # The parent's level across the child's own step.
@@ -706,7 +785,8 @@ class TopologyInferenceView:
                     verdict = multi[key[:2]]
                 else:
                     verdict = _classify_step(
-                        parent_delta, child_delta, sigma_p=sigma_p, sigma_c=sigma_c, beta=beta
+                        parent_delta, child_delta, sigma_p=sigma_p, sigma_c=sigma_c, beta=beta,
+                        parent_spread=_spread(parent),
                     )
                 if verdict is None:
                     continue
@@ -734,6 +814,8 @@ class TopologyInferenceView:
                 parent, child = edge.source_endpoint_id, edge.target_endpoint_id
                 if child not in decisive or parent in decisive or parent not in observed:
                     continue
+                if _suppressed(parent) or _suppressed(child) or _pair_blocked(parent, child):
+                    continue
                 child_delta, child_sigma = decisive[child]
                 sigma_p, measured = _observed_entry(observed.get(parent))
                 sigma_p = max(sigma_p or self.sigma_floor_w, self.sigma_floor_w)
@@ -753,6 +835,7 @@ class TopologyInferenceView:
                         sigma_p=sigma_p,
                         sigma_c=child_sigma if child_sigma is not None else self.sigma_floor_w,
                         beta=beta,
+                        parent_spread=_spread(parent),
                     )
                 if verdict is None:
                     continue
@@ -779,9 +862,11 @@ class TopologyInferenceView:
             # co-step pass above never created the pair).  A flat or unmeasured
             # parent never creates an edge: there is nothing to count against.
             for child, (child_delta, child_sigma) in decisive.items():
+                if _suppressed(child):
+                    continue
                 anchored = anchored_by_child.get(child) or {}
                 for parent, entry in observed.items():
-                    if parent == child or parent in decisive:
+                    if parent == child or parent in decisive or _suppressed(parent) or _pair_blocked(parent, child):
                         continue
                     key = (parent, child, _CONTAINS)
                     if key in by_index:
@@ -799,6 +884,7 @@ class TopologyInferenceView:
                             child_delta,
                             sigma_p=max(sigma_p or self.sigma_floor_w, self.sigma_floor_w),
                             sigma_c=child_sigma if child_sigma is not None else self.sigma_floor_w,
+                            parent_spread=_spread(parent),
                         )
                     if verdict != "support":
                         continue
@@ -861,7 +947,7 @@ class TopologyInferenceView:
                         )
                     )
 
-        version_transitions, decisions = self._settle(
+        version_transitions, decisions, unidentified = self._settle(
             edges,
             causes,
             absolute_now,
@@ -870,6 +956,7 @@ class TopologyInferenceView:
             levels,
             structure=structure,
             health=health,
+            declared_pairs=frozenset(blocked),
         )
         health = _prune_health(health, edges)
 
@@ -878,6 +965,7 @@ class TopologyInferenceView:
             edges=tuple(edges),
             health=health,
             structure_decisions=decisions,
+            leg_unidentified=unidentified,
             aligned=aligned_now,
             at=at,
             seen_groups=frozenset({*self.seen_groups, obs.group_id}),
@@ -904,7 +992,8 @@ class TopologyInferenceView:
         *,
         structure: Mapping[str, Sequence[float | None]] | None = None,
         health: HealthBook | None = None,
-    ) -> tuple[list[str], dict[str, str]]:
+        declared_pairs: frozenset[frozenset[str]] = frozenset(),
+    ) -> tuple[list[str], dict[str, str], frozenset[str]]:
         """Apply lifecycle transitions in place; return the version-worthy ones.
 
         Also returns the structural decisions (child -> direct parent) to keep.
@@ -924,6 +1013,7 @@ class TopologyInferenceView:
         labels: dict[int, str] = {}
         decided = dict(self.structure_decisions)
         sticky: set[tuple[str, str]] = set()
+        unidentified: frozenset[str] = frozenset()
 
         def note(stage: Sequence[str], before: Sequence[TopologyEdgeV3]) -> None:
             for index, (old, new) in enumerate(zip(before, edges, strict=True)):
@@ -934,6 +1024,22 @@ class TopologyInferenceView:
                     head = text.rsplit(": ", 1)[0]
                     if head == new.edge_id or head.startswith(new.edge_id + " ("):
                         labels[index] = head
+
+        # (0) Declared PAIRED_LEG / SAME_CONDUCTOR authority (spec P4): an
+        # inferred CONTAINS between the two legs of a declared pair is never
+        # scored.  It becomes REJECTED with a `declared_pair` reason so the
+        # transition text explains why.  Dormant (already REJECTED/RETIRED) and
+        # user-pinned edges are left alone.
+        if declared_pairs:
+            for index, edge in enumerate(edges):
+                if _relation(edge.relation) != _CONTAINS or edge.pinned or edge.lifecycle in _DORMANT:
+                    continue
+                if frozenset((edge.source_endpoint_id, edge.target_endpoint_id)) in declared_pairs:
+                    if edge.lifecycle != TopologyEdgeState.REJECTED:
+                        labels[index] = f"{edge.edge_id} (declared_pair)"
+                    edges[index] = edge.model_copy(
+                        update={"lifecycle": TopologyEdgeState.REJECTED}
+                    )
 
         # (1) Evidence.
         for index, edge in enumerate(edges):
@@ -1023,6 +1129,7 @@ class TopologyInferenceView:
                     previous=previous,
                     excluded=broken,
                     allow_confirm=self._confirm_gate(absolute_now),
+                    declared_pairs=declared_pairs,
                 )
                 texts.extend(result.transitions)
                 fresh = {
@@ -1038,6 +1145,7 @@ class TopologyInferenceView:
             edges[:] = result.edges
             note(texts, before)
             decided = result.decided
+            unidentified = result.leg_unidentified
         else:
             stage = self._apply_decisions(edges, decided, broken)
             if levels:
@@ -1065,7 +1173,12 @@ class TopologyInferenceView:
             or text.endswith(
                 f"{_value(TopologyEdgeState.STRUCTURAL)} -> {_value(TopologyEdgeState.PROVISIONAL)}"
             )
-        ], decided
+            # A structural edge rejected by a user declaration changes the
+            # published topology (and carries the `declared_pair` reason).
+            or text.endswith(
+                f"{_value(TopologyEdgeState.STRUCTURAL)} -> {_value(TopologyEdgeState.REJECTED)}"
+            )
+        ], decided, unidentified
 
     def _confirm_gate(
         self, absolute: Mapping[str, Sequence[float | None]]
@@ -1172,7 +1285,7 @@ class TopologyInferenceView:
             if weight > current.evidence.support + current.evidence.conflict:
                 edges[position] = current.model_copy(update={"evidence": edge.evidence})
                 causes[key] = learned_causes
-        version_transitions, decisions = self._settle(
+        version_transitions, decisions, _unidentified = self._settle(
             edges,
             causes,
             self.absolute,

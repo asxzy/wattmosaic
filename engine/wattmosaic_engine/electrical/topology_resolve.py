@@ -700,8 +700,89 @@ def _ancestry(edges: Sequence[TopologyEdgeV3]) -> Callable[[str, str], bool]:
     return lambda a, b: a != b and a in ancestors(b)
 
 
+def _ambiguous_parent(
+    info: StructureAnalysis,
+    child: str,
+    parent: str,
+    candidates: Sequence[str],
+    nested: Callable[[str, str], bool],
+    siblings: Sequence[str],
+) -> str | None:
+    """A sibling candidate fitting ``child`` indistinguishably from ``parent``.
+
+    A balanced 240 V load has two measured legs (or one x2 leg plus an
+    unmonitored one) and steps both mains by the same amount.  Fits to the two
+    sibling parents are then within :data:`STRUCTURAL_MARGIN`: which crossing
+    is real is not identifiable from steps, so neither can be STRUCTURAL.
+
+    Asymmetric evidence still allows STRUCTURAL: a rival that cannot carry the
+    child's siblings (a capacity violation) or a fit clearly worse than the
+    chosen parent's discriminates the crossing.  Returns the rival's id when
+    ambiguous, else None (spec P5).
+    """
+    fit = info.sfit(parent, child)
+    if fit is None:
+        return None
+    for rival in candidates:
+        if rival == parent or nested(parent, rival) or nested(rival, parent):
+            continue
+        other = info.sfit(rival, child)
+        if other is None or abs(fit.r - other.r) >= STRUCTURAL_MARGIN:
+            continue
+        # Capacity is asymmetric evidence: if either crossing cannot carry the
+        # child's siblings, the structure (not the balanced steps) picks a side.
+        if not info.fits_capacity(parent, siblings) or not info.fits_capacity(rival, siblings):
+            continue
+        return rival
+    return None
+
+
 def _transition(edge: TopologyEdgeV3, new: str, why: str) -> str:
     return f"{edge.edge_id} ({why}): {_value(edge.lifecycle)} -> {new}"
+
+
+def _balanced_leg(
+    info: StructureAnalysis,
+    leg: str,
+    parent: str,
+    rival: str,
+) -> bool:
+    """A leg fits ``parent`` and a sibling ``rival`` indistinguishably (spec P5).
+
+    A balanced 240 V load steps both mains by the same amount: steps alone say
+    nothing about which leg sits under which main.  When the two structural fits
+    are within :data:`STRUCTURAL_MARGIN` there is no asymmetric evidence, so
+    neither crossing may be made STRUCTURAL.  An asymmetric step (only one main
+    moving) makes one fit clearly better and this returns False.
+    """
+    fit = info.sfit(parent, leg)
+    other = info.sfit(rival, leg)
+    if fit is None or other is None:
+        # No fit means no evidence either way: keep the soft, honest verdict.
+        return True
+    if abs(fit.r - other.r) >= STRUCTURAL_MARGIN:
+        # One main follows the leg clearly better: asymmetric evidence.
+        return False
+    # Capacity is asymmetric evidence too; a main that cannot carry the leg
+    # cannot be its parent however alike the balanced steps look.
+    if not info.fits_capacity(parent, [leg]) or not info.fits_capacity(rival, [leg]):
+        return False
+    # For a measured pair, if one main cannot carry BOTH legs while they run,
+    # the split is decided by capacity (not by balanced steps): the crossing is
+    # identifiable and the existing 240 V pair rule may confirm it.
+    partner = None
+    for a, b in _pair_members(info, leg):
+        partner = b if a == leg else a
+    if partner is not None:
+        group = [leg, partner]
+        if not info.fits_capacity(parent, group) or not info.fits_capacity(rival, group):
+            return False
+    return True
+
+
+def _pair_members(info: StructureAnalysis, reader: str) -> tuple[tuple[str, str], ...]:
+    """Raw detected 240 V pairs involving ``reader`` (capacity asymmetry info)."""
+    return tuple((a, b) for a, b, _r in info.pairs if reader in (a, b))
 
 
 @dataclass(frozen=True)
@@ -710,11 +791,14 @@ class StructureResolution:
 
     ``decided`` maps each child the structure resolved to its direct parent;
     the caller keeps it across settles (sticky structural decisions).
+    ``leg_unidentified`` holds children whose parent crossing was kept soft
+    because balanced steps fit two sibling parents alike (spec P5).
     """
 
     edges: list[TopologyEdgeV3]
     transitions: list[str]
     decided: dict[str, str]
+    leg_unidentified: frozenset[str] = frozenset()
 
 
 def resolve_structure(
@@ -742,6 +826,7 @@ def resolve(
     previous: Mapping[str, str] | None = None,
     excluded: Collection[tuple[str, str]] = (),
     allow_confirm: Callable[[TopologyEdgeV3, Sequence[TopologyEdgeV3]], bool] | None = None,
+    declared_pairs: frozenset[frozenset[str]] = frozenset(),
 ) -> StructureResolution:
     """One direct parent per child from evidence, capacity, legs and regression.
 
@@ -759,7 +844,10 @@ def resolve(
     limits structural confirmation to edges that were already PROVISIONAL:
     never CANDIDATE -> STRUCTURAL in one settle.  ``excluded`` pairs (BROKEN
     health) are no candidates at all.  ``allow_confirm`` is an extra gate for
-    structural confirmation (the ledger's direction cap).
+    structural confirmation (the ledger's direction cap).  ``declared_pairs``
+    are user-declared PAIRED_LEG/SAME_CONDUCTOR reader sets (spec P4): a
+    CONTAINS edge between them is never a structural candidate and the pair
+    rule applies from the first settle.
     """
     out = list(edges)
     info = analysis if analysis is not None and analysis.source is series else analyse(series)
@@ -774,6 +862,19 @@ def resolve(
     ignored_parents = {b for _a, b in classified.duplicates}
     twin_pairs = {frozenset(pair) for pair in classified.duplicates}
     pair_of = {a: b for a, b in classified.pairs} | {b: a for a, b in classified.pairs}
+    # Declared pairs (P4) are authoritative from the first settle, before the
+    # data-driven classifier has enough evidence to see the pair.
+    for pair in declared_pairs:
+        members = tuple(sorted(pair))
+        if len(members) == 2:
+            a, b = members
+            pair_of.setdefault(a, b)
+            pair_of.setdefault(b, a)
+    if declared_pairs:
+        pairs = sorted({tuple(sorted(p)) for p in (*classified.pairs, *declared_pairs)
+                        if len(p) == 2})
+    else:
+        pairs = list(classified.pairs)
 
     transitions: list[str] = []
 
@@ -984,7 +1085,8 @@ def resolve(
         return StructureResolution(out, transitions, {})
 
     score = {key: score_of(i) for key, i in index_of.items()}
-    pairs = list(classified.pairs)
+    leg_unidentified: set[str] = set()
+    # ``pairs`` already includes declared pairs (set above).
     # A held leg whose partner is open stays in the assignment (fixed to its
     # parent) so the pair rule sees both legs and splits the open one off.
     open_candidates = {
@@ -1021,7 +1123,39 @@ def resolve(
         decided_out[child] = parent
         chosen_edge = out[chosen_index]
         before = (previous or {}).get(chosen_edge.edge_id, str(_value(chosen_edge.lifecycle)))
-        if (
+        # P5: if a sibling parent fits this child just as well, the crossing is
+        # not identifiable from balanced steps; keep it PROVISIONAL (soft).
+        ambiguous = _ambiguous_parent(
+            info, child, parent, candidates[child], nested, children_of.get(parent, [child])
+        )
+        if ambiguous is not None and child in pair_of:
+            # Capacity is the asymmetric evidence for a 240 V pair: if one
+            # sibling parent cannot carry BOTH legs, the structure splits them
+            # (existing pair rule) and the crossing is identifiable.
+            partner = pair_of[child]
+            for rival in candidates[child]:
+                if rival == parent:
+                    continue
+                group = [c for c in (child, partner) if c in candidates]
+                if group and (
+                    not info.fits_capacity(parent, group) or not info.fits_capacity(rival, group)
+                ):
+                    ambiguous = None
+                    break
+        if ambiguous is not None:
+            transitions.append(
+                _transition(
+                    chosen_edge,
+                    _PROVISIONAL,
+                    f"leg_unidentified: true; {ambiguous} fits {child} equally well",
+                )
+            )
+            leg_unidentified.add(child)
+            if lifecycle_of(chosen_index) != _PROVISIONAL:
+                out[chosen_index] = chosen_edge.model_copy(
+                    update={"lifecycle": TopologyEdgeState(_PROVISIONAL)}
+                )
+        elif (
             lifecycle_of(chosen_index) == _PROVISIONAL
             and str(_value(before)) == _PROVISIONAL
             and acyclic(parent, child)
@@ -1068,6 +1202,26 @@ def resolve(
                 continue
             q_edge = out[q_index]
             before = (previous or {}).get(q_edge.edge_id, str(_value(q_edge.lifecycle)))
+            # P5: a balanced load moves both mains by the same amount.  If the
+            # other leg also fits the two siblings equally, no asymmetric
+            # evidence separates the crossings; keep both PROVISIONAL (soft) and
+            # record the ambiguity in the transition text.
+            if _balanced_leg(info, other_leg, q, p):
+                # Keep the crossing soft and record the ambiguity explicitly.
+                transitions.append(
+                    _transition(
+                        q_edge,
+                        _PROVISIONAL,
+                        "leg_unidentified: true; balanced legs fit both mains alike",
+                    )
+                )
+                leg_unidentified.add(other_leg)
+                if lifecycle_of(q_index) != _PROVISIONAL:
+                    out[q_index] = q_edge.model_copy(
+                        update={"lifecycle": TopologyEdgeState(_PROVISIONAL)}
+                    )
+                decided_out[other_leg] = q
+                continue
             if (
                 lifecycle_of(q_index) == _PROVISIONAL
                 and str(_value(before)) == _PROVISIONAL
@@ -1077,7 +1231,7 @@ def resolve(
                 and (allow_confirm is None or allow_confirm(q_edge, out))
             ):
                 set_lifecycle(q_index, _STRUCTURAL, f"structural: 240 V pair of {leg} under {p}")
-    return StructureResolution(out, transitions, decided_out)
+    return StructureResolution(out, transitions, decided_out, frozenset(leg_unidentified))
 
 
 def _disagreement(

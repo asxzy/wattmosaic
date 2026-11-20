@@ -364,6 +364,12 @@ class RuntimeMixin:
         # Recent P3 step instants per reader, for T5's step-anchored parent
         # measurement (bounded: a few dozen steps per reader).
         self._t5_steps: dict[str, deque[tuple[str | None, datetime, datetime, float]]] = {}
+        # P3: the monitor-applied factor registry is built once and rebuilt only
+        # when the factor table's row count changes (a factor insert).  Scaling
+        # a child's step delta by 1/multiplier lets a x2 child match parents
+        # that move r / 2.  Engine-applied factors are absent (P1 removed them).
+        self._factor_registry: Any | None = None
+        self._factor_row_count: int | None = None
         # Last sample per 30 s bucket per reader over a week, the input of T5's
         # aligned absolute series (topology linking v2, design §5 T5).  The P2
         # ring only covers minutes; this is O(1) per sample, bounded, compact
@@ -2191,6 +2197,120 @@ class RuntimeMixin:
             out[str(reader)] = (sigma, self._measured_level_change(str(reader), onset))
         return out
 
+    def _factor_registry_for_fold(self, readers: Sequence[str]) -> Any | None:
+        """The factor registry, rebuilt when the factor table's row count changes (P3).
+
+        ``None`` means no factor store / no readers: callers then use scale 1.0.
+        The registry's as-of lookups enforce the interval in force at each step;
+        only ``applied_by == "monitor"`` factors are reported by the scale
+        helper, because engine-applied multipliers are already gone in P1.
+        """
+        factors = getattr(getattr(self.db, "repos", None), "factors", None)
+        if factors is None:
+            return None
+        try:
+            count_fn = getattr(factors, "count", None)
+            count = int(count_fn()) if count_fn is not None else None
+        except Exception:  # noqa: BLE001 - no factor store: no scaling
+            return None
+        if (
+            self._factor_registry is not None
+            and count is not None
+            and count == self._factor_row_count
+        ):
+            return self._factor_registry
+        from ..electrical.factors import FactorRegistry
+
+        rows: list[Any] = []
+        try:
+            for reader in readers:
+                rows.extend(factors.factors_for_ct(str(reader)))
+        except Exception:  # noqa: BLE001 - a broken store must not abort a fold
+            return self._factor_registry
+        try:
+            self._factor_registry = FactorRegistry(rows)
+            self._factor_row_count = count
+        except Exception:  # noqa: BLE001 - invalid intervals: no scaling
+            return None
+        return self._factor_registry
+
+    def _factor_scales(
+        self, group: EventGroup, readers: Sequence[str]
+    ) -> dict[str, float]:
+        """child -> 1 / multiplier for a monitor factor at the child's step (P3)."""
+        registry = self._factor_registry_for_fold(readers)
+        if registry is None:
+            return {}
+        out: dict[str, float] = {}
+        for delta in group.reader_deltas:
+            child = str(delta.reader_id)
+            interval = self._member_step(group, delta)
+            if interval is None:
+                continue
+            at = interval[1]
+            resolution = registry.resolve(child, at)
+            if resolution.applied_by != "monitor" or resolution.factor is None:
+                continue
+            multiplier = float(resolution.factor.multiplier)
+            if multiplier > 0 and multiplier != 1.0:
+                out[child] = 1.0 / multiplier
+        return out
+
+    def _declared_topology_constraints(
+        self,
+    ) -> tuple[frozenset[frozenset[str]], dict[str, str]]:
+        """In-force declared pairs and SAME_CONDUCTOR aliases, cached by version id (P4).
+
+        Returns ``(pairs, alias_canonical)`` from the active topology version.
+        ``alias_canonical`` maps an alias reader to its canonical reader only
+        when the canonical is present in the current reading set; the caller
+        uses it to suppress the alias while the canonical reports a value.
+        """
+        triple = None
+        version_id: str | None = None
+        service = getattr(self, "version_service", None)
+        if service is not None:
+            try:
+                triple = service.current()
+                version_id = getattr(triple, "topology_version_id", None)
+            except Exception:  # noqa: BLE001 - no version: no declared constraints
+                pass
+        cached = getattr(self, "_declared_constraints_cache", None)
+        if cached is not None and cached[0] == version_id:
+            return cached[1]
+        pairs: set[frozenset[str]] = set()
+        aliases: dict[str, str] = {}
+        edges: Sequence[Any] = ()
+        if service is not None and version_id is not None:
+            try:
+                edges = tuple(service.topology_view(version_id).edges())
+            except Exception:  # noqa: BLE001 - no view: nothing declared
+                edges = ()
+        for edge in edges:
+            relation = str(getattr(edge.relation, "value", edge.relation))
+            lifecycle = str(getattr(edge.lifecycle, "value", edge.lifecycle))
+            if lifecycle not in ("structural", "confirmed"):
+                continue
+            # Only installer declarations constrain T5: an inferred
+            # SAME_CONDUCTOR / PAIRED_LEG edge has no meaningful direction and
+            # is itself evidence the ledger may still revise.
+            if str(getattr(edge, "declared_by", "")) != "user":
+                continue
+            source, target = str(edge.source_endpoint_id), str(edge.target_endpoint_id)
+            if source == target:
+                continue
+            if relation in ("paired_leg", "same_conductor"):
+                pairs.add(frozenset((source, target)))
+            if relation == "same_conductor":
+                # A declared SAME_CONDUCTOR edge reads alias -> canonical (the
+                # source is the alias, like ``alias_of_ct_id``).  Never pick the
+                # canonical by id order: suppressing the wrong member would
+                # hide a real panel CT as a parent.
+                aliases[source] = target
+        result = (frozenset(pairs), aliases)
+        self._declared_constraints_cache = (version_id, result)
+        return result
+
     def _typical_levels(self, window_s: float = 600.0) -> dict[str, float]:
         """Median absolute power per reader over the recent window (T5 tie-break).
 
@@ -2255,17 +2375,40 @@ class RuntimeMixin:
                 best = (distance, lo, hi)
         return None if best is None else (best[1], best[2])
 
-    def _anchored_level_change(self, reader: str, lo: datetime, hi: datetime) -> float | None:
-        """``reader``'s median level after ``hi`` minus its level before ``lo``.
+    #: Cross-device lag: a parent on another physical device may report the step
+    #: one sample later.  Start its post window one parent sample interval after
+    #: the child's step ``hi`` (capped), so a late step is still measured (P6).
+    _T5_PARENT_LAG_CAP_S = 30.0
+
+    def _parent_sample_interval(self, reader: str) -> float:
+        """The parent's median sample interval in seconds, capped (P6)."""
+        cadence = getattr(self.reader_state, "cadence", None)
+        info = None if cadence is None else cadence(reader)
+        seconds = getattr(info, "seconds", None)
+        if not isinstance(seconds, (int, float)) or seconds <= 0:
+            return self._T5_PARENT_LAG_CAP_S
+        return min(float(seconds), self._T5_PARENT_LAG_CAP_S)
+
+    def _anchored_level_change(
+        self, reader: str, lo: datetime, hi: datetime, *, lag_s: float = 0.0
+    ) -> tuple[float, float] | None:
+        """``reader``'s level change across a step plus its pre/post spread.
+
+        Returns ``(median(post) - median(pre), max(spread_pre, spread_post))``.
+        The spread is what makes "parent flat" mean *flat*, not net zero (spec
+        P6): a concurrent opposite step inside the window can net to zero while
+        the parent was not flat at all, which proves nothing about containment.
 
         Samples between ``lo`` and ``hi`` are ambiguous (the step happened
-        somewhere in that interval) and are not used.  ``None`` when there is no
-        post-step sample yet or no level before the step.
+        somewhere in that interval) and are not used.  ``lag_s`` delays the
+        start of the post window for a parent on another device (P6).  ``None``
+        when there is no post-step sample yet or no level before the step.
         """
         span = timedelta(seconds=self._T5_ANCHOR_S)
+        post_start = hi + timedelta(seconds=lag_s)
         post = [
             s.active_power_w
-            for s in self.reader_state.window(reader, hi, hi + span)
+            for s in self.reader_state.window(reader, post_start, post_start + span)
             if s.active_power_w is not None
         ]
         if not post:
@@ -2286,19 +2429,39 @@ class RuntimeMixin:
             if not held:
                 return None
             pre = held[-1:]
-        return float(statistics.median(post) - statistics.median(pre))
+        change = float(statistics.median(post) - statistics.median(pre))
+        # A window is flat only when its samples sit close to the window's own
+        # median.  Use the half-range of the middle samples: an ordinary noisy
+        # window (a few sigma of Gaussian jitter) stays flat, while a
+        # concurrent opposite step inside the window moves a whole cluster of
+        # samples away from the median and is revealed (P6).  With only a couple
+        # of samples either side, the median-centred extreme is the best
+        # available estimate of "not flat".
+        pre_med, post_med = statistics.median(pre), statistics.median(post)
+
+        def _spread(values: list[float], median: float) -> float:
+            deviations = sorted(abs(float(v) - float(median)) for v in values)
+            # Ignore the single largest deviation (a lone noisy sample); a real
+            # concurrent step leaves several samples far from the median.
+            return float(deviations[-2] if len(deviations) >= 2 else deviations[-1])
+
+        spread = max(_spread(pre, pre_med), _spread(post, post_med))
+        return (change, spread)
 
     def _step_anchored_changes(
         self, group: EventGroup, observed: Mapping[str, Any]
-    ) -> dict[str, dict[str, float]]:
-        """child -> {candidate parent: level change across the child's own step}.
+    ) -> tuple[dict[str, dict[str, float]], dict[str, tuple[float, float]]]:
+        """child -> {candidate parent: level change}, and parent -> spreads.
 
         A group's onset can sit a minute or more from a member's step (live:
         -61 s .. +103 s, 10th-90th percentile), so a parent measured around the
         onset mixes in a busy feed's unrelated changes and true parents read
         flat or off-size.  Anchoring on the child's own P3 step removes that.
+        The parent's post window starts one of its own sample intervals after
+        the child's step (P6) so a device reporting one tick late is still seen.
         """
         out: dict[str, dict[str, float]] = {}
+        spreads: dict[str, tuple[float, float]] = {}
         for delta in group.reader_deltas:
             interval = self._member_step(group, delta)
             if interval is None:
@@ -2309,12 +2472,16 @@ class RuntimeMixin:
             for reader in observed:
                 if reader == child:
                     continue
-                change = self._anchored_level_change(str(reader), lo, hi)
-                if change is not None:
+                result = self._anchored_level_change(
+                    str(reader), lo, hi, lag_s=self._parent_sample_interval(str(reader))
+                )
+                if result is not None:
+                    change, spread = result
                     changes[str(reader)] = change
+                    spreads[str(reader)] = spread
             if changes:
                 out[child] = changes
-        return out
+        return out, spreads
 
     def _group_level_changes(
         self, group: EventGroup, observed: Mapping[str, Any]
@@ -2342,9 +2509,9 @@ class RuntimeMixin:
         readers.update(str(delta.reader_id) for delta in group.reader_deltas)
         out: dict[str, float] = {}
         for reader in sorted(readers):
-            change = self._anchored_level_change(reader, lo, hi)
-            if change is not None:
-                out[reader] = change
+            result = self._anchored_level_change(reader, lo, hi)
+            if result is not None:
+                out[reader] = result[0]
         return out
 
     #: How often T5's aligned series are rebuilt from the structural memory
@@ -2525,13 +2692,20 @@ class RuntimeMixin:
                 for reader, entry in observed.items()
                 if reader in obs.deltas or not isinstance(entry, tuple) or entry[1] is not None
             }
+            anchored, parent_spreads = self._step_anchored_changes(group, observed)
+            readers = [str(r) for r in observed]
+            pairs, aliases = self._declared_topology_constraints()
             updated = view.observe_group(
                 obs,
                 observed=observed,
                 levels=self._typical_levels(),
-                measured_by_child=self._step_anchored_changes(group, observed),
+                measured_by_child=anchored,
                 group_moves=self._group_level_changes(group, observed),
                 aligned=self._t5_aligned_series(),
+                scales=self._factor_scales(group, readers),
+                parent_spreads=parent_spreads,
+                declared_pairs=pairs,
+                alias_canonical=aliases,
             )
             self.topology_inference = updated
             self._persist_edge_health_throttled(
