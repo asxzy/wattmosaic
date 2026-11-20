@@ -1019,17 +1019,31 @@ function v3DeviceModel(device, cells, records, models, endpoints) {
     observed_by: observedBy,
     records: Array.isArray(records) ? records : [],
     models: Array.isArray(models) ? models : ((models && models.versions) || []),
-    endpoint_scope: _endpointScope(endpoints),
+    endpoint_scope: _endpointScope(endpoints, _str(d.device_id)),
   };
 }
 
-function _endpointScope(endpoints) {
-  const list = Array.isArray(endpoints) ? endpoints : [];
-  const candidate = list.find((e) => e && (e.scope_status === 'candidate' || e.scope === 'candidate'));
+// GET /endpoints answers ``{endpoints: [...]}``; tolerate a bare list.
+const _endpointList = (payload) => {
+  if (Array.isArray(payload)) return payload;
+  if (payload && Array.isArray(payload.endpoints)) return payload.endpoints;
+  return [];
+};
+
+// The candidate single-subject endpoint that names *this* device (DEC-05/06).
+// A circuit CT is also scope_status=candidate but is never single-subject, so
+// it must not offer a scope review on an unrelated device page.
+function _endpointScope(endpoints, deviceId = null) {
+  const list = _endpointList(endpoints);
+  const subjectOf = (e) => _str(e.scope_subject_id) || _str(e.subject_id);
+  const candidate = list.find((e) => e
+    && (e.scope_status === 'candidate' || e.scope === 'candidate')
+    && (_absent(e.scope) || e.scope === 'single_subject' || e.scope === 'candidate')
+    && (deviceId === null || subjectOf(e) === deviceId));
   if (!candidate) return null;
   return {
     endpoint_id: _str(candidate.endpoint_id) || _str(candidate.id),
-    subject_id: _str(candidate.subject_id),
+    subject_id: subjectOf(candidate),
     status: 'candidate',
     confirm_path: `/endpoints/${encodeURIComponent(_str(candidate.endpoint_id) || _str(candidate.id))}/scope`,
   };
@@ -1104,14 +1118,18 @@ function v3HistoryCard(model) {
 
 // Endpoint scope review (D2, DEC-05/06): confirm or reject a candidate
 // single-subject scope.  These are the only writes and happen on user action.
-async function confirmEndpointScope(endpointId, http = post) {
+// The body is the D2 route's contract: ``{action: 'confirm'|'reject'}`` plus
+// an optional ``subject_id`` (api/routes/endpoints.py).
+async function confirmEndpointScope(endpointId, http = post, subjectId = null) {
   if (_absent(endpointId)) return null;
-  return http(`/endpoints/${encodeURIComponent(String(endpointId))}/scope`, { decision: 'confirm' });
+  const body = { action: 'confirm' };
+  if (!_absent(subjectId)) body.subject_id = String(subjectId);
+  return http(`/endpoints/${encodeURIComponent(String(endpointId))}/scope`, body);
 }
 
 async function rejectEndpointScope(endpointId, http = post) {
   if (_absent(endpointId)) return null;
-  return http(`/endpoints/${encodeURIComponent(String(endpointId))}/scope`, { decision: 'reject' });
+  return http(`/endpoints/${encodeURIComponent(String(endpointId))}/scope`, { action: 'reject' });
 }
 
 function endpointScopeCard(model) {
@@ -1126,7 +1144,7 @@ function endpointScopeCard(model) {
     el('div', { style: 'margin-top:12px;display:flex;gap:8px' }, [
       el('button', {
         class: 'btn btn-sm', type: 'button',
-        onclick: () => confirmEndpointScope(scope.endpoint_id).then(
+        onclick: () => confirmEndpointScope(scope.endpoint_id, post, scope.subject_id).then(
           () => notify('Scope confirmed', 'This endpoint is now a single-subject measurement.'),
           (err) => notify('Could not confirm scope', describeError(err), 'bad')
         ),
@@ -1145,12 +1163,14 @@ function endpointScopeCard(model) {
 // Wire the v3 cards into the device detail view.  Called by renderDevice with
 // data from the payloads it already fetches plus the additive v3 routes.
 async function fetchDeviceV3(deviceId, signal) {
-  const [records, cells, endpoints] = await Promise.all([
+  const [records, row, endpoints] = await Promise.all([
     get(`/devices/${encodeURIComponent(deviceId)}/records`, signal).catch(() => []),
-    get(`/matrix/rows/${encodeURIComponent(deviceId)}`, signal).catch(() => []),
-    get('/endpoints', signal).catch(() => []),
+    get(`/matrix/rows/${encodeURIComponent(deviceId)}`, signal).catch(() => null),
+    get('/endpoints', signal).catch(() => null),
   ]);
-  return { records, cells, endpoints };
+  // /matrix/rows/{id} is a RowDetail whose ``cells`` are the device's cells.
+  const cells = Array.isArray(row) ? row : (row && Array.isArray(row.cells) ? row.cells : []);
+  return { records, cells, endpoints: _endpointList(endpoints) };
 }
 
 export {

@@ -200,6 +200,6 @@ def test_endpoint_scope_confirm_reject_routes() -> None:
     )
     result = run_esm(program, shim=DOM_SHIM)
     assert result["calls"] == [
-        ["/endpoints/plug_1/scope", {"decision": "confirm"}],
-        ["/endpoints/plug_1/scope", {"decision": "reject"}],
+        ["/endpoints/plug_1/scope", {"action": "confirm"}],
+        ["/endpoints/plug_1/scope", {"action": "reject"}],
     ]
