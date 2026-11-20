@@ -2130,6 +2130,26 @@ class RuntimeMixin:
             out[str(reader)] = (sigma, self._measured_level_change(str(reader), onset))
         return out
 
+    def _typical_levels(self, window_s: float = 600.0) -> dict[str, float]:
+        """Median absolute power per reader over the recent window (T5 tie-break).
+
+        A direct parent carries no more power than the feed above it, so T5
+        keeps the lowest-level confirmed parent of a child and demotes the
+        transitive grandparent edges to soft alternatives.
+        """
+        now = self._clock()
+        since = now - timedelta(seconds=window_s)
+        levels: dict[str, float] = {}
+        for reader in self.reader_state.readers():
+            values = [
+                abs(s.active_power_w)
+                for s in self.reader_state.window(reader, since, now)
+                if s.active_power_w is not None
+            ]
+            if len(values) >= 3:
+                levels[str(reader)] = float(statistics.median(values))
+        return levels
+
     def _measured_level_change(self, reader: str, onset: datetime) -> float | None:
         """Median level after ``onset`` minus median level before it, or None."""
         pre = [
@@ -2169,7 +2189,9 @@ class RuntimeMixin:
             from ..electrical.topology_inference import DeltaObservation
 
             obs = DeltaObservation.from_group(group)
-            updated = view.observe_group(obs, observed=self._observed_readers(group))
+            updated = view.observe_group(
+                obs, observed=self._observed_readers(group), levels=self._typical_levels()
+            )
             self.topology_inference = updated
             repo = self.db.repos.topology_v3
             changed = 0

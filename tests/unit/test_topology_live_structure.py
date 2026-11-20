@@ -99,6 +99,31 @@ def test_duplicate_channel_names_get_readable_unique_labels() -> None:
     assert labels == {"Refoss main panel L2", "Refoss sub panel L2", "upper floor hrv"}
 
 
+def test_the_lower_level_parent_is_the_direct_one_and_the_grandparent_is_demoted() -> None:
+    from wattmosaic_engine.electrical.topology_inference import DeltaObservation
+
+    edges = (
+        _edge("main_l2", "plug", EdgeLifecycleV3.CONFIRMED, support=14, parent_only=21),
+        _edge("sub_l1", "plug", EdgeLifecycleV3.CONFIRMED, support=19, parent_only=33),
+    )
+    causes = {
+        ("main_l2", "plug", "contains"): frozenset({"a", "b"}),
+        ("sub_l1", "plug", "contains"): frozenset({"a", "b"}),
+    }
+    view = TopologyInferenceView(edges=edges, clock=lambda: T0, causes_by_edge=causes)
+    view = view.observe_group(
+        DeltaObservation(group_id="g", deltas={"other": (40.0, 2.0)}, at=T0, cause_id="c"),
+        levels={"main_l2": 3100.0, "sub_l1": 820.0, "plug": 60.0},
+    )
+    assert view.edge("sub_l1", "plug").lifecycle == EdgeLifecycleV3.CONFIRMED
+    assert view.edge("main_l2", "plug").lifecycle == EdgeLifecycleV3.PROVISIONAL
+    # Without levels nothing is decided.
+    same = TopologyInferenceView(edges=edges, clock=lambda: T0, causes_by_edge=causes).observe_group(
+        DeltaObservation(group_id="g2", deltas={"other": (40.0, 2.0)}, at=T0, cause_id="c2")
+    )
+    assert same.edge("main_l2", "plug").lifecycle == EdgeLifecycleV3.CONFIRMED
+
+
 class _RecordingVersions:
     def __init__(self, active: set[str]) -> None:
         self.active = active

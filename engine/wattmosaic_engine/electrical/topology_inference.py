@@ -461,9 +461,16 @@ class TopologyInferenceView:
         absolute: Mapping[str, Sequence[float | None]] | None = None,
         basis_by_reader: Mapping[str, MeasurementBasis | str] | None = None,
         channel_meta: Mapping[str, Mapping[str, Any]] | None = None,
-        observed: Mapping[str, float | None] | None = None,
+        observed: Mapping[str, Any] | None = None,
+        levels: Mapping[str, float] | None = None,
     ) -> TopologyInferenceView:
         """Fold one FINAL event group into every affected pair's ledger.
+
+        ``levels`` maps readers to their typical (recent median) power.  When a
+        child ends up with several CONFIRMED inferred parents, containment is
+        transitive (a grandparent feed sees every step of its grandchildren), so
+        only the parent with the lowest level is the direct one; the others are
+        kept as PROVISIONAL soft alternatives.
 
         ``observed`` maps each reader that held a usable reading over the
         group's window to its noise sigma (``None`` = unknown, the floor is
@@ -705,6 +712,9 @@ class TopologyInferenceView:
                     f"{edge.edge_id}: {_value(edge.lifecycle)} -> {_value(new_lifecycle)}"
                 )
                 edges[index] = edge.model_copy(update={"lifecycle": new_lifecycle})
+        # One direct parent per child: a grandparent feed is transitive.
+        if levels:
+            transitions.extend(self._keep_direct_parents(edges, levels))
         # Only a crossing into CONFIRMED or CONFLICTED promotes a topology
         # version (T5 step 3).  CANDIDATE/PROVISIONAL are soft and accumulate
         # silently; one event must never publish a new version.
@@ -717,6 +727,10 @@ class TopologyInferenceView:
             # contradicted changes nothing H uses, so it is no new version.
             or text.endswith(
                 f"{_value(EdgeLifecycleV3.CONFIRMED)} -> {_value(EdgeLifecycleV3.CONFLICTED)}"
+            )
+            # A confirmed grandparent edge demoted to a soft alternative.
+            or text.endswith(
+                f"{_value(EdgeLifecycleV3.CONFIRMED)} -> {_value(EdgeLifecycleV3.PROVISIONAL)}"
             )
         ]
 
@@ -737,6 +751,48 @@ class TopologyInferenceView:
         return view
 
     # -- lifecycle / versioning internals ----------------------------------- #
+    @staticmethod
+    def _keep_direct_parents(
+        edges: list[TopologyEdgeV3], levels: Mapping[str, float]
+    ) -> list[str]:
+        """Demote all but the lowest-level CONFIRMED inferred parent per child.
+
+        A direct parent always carries no more power than the feed above it, so
+        among confirmed parents the one with the lowest typical level is the
+        direct one.  User-declared and pinned edges are never touched; a child
+        whose parents' levels are unknown is left as it is.
+        """
+        by_child: dict[str, list[int]] = {}
+        for index, edge in enumerate(edges):
+            if (
+                _relation(edge.relation) == _CONTAINS
+                and edge.declared_by == "inference"
+                and not edge.pinned
+                and _value(edge.lifecycle) == _value(EdgeLifecycleV3.CONFIRMED)
+            ):
+                by_child.setdefault(edge.target_endpoint_id, []).append(index)
+        transitions: list[str] = []
+        for indices in by_child.values():
+            if len(indices) < 2:
+                continue
+            known = [i for i in indices if levels.get(edges[i].source_endpoint_id) is not None]
+            if len(known) < len(indices):
+                continue
+            keep = min(
+                indices,
+                key=lambda i: (float(levels[edges[i].source_endpoint_id]), edges[i].edge_id),
+            )
+            for i in indices:
+                if i == keep:
+                    continue
+                edge = edges[i]
+                transitions.append(
+                    f"{edge.edge_id}: {_value(edge.lifecycle)} -> "
+                    f"{_value(EdgeLifecycleV3.PROVISIONAL)}"
+                )
+                edges[i] = edge.model_copy(update={"lifecycle": EdgeLifecycleV3.PROVISIONAL})
+        return transitions
+
     @staticmethod
     def _lifecycle(
         edge: TopologyEdgeV3,
