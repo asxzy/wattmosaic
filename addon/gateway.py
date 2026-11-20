@@ -575,11 +575,21 @@ async def on_cleanup(app: web.Application) -> None:
     await app["session"].close()
 
 
+async def ui_not_found(request: web.Request) -> web.Response:
+    """A ``/ui/`` path that is not a flat, vetted asset name is never proxied."""
+    if not _peer_trusted(request):
+        return _json(401, "unauthorized", "the panel is only served through Home Assistant ingress")
+    return _json(404, "not_found", "unknown asset")
+
+
 def create_app() -> web.Application:
     app = web.Application(client_max_size=MAX_BODY)
     app.router.add_get("/healthz", healthz)
     app.router.add_get("/", index)
     app.router.add_get("/ui/{asset}", static)
+    # Any other /ui/... path (nested segments) is the panel's namespace, not
+    # the engine's: answer 404 here instead of forwarding it upstream.
+    app.router.add_route("*", "/ui/{tail:.+}", ui_not_found)
     app.router.add_route("*", "/{tail:.*}", proxy)
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
