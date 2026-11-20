@@ -67,6 +67,34 @@ def test_restart_resumes_inferred_edges_with_their_evidence(tmp_path: Path) -> N
     assert edge.evidence.independent_causes == 3
 
 
+def test_version_edges_keep_their_lifecycle_after_a_restart_and_a_fold(tmp_path: Path) -> None:
+    """A CONFIRMED edge seeded from the active version must survive the next fold.
+
+    Live regression: causes were restored only for edges outside the version, so
+    the first fold after a restart recomputed every version edge with zero
+    independent causes and demoted all CONFIRMED/PROVISIONAL edges to CANDIDATE.
+    """
+    db = Database(tmp_path / "resume2.db")
+    edge = _edge("te-inf::feed_l1::kitchen_ckt", "feed_l1", "kitchen_ckt",
+                 support=9, causes=3, lifecycle=EdgeLifecycleV3.CONFIRMED)
+    db.repos.topology_v3.upsert_edge(edge)
+    core = EngineCore(EngineConfig(database_path=str(tmp_path / "resume2.db"), ha_token="x"),
+                      db, clock=lambda: T0)
+    core._wire_v3_services()  # noqa: SLF001
+    versions = core.version_service
+    vid = versions.propose_topology([edge], None)
+    versions.promote_topology(vid, "test: version holds the confirmed edge")
+    core.topology_inference = None
+    core._wire_self_healing()  # noqa: SLF001 - a restart re-seeds from the version
+    view = core.topology_inference.observe_group(
+        DeltaObservation(group_id="g-other", deltas={"garage_ckt": (30.0, 2.0)}, at=T0, cause_id="x")
+    )
+    resumed = view.edge("feed_l1", "kitchen_ckt")
+    assert resumed is not None
+    assert resumed.lifecycle == EdgeLifecycleV3.CONFIRMED
+    assert resumed.evidence.independent_causes == 3
+
+
 def test_migration_27_drops_only_unpinned_unversioned_inferred_edges(tmp_path: Path) -> None:
     db = Database(tmp_path / "m27.db")
     repo = db.repos.topology_v3

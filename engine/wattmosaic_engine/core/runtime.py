@@ -523,7 +523,7 @@ class RuntimeMixin:
         except Exception:  # noqa: BLE001 - resuming is best effort
             return edges, causes
         for row in rows:
-            if str(row.get("declared_by")) != "inference" or row.get("edge_id") in skip:
+            if str(row.get("declared_by")) != "inference":
                 continue
             try:
                 edge = TopologyEdgeV3(**_edge_row(row))
@@ -532,11 +532,16 @@ class RuntimeMixin:
             lifecycle = str(getattr(edge.lifecycle, "value", edge.lifecycle))
             if lifecycle in ("rejected", "retired"):
                 continue
-            edges.append(edge)
+            # Causes are restored for *every* inferred edge, including those the
+            # active version already seeds: without them the first fold
+            # recomputed a version edge's lifecycle with zero independent causes
+            # and demoted every CONFIRMED/PROVISIONAL edge to CANDIDATE.
             relation = str(getattr(edge.relation, "value", edge.relation))
             key = (edge.source_endpoint_id, edge.target_endpoint_id, relation)
             count = int(getattr(edge.evidence, "independent_causes", 0) or 0)
             causes[key] = frozenset(f"restored::{edge.edge_id}::{i}" for i in range(count))
+            if edge.edge_id not in skip:
+                edges.append(edge)
         if edges:
             log.info("topology ledger resumed with %d stored inferred edges", len(edges))
         return edges, causes
