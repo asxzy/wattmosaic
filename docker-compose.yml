@@ -17,7 +17,7 @@ services:
       args:
         # Pin a digest for a fully reproducible build if you need one.
         PYTHON_IMAGE: ${WM_PYTHON_IMAGE:-python:3.12-slim-bookworm}
-    image: wattmosaic-engine:${WM_IMAGE_TAG:-0.1.3}
+    image: wattmosaic-engine:${WM_IMAGE_TAG:-local}
     container_name: wattmosaic-engine
     restart: unless-stopped
     init: true
@@ -52,6 +52,15 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # run.sh starts as root only to chown /data and then setpriv to UID 10001
+    # with every capability cleared. Without these it cannot even enter /app
+    # (0750, owned by 10001), and the container restart-loops with exit 126.
+    cap_add:
+      - CHOWN
+      - FOWNER
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
     read_only: true
     tmpfs:
       - /tmp:size=32m,mode=1777

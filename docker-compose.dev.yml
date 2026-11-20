@@ -1,0 +1,61 @@
+# Local development overlay: the engine plus a Home Assistant ingress stand-in.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+#   open http://<this-host>:8790/          # the panel, no token needed
+#
+# The gateway only serves the panel (and injects the API token) for a trusted
+# ingress peer that sends X-Remote-User-Id, which is what HA ingress does. The
+# `ingress-proxy` service plays that role from a fixed address on its own
+# network, and the engine trusts exactly that address -- not the Docker bridge,
+# so other host processes hitting :8787 directly still need X-API-Token.
+#
+# WARNING: the proxy listens on 0.0.0.0. Anyone who can reach port 8790 gets the
+# panel and an authenticated engine API. Use it only on a trusted network, or
+# set WM_PROXY_BIND=127.0.0.1 to keep it on this machine.
+#
+# .env (HA_URL/HA_HOST, HA_TOKEN, optional WM_API_TOKEN) is read as in the base
+# file. The engine connects to that HA read-only (no service calls); point it at
+# a test HA if you do not want a second client on production.
+
+services:
+  engine:
+    environment:
+      WM_GATEWAY_TRUSTED_INGRESS_IPS: "172.31.250.10"
+    networks:
+      dev:
+        ipv4_address: 172.31.250.2
+
+  ingress-proxy:
+    image: wattmosaic-engine:${WM_IMAGE_TAG:-local}
+    container_name: wattmosaic-ingress-proxy
+    restart: unless-stopped
+    init: true
+    depends_on:
+      - engine
+    # Runs as a plain user from the engine image (it already ships aiohttp).
+    user: "10001:10001"
+    entrypoint: ["/opt/venv/bin/python", "/opt/dev/ingress_proxy.py"]
+    environment:
+      WM_PROXY_UPSTREAM: http://172.31.250.2:8787
+      WM_PROXY_HOST: 0.0.0.0
+      WM_PROXY_PORT: "8790"
+    volumes:
+      - ./tools/dev/ingress_proxy.py:/opt/dev/ingress_proxy.py:ro
+    ports:
+      - "${WM_PROXY_BIND:-0.0.0.0}:${WM_PROXY_PORT:-8790}:8790"
+    networks:
+      dev:
+        ipv4_address: 172.31.250.10
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    healthcheck:
+      disable: true
+
+networks:
+  dev:
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24
