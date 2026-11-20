@@ -170,3 +170,5 @@ def coverage_report(
 HA compressed history rows: the state is `"s"`; the timestamp is `"lu"` if present, else
 `"lc"`, as epoch seconds (float). Follow `tools/audit/derive_state_entities.py:275`.
 Non-numeric states (`unavailable`, `unknown`) are skipped and counted in a note.
+
+**HA query semantics (found in review).** `history/history_during_period` filters strictly (`last_updated > start_time`, `< end_time`), omits entities with no rows, and by default (`include_start_time_state=True`) prepends a synthetic row stamped exactly at `start_time` carrying the last earlier state. Chunked fetchers must request the start-time state only for the first chunk, or every chunk fabricates a sample (T04) and masks gaps (T05).
