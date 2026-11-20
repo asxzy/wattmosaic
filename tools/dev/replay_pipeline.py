@@ -91,6 +91,15 @@ def _value(item: Any) -> Any:
     return getattr(item, "value", item)
 
 
+# Public aliases for the small time/value helpers, so sibling replay tools can
+# reuse the exact same parsing without duplicating it.  Behaviour is unchanged;
+# the private names above remain the canonical definitions used by this module.
+as_utc = _as_utc
+iso = _iso
+parse_time = _parse_time
+value = _value
+
+
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
