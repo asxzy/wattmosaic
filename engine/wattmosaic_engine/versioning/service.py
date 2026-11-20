@@ -554,7 +554,11 @@ class VersionService:
             affected_mapping_edge_ids=list(mapping_edge_ids),
             created_at=at,
         )
-        self._topo.append_configuration_event(history_event)
+        # A re-detected change re-marks the same event: the history row is
+        # immutable and written once (it raised IntegrityError live).
+        has = getattr(self._topo, "has_configuration_event", None)
+        if has is None or not has(history_event.event_id):
+            self._topo.append_configuration_event(history_event)
 
         for edge_id in edge_ids:
             rows = self._topo.edge_history(edge_id)

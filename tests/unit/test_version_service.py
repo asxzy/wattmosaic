@@ -143,6 +143,13 @@ def test_re_detected_configuration_event_is_recorded_once(tmp_path: Path) -> Non
         assert restarted.record_configuration_event(ev) == ev.event_id
         stored = [e for e in db.repos.topology_v3.events() if e["event_id"] == ev.event_id]
         assert len(stored) == 1
+        # mark_suspected appends its own history event; re-marking is a no-op.
+        restarted.mark_suspected(ev.event_id, [], [])
+        restarted.mark_suspected(ev.event_id, [], [])
+        history = [e for e in db.repos.topology_v3.events() if e["event_id"] == f"{ev.event_id}:suspected"]
+        assert len(history) == 1
+        # The repository itself is idempotent for every caller.
+        db.repos.topology_v3.append_configuration_event(ev)
     finally:
         db.close()
 

@@ -124,6 +124,26 @@ def test_the_lower_level_parent_is_the_direct_one_and_the_grandparent_is_demoted
     assert same.edge("main_l2", "plug").lifecycle == EdgeLifecycleV3.CONFIRMED
 
 
+def test_a_confirmed_edge_does_not_flap_on_one_extra_conflict() -> None:
+    from wattmosaic_engine.electrical.topology_inference import DeltaObservation
+
+    def _with(lifecycle: EdgeLifecycleV3) -> TopologyEdgeV3:
+        edge = _edge("sub_l2", "hrv", lifecycle, support=30)
+        return edge.model_copy(update={"evidence": edge.evidence.model_copy(update={"conflict": 2})})
+
+    causes = {("sub_l2", "hrv", "contains"): frozenset({"a", "b", "c"})}
+    group = DeltaObservation(group_id="g", deltas={"other": (40.0, 2.0)}, at=T0, cause_id="x")
+    kept = TopologyInferenceView(
+        edges=(_with(EdgeLifecycleV3.CONFIRMED),), clock=lambda: T0, causes_by_edge=causes
+    ).observe_group(group)
+    assert kept.edge("sub_l2", "hrv").lifecycle == EdgeLifecycleV3.CONFIRMED
+    # The same 6.3 % conflict does not *promote* a new edge to CONFIRMED.
+    fresh = TopologyInferenceView(
+        edges=(_with(EdgeLifecycleV3.PROVISIONAL),), clock=lambda: T0, causes_by_edge=causes
+    ).observe_group(group)
+    assert fresh.edge("sub_l2", "hrv").lifecycle == EdgeLifecycleV3.PROVISIONAL
+
+
 class _RecordingVersions:
     def __init__(self, active: set[str]) -> None:
         self.active = active

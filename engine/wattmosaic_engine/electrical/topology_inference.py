@@ -832,6 +832,18 @@ class TopologyInferenceView:
             return EdgeLifecycleV3.CONFIRMED
         if (
             gates_ok
+            and _value(edge.lifecycle) == _value(EdgeLifecycleV3.CONFIRMED)
+            and support >= MIN_SUPPORT_CONFIRMED
+            and ratio < CONFLICT_RATIO_PROVISIONAL
+        ):
+            # Hysteresis: confirming needs < 5 % conflict, but an already
+            # CONFIRMED edge keeps that status until conflict passes the 10 %
+            # suggestion limit.  Live, one extra conflicting event (30 support,
+            # 2 conflict = 6.3 %) dropped a real branch out of the hierarchy and
+            # the next supporting event put it back.
+            return EdgeLifecycleV3.CONFIRMED
+        if (
+            gates_ok
             and support >= MIN_SUPPORT_PROVISIONAL
             and ratio < CONFLICT_RATIO_PROVISIONAL
         ):

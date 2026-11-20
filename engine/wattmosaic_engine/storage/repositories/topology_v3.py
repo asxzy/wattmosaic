@@ -268,14 +268,20 @@ class TopologyV3Repository(Repository):
     # -- configuration events ---------------------------------------------- #
 
     def append_configuration_event(self, event: Any) -> None:
-        """Append one immutable configuration-change event."""
+        """Append one immutable configuration-change event (idempotent by id).
+
+        Event ids identify the event (detectors derive them from what they
+        detected), and an event never changes, so recording the same id again
+        is a no-op rather than an IntegrityError.  Every caller (D1, T7
+        self-healing, device scope changes, the runtime) relies on this.
+        """
         data = _model_dict(event)
         refs = data.get("evidence_refs", [])
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 self._conn.execute(
-                    """INSERT INTO configuration_events(
+                    """INSERT OR IGNORE INTO configuration_events(
                         event_id, kind, detection, status, affected_endpoint_ids_json,
                         affected_edge_ids_json, affected_mapping_edge_ids_json,
                         candidate_topology_version_id, candidate_mapping_version_id,
