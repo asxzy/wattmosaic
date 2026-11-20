@@ -1,6 +1,6 @@
 """The automatic development-version bump.
 
-``main`` is now the development line and every push publishes a prerelease, so
+``main`` is now the development line and each Release run publishes a prerelease, so
 the version has to be incremented by CI rather than by hand.  The Supervisor
 only offers an App update when ``addon/config.yaml``'s ``version:`` *string*
 changes -- it compares versions, never commits -- so a push that changes code

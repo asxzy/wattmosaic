@@ -2,7 +2,7 @@
 
 Why this exists
 ---------------
-``main`` is now the development line: every push publishes a prerelease.  The
+``main`` is now the development line: each Release run on it publishes a prerelease.  The
 Supervisor only offers an App update when ``addon/config.yaml``'s ``version:``
 *string* changes -- it clones one branch and compares version strings, it never
 compares commits.  So a push that changes code but not the version would build a

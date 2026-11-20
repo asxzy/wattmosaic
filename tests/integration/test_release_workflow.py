@@ -52,19 +52,26 @@ def _step(job: str, prefix: str) -> dict:
 
 
 class TestTriggers:
-    def test_main_is_a_release_branch(self) -> None:
-        """``main`` is the development line, so a push there publishes."""
-        triggers = _workflow()[True] if True in _workflow() else _workflow()["on"]
-        assert "main" in triggers["push"]["branches"]
+    """Releases are on demand: a person starts the workflow; a push never does."""
 
-    def test_the_old_dev_branch_is_gone(self) -> None:
-        """Keeping a second long-lived branch is the fork this rework removes."""
-        triggers = _workflow()[True] if True in _workflow() else _workflow()["on"]
-        assert "dev" not in triggers["push"]["branches"]
+    @staticmethod
+    def _triggers() -> dict:
+        workflow = _workflow()
+        return workflow[True] if True in workflow else workflow["on"]
 
-    def test_stable_is_a_release_branch(self) -> None:
-        triggers = _workflow()[True] if True in _workflow() else _workflow()["on"]
-        assert "stable" in triggers["push"]["branches"]
+    def test_no_push_publishes(self) -> None:
+        """A push to ``main`` (or any branch) must not cut a release."""
+        assert "push" not in self._triggers()
+
+    def test_release_is_started_manually(self) -> None:
+        assert "workflow_dispatch" in self._triggers()
+
+    def test_only_main_and_stable_can_publish(self) -> None:
+        """A manual run from a feature branch must not publish anything."""
+        guard = _jobs()["prepare"]["if"]
+        assert "github.ref_name == 'main'" in guard
+        assert "github.ref_name == 'stable'" in guard
+        assert "dev" not in guard.replace("github.ref_name", "")
 
 
 class TestSinglePipeline:

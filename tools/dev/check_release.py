@@ -286,7 +286,7 @@ def notes_section(version: str) -> str | None:
 def check_channel(channel: str) -> None:
     """A branch may only carry a version of its own kind.
 
-    ``main`` is the **development** line: every push publishes a prerelease, so
+    ``main`` is the **development** line: each Release run publishes a prerelease, so
     the version there must carry a ``-dev.N`` suffix.  ``stable`` is the frozen
     stable line and may only carry a plain ``X.Y.Z``.
 

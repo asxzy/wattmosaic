@@ -21,8 +21,12 @@
 #
 # Channels
 # --------
-# `main` is the development line: every push publishes a prerelease
+# `main` is the development line: a run on `main` publishes a prerelease
 # (`X.Y.Z-dev.N`).  `stable` carries plain `X.Y.Z` and is human-driven.
+#
+# Releases are on demand: this workflow runs only when started from the Actions
+# tab (or `gh workflow run release.yaml --ref main`), never on push.  Pick the
+# branch in the "Run workflow" dialog; only `main` and `stable` may publish.
 #
 # A prerelease on `main` cannot reach a stable user, and that is enforced by the
 # Marketplace rather than by trust: `show_beta` defaults to false, and
@@ -37,13 +41,13 @@
 # longer in the list, so `last_version` stays `None`, `display_available_version`
 # falls back to a commit SHA, and `version_to_install()` returns
 # `default_branch` -- which would offer a stable user the development line.  A
-# per-push release stream reaches 30 within a week, so old prereleases are
+# frequent release stream can reach 30 within a week, so old prereleases are
 # deleted.  Stable Releases are never pruned.
 name: Release
 
 on:
-  push:
-    branches: ["main", "stable"]
+  # On demand only (no push trigger): release when a build is wanted, not on
+  # every push.  The branch chosen in the dialog selects the channel.
   workflow_dispatch:
     inputs:
       force:
@@ -51,7 +55,7 @@ on:
         type: boolean
         default: false
 
-# Two pushes must never race to create different releases, and the bump commit
+# Two runs must never race to create different releases, and the bump commit
 # must land before the next run reads the tree. Serialise per branch.
 concurrency:
   group: release-${{ github.ref }}
@@ -64,6 +68,9 @@ env:
 
 jobs:
   prepare:
+    # Only the two release channels may publish; a manual run started from any
+    # other branch does nothing.
+    if: github.ref_name == 'main' || github.ref_name == 'stable'
     runs-on: ubuntu-latest
     permissions:
       contents: write

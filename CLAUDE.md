@@ -98,7 +98,7 @@ contracts, runtime.interfaces → nothing else in the package
 
 Five version fields must agree: `pyproject.toml`, `custom_components/wattmosaic/manifest.json`, `const.VERSION`, `addon/config.yaml`, and a `## vX.Y.Z` section in `RELEASE_NOTES.md`. `check_release.py` enforces this.
 
-- Every push to `main` publishes a dev prerelease (`.github/workflows/release.yaml`). If the committed version is already tagged, CI bumps `X.Y.Z-dev.N` (`tools/dev/bump_version.py --next`), writes the notes itself and commits `Release … [wm-auto-version]`. Don't bump by hand for routine work.
+- Releases are on demand: run the Release workflow (`.github/workflows/release.yaml`, `gh workflow run release.yaml --ref main`); pushing does not release. A run on `main` publishes a dev prerelease. If the committed version is already tagged, CI bumps `X.Y.Z-dev.N` (`tools/dev/bump_version.py --next`), writes the notes itself and commits `Release … [wm-auto-version]`. Don't bump by hand for routine work.
 - To move the core version (e.g. to `0.4.0-dev.1`), set all five fields yourself **and** add its `RELEASE_NOTES.md` section. CI honours an untagged committed version only as-is, and `check_release.py` refuses an undocumented one.
 - Use the dotted prerelease form `-dev.10`, never `-dev10`. The `stable` branch carries plain `X.Y.Z` and is released by a human.
 

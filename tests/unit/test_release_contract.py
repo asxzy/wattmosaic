@@ -372,7 +372,7 @@ def test_the_served_engine_version_is_the_package_version():
 def test_the_health_schema_does_not_embed_the_current_version():
     """The generated schema must not change when only the version changes.
 
-    CI bumps the version on every push to ``main`` and then asserts
+    CI bumps the version on every Release run on ``main`` and then asserts
     ``git diff --exit-code data/schemas``.  A plain pydantic default writes the
     current version into the JSON schema, so every auto-release would fail the
     schema gate with no contract change.  ``HealthResponse.engine_version``
