@@ -80,7 +80,7 @@ from .nesting_math import (
     duplicate_evidence,
 )
 from .topology_health import HealthBook, demotions
-from .topology_resolve import StructureAnalysis, analyse, resolve_structure, structure_series
+from .topology_resolve import StructureAnalysis, analyse, resolve, structure_series
 
 __all__: list[str] = [
     "CONTAINMENT_MIN",
@@ -474,6 +474,13 @@ class TopologyInferenceView:
     #: apart from ``absolute`` so the per-edge containment gate is not run on
     #: hours of samples at every fold.
     aligned: Mapping[str, Sequence[float | None]] = field(default_factory=dict)
+    #: Sticky structural decisions (child -> direct parent) of earlier settles.
+    #: A decided parent the structure CONFIRMED stays CONFIRMED (even below
+    #: MIN_SUPPORT_CONFIRMED, and while no aligned series are available) until
+    #: the structure positively disagrees, its conflict ratio passes the
+    #: PROVISIONAL bound or its health is BROKEN (design §5 T5, linking v2).
+    #: The runtime persists it next to the edge-health book.
+    structure_decisions: Mapping[str, str] = field(default_factory=dict)
     structure_cache: _StructureCache = field(
         default_factory=lambda: _StructureCache(), compare=False, repr=False
     )
@@ -847,7 +854,7 @@ class TopologyInferenceView:
                         )
                     )
 
-        version_transitions = self._settle(
+        version_transitions, decisions = self._settle(
             edges,
             causes,
             absolute_now,
@@ -863,6 +870,7 @@ class TopologyInferenceView:
             self,
             edges=tuple(edges),
             health=health,
+            structure_decisions=decisions,
             aligned=aligned_now,
             at=at,
             seen_groups=frozenset({*self.seen_groups, obs.group_id}),
@@ -889,15 +897,26 @@ class TopologyInferenceView:
         *,
         structure: Mapping[str, Sequence[float | None]] | None = None,
         health: HealthBook | None = None,
-    ) -> list[str]:
+    ) -> tuple[list[str], dict[str, str]]:
         """Apply lifecycle transitions in place; return the version-worthy ones.
 
+        Also returns the structural decisions (child -> direct parent) to keep.
         Per edge, only the *net* change of this settle is reported (a stage may
         undo what an earlier one did -- the evidence rule re-confirms an edge the
         structural pass then demotes again -- which is no transition at all).
+
+        Stages: (1) the evidence rule per edge, with a decided structural parent
+        kept CONFIRMED while the evidence still holds it PROVISIONAL (sticky);
+        (2) edge health: BROKEN edges are demoted and leave the candidates;
+        (3) one direct parent per child -- the structural pass on adequate
+        aligned series, else the remembered decisions plus the lowest-level
+        rule for undecided children.  Missing series never demote a decision.
         """
         original = [_value(edge.lifecycle) for edge in edges]
+        previous = {edge.edge_id: str(_value(edge.lifecycle)) for edge in edges}
         labels: dict[int, str] = {}
+        decided = dict(self.structure_decisions)
+        sticky: set[tuple[str, str]] = set()
 
         def note(stage: Sequence[str], before: Sequence[TopologyEdgeV3]) -> None:
             for index, (old, new) in enumerate(zip(before, edges, strict=True)):
@@ -909,6 +928,7 @@ class TopologyInferenceView:
                     if head == new.edge_id or head.startswith(new.edge_id + " ("):
                         labels[index] = head
 
+        # (1) Evidence.
         for index, edge in enumerate(edges):
             if _relation(edge.relation) != _CONTAINS or edge.pinned or edge.lifecycle in _DORMANT:
                 continue
@@ -919,24 +939,26 @@ class TopologyInferenceView:
                 and edge.declared_by != "user"
             ):
                 new_lifecycle = self._direction_cap(edge, edges, new_lifecycle, absolute_now)
+            if (
+                new_lifecycle == EdgeLifecycleV3.PROVISIONAL
+                and edge.lifecycle == EdgeLifecycleV3.CONFIRMED
+                and edge.declared_by == "inference"
+                and decided.get(edge.target_endpoint_id) == edge.source_endpoint_id
+            ):
+                # Sticky structural confirmation: the evidence still holds the
+                # edge (gates pass, conflict below the PROVISIONAL bound), and
+                # the structure decided it; support alone never undoes that.
+                new_lifecycle = EdgeLifecycleV3.CONFIRMED
+                sticky.add((edge.source_endpoint_id, edge.target_endpoint_id))
             if new_lifecycle != edge.lifecycle:
                 labels[index] = edge.edge_id
                 edges[index] = edge.model_copy(update={"lifecycle": new_lifecycle})
-        # One direct parent per child: a grandparent feed is transitive.  With
-        # aligned absolute series the structural pass decides (capacity, paired
-        # legs, duplicates, regression); without them the lowest level wins.
-        series = structure_series(structure)
-        before = list(edges)
-        if series is not None:
-            resolved, stage = resolve_structure(
-                edges, series, levels=levels, analysis=self.structure_cache.get(series)
-            )
-            edges[:] = resolved
-            note(stage, before)
-        elif levels:
-            note(self._keep_direct_parents(edges, levels), before)
-        # Edge health (M3): a confirmed inferred edge whose parent stopped
-        # following its child is no longer structural.
+
+        # (2) Edge health (M3) BEFORE the structure: a confirmed inferred edge
+        # whose parent stopped following its child is no longer structural, and
+        # a BROKEN edge never competes for a child (it must not win and demote
+        # its rival).
+        broken: set[tuple[str, str]] = set(health.broken()) if health is not None else set()
         if health is not None and health.entries:
             reasons = dict(demotions(health, edges))
             if reasons:
@@ -954,6 +976,38 @@ class TopologyInferenceView:
                         update={"lifecycle": EdgeLifecycleV3.PROVISIONAL}
                     )
                 note(stage, before)
+        for parent, child in broken:
+            sticky.discard((parent, child))
+            if decided.get(child) == parent:
+                del decided[child]
+
+        # (3) One direct parent per child: a grandparent feed is transitive.
+        # With adequate aligned series the structural pass decides (capacity,
+        # paired legs, duplicates, regression); without them the remembered
+        # decisions stand and only undecided children fall back to the
+        # lowest-level rule.
+        series = structure_series(structure)
+        before = list(edges)
+        if series is not None:
+            result = resolve(
+                edges,
+                series,
+                levels=levels,
+                analysis=self.structure_cache.get(series),
+                decided=decided,
+                sticky=sticky,
+                previous=previous,
+                excluded=broken,
+                allow_confirm=self._confirm_gate(absolute_now),
+            )
+            edges[:] = result.edges
+            note(result.transitions, before)
+            decided = result.decided
+        else:
+            stage = self._apply_decisions(edges, decided, broken)
+            if levels:
+                stage += self._keep_direct_parents(edges, levels, skip=frozenset(decided))
+            note(stage, before)
         transitions = [
             f"{labels[index]}: {original[index]} -> {_value(edges[index].lifecycle)}"
             for index in sorted(labels)
@@ -976,7 +1030,60 @@ class TopologyInferenceView:
             or text.endswith(
                 f"{_value(EdgeLifecycleV3.CONFIRMED)} -> {_value(EdgeLifecycleV3.PROVISIONAL)}"
             )
-        ]
+        ], decided
+
+    def _confirm_gate(
+        self, absolute: Mapping[str, Sequence[float | None]]
+    ) -> Callable[[TopologyEdgeV3, Sequence[TopologyEdgeV3]], bool] | None:
+        """The direction cap as a gate for structural confirmation (no cycles)."""
+        if not self.require_direction:
+            return None
+
+        def gate(edge: TopologyEdgeV3, edges: Sequence[TopologyEdgeV3]) -> bool:
+            capped = self._direction_cap(edge, edges, EdgeLifecycleV3.CONFIRMED, absolute)
+            return capped == EdgeLifecycleV3.CONFIRMED
+
+        return gate
+
+    @staticmethod
+    def _apply_decisions(
+        edges: list[TopologyEdgeV3],
+        decided: dict[str, str],
+        broken: set[tuple[str, str]],
+    ) -> list[str]:
+        """Re-apply remembered decisions when no adequate series are available.
+
+        A decided parent stays the direct parent: every other CONFIRMED inferred
+        candidate of its child drops to PROVISIONAL (as the structural pass did).
+        A decision whose edge is gone, dormant, CANDIDATE/CONFLICTED or BROKEN
+        is forgotten (``decided`` is updated in place).
+        """
+        live: dict[tuple[str, str], str] = {}
+        for edge in edges:
+            if _relation(edge.relation) == _CONTAINS and edge.lifecycle not in _DORMANT:
+                live[(edge.source_endpoint_id, edge.target_endpoint_id)] = _value(edge.lifecycle)
+        kept = (_value(EdgeLifecycleV3.CONFIRMED), _value(EdgeLifecycleV3.PROVISIONAL))
+        for child, parent in list(decided.items()):
+            if live.get((parent, child)) not in kept or (parent, child) in broken:
+                del decided[child]
+        transitions: list[str] = []
+        for index, edge in enumerate(edges):
+            parent = decided.get(edge.target_endpoint_id)
+            if (
+                parent is None
+                or edge.source_endpoint_id == parent
+                or _relation(edge.relation) != _CONTAINS
+                or edge.declared_by != "inference"
+                or edge.pinned
+                or edge.lifecycle != EdgeLifecycleV3.CONFIRMED
+            ):
+                continue
+            transitions.append(
+                f"{edge.edge_id} (structure: direct parent is {parent}): "
+                f"{_value(edge.lifecycle)} -> {_value(EdgeLifecycleV3.PROVISIONAL)}"
+            )
+            edges[index] = edge.model_copy(update={"lifecycle": EdgeLifecycleV3.PROVISIONAL})
+        return transitions
 
     def merge_evidence(
         self,
@@ -1011,6 +1118,15 @@ class TopologyInferenceView:
             weight = edge.evidence.support + edge.evidence.conflict
             position = by_key.get(key)
             if position is None:
+                if (
+                    edge.evidence.support < MIN_SUPPORT_PROVISIONAL
+                    and edge.evidence.conflict_ratio > CONFLICT_RATIO_CONFLICTED
+                ):
+                    # A replay counts every reader pair: one or two coincident
+                    # steps against many contradictions is noise, not a pair
+                    # worth a CONFLICTED ledger row (live: 625 of ~760 replay
+                    # edges).  An absent pair says the same to every rule.
+                    continue
                 edges.append(edge.model_copy(update={"lifecycle": EdgeLifecycleV3.CANDIDATE}))
                 by_key[key] = len(edges) - 1
                 causes[key] = learned_causes
@@ -1021,7 +1137,7 @@ class TopologyInferenceView:
             if weight > current.evidence.support + current.evidence.conflict:
                 edges[position] = current.model_copy(update={"evidence": edge.evidence})
                 causes[key] = learned_causes
-        version_transitions = self._settle(
+        version_transitions, decisions = self._settle(
             edges,
             causes,
             self.absolute,
@@ -1034,6 +1150,7 @@ class TopologyInferenceView:
         view = replace(
             self,
             edges=tuple(edges),
+            structure_decisions=decisions,
             causes_by_edge={key: frozenset(values) for key, values in causes.items()},
         )
         if version_transitions:
@@ -1101,6 +1218,8 @@ class TopologyInferenceView:
                     stack.extend(links.get(node, ()))
             return seen
 
+        # One class per reader pair (a 240 V leg pair is never also a twin).
+        links = analysis.classify(edges) if analysis is not None else None
         floor = self.sigma_floor_w
         steps = {
             reader: ChildStep(reader, float(delta), float(sigma) if sigma is not None else floor)
@@ -1116,9 +1235,9 @@ class TopologyInferenceView:
             """Detected 240 V pairs first, then (``alike_too``) readers stepping alike."""
             units: list[list[str]] = []
             placed: set[str] = set()
-            if analysis is not None:
+            if links is not None:
                 for reader in readers:
-                    partner = analysis.partner(reader)
+                    partner = links.partner(reader)
                     if partner in readers and reader not in placed and partner not in placed:
                         units.append(sorted((reader, partner)))
                         placed.update((reader, partner))
@@ -1162,7 +1281,7 @@ class TopologyInferenceView:
             if move is None or not math.isfinite(move):
                 continue
             ancestors = closure(parent, parents_of)
-            twins = analysis.twins(parent) if analysis is not None else frozenset()
+            twins = links.twins(parent) if links is not None else frozenset()
             candidates = [
                 reader
                 for reader in sorted(decisive)
@@ -1200,19 +1319,24 @@ class TopologyInferenceView:
 
     @staticmethod
     def _keep_direct_parents(
-        edges: list[TopologyEdgeV3], levels: Mapping[str, float]
+        edges: list[TopologyEdgeV3],
+        levels: Mapping[str, float],
+        *,
+        skip: frozenset[str] = frozenset(),
     ) -> list[str]:
         """Demote all but the lowest-level CONFIRMED inferred parent per child.
 
         A direct parent always carries no more power than the feed above it, so
         among confirmed parents the one with the lowest typical level is the
         direct one.  User-declared and pinned edges are never touched; a child
-        whose parents' levels are unknown is left as it is.
+        whose parents' levels are unknown is left as it is, and so is a child in
+        ``skip`` (its direct parent was decided structurally).
         """
         by_child: dict[str, list[int]] = {}
         for index, edge in enumerate(edges):
             if (
-                _relation(edge.relation) == _CONTAINS
+                edge.target_endpoint_id not in skip
+                and _relation(edge.relation) == _CONTAINS
                 and edge.declared_by == "inference"
                 and not edge.pinned
                 and _value(edge.lifecycle) == _value(EdgeLifecycleV3.CONFIRMED)

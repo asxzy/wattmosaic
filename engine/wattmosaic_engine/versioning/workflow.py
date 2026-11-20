@@ -250,9 +250,12 @@ class ConfigurationWorkflow:
         """Add one independent corroboration; promote at the threshold.
 
         Evidence comes from T5 (topology) and M2 match history (mapping); the
-        workflow itself does not recompute it.  A candidate edge set is proposed
-        once when the first corroboration arrives, then promoted when
-        ``confirmed_events`` independent sources agree.
+        workflow itself does not recompute it.  The candidate edge set is
+        proposed only once ``confirmed_events`` independent sources agree, and
+        promoted right away: a candidate proposed on the first corroboration
+        was left dangling whenever the suspicion never reached the threshold
+        (live: a history replay's promotion re-ran the detectors and left an
+        orphan candidate version behind).
         """
         record = self._records[change_event_id]
         if record.status != "suspected":
@@ -260,6 +263,8 @@ class ConfigurationWorkflow:
         record.corroborations += 1
         token = source or f"event-{record.corroborations}"
         record.independent_sources.add(token)
+        if len(record.independent_sources) < self.confirmed_events:
+            return record
         if record.candidate_topology_version_id is None:
             edges = candidate_topology_edges
             if edges is None:
@@ -274,8 +279,6 @@ class ConfigurationWorkflow:
             record.candidate_mapping_version_id = self.versions.propose_mapping(
                 list(edges), change_event_id
             )
-        if len(record.independent_sources) < self.confirmed_events:
-            return record
 
         model_before = self.versions.current().model_set_id
         reason = f"HB14: {record.kind} corroborated by {len(record.independent_sources)} events"

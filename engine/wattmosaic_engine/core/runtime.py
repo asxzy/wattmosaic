@@ -367,6 +367,9 @@ class RuntimeMixin:
         self._t5_history: dict[str, deque[tuple[int, datetime, float | None]]] = {}
         self._t5_aligned: dict[str, list[float | None]] | None = None
         self._t5_aligned_at: datetime | None = None
+        # Edge-health writes are throttled (at most one per _T5_HEALTH_EVERY_S).
+        self._t5_health_saved_at: datetime | None = None
+        self._t5_health_dirty = False
         self.change_detector = ChangeDetector(self.reader_state, self._on_reading_event)
         self.window_collector = WindowCollector(
             self.reader_state,
@@ -584,6 +587,7 @@ class RuntimeMixin:
             require_direction=True,
             causes_by_edge=causes,
             health=self._load_edge_health(),
+            structure_decisions=self._load_structure_decisions(),
         )
         self.reconciler = Reconciler(
             operator=self._build_reconciliation_operator(),
@@ -797,7 +801,7 @@ class RuntimeMixin:
                 at if last_seen is None else max(last_seen, at)
             )
             self.reader_state.add(reading)
-            self._t5_record(reading.reader_id, at, reading.active_power_w)
+            self._t5_record(reading.reader_id, at, reading.active_power_w, reading.received_at)
             # ADR-0042: persistence is a debug option.  With capture off (the
             # default) the HA recorder is the production history, so skip the
             # write entirely -- one cheap attribute read on the O(1) fast path.
@@ -2324,11 +2328,28 @@ class RuntimeMixin:
     _T5_ALIGN_STEP_S = 10.0
     _T5_ALIGN_EVERY_S = 300.0
     _T5_HEALTH_KEY = "t5_edge_health"
+    _T5_HEALTH_EVERY_S = 30.0
+    _T5_STRUCTURE_KEY = "t5_structure_decisions"
 
-    def _t5_record(self, reader: str, at: datetime, value: float | None) -> None:
-        """Keep the last sample per grid bucket (fast path: O(1), never raises)."""
+    def _t5_record(
+        self,
+        reader: str,
+        at: datetime,
+        value: float | None,
+        received_at: datetime | None = None,
+    ) -> None:
+        """Keep the last sample per grid bucket (fast path: O(1), never raises).
+
+        A sample stamped more than one grid step after it was received (a
+        skewed device clock) is clamped to its receive time: kept as stamped,
+        it would make every later on-time sample look late and freeze the
+        reader's aligned history until the wall clock caught up.
+        """
         try:
-            bucket = int(at.timestamp() // self._T5_ALIGN_STEP_S)
+            step = self._T5_ALIGN_STEP_S
+            if received_at is not None and received_at.timestamp() + step < at.timestamp():
+                at = received_at
+            bucket = int(at.timestamp() // step)
             rows = self._t5_history.get(reader)
             if rows is None:
                 maxlen = int(self._T5_ALIGN_WINDOW_S / self._T5_ALIGN_STEP_S) + 2
@@ -2395,6 +2416,48 @@ class RuntimeMixin:
         except Exception:  # noqa: BLE001 - a state write must not abort the fold
             log.debug("topology edge health write skipped", exc_info=True)
 
+    def _persist_edge_health_throttled(self, book: Any, *, changed: bool) -> None:
+        """Write the health book when it changed, at most every ~30 s.
+
+        A busy house folds several groups a second; the book is a rolling
+        window, so a write per fold is wasted I/O.  A pending change is written
+        by the next fold after the interval.
+        """
+        self._t5_health_dirty = self._t5_health_dirty or changed
+        if not self._t5_health_dirty:
+            return
+        now = self._clock()
+        last = self._t5_health_saved_at
+        if last is not None and 0.0 <= (now - last).total_seconds() < self._T5_HEALTH_EVERY_S:
+            return
+        self._persist_edge_health(book)
+        self._t5_health_saved_at = now
+        self._t5_health_dirty = False
+
+    def _load_structure_decisions(self) -> dict[str, str]:
+        """The persisted sticky structural decisions (child -> direct parent)."""
+        try:
+            text = self.db.get_state(self._T5_STRUCTURE_KEY)
+            payload = json.loads(text) if isinstance(text, str) and text else {}
+        except Exception:  # noqa: BLE001 - resuming is best effort
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        return {
+            str(child): str(parent)
+            for child, parent in payload.items()
+            if isinstance(child, str) and isinstance(parent, str) and child != parent
+        }
+
+    def _persist_structure_decisions(self, decisions: Mapping[str, str]) -> None:
+        try:
+            self.db.set_state(
+                self._T5_STRUCTURE_KEY,
+                json.dumps(dict(decisions), sort_keys=True, separators=(",", ":")),
+            )
+        except Exception:  # noqa: BLE001 - a state write must not abort the fold
+            log.debug("topology structure decisions write skipped", exc_info=True)
+
     def _fold_group_ledger(self, group: EventGroup) -> int:
         """Fold ``group``'s reader deltas into the T5 ledger and persist edges.
 
@@ -2405,10 +2468,13 @@ class RuntimeMixin:
         promotion hook then schedules the self-healing detectors and L7
         reconciliation.  Returns the number of edges written this call.
         """
-        view = self.topology_inference
-        if view is None:
-            return 0
         with self._ledger_lock:
+            # Read the view under the lock: a concurrent history merge
+            # (discovery_api) swaps it, and a view read before the lock would
+            # overwrite that merge with a stale ledger.
+            view = self.topology_inference
+            if view is None:
+                return 0
             from ..electrical.topology_inference import DeltaObservation
 
             obs = DeltaObservation.from_group(group)
@@ -2430,8 +2496,12 @@ class RuntimeMixin:
                 aligned=self._t5_aligned_series(),
             )
             self.topology_inference = updated
-            if updated.health is not view.health:
-                self._persist_edge_health(updated.health)
+            self._persist_edge_health_throttled(
+                updated.health,
+                changed=updated.health is not view.health and updated.health != view.health,
+            )
+            if dict(updated.structure_decisions) != dict(view.structure_decisions):
+                self._persist_structure_decisions(updated.structure_decisions)
             repo = self.db.repos.topology_v3
             changed = 0
             for edge in updated.edges:

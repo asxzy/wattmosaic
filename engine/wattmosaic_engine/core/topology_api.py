@@ -576,16 +576,26 @@ def topology_v3(service: Any, *, lifecycles: Sequence[str] | None = None) -> dic
 
 
 def with_edge_health(result: dict[str, Any], book: Any) -> dict[str, Any]:
-    """Add ``health`` (M3 ``as_dict`` minus parent/child) to CONTAINS edge rows."""
-    entries = getattr(book, "entries", None)
-    if not entries:
-        return result
+    """Add ``health`` (M3 ``as_dict`` minus parent/child) to CONTAINS edge rows.
+
+    Every CONFIRMED CONTAINS row carries ``health``: an edge with no decisive
+    verdict yet (its child has not stepped since it was confirmed -- live, a
+    hot tub is off 97 % of the time, and a busy main often reads a child's step
+    as neutral) shows an empty window with status ``unknown`` instead of no
+    field at all.  Other lifecycles carry it only when the book has an entry.
+    """
+    from ..electrical.topology_health import EdgeHealth
+
+    entries = getattr(book, "entries", None) or {}
     for row in result.get("edges", ()):
         if row.get("relation") != RelationType.CONTAINS.value:
             continue
-        entry = entries.get((row.get("source_endpoint_id"), row.get("target_endpoint_id")))
+        parent, child = row.get("source_endpoint_id"), row.get("target_endpoint_id")
+        entry = entries.get((parent, child))
         if entry is None:
-            continue
+            if row.get("lifecycle") != EdgeLifecycleV3.CONFIRMED.value or not parent or not child:
+                continue
+            entry = EdgeHealth(parent=str(parent), child=str(child))
         health = entry.as_dict()
         health.pop("parent", None)
         health.pop("child", None)
