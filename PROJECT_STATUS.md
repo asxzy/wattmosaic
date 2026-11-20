@@ -4468,6 +4468,30 @@ requirement quote verbatim, marked as historical. A scan test
 (`tests/unit/test_docs_vocabulary.py`) fails if the retired concept reappears in
 shipped prose.
 
+---
+
+## Raw CT capture — integrated and verified (2026-11-19)
+
+ADR-0042 supersedes DEC-30's raw-sample clause: HA's recorder is the production
+history, and engine-side `ct_samples` persistence is now a debug option
+(`raw_capture_days`, default 0 = off). The integrated change adds the setting and
+App option (0–90), its own `capture` retention tier, a bounded off-loop
+`ct_samples` purge that also drains legacy rows, the health/diagnostics surface,
+an HA-history replay source and a recorder-coverage probe (T05 pending merge). No
+contract or schema changed; `ct_samples` row writes and reads by the runtime are
+gone (the only read methods retained are dead repository methods covered by
+existing storage tests).
+
+T10 verification: added `tests/unit/test_raw_capture_parity.py` (App↔engine↔storage
+bounds, default and env-var parity). Full suite green on Python 3.11.12, 3.12.10
+and 3.14.5 (**2905 passed, 1 skipped** on each); every CI gate in `CLAUDE.md`
+green on all three. `perf_runtime.py --quick`: `ct_samples` growth 0 B/day at the
+default (≈ 537 MB/day total) vs ≈ 507 MB/day of raw growth (≈ 1.39 GB/day total)
+at `raw_capture_days=7`. An upgrade-drain rehearsal removed 100,000 legacy rows
+in one maintenance pass with a longest batch of ~20 ms (budget 2 s). TODO §1's
+first box is now checked. Full evidence and the AC1–AC10 mapping are in
+`docs/specs/raw-capture/verification.md`.
+
 ### Still open
 
 Waves 6–8 of the retirement remain: the App panel strings and its static gate
