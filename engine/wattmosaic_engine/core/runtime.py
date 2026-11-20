@@ -502,6 +502,45 @@ class RuntimeMixin:
         # which calls the hook directly to avoid a double fire).
         self.bind_promotion_hooks()
 
+    def _stored_inferred_edges(
+        self, skip: set[str]
+    ) -> tuple[list[Any], dict[tuple[str, str, str], frozenset[str]]]:
+        """Inferred T5 edges persisted outside the active version, to resume from.
+
+        The ledger used to be seeded only from the active version, so every
+        restart discarded all accumulated discovery evidence and suggestions
+        took hours to rebuild.  Cause ids are not stored, only their count, so
+        each edge gets that many placeholder causes: ``independent_causes``
+        stays correct and new events still add to it.
+        """
+        from ..contracts import TopologyEdgeV3
+        from .topology_api import _edge_row
+
+        edges: list[Any] = []
+        causes: dict[tuple[str, str, str], frozenset[str]] = {}
+        try:
+            rows = self.db.repos.topology_v3.edges()
+        except Exception:  # noqa: BLE001 - resuming is best effort
+            return edges, causes
+        for row in rows:
+            if str(row.get("declared_by")) != "inference" or row.get("edge_id") in skip:
+                continue
+            try:
+                edge = TopologyEdgeV3(**_edge_row(row))
+            except Exception:  # noqa: BLE001 - one bad row must not block startup
+                continue
+            lifecycle = str(getattr(edge.lifecycle, "value", edge.lifecycle))
+            if lifecycle in ("rejected", "retired"):
+                continue
+            edges.append(edge)
+            relation = str(getattr(edge.relation, "value", edge.relation))
+            key = (edge.source_endpoint_id, edge.target_endpoint_id, relation)
+            count = int(getattr(edge.evidence, "independent_causes", 0) or 0)
+            causes[key] = frozenset(f"restored::{edge.edge_id}::{i}" for i in range(count))
+        if edges:
+            log.info("topology ledger resumed with %d stored inferred edges", len(edges))
+        return edges, causes
+
     def _wire_self_healing(self) -> None:
         """Build T5's ledger view, T7's workflow and the L7 reconciler.
 
@@ -523,11 +562,13 @@ class RuntimeMixin:
         triple = versions.current()
         topo_view = versions.topology_view(triple.topology_version_id)
         seed_edges = list(getattr(topo_view, "edges", lambda: ())())
+        stored, causes = self._stored_inferred_edges({e.edge_id for e in seed_edges})
         self.topology_inference = TopologyInferenceView(
-            edges=tuple(seed_edges),
+            edges=tuple(seed_edges + stored),
             clock=self._clock,
             versions=versions,
             require_direction=True,
+            causes_by_edge=causes,
         )
         self.reconciler = Reconciler(
             operator=self._build_reconciliation_operator(),
