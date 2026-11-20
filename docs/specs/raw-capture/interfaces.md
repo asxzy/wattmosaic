@@ -73,7 +73,7 @@ def purge_ct_samples(
 ```
 
 - Each batch: acquire `lock`, `BEGIN IMMEDIATE`, delete ≤ `batch_rows` rows with the
-  lowest `id` whose `received_at < cutoff` (all rows when `cutoff is None`), `COMMIT`,
+  oldest `received_at` (then `id`) whose `received_at < cutoff`, using `idx_ct_samples_time`; lowest `id` when `cutoff is None`. `COMMIT`,
   release `lock`. Roll back and re-raise on error.
 - Stops when a batch deletes fewer than `batch_rows` (then `done=True`), or when
   `max_batches` or `time_budget_s` is reached (`done=False`).

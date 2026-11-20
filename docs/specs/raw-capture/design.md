@@ -119,6 +119,6 @@ and exits non-zero if any entity is `missing`.
 | Risk | Mitigation |
 |---|---|
 | Large legacy purge blocks writers | Per-batch transactions, per-batch lock, batch + time budget (T03) |
-| Purge scans without an index | Delete by ascending `id` window with `received_at` filter; `idx_ct_samples_time` exists (`migrations/legacy.py:302`) |
+| Purge scans without an index | With a cutoff, select by `received_at < ? ORDER BY received_at, id` so `idx_ct_samples_time` (`migrations/legacy.py:302`) answers filter and order and an empty result costs nothing; `ORDER BY id` only when `cutoff is None` (review finding on T03) |
 | A hidden reader of `ct_samples` appears | T10 re-greps engine/api/ui/learning; AC1 runs the real runtime with capture off |
 | App and engine bounds drift | Parity tests in T10, mirroring `test_derived_retention.py:398-414` |
