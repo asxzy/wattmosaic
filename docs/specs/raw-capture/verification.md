@@ -16,7 +16,7 @@ venv (**3.14.5**). All commands were run from the repository root.
 | AC5 | `tests/unit/test_runtime_raw_capture.py::*` plus source inspection of `_prune_evidence` (`core/runtime.py:2304-2337`): it calls `apply_evidence_retention` only; no `DELETE FROM ct_samples` remains. The "no hidden reader" search below confirms no runtime read path. |
 | AC6 | `tests/unit/test_raw_capture_settings.py::*` (T01) + new `tests/unit/test_raw_capture_parity.py` (App↔engine↔storage parity) + `bash scripts/validate_addon.sh --no-build` (App option bounds/default verified). |
 | AC7 | `tests/unit/test_replay_ha_history.py::*`. |
-| AC8 | **pending T05 merge (verified by orchestrator)** — `tools/audit/check_recorder_coverage.py` / `tests/unit/test_recorder_coverage.py` are not present on this branch (T05 is being fixed on another branch). Not tested here. |
+| AC8 | Verified by the orchestrator after the T05 merge: `tests/unit/test_recorder_coverage.py` (17 tests), including `test_stream_coverage_chunks_and_real_history` (HA start-time state requested on the first chunk only; an entity that stops mid-window shows `last` at the stop and a 2.5 h `max_gap_s`) and `test_streaming_fold_matches_pure_report`. |
 | AC9 | `perf_runtime.py --quick` numbers below: `ct_samples` growth ≈ 0 with the default. |
 | AC10 | All CI gates green on 3.11.12, 3.12.10 and 3.14.5 below; full suite green on all three. |
 
@@ -146,3 +146,24 @@ the 2 s time budget; no batch exceeded the budget by more than one batch.
 ## Test fixes made here
 
 None. No existing assertion was weakened.
+
+## Final integrated gate run (orchestrator, after all ten tasks merged)
+
+On `feat/raw-capture` with T01–T10 merged (shared venv, Python 3.14.5):
+
+| Gate | Result |
+|---|---|
+| `pytest` (full, `-o addopts=''`) | 3086 passed, 8 skipped |
+| `ruff check engine tools tests` | clean |
+| `export_schemas.py` + `git diff --exit-code data/schemas` | no drift (no contract change) |
+| `render_validation_docs.py --check` | up to date |
+| `validate_addon.sh --no-build` | 87 passed, 0 failed, 3 skipped |
+| `check_panel.py` / `check_secrets.py` / `check_release.py` / `check_hacs.py` | clean |
+| `mypy engine/wattmosaic_engine` (advisory) | 505 errors vs 494 on the base; the 11 new ones are all the existing mixin `attr-defined`/`has-type` pattern (`config`, `db`, `_clock` on `RuntimeMixin`/`DiagnosticsApiMixin`), no new category |
+
+Review rounds: every task diff was independently reviewed before merge. Findings
+were fixed in T01 (removed an unredacted `to_dict()`), T03 (index-backed purge
+select, guarded rollback, per-batch commit test), T04/T05 (HA start-time state
+requested only on the first history chunk; T04 kept the `--db`/`--jsonl` exit
+behaviour unchanged), T07 (HA connection env documented) and T08 (spent budget
+honoured, no stacked purges).

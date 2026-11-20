@@ -1,6 +1,6 @@
 # Raw CT capture is a debug option, HA's recorder is the production history
 
-**Status:** Planned · 2026-11-19 · Not started (do not implement until the owner says go)
+**Status:** Implemented · 2026-11-19 · on branch `feat/raw-capture`; see `verification.md`
 **Plan branch:** `worktree-raw-retention-plan` (based on `origin/main` @ `29ad782`)
 **Addresses:** `docs/specs/realtime-topology-disaggregation/TODO.md` §1 (disk use on Pi-class hosts)
 **Amends:** DEC-30 (raw-sample clause) through a new ADR-0042 (task T07)
