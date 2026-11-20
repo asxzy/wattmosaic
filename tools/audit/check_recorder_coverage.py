@@ -32,14 +32,16 @@ import math
 import sqlite3
 import sys
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
+import aiohttp
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from ha_client import HAClient, fetch_history  # noqa: E402
+from ha_client import HAClient  # noqa: E402
 
 Status = Literal["ok", "short", "missing"]
 
@@ -54,19 +56,31 @@ class EntityCoverage:
     status: Status
 
 
+def _numeric_state(row: Mapping[str, Any]) -> float | None:
+    """Finite numeric value of a compressed history row's state, or ``None``.
+
+    Non-numeric ``unavailable``/``unknown``/empty states and non-finite values
+    (``nan``, ``inf``) are not observations and must never be counted as rows.
+    """
+    if "s" not in row:
+        return None
+    try:
+        value = float(str(row["s"]).strip())
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
 def _parse_ts(row: Mapping[str, Any]) -> datetime | None:
-    """Return an aware UTC timestamp from a compressed history row, or ``None``.
+    """Aware UTC timestamp of a compressed history row, or ``None``.
 
     HA's minimal history uses ``lu`` (last_updated) and, when that is absent,
-    ``lc`` (last_changed).  Both are epoch seconds (float).  Non-numeric states
-    and malformed rows are treated as no observation.
+    ``lc`` (last_changed).  Both are epoch seconds (float).
     """
+    if _numeric_state(row) is None:
+        return None
+    raw_ts = row.get("lu") if row.get("lu") is not None else row.get("lc")
     try:
-        state = row.get("s")
-        if state is None or str(state).strip() == "":
-            return None
-        float(str(state))  # validate numeric state; value itself is not kept
-        raw_ts = row.get("lu") if row.get("lu") is not None else row.get("lc")
         ts = float(raw_ts)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
@@ -75,14 +89,52 @@ def _parse_ts(row: Mapping[str, Any]) -> datetime | None:
     return datetime.fromtimestamp(ts, UTC)
 
 
-def _max_gap(times: Sequence[datetime], end: datetime) -> float | None:
-    """Largest gap between consecutive timestamps, including last -> ``end``."""
-    if not times:
+def _is_non_numeric(row: Mapping[str, Any]) -> bool:
+    """Whether a state row carried a non-numeric (or non-finite) value."""
+    return "s" in row and _numeric_state(row) is None
+
+
+def non_numeric_counts(
+    payload: Mapping[str, Sequence[Mapping[str, Any]]],
+    entity_ids: Sequence[str],
+) -> dict[str, int]:
+    """Count skipped non-numeric state rows per entity (pure counterpart)."""
+    return {
+        eid: sum(1 for row in payload.get(eid) or [] if _is_non_numeric(row))
+        for eid in entity_ids
+    }
+
+
+def _summarize(
+    entity_id: str,
+    times: Sequence[datetime],
+    *,
+    start: datetime,
+    end: datetime,
+    short_tolerance: timedelta,
+) -> EntityCoverage | None:
+    """One shared rule for the pure report and the streaming fold.
+
+    Sort, restrict to ``[start, end]``, take gaps between consecutive rows (a
+    gap counts when ``>= 0``, so duplicate timestamps contribute ``0.0``) plus
+    the tail gap to ``end``.  With any row, ``max_gap_s`` is a float, possibly
+    ``0.0``; it never changes the status.
+    """
+    ordered = sorted(ts for ts in times if start <= ts <= end)
+    if not ordered:
         return None
-    ordered = sorted(times)
     gaps = [(b - a).total_seconds() for a, b in zip(ordered, ordered[1:], strict=False)]
     gaps.append((end - ordered[-1]).total_seconds())
-    return max(gaps, default=0.0)
+    gaps = [gap for gap in gaps if gap >= 0]
+    status: Status = "short" if ordered[0] > start + short_tolerance else "ok"
+    return EntityCoverage(
+        entity_id,
+        len(ordered),
+        ordered[0],
+        ordered[-1],
+        max(gaps, default=0.0),
+        status,
+    )
 
 
 def coverage_report(
@@ -93,51 +145,36 @@ def coverage_report(
     end: datetime,
     short_tolerance: timedelta = timedelta(hours=1),
 ) -> list[EntityCoverage]:
-    """Classify recorder coverage for each requested entity.
-
-    ``missing``: no numeric rows.  ``short``: the first row is later than
-    ``start + short_tolerance``.  ``ok``: otherwise.  ``max_gap_s`` is reported
-    but never changes the status.
-    """
+    """Classify recorder coverage for each requested entity (pure function)."""
     out: list[EntityCoverage] = []
     for eid in entity_ids:
         times = [ts for ts in (_parse_ts(row) for row in payload.get(eid) or []) if ts is not None]
-        if not times:
-            out.append(EntityCoverage(eid, 0, None, None, None, "missing"))
-            continue
-        first = min(times)
-        last = max(times)
-        status: Status = "short" if first > start + short_tolerance else "ok"
-        out.append(EntityCoverage(eid, len(times), first, last, _max_gap(times, end), status))
+        summary = _summarize(
+            eid, times, start=start, end=end, short_tolerance=short_tolerance
+        )
+        out.append(
+            summary
+            if summary is not None
+            else EntityCoverage(eid, 0, None, None, None, "missing")
+        )
     return out
 
 
 @dataclass(slots=True)
 class _Accumulator:
-    """Running fold state for one entity (only counts/timestamps are kept)."""
+    """Running fold state: only timestamps and counts, never the values."""
 
     entity_id: str
-    rows: int = 0
-    first: datetime | None = None
-    last: datetime | None = None
-    previous: datetime | None = None
-    max_gap_s: float | None = None
+    times: list[datetime] = field(default_factory=list)
+    non_numeric: int = 0
 
     def add_chunk(self, rows: Sequence[Mapping[str, Any]]) -> None:
         for row in rows:
+            if _is_non_numeric(row):
+                self.non_numeric += 1
             ts = _parse_ts(row)
-            if ts is None:
-                continue
-            self.rows += 1
-            if self.first is None or ts < self.first:
-                self.first = ts
-            if self.last is None or ts > self.last:
-                self.last = ts
-            if self.previous is not None:
-                gap = (ts - self.previous).total_seconds()
-                if gap > 0 and (self.max_gap_s is None or gap > self.max_gap_s):
-                    self.max_gap_s = gap
-            self.previous = ts
+            if ts is not None:
+                self.times.append(ts)
 
     def finish(
         self,
@@ -146,21 +183,17 @@ class _Accumulator:
         end: datetime,
         short_tolerance: timedelta = timedelta(hours=1),
     ) -> EntityCoverage:
-        if self.rows == 0 or self.first is None:
-            return EntityCoverage(self.entity_id, 0, None, None, None, "missing")
-        # Include the gap from the last row to the end of the window.
-        if self.last is not None:
-            tail = (end - self.last).total_seconds()
-            if tail > 0 and (self.max_gap_s is None or tail > self.max_gap_s):
-                self.max_gap_s = tail
-        status: Status = "short" if self.first > start + short_tolerance else "ok"
-        return EntityCoverage(
+        summary = _summarize(
             self.entity_id,
-            self.rows,
-            self.first,
-            self.last,
-            self.max_gap_s,
-            status,
+            self.times,
+            start=start,
+            end=end,
+            short_tolerance=short_tolerance,
+        )
+        return (
+            summary
+            if summary is not None
+            else EntityCoverage(self.entity_id, 0, None, None, None, "missing")
         )
 
 
@@ -183,9 +216,11 @@ async def stream_coverage(
 ) -> dict[str, _Accumulator]:
     """Fetch the window in 1-hour chunks and fold rows into running counters.
 
-    Only a client's read-only ``fetch_history`` is used.  Fetching per chunk
-    keeps a 10-day window at 1 Hz from producing one huge response; only counts
-    and timestamps are retained.
+    The start-time state is requested **only for the first chunk**.  HA's
+    ``history_during_period`` defaults to ``include_start_time_state=True`` and
+    then prepends a synthetic row at ``start_time`` to every per-entity result;
+    doing that for every hourly chunk would cap ``max_gap_s`` at about one hour
+    and hide an entity that stopped recording mid-window.
     """
     if accumulators is None:
         accumulators = {eid: _Accumulator(eid) for eid in entity_ids}
@@ -193,12 +228,15 @@ async def stream_coverage(
         cursor = start
         while cursor < end:
             stop = min(cursor + chunk, end)
-            payload = await fetch_history(
-                client,
-                list(entity_ids),
-                start=cursor.isoformat(),
-                end=stop.isoformat(),
-                minimal=True,
+            payload = await client.ws_command(
+                "history/history_during_period",
+                start_time=cursor.isoformat(),
+                end_time=stop.isoformat(),
+                entity_ids=list(entity_ids),
+                minimal_response=True,
+                no_attributes=True,
+                significant_changes_only=False,
+                include_start_time_state=(cursor == start),
             )
             fold_chunk(accumulators, payload)
             cursor = stop
@@ -210,7 +248,7 @@ def entity_ids_from_topology_db(db_path: Path) -> list[str]:
 
     Mirrors the query pattern in ``replay_capture.py``: ``channels[].entity_id``
     where ``ct_id`` is set.  The database is opened ``mode=ro`` and never
-    written.
+    written.  Corrupt JSON propagates so the CLI can report it clearly.
     """
     if not db_path.exists():
         return []
@@ -249,11 +287,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     args = parser.parse_args(argv)
 
-    entity_ids = (
-        list(args.entities)
-        if args.entities is not None
-        else entity_ids_from_topology_db(args.db)
-    )
+    if not math.isfinite(args.days) or args.days <= 0:
+        parser.error("--days must be a positive number")
+    try:
+        end = _parse_end(args.end)
+    except ValueError:
+        parser.error(f"invalid --end {args.end!r}: expected an ISO-8601 timestamp")
+
+    if args.db is not None and not args.db.exists():
+        print(f"check_recorder_coverage: database file not found: {args.db}", file=sys.stderr)
+        return 2
+    try:
+        entity_ids = (
+            list(args.entities)
+            if args.entities is not None
+            else entity_ids_from_topology_db(args.db)
+        )
+    except (ValueError, sqlite3.Error) as exc:
+        print(
+            f"check_recorder_coverage: cannot read CT entities from {args.db}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
     if not entity_ids:
         if args.json:
             print(json.dumps({"error": "no CT entities found"}))
@@ -261,17 +316,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("check_recorder_coverage: no CT entities found", file=sys.stderr)
         return 2
 
-    end = _parse_end(args.end)
     start = end - timedelta(days=args.days)
     accumulators = {eid: _Accumulator(eid) for eid in entity_ids}
-    asyncio.run(
-        stream_coverage(entity_ids, start=start, end=end, accumulators=accumulators)
-    )
-    report = [
-        acc.finish(start=start, end=end) for acc in accumulators.values()
-    ]
+    try:
+        asyncio.run(
+            stream_coverage(entity_ids, start=start, end=end, accumulators=accumulators)
+        )
+    except (RuntimeError, OSError, aiohttp.ClientError, TimeoutError) as exc:
+        print(
+            f"check_recorder_coverage: Home Assistant history request failed: {exc}",
+            file=sys.stderr,
+        )
+        return 2
 
-    counts = {status: sum(1 for c in report if c.status == status) for status in ("ok", "short", "missing")}
+    report = [acc.finish(start=start, end=end) for acc in accumulators.values()]
+    non_numeric = {eid: acc.non_numeric for eid, acc in accumulators.items()}
+    counts = {
+        status: sum(1 for c in report if c.status == status)
+        for status in ("ok", "short", "missing")
+    }
     if args.json:
         print(
             json.dumps(
@@ -282,6 +345,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         {
                             "entity_id": c.entity_id,
                             "rows": c.rows,
+                            "non_numeric": non_numeric.get(c.entity_id, 0),
                             "first": c.first.isoformat() if c.first else None,
                             "last": c.last.isoformat() if c.last else None,
                             "max_gap_s": c.max_gap_s,
@@ -295,12 +359,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
     else:
-        print(f"{'entity':40s} {'rows':>7s} {'status':>8s}  first / last / max_gap_s")
+        print(
+            f"{'entity':40s} {'rows':>7s} {'nonnum':>7s} {'status':>8s}"
+            "  first / last / max_gap_s"
+        )
         for c in report:
             first = c.first.isoformat() if c.first else "-"
             last = c.last.isoformat() if c.last else "-"
             gap = f"{c.max_gap_s:.0f}" if c.max_gap_s is not None else "-"
-            print(f"{c.entity_id:40s} {c.rows:7d} {c.status:>8s}  {first} / {last} / {gap}")
+            print(
+                f"{c.entity_id:40s} {c.rows:7d} {non_numeric.get(c.entity_id, 0):7d} "
+                f"{c.status:>8s}  {first} / {last} / {gap}"
+            )
         print(
             f"{counts['ok']} ok · {counts['short']} short · {counts['missing']} missing"
         )
