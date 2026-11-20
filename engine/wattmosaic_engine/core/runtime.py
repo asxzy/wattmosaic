@@ -398,6 +398,10 @@ class RuntimeMixin:
         #: inference (event-loop coalescing).  Observable, never guessed.
         self.groups_superseded = 0
         self.infer_group_calls = 0
+        #: Ready deliveries skipped because the group's content and lifecycle
+        #: were already inferred and published.
+        self.groups_unchanged_skipped = 0
+        self._inferred_fingerprint: dict[str, tuple[Any, ...]] = {}
         self.infer_steady_calls = 0
         self.heartbeats = 0
         self._last_steady_at: dict[str, datetime] = {}
@@ -521,6 +525,7 @@ class RuntimeMixin:
             edges=tuple(seed_edges),
             clock=self._clock,
             versions=versions,
+            require_direction=True,
         )
         self.reconciler = Reconciler(
             operator=self._build_reconciliation_operator(),
@@ -693,13 +698,19 @@ class RuntimeMixin:
         at = self._clock()
         self._time_stage("detect", at)
         self._record_association_from_step(event)
+        evidence_id: str | None = None
         try:
-            self.window_collector.on_detected(event, at=at)
+            window = self.window_collector.on_detected(event, at=at)
+            if window is not None:
+                # P5's sub-event and reader delta must cite the evidence row P4
+                # actually wrote; without it ``on_provisional`` never finds the
+                # group and the delta's evidence ref resolves to nothing.
+                evidence_id = window.evidence.evidence_id
         except Exception:  # noqa: BLE001 - never let bookkeeping break ingestion
             log.exception("event window open failed")
         if self.grouping_engine is not None:
             try:
-                self.grouping_engine.on_reader_step(event, now=at)
+                self.grouping_engine.on_reader_step(event, now=at, evidence_id=evidence_id)
             except Exception:  # noqa: BLE001
                 log.exception("event group formation failed")
 
@@ -762,10 +773,23 @@ class RuntimeMixin:
         :meth:`_coalesce_ready_groups`).  Superseded revisions are counted in
         ``groups_superseded``; the newest revision of any group is never dropped.
         """
-        if not self.groups_ready.put_nowait(group):
+        # One slot per group: a group re-delivered while it still waits (it
+        # grew, or changed lifecycle) replaces its queued value in place.  The
+        # event loop infers the live value anyway, so a second slot only
+        # flooded the queue and pushed unrelated groups out (drop-oldest).
+        accepted, replaced = self.groups_ready.put_or_replace(group, _group_key)
+        if replaced:
+            self.groups_superseded += 1
+        elif not accepted:
             self.groups_dropped += 1
             log.warning("event group queue full; dropped the oldest group")
-        self._schedule_topology_ledger(group)
+        if group.status == EventGroupStatus.CONFIRMED:
+            # T5 folds FINAL groups only.  P5 first hands a group over at
+            # MATCHING with only its first reader delta, and the ledger
+            # deduplicates by group id, so folding that early delivery claimed
+            # the id and discarded every later co-step: no pair ever gained
+            # support and discovery never proposed an edge (design §5).
+            self._schedule_topology_ledger(group)
 
     def _coalesce_ready_groups(self, seed: EventGroup | None = None) -> list[EventGroup]:
         """Drain the ready queue, returning one group per id: the newest revision.
@@ -1079,10 +1103,15 @@ class RuntimeMixin:
             rows = list(repo.edges()) if repo is not None else []
         except Exception:  # noqa: BLE001
             return frozenset()
+        # Only CONFIRMED structure makes a parent: T5 persists CANDIDATE and
+        # PROVISIONAL suggestions to the same table, and a suggestion must not
+        # silence a declared endpoint's association history.
         return frozenset(
             str(row.get("source_endpoint_id", ""))
             for row in rows
-            if isinstance(row, Mapping) and str(row.get("relation", "")) == "contains"
+            if isinstance(row, Mapping)
+            and str(row.get("relation", "")) == "contains"
+            and str(row.get("lifecycle", "confirmed")) == "confirmed"
         )
 
     async def on_ha_event(self, event: HAEvent) -> None:
@@ -1113,6 +1142,12 @@ class RuntimeMixin:
             live = self.grouping_engine.current(group.group_id)
             if live is not None and live.revision >= group.revision:
                 group = live
+        if self._inferred_fingerprint.get(group.group_id) == _inference_fingerprint(group):
+            # Already inferred and published exactly this content and
+            # lifecycle: re-inferring would only append a duplicate
+            # interpretation.  Nothing new reaches the event loop.
+            self.groups_unchanged_skipped += 1
+            return None
         versions: VersionTriple = group.versions or self.version_service.current()
         at = group.opened_at
         topo_view = self.version_service.topology_view(versions.topology_version_id)
@@ -1212,17 +1247,28 @@ class RuntimeMixin:
             for group in batch:
                 started = time.monotonic()
                 try:
-                    bundle = await asyncio.to_thread(self._build_input_bundle, group)
+                    bundle = await self._run_inference_job(self._build_input_bundle, group)
                     if bundle is None:
                         continue
-                    result = await asyncio.to_thread(self._run_infer_group, bundle)
-                    await asyncio.to_thread(
+                    result = await self._run_inference_job(self._run_infer_group, bundle)
+                    await self._run_inference_job(
                         self._publish_group_result, bundle["group"], result, bundle
                     )
                 except Exception:  # noqa: BLE001 - one bad group must not kill the loop
                     log.exception("event-loop inference failed for group %s", group.group_id)
                 finally:
                     self._record_latency("event", (time.monotonic() - started) * 1000.0)
+
+    async def _run_inference_job(self, fn: Any, *args: Any) -> Any:
+        """Run ``fn`` on the single inference worker (never on the asyncio loop).
+
+        One worker serializes event inference, publishing and steady solves, so
+        the snapshot and record chain are written by one thread at a time.
+        """
+        executor = self.inference_executor
+        if executor is None:
+            return await asyncio.to_thread(fn, *args)
+        return await asyncio.get_running_loop().run_in_executor(executor, fn, *args)
 
     def _publishable(self, result: JointInferenceResult) -> JointInferenceResult:
         """The result as published *power*: no negative level for a consumer.
@@ -1292,6 +1338,14 @@ class RuntimeMixin:
         published = self._publishable(result)
         # 1. Persist the versioned record (I6/S16).
         try:
+            self._adopt_record_head(group.group_id)
+            head_id = self.record_store.heads.get(group.group_id)
+            head = self.record_store.records.get(head_id) if head_id is not None else None
+            head_result = getattr(head, "result", None)
+            if head_result is not None and head_result.result_id == result.result_id:
+                # The same interpretation again (a steady heartbeat re-solving
+                # an unchanged state): the stored head already says this.
+                raise _UnchangedInterpretation
             record = self.record_store.open_provisional(
                 tuple(d.reader_id for d in group.reader_deltas),
                 at=at,
@@ -1300,8 +1354,11 @@ class RuntimeMixin:
             )
             record.result = result  # publish the full inferred result, not a stub
             evidence.put_record(record)
+        except _UnchangedInterpretation:
+            pass
         except Exception:  # noqa: BLE001
             log.exception("failed to persist an inference record")
+        self._remember_inferred(group)
         # 2. Matrix update (M2).
         if self.matrix_updater is not None:
             try:
@@ -1361,6 +1418,45 @@ class RuntimeMixin:
                 self.learning_worker.schedule()
             except Exception:  # noqa: BLE001
                 log.exception("learning submit failed")
+
+    def _remember_inferred(self, group: EventGroup) -> None:
+        """Note the content/lifecycle just published for ``group`` (bounded)."""
+        fingerprints = self._inferred_fingerprint
+        fingerprints.pop(group.group_id, None)
+        fingerprints[group.group_id] = _inference_fingerprint(group)
+        while len(fingerprints) > _INFERRED_FINGERPRINTS_MAX:
+            fingerprints.pop(next(iter(fingerprints)))
+
+    def _adopt_record_head(self, group_id: str) -> None:
+        """Continue a group's stored interpretation chain, never restart it.
+
+        The in-memory record store starts empty on every process start, but
+        group ids are content-derived: a restart that re-derives a group (HA
+        prime, history backfill) used to open interpretation revision 1 again
+        and hit ``UNIQUE(event_group_id, interpretation_revision)``.  The
+        stored head is adopted as ``previous`` so the next record is
+        ``head + 1`` (append-only, same principle as group revisions).
+        """
+        store = self.record_store
+        if group_id in store.heads:
+            return
+        reader = getattr(self.db.repos.evidence, "record_head", None)
+        if reader is None:
+            return
+        try:
+            stored = reader(group_id)
+        except Exception:  # noqa: BLE001 - no stored chain: start at revision 1
+            log.debug("record head lookup failed for %s", group_id, exc_info=True)
+            return
+        if stored is None:
+            return
+        record_id, revision = stored
+        # Only the chain link is needed (``record_id`` and the revision): the
+        # stored payload is never rewritten, and decoding it is not required.
+        store.records[record_id] = SimpleNamespace(  # type: ignore[assignment]
+            record_id=record_id, interpretation_revision=revision, result=None
+        )
+        store.heads[group_id] = record_id
 
     def _persist_group_evidence(self, group: EventGroup, bundle: Mapping[str, Any]) -> None:
         """Persist a published group's HA events; record a CONFIRMED group's subjects.
@@ -1508,7 +1604,13 @@ class RuntimeMixin:
                 pass
             started = time.monotonic()
             try:
-                self._steady_pass()
+                # Group lifecycle ticks mutate P5 state the fast path also
+                # touches, so they stay on the loop (bounded, cheap); the
+                # solves run on the single inference worker, serialized with
+                # the event loop's infer/publish (ADR-0033, DEC-37).
+                now = self._clock()
+                self.tick_groups(now)
+                await self._run_inference_job(self._steady_solve, now)
             except Exception:  # noqa: BLE001
                 log.exception("steady pass failed")
             finally:
@@ -1804,6 +1906,16 @@ class RuntimeMixin:
         """Run one steady pass: group lifecycle, measured readers, >3σ changes."""
         now = self._clock()
         self.tick_groups(now)
+        self._steady_solve(now)
+
+    def _steady_solve(self, now: datetime | None = None) -> None:
+        """The solving half of a steady pass (off the asyncio loop in production).
+
+        Each published reader runs ``infer_steady`` plus a full publish (record,
+        matrix, residuals, snapshot) -- far too much to run inline on the loop
+        that also answers ``/health`` and reads the HA WebSocket.
+        """
+        now = now if now is not None else self._clock()
         views = self._steady_views()
         if views is None:
             return
@@ -1882,18 +1994,16 @@ class RuntimeMixin:
     def fold_groups(self, groups: Sequence[EventGroup]) -> None:
         """Drive the real T5 ledger fold on P5's finalized groups (harness seam).
 
-        P5 merges co-temporal reader steps into one group *after* the ready
-        callback fires, so the queued snapshot carries only the first delta.
-        A synchronous harness feeds the final groups back through this method,
-        which submits the runtime's own ``_fold_group_ledger`` job -- no result
-        is computed here.
+        The runtime folds each group when P5 confirms it; a replay that ends
+        before its last groups went quiet feeds them through this method, which
+        submits the runtime's own ``_fold_group_ledger`` job -- no result is
+        computed here.
         """
         for group in groups:
-            # The early ready-callback fold already claimed this group id with
-            # only its first delta; use a distinct id for the finalized group so
-            # the ledger's deduplication does not discard the co-temporal deltas.
-            final = group.model_copy(update={"group_id": f"{group.group_id}:final"})
-            self._schedule_topology_ledger(final)
+            # The runtime folds a group once, when it is CONFIRMED (FINAL); the
+            # ledger deduplicates by group id, so a group already folded there
+            # is not counted twice and a still-open group is folded now.
+            self._schedule_topology_ledger(group)
 
     # -- topological self-healing (T5 / T7 / L7) --------------------------- #
 
@@ -1905,6 +2015,24 @@ class RuntimeMixin:
         through the repository's own short transaction (single-writer rule).
         """
         self.submit_background(self._fold_group_ledger, group)
+
+    def _observed_readers(self) -> dict[str, float | None]:
+        """Readers holding a usable reading now, with their noise sigma (T5).
+
+        A reader that is stale, missing or excluded by the D3 quality gate is
+        not "observed": its silence is never conflict evidence (HB §18).
+        """
+        now = self._clock()
+        excluded = set(excluded_readers(self.latest_quality))
+        out: dict[str, float | None] = {}
+        for reader in self.reader_state.readers():
+            if reader in excluded:
+                continue
+            held = self.reader_state.held(reader, now)
+            if held.value is None or str(held.state) != "held":
+                continue
+            out[str(reader)] = self.reader_state.sigma(reader)
+        return out
 
     def _fold_group_ledger(self, group: EventGroup) -> int:
         """Fold ``group``'s reader deltas into the T5 ledger and persist edges.
@@ -1923,7 +2051,7 @@ class RuntimeMixin:
             from ..electrical.topology_inference import DeltaObservation
 
             obs = DeltaObservation.from_group(group)
-            updated = view.observe_group(obs)
+            updated = view.observe_group(obs, observed=self._observed_readers())
             self.topology_inference = updated
             repo = self.db.repos.topology_v3
             changed = 0
@@ -2270,6 +2398,7 @@ class RuntimeMixin:
             "groups_dropped": self.groups_dropped,
             "groups_superseded": self.groups_superseded,
             "infer_group_calls": self.infer_group_calls,
+            "groups_unchanged_skipped": self.groups_unchanged_skipped,
             "infer_steady_calls": self.infer_steady_calls,
             "heartbeats": self.heartbeats,
             "background": (
@@ -2612,6 +2741,29 @@ _RECONCILIATION_REASONS = frozenset(
         "replay",
     }
 )
+
+
+class _UnchangedInterpretation(Exception):
+    """Control flow: the result equals the group's stored head; append nothing."""
+
+
+#: Bound on the per-group "already inferred" fingerprints (oldest evicted).
+_INFERRED_FINGERPRINTS_MAX = 4096
+
+
+def _group_key(group: EventGroup | None) -> str | None:
+    return None if group is None else group.group_id
+
+
+def _inference_fingerprint(group: EventGroup) -> tuple[Any, ...]:
+    """Everything of a group an inference result depends on."""
+    return (
+        group.revision,
+        str(getattr(group.status, "value", group.status)),
+        tuple(sub.sub_event_id for sub in group.sub_events),
+        tuple((d.reader_id, d.delta_w, d.sigma_w) for d in group.reader_deltas),
+        group.versions,
+    )
 
 
 def _steady_group(result: JointInferenceResult, at: datetime) -> EventGroup:

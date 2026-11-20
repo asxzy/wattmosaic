@@ -382,6 +382,10 @@ class TopologyInferenceView:
     co_response_causes: Mapping[frozenset[str], frozenset[str]] = field(default_factory=dict)
     co_response_events: Mapping[frozenset[str], int] = field(default_factory=dict)
     version_id: str | None = None
+    #: Refuse to CONFIRM a containment whose reverse is an equally supported,
+    #: uncontradicted alternative (see :meth:`_direction_cap`).  The runtime
+    #: sets it: an online ledger must never promote a containment cycle.
+    require_direction: bool = False
 
     # -- reads -------------------------------------------------------------- #
     def edge(
@@ -441,8 +445,20 @@ class TopologyInferenceView:
         absolute: Mapping[str, Sequence[float | None]] | None = None,
         basis_by_reader: Mapping[str, MeasurementBasis | str] | None = None,
         channel_meta: Mapping[str, Mapping[str, Any]] | None = None,
+        observed: Mapping[str, float | None] | None = None,
     ) -> TopologyInferenceView:
-        """Fold one FINAL event group into every affected pair's ledger."""
+        """Fold one FINAL event group into every affected pair's ledger.
+
+        ``observed`` maps each reader that held a usable reading over the
+        group's window to its noise sigma (``None`` = unknown, the floor is
+        used).  With it, a child step whose candidate parent was observed but
+        did *not* move counts as conflict for that edge (design §5 T5:
+        "a child step with no matching parent step beyond 3 sigma_p").  This is
+        what tells the two directions of an equal-delta pair apart: the true
+        parent also steps for its other loads, so the reversed edge collects
+        conflict.  Without ``observed`` (no reader health known) a non-moving
+        reader is never evidence either way.
+        """
         obs = _coerce_group(group, self.sigma_floor_w)
         if obs.group_id in self.seen_groups:
             # A repeated group id is a duplicate delivery, not new evidence.
@@ -534,6 +550,32 @@ class TopologyInferenceView:
                 )
                 edges[position] = edge.model_copy(update={"evidence": evidence})
 
+        # -- child steps whose observed parent did not move: conflict -------- #
+        if observed:
+            for position, edge in enumerate(list(edges)):
+                if _relation(edge.relation) != _CONTAINS or edge.pinned or edge.lifecycle in _DORMANT:
+                    continue
+                parent, child = edge.source_endpoint_id, edge.target_endpoint_id
+                if child not in decisive or parent in decisive or parent not in observed:
+                    continue
+                child_delta = decisive[child][0]
+                sigma_p = observed.get(parent) or self.sigma_floor_w
+                beta = edge.beta if edge.beta is not None else 1.0
+                if abs(beta * child_delta) <= _SIGMA_FACTOR * max(sigma_p, self.sigma_floor_w):
+                    # Hidden in the parent's noise: not evidence either way.
+                    continue
+                key = (parent, child, _CONTAINS)
+                causes.setdefault(key, set()).add(cause)
+                current = edges[position]
+                evidence = current.evidence.model_copy(
+                    update={
+                        "conflict": current.evidence.conflict + 1,
+                        "last_conflict_at": at,
+                        "independent_causes": len(causes[key]),
+                    }
+                )
+                edges[position] = current.model_copy(update={"evidence": evidence})
+
         # -- co-response without containment -> CORRELATED ------------------- #
         readers = sorted(decisive)
         for i, a in enumerate(readers):
@@ -577,6 +619,12 @@ class TopologyInferenceView:
             if _relation(edge.relation) != _CONTAINS or edge.pinned or edge.lifecycle in _DORMANT:
                 continue
             new_lifecycle = self._lifecycle(edge, causes, absolute_now, basis_now, meta_now)
+            if (
+                self.require_direction
+                and new_lifecycle == EdgeLifecycleV3.CONFIRMED
+                and edge.declared_by != "user"
+            ):
+                new_lifecycle = self._direction_cap(edge, edges, new_lifecycle, absolute_now)
             if new_lifecycle != edge.lifecycle:
                 transitions.append(
                     f"{edge.edge_id}: {_value(edge.lifecycle)} -> {_value(new_lifecycle)}"
@@ -589,7 +637,12 @@ class TopologyInferenceView:
             text
             for text in transitions
             if text.endswith(f"-> {_value(EdgeLifecycleV3.CONFIRMED)}")
-            or text.endswith(f"-> {_value(EdgeLifecycleV3.CONFLICTED)}")
+            # A structural edge becoming CONFLICTED changes the topology; a
+            # never-structural suggestion (CANDIDATE/PROVISIONAL) that is
+            # contradicted changes nothing H uses, so it is no new version.
+            or text.endswith(
+                f"{_value(EdgeLifecycleV3.CONFIRMED)} -> {_value(EdgeLifecycleV3.CONFLICTED)}"
+            )
         ]
 
         view = replace(
@@ -660,6 +713,39 @@ class TopologyInferenceView:
                 return EdgeLifecycleV3.CONFIRMED
             return EdgeLifecycleV3.CANDIDATE
         return edge.lifecycle
+
+    @staticmethod
+    def _direction_cap(
+        edge: TopologyEdgeV3,
+        edges: Sequence[TopologyEdgeV3],
+        proposed: EdgeLifecycleV3,
+        absolute: Mapping[str, Sequence[float | None]],
+    ) -> EdgeLifecycleV3:
+        """Never CONFIRM a containment whose reverse is equally supported.
+
+        Equal parent/child deltas support both ``p CONTAINS c`` and
+        ``c CONTAINS p``; only a step the other reader did not share tells them
+        apart (conflict on the wrong direction), and so does the absolute
+        containment gate when level series are known.  Until the reverse edge
+        is contradicted (conflict ratio >= the PROVISIONAL bound, or it fails
+        containment) or absent, the direction is not identified: the edge stays PROVISIONAL (soft, never
+        structural), so inference never promotes a containment cycle.
+        """
+        for other in edges:
+            if (
+                _relation(other.relation) == _CONTAINS
+                and other.source_endpoint_id == edge.target_endpoint_id
+                and other.target_endpoint_id == edge.source_endpoint_id
+                and other.lifecycle not in _DORMANT
+                and other.lifecycle != EdgeLifecycleV3.CONFLICTED
+                and other.evidence.support > 0
+                and other.evidence.conflict_ratio < CONFLICT_RATIO_PROVISIONAL
+                and _containment_gate(
+                    absolute.get(other.source_endpoint_id), absolute.get(other.target_endpoint_id)
+                )
+            ):
+                return EdgeLifecycleV3.PROVISIONAL
+        return proposed
 
     def _propose_version(self, transitions: Sequence[str]) -> TopologyInferenceView:
         service = self.versions

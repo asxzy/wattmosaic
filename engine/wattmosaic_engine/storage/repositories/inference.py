@@ -321,6 +321,14 @@ class InferenceRepository(Repository):
             ).fetchone()
             if latest is not None and latest[0] == content_hash:
                 return False
+            if self._conn.execute(
+                "SELECT 1 FROM inference_snapshots WHERE snapshot_id = ? LIMIT 1",
+                (snapshot.snapshot_id,),
+            ).fetchone() is not None:
+                # The id is content-derived: an older row (e.g. written before a
+                # restart that re-derived the same state) already holds exactly
+                # this snapshot.  Adopt it; never re-insert.
+                return False
             self._conn.execute(
                 """INSERT INTO inference_snapshots(
                     snapshot_id, observed_at, computed_at, topology_version_id,

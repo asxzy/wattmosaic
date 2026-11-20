@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from typing import Generic, TypeVar
+from collections.abc import Callable
+from typing import Any, Generic, TypeVar
 
 T = TypeVar("T")
 
@@ -28,6 +29,7 @@ class BoundedQueue(Generic[T]):
         self._closed = False
         self.total_enqueued = 0
         self.total_dequeued = 0
+        self.total_replaced = 0
         self.total_dropped = 0
 
     def put_nowait(self, item: T) -> bool:
@@ -61,6 +63,22 @@ class BoundedQueue(Generic[T]):
                 return None
             self._not_empty.clear()
             await self._not_empty.wait()
+
+    def put_or_replace(self, item: T, key: Callable[[T], Any]) -> tuple[bool, bool]:
+        """Replace a queued item with the same ``key`` in place, else enqueue.
+
+        Returns ``(accepted_without_drop, replaced)``.  A replaced item keeps its
+        queue position, so a value re-delivered while still waiting never
+        occupies a second slot (and never pushes an unrelated item out).
+        """
+        if not self._closed:
+            wanted = key(item)
+            for index, existing in enumerate(self._items):
+                if existing is not None and key(existing) == wanted:
+                    self._items[index] = item
+                    self.total_replaced += 1
+                    return True, True
+        return self.put_nowait(item), False
 
     def get_nowait(self) -> T | None:
         if not self._items:
@@ -106,6 +124,7 @@ class BoundedQueue(Generic[T]):
             "enqueued": self.total_enqueued,
             "dequeued": self.total_dequeued,
             "dropped": self.total_dropped,
+            "replaced": self.total_replaced,
             "closed": int(self._closed),
         }
 

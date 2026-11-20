@@ -484,6 +484,19 @@ class EvidenceRepository(Repository):
                 self._record_row(record),
             )
 
+    def record_head(self, group_id: str) -> tuple[str, int] | None:
+        """``(record_id, interpretation_revision)`` of a group's latest record.
+
+        A cheap read (no payload decode) for continuing a chain after restart.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT record_id, interpretation_revision FROM event_inference_records "
+                "WHERE event_group_id=? ORDER BY interpretation_revision DESC LIMIT 1",
+                (str(group_id),),
+            ).fetchone()
+        return None if row is None else (str(row[0]), int(row[1]))
+
     def records_for_group(self, group_id: str) -> list[EventInferenceRecord]:
         """All interpretations of one group, oldest revision first."""
         with self._lock:
