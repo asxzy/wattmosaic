@@ -1,5 +1,13 @@
 # Release Notes
 
+## v0.3.0-dev.2 — 2026-11-20 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- fix(tests): Python 3.11 rejects MappingProxyType dataclass defaults; use default_factory
+
 ## v0.3.0-dev.1 — 2026-11-19 (development channel)
 
 **This release breaks the API contract: `CONTRACT_VERSION` 2.x → 3.0.0.** It is
