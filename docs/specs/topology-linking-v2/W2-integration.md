@@ -90,3 +90,48 @@ old rule stays as the fallback):
   structural pass runs on it.
 * Keep the replay counting-only and fast (ADR-0033): a week of 46 readers must
   stay under ~5 s of CPU in `_replay`.
+
+## Structural memory and the week-long structural pass (live fix)
+
+An offline replay of a week of recorder history (fresh ledger and the deployed
+one) showed why the structural pass never fixed the known errors:
+
+* **Window.** Discover aligned only the last 24 h and the live runtime the last
+  6 h.  A hot tub on 3 % of the week shows its capacity violation only while it
+  runs, and the crossed sub-panel feeds separate only over thousands of steps
+  (24 h r 0.40/0.45 vs 168 h r 0.58/0.60).  The live runtime now keeps a
+  **structural memory** (`electrical/topology_memory.py`): the last sample per
+  30 s bucket per reader for 7 days in flat float buffers, persisted as
+  `engine_state` key `t5_structure_memory` (delta-encoded, zlib; ~0.9 MB for
+  40 readers) every 30 min and on stop, restored at start (the downtime is
+  absent, never held).  Discover aligns the whole lookback (up to the week) on
+  the same 30 s grid, one reader per call with GIL yields, seeds the memory
+  with it (live samples win) and runs the structural pass on the memory's
+  series.  `topology_resolve.analyse` takes the grid step from the series
+  (`AlignedSeries.step_s`): the structural difference spans 30 s and the
+  detectors run on one sample a minute on any grid.
+* **240 V pair held under one main.**  Both legs CONFIRMED and sticky under
+  main L1 never reached the assignment.  A decided pair whose parent cannot
+  carry both legs while they run releases the weaker leg; two leg edges with
+  near-equal scores (391/1 vs 384/0) give no direction (both legs stay leaves).
+* **Grandparent kept the circuits.**  A confirmed grandparent excluded the
+  provisional sub-panel from a circuit's candidates; the grandparent then
+  counted the circuit twice in its capacity and refused the sub-panel.  A
+  provisional parent below a confirmed candidate (an active edge to it) that
+  the regression singles out now competes.
+* **KCL below 300 W.**  A constant 234 W load outdrawing a 130-280 W leg 19 % of
+  the time sat under it and poisoned its capacity.  One child against one
+  parent is checked at 50 W; a parent the child outdraws is no candidate (a
+  CONFIRMED edge to it drops to PROVISIONAL).
+* **Sparse duplicate meters.**  A meter reporting every ~2 min fails the 30 s
+  symmetric-twin test (r 0.40/0.25, slope ratio 1.36).  Where the ledger gives
+  the two readers no direction, differences over 5 min decide (r 0.85/0.85).
+* **One pass per settle.**  A settle now resolves up to three times, each pass
+  restarting from the evidence lifecycles plus the earlier passes'
+  structural confirmations, and a decided parent that became a confirmed
+  ancestor of another confirmed candidate yields to it.
+
+One expected placement the data does not support: a small sub-panel load
+(25 steps >= 40 W in the week) expected under sub L1 steps with sub L2 (same
+device, synchronous samples: 16 of 25 steps move sub L2 by 0.7-1.3x, 1 of 25
+sub L1; regression r 0.64 vs 0.03), so it stays under sub L2.

@@ -113,7 +113,9 @@ async def test_discover_hands_the_replay_known_children_and_aligned_history(
 ) -> None:
     # Linking v2 W2: explain-away needs the live CONFIRMED children, and the
     # structural pass gets the history hold-aligned (change-only recorder rows:
-    # unlimited hold) on a 10 s grid, capped to the most recent 24 h.
+    # unlimited hold) on the structural memory's 30 s grid over the WHOLE
+    # lookback (design §5 T5: a 24 h cap hid a hot tub that ran 3 % of the
+    # week), one reader per call (GIL yields in between, ADR-0033).
     import wattmosaic_engine.electrical.topology_history as history_module
     import wattmosaic_engine.electrical.topology_regression as regression
 
@@ -138,8 +140,10 @@ async def test_discover_hands_the_replay_known_children_and_aligned_history(
 
     def align(history, **kwargs):
         seen["align"] = kwargs
-        seen["aligned"] = real_align(history, **kwargs)
-        return seen["aligned"]
+        seen.setdefault("calls", []).append(set(history))
+        out = real_align(history, **kwargs)
+        seen.setdefault("aligned", {}).update(out)
+        return out
 
     monkeypatch.setattr(history_module, "learn_topology_from_history", learn)
     monkeypatch.setattr(regression, "align", align)
@@ -148,13 +152,17 @@ async def test_discover_hands_the_replay_known_children_and_aligned_history(
     assert again["topology"]["ok"] is True
     assert ("feed", "branch_hrv") in seen["known"]
     assert seen["align"]["max_hold_s"] is None
-    assert seen["align"]["step_s"] == 10.0
+    assert seen["align"]["step_s"] == 30.0
     span = (seen["align"]["end"] - seen["align"]["start"]).total_seconds()
-    assert span == 24 * 3600.0
+    assert 48 * 3600.0 - 30.0 < span <= 48 * 3600.0
+    assert all(len(call) == 1 for call in seen["calls"])
     assert set(seen["aligned"]) == set(ENTITY)
-    assert {len(values) for values in seen["aligned"].values()} == {8640}
-    # The live view does not keep a day of history (ADR-0033).
+    assert {len(values) for values in seen["aligned"].values()} == {5760}
+    # The per-edge containment gate never sees the history (``absolute``) ...
     assert core.topology_inference.absolute == absolute_before
+    # ... but the live structural memory now holds the replayed lookback.
+    live = core._t5_aligned_series()  # noqa: SLF001
+    assert set(live) == set(ENTITY) and len(next(iter(live.values()))) >= 5760
 
 
 _ = UTC

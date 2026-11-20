@@ -219,6 +219,9 @@ class RuntimeMixin:
                 close_backend()
             except Exception:  # noqa: BLE001
                 log.exception("failed to flush the inference backend on shutdown")
+        if self._t5_memory.readers():
+            # The structural memory is saved every 30 min; keep the tail too.
+            self._persist_structure_memory()
         try:
             self.db.checkpoint()
         except Exception:  # noqa: BLE001
@@ -361,11 +364,17 @@ class RuntimeMixin:
         # Recent P3 step instants per reader, for T5's step-anchored parent
         # measurement (bounded: a few dozen steps per reader).
         self._t5_steps: dict[str, deque[tuple[str | None, datetime, datetime, float]]] = {}
-        # Last sample per 10 s bucket per reader over the structural window, the
-        # input of T5's aligned absolute series (topology linking v2).  The P2
-        # ring only covers minutes; this is O(1) per sample and bounded.
-        self._t5_history: dict[str, deque[tuple[int, datetime, float | None]]] = {}
-        self._t5_aligned: dict[str, list[float | None]] | None = None
+        # Last sample per 30 s bucket per reader over a week, the input of T5's
+        # aligned absolute series (topology linking v2, design §5 T5).  The P2
+        # ring only covers minutes; this is O(1) per sample, bounded, compact
+        # and persisted (``_T5_MEMORY_KEY``), so structural evidence -- a 240 V
+        # load that runs 3 % of the week, a busy feed's regression -- outlives
+        # both the old 6 h window and a restart.
+        from ..electrical.topology_memory import StructureMemory
+
+        self._t5_memory = StructureMemory()
+        self._t5_memory_saved_at: datetime | None = None
+        self._t5_aligned: Mapping[str, Any] | None = None
         self._t5_aligned_at: datetime | None = None
         # Edge-health writes are throttled (at most one per _T5_HEALTH_EVERY_S).
         self._t5_health_saved_at: datetime | None = None
@@ -589,6 +598,7 @@ class RuntimeMixin:
             health=self._load_edge_health(),
             structure_decisions=self._load_structure_decisions(),
         )
+        self._load_structure_memory()
         self.reconciler = Reconciler(
             operator=self._build_reconciliation_operator(),
             model_sets={versions.current().model_set_id: self.model_registry_v3},
@@ -2322,14 +2332,14 @@ class RuntimeMixin:
                 out[reader] = change
         return out
 
-    #: Structural window and grid of T5's aligned series, and how often the
-    #: aligned copy is rebuilt (design §5 T5, topology linking v2 W2).
-    _T5_ALIGN_WINDOW_S = 6 * 3600.0
-    _T5_ALIGN_STEP_S = 10.0
+    #: How often T5's aligned series are rebuilt from the structural memory
+    #: (design §5 T5, topology linking v2 W2), and how often the memory is saved.
     _T5_ALIGN_EVERY_S = 300.0
     _T5_HEALTH_KEY = "t5_edge_health"
     _T5_HEALTH_EVERY_S = 30.0
     _T5_STRUCTURE_KEY = "t5_structure_decisions"
+    _T5_MEMORY_KEY = "t5_structure_memory"
+    _T5_MEMORY_EVERY_S = 1800.0
 
     def _t5_record(
         self,
@@ -2338,40 +2348,29 @@ class RuntimeMixin:
         value: float | None,
         received_at: datetime | None = None,
     ) -> None:
-        """Keep the last sample per grid bucket (fast path: O(1), never raises).
+        """Keep the last sample per memory bucket (fast path: O(1), never raises).
 
-        A sample stamped more than one grid step after it was received (a
-        skewed device clock) is clamped to its receive time: kept as stamped,
-        it would make every later on-time sample look late and freeze the
-        reader's aligned history until the wall clock caught up.
+        A sample stamped more than one bucket after it was received (a skewed
+        device clock) is clamped to its receive time: kept as stamped, it would
+        make every later on-time sample look late and freeze the reader's
+        memory until the wall clock caught up.
         """
         try:
-            step = self._T5_ALIGN_STEP_S
-            if received_at is not None and received_at.timestamp() + step < at.timestamp():
+            memory = self._t5_memory
+            if received_at is not None and received_at.timestamp() + memory.step_s < at.timestamp():
                 at = received_at
-            bucket = int(at.timestamp() // step)
-            rows = self._t5_history.get(reader)
-            if rows is None:
-                maxlen = int(self._T5_ALIGN_WINDOW_S / self._T5_ALIGN_STEP_S) + 2
-                rows = self._t5_history[reader] = deque(maxlen=maxlen)
-            if rows:
-                last = rows[-1][0]
-                if bucket < last:
-                    return  # late sample: the aligned history only moves forward
-                if bucket == last:
-                    rows.pop()
-            rows.append((bucket, at, value))
+            memory.record(reader, at.timestamp(), value)
         except Exception:  # noqa: BLE001 - bookkeeping must not break ingestion
             return
 
-    def _t5_aligned_series(self) -> dict[str, list[float | None]] | None:
-        """The aligned absolute series (10 s grid, last 6 h), rebuilt every 300 s.
+    def _t5_aligned_series(self) -> Mapping[str, Any] | None:
+        """The aligned absolute series (30 s grid, up to a week), rebuilt every 300 s.
 
         The same object is returned between rebuilds so the ledger's structural
-        analysis stays cached.  Each reader is aligned in its own short step
-        with a GIL yield in between (ADR-0033: no long GIL holds; a convoy once
-        timed the gateway out).  Recorder semantics: a reader reports on change,
-        so a value is held until the next one (no hold cap).
+        analysis stays cached.  Building it is a memcpy per reader under the
+        memory's lock (ADR-0033: no long GIL holds).  Recorder semantics: a
+        reader reports on change, so a value is held until the next one; a
+        restart gap is absent.
         """
         now = self._clock()
         if (
@@ -2380,25 +2379,49 @@ class RuntimeMixin:
             and 0.0 <= (now - self._t5_aligned_at).total_seconds() < self._T5_ALIGN_EVERY_S
         ):
             return self._t5_aligned
-        from ..electrical.topology_regression import align
-
-        snapshot = {reader: list(rows) for reader, rows in list(self._t5_history.items())}
-        firsts = [rows[0][1] for rows in snapshot.values() if rows]
-        if not firsts:
+        aligned = self._t5_memory.series(now.timestamp())
+        if not aligned:
             return self._t5_aligned
-        step = self._T5_ALIGN_STEP_S
-        start = max(min(firsts), now - timedelta(seconds=self._T5_ALIGN_WINDOW_S))
-        start = datetime.fromtimestamp(
-            (start.timestamp() // step) * step, tz=start.tzinfo
-        )
-        aligned: dict[str, list[float | None]] = {}
-        for reader in sorted(snapshot):
-            rows = [(at, value) for _bucket, at, value in snapshot[reader]]
-            aligned.update(align({reader: rows}, start=start, end=now, step_s=step))
-            time.sleep(0)  # yield the GIL between readers
         self._t5_aligned = aligned
         self._t5_aligned_at = now
+        self._persist_structure_memory_throttled()
         return aligned
+
+    def _load_structure_memory(self) -> None:
+        """Restore the persisted structural memory (empty when absent or unreadable)."""
+        from ..electrical.topology_memory import StructureMemory
+
+        try:
+            text = self.db.get_state(self._T5_MEMORY_KEY)
+            restored = StructureMemory.from_json(text if isinstance(text, str) else None)
+        except Exception:  # noqa: BLE001 - resuming is best effort
+            return
+        if not restored.readers() or self._t5_memory.readers():
+            # Nothing persisted, or samples already arrived (a re-wire): the
+            # live memory is newer than anything persisted; keep it.
+            return
+        self._t5_memory = restored
+        self._t5_aligned = None
+        self._t5_aligned_at = None
+
+    def _persist_structure_memory(self) -> None:
+        try:
+            self.db.set_state(self._T5_MEMORY_KEY, self._t5_memory.to_json())
+            self._t5_memory_saved_at = self._clock()
+        except Exception:  # noqa: BLE001 - a state write must not abort the fold
+            log.debug("topology structure memory write skipped", exc_info=True)
+
+    def _persist_structure_memory_throttled(self) -> None:
+        now = self._clock()
+        last = self._t5_memory_saved_at
+        if last is None:
+            # Not saved by this process yet: start the interval, do not write a
+            # near-empty memory over a restored one on the first rebuild.
+            self._t5_memory_saved_at = now
+            return
+        if 0.0 <= (now - last).total_seconds() < self._T5_MEMORY_EVERY_S:
+            return
+        self._persist_structure_memory()
 
     def _load_edge_health(self) -> Any:
         """The persisted T5 edge-health book (empty when absent or unreadable)."""

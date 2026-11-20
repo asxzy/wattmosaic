@@ -254,6 +254,9 @@ def test_conflict_above_the_provisional_bound_drops_a_sticky_edge() -> None:
 
 def test_a_broken_edge_cannot_win_and_demote_its_rival() -> None:
     series = _crossed()
+    # Headroom on main_1 so capacity alone (KCL) does not already rule it out
+    # as sub_1's parent: the rivalry is decided by health, not capacity.
+    series["main_1"] = [v + 2500.0 for v in series["main_1"]]
     edges = [
         _edge("main_1", "sub_1", CONFIRMED, support=30),
         _edge("main_2", "sub_1", CONFIRMED, support=30),

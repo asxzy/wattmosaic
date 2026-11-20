@@ -110,6 +110,9 @@ CONFLICT_RATIO_CONFIRMED = 0.05
 CONFLICT_RATIO_CONFLICTED = 0.25
 MIN_EVENTS_CONFLICTED = 6
 MIN_CORRELATED_EVENTS = 5
+#: Structural passes per settle (each may build on the previous one's
+#: confirmations; stops early once a pass changes nothing).
+STRUCTURE_ROUNDS = 3
 
 #: hierarchy.py:104 -- a constant child/parent ratio is one conductor with a
 #: multiplier, not two nested feeds (scaled-copy refusal).
@@ -989,19 +992,47 @@ class TopologyInferenceView:
         series = structure_series(structure)
         before = list(edges)
         if series is not None:
-            result = resolve(
-                edges,
-                series,
-                levels=levels,
-                analysis=self.structure_cache.get(series),
-                decided=decided,
-                sticky=sticky,
-                previous=previous,
-                excluded=broken,
-                allow_confirm=self._confirm_gate(absolute_now),
-            )
+            # Structural decisions build on each other: a sub-panel confirmed
+            # in one pass is the direct parent (nested) its circuits need in
+            # the next, so a settle resolves until nothing changes (bounded).
+            # Each pass restarts from the evidence's lifecycles plus the
+            # structural confirmations of the passes before it, so a demotion
+            # made before a sub-panel was known never sticks.
+            analysis = self.structure_cache.get(series)
+            promoted: set[str] = set()
+            texts: list[str] = []
+            result = None
+            for _round in range(STRUCTURE_ROUNDS):
+                trial = [
+                    edge.model_copy(update={"lifecycle": EdgeLifecycleV3.CONFIRMED})
+                    if edge.edge_id in promoted
+                    else edge
+                    for edge in before
+                ]
+                result = resolve(
+                    trial,
+                    series,
+                    levels=levels,
+                    analysis=analysis,
+                    decided=decided,
+                    sticky=sticky,
+                    previous=previous,
+                    excluded=broken,
+                    allow_confirm=self._confirm_gate(absolute_now),
+                )
+                texts.extend(result.transitions)
+                fresh = {
+                    edge.edge_id
+                    for old, edge in zip(before, result.edges, strict=True)
+                    if _value(edge.lifecycle) == _value(EdgeLifecycleV3.CONFIRMED)
+                    and _value(old.lifecycle) != _value(EdgeLifecycleV3.CONFIRMED)
+                }
+                if fresh <= promoted:
+                    break
+                promoted |= fresh
+            assert result is not None
             edges[:] = result.edges
-            note(result.transitions, before)
+            note(texts, before)
             decided = result.decided
         else:
             stage = self._apply_decisions(edges, decided, broken)

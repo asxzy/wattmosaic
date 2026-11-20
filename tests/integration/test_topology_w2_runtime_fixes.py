@@ -156,9 +156,10 @@ async def test_a_future_sample_never_freezes_the_aligned_history(tmp_path: Path)
     for i in range(1, 30):
         now[0] = T0 + timedelta(seconds=10 * i)
         await core.on_reading(_reading(now[0], now[0], 100.0 + i, i))
-    rows = core._t5_history["skewed"]  # noqa: SLF001
-    assert rows[-1][2] == 129.0
-    assert len(rows) >= 29
+    rows = core._t5_memory.series(now[0].timestamp())["skewed"]  # noqa: SLF001
+    assert rows[-1] == 129.0
+    # Every on-time sample landed (10 s apart: ~10 buckets of 30 s), none frozen.
+    assert len(rows) >= 9 and all(value == value for value in rows[-9:])
 
 
 def test_confirmed_edges_show_health_in_the_topology_api(tmp_path: Path) -> None:

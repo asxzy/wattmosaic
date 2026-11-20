@@ -71,12 +71,15 @@ from .topology_regression import (
 __all__ = [
     "CAPACITY_ACTIVE_W",
     "DECIMATE",
+    "DECIMATE_S",
     "MAX_DECIMATED_SAMPLES",
     "MIN_STRUCTURE_SAMPLES",
     "STRUCTURAL_MARGIN",
     "STRUCTURAL_MIN_R",
     "STRUCTURAL_SLOPE",
     "STRUCTURAL_UNCONFIRM_R",
+    "STRUCTURE_DIFF_SPAN_S",
+    "AlignedSeries",
     "Classified",
     "StructureAnalysis",
     "StructureResolution",
@@ -88,12 +91,20 @@ __all__ = [
 
 #: Capacity is only meaningful while the children actually draw power.
 CAPACITY_ACTIVE_W = 300.0
+#: ... for ONE child against one parent a lower bar suffices: a constant 230 W
+#: load never reaches 300 W, yet outdraws a 130-280 W sub-panel leg 19 % of the
+#: time (live), which no real parent allows (KCL).
+CAPACITY_ALONE_ACTIVE_W = 50.0
 #: Below this many aligned samples the series say nothing about structure.
 MIN_STRUCTURE_SAMPLES = 50
-#: Pair/duplicate detection and capacity run on every n-th sample (10 s -> 60 s).
+#: Pair/duplicate detection and capacity run on one sample a minute (every
+#: n-th sample of the default 10 s grid) ...
+DECIMATE_S = 60.0
 DECIMATE = 6
 #: ... and never on more than this many samples (a week of recorder history).
 MAX_DECIMATED_SAMPLES = 2000
+#: Grid step assumed for a plain mapping (the live and replay default).
+DEFAULT_STEP_S = 10.0
 #: Structural confirmation needs a clear differenced-regression winner.
 STRUCTURAL_MIN_R = 0.3
 STRUCTURAL_SLOPE = (0.3, 1.3)
@@ -113,6 +124,14 @@ DUP_SYM_MIN_R = 0.3
 DUP_SYM_MAX_R_GAP = 0.15
 DUP_SYM_SLOPE_RATIO = (0.8, 1.25)
 DUP_SYM_MIN_COUNT_RATIO = 0.75
+#: Sparse twins (:meth:`StructureAnalysis.co_moving`): differences over 5 min,
+#: both ways at least this r, symmetric like :meth:`~StructureAnalysis.symmetric_twins`.
+TWIN_DIFF_SPAN_S = 300.0
+TWIN_MIN_R = 0.6
+#: Two edges between the same readers (one each way, same lifecycle) whose
+#: evidence scores differ by less than this fraction give no direction: the
+#: stronger one does not make its source a parent (240 V legs step together).
+DIRECTION_TIE_RATIO = 0.25
 #: Weight of the regression r in the assignment's evidence score.
 _REGRESSION_WEIGHT = 100.0
 #: Structural fits difference over this many grid steps (30 s on the 10 s
@@ -120,8 +139,10 @@ _REGRESSION_WEIGHT = 100.0
 #: different 10 s buckets on parent and child; lag-1 differences then split it
 #: into two unrelated halves (live: slope ~0.6 for a true feed, and a child
 #: fitting a random reader better than its own sub-panel).  A span longer than
-#: the sampling interval sees the whole step on both.
+#: the sampling interval sees the whole step on both.  On another grid the span
+#: is :data:`STRUCTURE_DIFF_SPAN_S` in that grid's steps (30 s grid: 1).
 STRUCTURE_DIFF_SPAN = 3
+STRUCTURE_DIFF_SPAN_S = 30.0
 
 _CONTAINS = "contains"
 _CONFIRMED = EdgeLifecycleV3.CONFIRMED.value
@@ -135,8 +156,31 @@ def _value(item: Any) -> Any:
     return getattr(item, "value", item) if item is not None else None
 
 
+class AlignedSeries(dict):  # type: ignore[type-arg]
+    """Aligned series (reader -> values on one grid) that know their grid.
+
+    ``step_s`` is the grid step and ``start_ts`` the POSIX time of index 0 (or
+    ``None``).  A plain mapping is taken to be on the 10 s grid.
+    """
+
+    def __init__(self, data: Any = (), *, step_s: float = 10.0, start_ts: float | None = None) -> None:
+        super().__init__(data)
+        self.step_s = float(step_s)
+        self.start_ts = start_ts
+
+
+def grid_step(series: Mapping[str, Series]) -> float:
+    """The grid step of ``series`` (:class:`AlignedSeries`), else the 10 s default."""
+    step = getattr(series, "step_s", None)
+    return float(step) if isinstance(step, (int, float)) and step > 0 else DEFAULT_STEP_S
+
+
 def _as_array(values: Series) -> np.ndarray:
     """float64 copy; absent / non-finite samples become ``nan``."""
+    if isinstance(values, np.ndarray):
+        out = values.astype(np.float64, copy=True)
+        out[~np.isfinite(out)] = np.nan
+        return out
     try:
         out = np.array([np.nan if v is None else v for v in values], dtype=np.float64)
     except (TypeError, ValueError):
@@ -191,6 +235,12 @@ class StructureAnalysis:
     #: Capacity violations keyed ``(parent, sorted children)``; shared with
     #: :func:`~.topology_capacity.assign_parents` so folds never recompute them.
     capacity: dict[tuple[str, tuple[str, ...]], float] = field(default_factory=dict)
+    #: One-child violations at :data:`CAPACITY_ALONE_ACTIVE_W`, keyed ``(parent, child)``.
+    alone: dict[tuple[str, str], float] = field(default_factory=dict)
+    #: Grid steps of the structural difference (:data:`STRUCTURE_DIFF_SPAN_S`).
+    span: int = STRUCTURE_DIFF_SPAN
+    #: Grid step of ``full`` in seconds.
+    grid_s: float = DEFAULT_STEP_S
 
     def partner(self, reader: str) -> str | None:
         """The other leg of ``reader``'s 240 V pair, if any."""
@@ -231,7 +281,7 @@ class StructureAnalysis:
             p = self.full.get(parent)
             c = self.full.get(child)
             self.sfits[key] = (
-                None if p is None or c is None else _diff_fit(p, c, span=STRUCTURE_DIFF_SPAN)
+                None if p is None or c is None else _diff_fit(p, c, span=self.span)
             )
         return self.sfits[key]
 
@@ -252,6 +302,20 @@ class StructureAnalysis:
     def fits_capacity(self, parent: str, children: Sequence[str]) -> bool:
         return self.capacity_violation(parent, children) <= CAPACITY_MAX_VIOLATION
 
+    def fits_alone(self, parent: str, child: str) -> bool:
+        """Whether ``child`` alone fits ``parent`` while it draws :data:`CAPACITY_ALONE_ACTIVE_W`."""
+        key = (parent, child)
+        if key not in self.alone:
+            parent_series = self.decimated.get(parent)
+            child_series = self.decimated.get(child)
+            if parent_series is None or child_series is None:
+                self.alone[key] = 0.0
+            else:
+                self.alone[key] = capacity_violation(
+                    parent_series, [child_series], min_children_w=CAPACITY_ALONE_ACTIVE_W
+                )[0]
+        return self.alone[key] <= CAPACITY_MAX_VIOLATION and self.fits_capacity(parent, [child])
+
     def symmetric_twins(self, a: str, b: str) -> bool:
         """Whether ``a`` and ``b`` step together both ways (one wire, two meters)."""
         forward = self.sfit(a, b)
@@ -266,6 +330,32 @@ class StructureAnalysis:
         if not low <= forward.slope / reverse.slope <= high:
             return False
         return min(forward.n, reverse.n) >= DUP_SYM_MIN_COUNT_RATIO * max(forward.n, reverse.n)
+
+    def co_moving(self, a: str, b: str) -> bool:
+        """Symmetric differenced fits over :data:`TWIN_DIFF_SPAN_S`.
+
+        The twin test for a meter sampled much more sparsely than its twin
+        (live: one row every ~2 min against 16 s): over 30 s the sparse meter
+        has mostly not reported yet, so the structural fits are weak and
+        lopsided (r 0.40 / 0.25) although both meter one wire; over 5 min they
+        agree (r 0.85 / 0.85, slopes 0.88 / 0.79).  Only used where the ledger
+        gives the two readers no containment direction at all (a parent with one
+        dominant child has a CONFIRMED edge to it).
+        """
+        p, c = self.full.get(a), self.full.get(b)
+        if p is None or c is None:
+            return False
+        span = max(self.span, round(TWIN_DIFF_SPAN_S / self.grid_s))
+        forward = _diff_fit(p, c, span=span)
+        reverse = _diff_fit(c, p, span=span)
+        if forward is None or reverse is None or forward.slope <= 0.0 or reverse.slope <= 0.0:
+            return False
+        low, high = DUP_SYM_SLOPE_RATIO
+        return (
+            min(forward.r, reverse.r) >= TWIN_MIN_R
+            and abs(forward.r - reverse.r) <= DUP_SYM_MAX_R_GAP
+            and low <= forward.slope / reverse.slope <= high
+        )
 
     def classify(
         self,
@@ -305,19 +395,30 @@ class StructureAnalysis:
             )
 
         def leaf(reader: str, twin: str) -> bool:
-            """No child, except ones whose reverse edge is at least as strong.
+            """No child, except ones whose reverse edge is about as strong.
 
             Equal deltas give an edge both ways (two legs, two meters): that is
-            no direction, so it is no child either.  ``twin`` counts like any
-            other reader: a parent with one dominant child (a CONFIRMED edge
-            to it and no equal reverse) is not a leaf.
+            no direction, so it is no child either.  "About as strong" is the
+            same lifecycle and a score within :data:`DIRECTION_TIE_RATIO`: the
+            two legs of a 240 V load step together, so neither edge collects
+            conflict and their counts differ only by a few unpaired steps
+            (live: 391/1 vs 384/0 must not make one leg the other's parent).
+            ``twin`` counts like any other reader: a parent with one dominant
+            child (a CONFIRMED edge to it, or a reverse edge contradicted by
+            the parent's own steps) is not a leaf.
             """
             del twin
             own = parents.get(reader, {})
             for child in children.get(reader, set()):
                 reverse = own.get(child)
                 forward = parents.get(child, {}).get(reader)
-                if reverse is None or forward is None or forward > reverse:
+                if reverse is None or forward is None:
+                    return False
+                if forward[0] != reverse[0]:
+                    if forward[0] > reverse[0]:
+                        return False
+                    continue
+                if forward[1] > reverse[1] + DIRECTION_TIE_RATIO * max(abs(reverse[1]), 1.0):
                     return False
             return True
 
@@ -338,11 +439,19 @@ class StructureAnalysis:
                 for q in shared[i + 1:]
             )
 
+        def undirected(a: str, b: str) -> bool:
+            """No CONFIRMED/PROVISIONAL containment between ``a`` and ``b`` either way."""
+            return b not in parents.get(a, {}) and a not in parents.get(b, {})
+
         raw_pairs = {(a, b) for a, b, _r in self.pairs}
         strict = {
             (a, b)
             for a, b, _r, _offset in self.duplicates
-            if self.active.get((a, b), 0) >= DUP_MIN_ACTIVE_SAMPLES and self.symmetric_twins(a, b)
+            if self.active.get((a, b), 0) >= DUP_MIN_ACTIVE_SAMPLES
+            and (
+                self.symmetric_twins(a, b)
+                or (undirected(a, b) and self.co_moving(a, b))
+            )
         }
         pairs: list[tuple[str, str]] = []
         duplicates: list[tuple[str, str]] = []
@@ -511,11 +620,21 @@ def _find_duplicates(
     return out
 
 
-def analyse(series: Mapping[str, Series], *, decimate: int = DECIMATE) -> StructureAnalysis:
-    """Detect paired legs and duplicate meters once for an aligned series set."""
+def analyse(series: Mapping[str, Series], *, decimate: int | None = None) -> StructureAnalysis:
+    """Detect paired legs and duplicate meters once for an aligned series set.
+
+    The grid step comes from the series (:func:`grid_step`): the structural
+    difference spans :data:`STRUCTURE_DIFF_SPAN_S` and the detectors run on one
+    sample per :data:`DECIMATE_S` whatever the grid (a 30 s week-long memory and
+    a 10 s replay give the same fits).
+    """
     names = tuple(sorted(series))
     full = {name: _as_array(series[name]) for name in names}
     length = max((len(values) for values in series.values()), default=0)
+    grid = grid_step(series)
+    span = max(1, round(STRUCTURE_DIFF_SPAN_S / grid))
+    if decimate is None:
+        decimate = max(1, round(DECIMATE_S / grid))
     step = max(1, int(decimate), math.ceil(length / MAX_DECIMATED_SAMPLES))
     small = {name: full[name][::step] for name in names}
     decimated = {
@@ -541,6 +660,8 @@ def analyse(series: Mapping[str, Series], *, decimate: int = DECIMATE) -> Struct
         pairs=tuple(pairs),
         duplicates=tuple(duplicates),
         active=active,
+        span=span,
+        grid_s=grid,
     )
 
 
@@ -695,26 +816,6 @@ def resolve(
         if lifecycle in (_CONFIRMED, _PROVISIONAL):
             inferred.setdefault(child, []).append(index)
 
-    # Sticky decisions: kept unless the structure positively disagrees.
-    held: dict[str, str] = {}
-    for child, indices in sorted(inferred.items()):
-        kept = decided_in.get(child)
-        if child in fixed or kept is None or kept in ignored_parents:
-            continue
-        kept_index = next((i for i in indices if out[i].source_endpoint_id == kept), None)
-        if kept_index is None or lifecycle_of(kept_index) != _CONFIRMED:
-            continue
-        rivals = [
-            out[i].source_endpoint_id
-            for i in indices
-            if i != kept_index and out[i].source_endpoint_id not in ignored_parents
-        ]
-        reason = _disagreement(info, kept, child, rivals, paired=child in pair_of)
-        if reason is None:
-            held[child] = kept
-        elif (kept, child) in sticky_set:
-            set_lifecycle(kept_index, _PROVISIONAL, f"structure disagrees: {reason}")
-
     def score_of(index: int) -> float:
         edge = out[index]
         parent, child = edge.source_endpoint_id, edge.target_endpoint_id
@@ -725,13 +826,143 @@ def resolve(
             value += _REGRESSION_WEIGHT * fit.r
         return value + float(extra.get((parent, child), 0.0))
 
+    def edge_index(parent: str, child: str) -> int | None:
+        return next(
+            (i for i in inferred.get(child, ()) if out[i].source_endpoint_id == parent), None
+        )
+
+    # A 240 V pair whose legs were both decided under ONE parent is split when
+    # that parent cannot carry both legs while they run (capacity while on):
+    # the leg with the weaker evidence there is released and re-assigned; the
+    # other leg's decision stands.  Each leg alone fits its parent, so the
+    # per-child check below never sees this.
+    released: set[str] = set()
+    for a, b in classified.pairs:
+        p = decided_in.get(a)
+        if p is None or p != decided_in.get(b) or a in fixed or b in fixed:
+            continue
+        a_index, b_index = edge_index(p, a), edge_index(p, b)
+        if a_index is None or b_index is None:
+            continue
+        if lifecycle_of(a_index) != _CONFIRMED or lifecycle_of(b_index) != _CONFIRMED:
+            continue
+        if info.fits_capacity(p, [a, b]):
+            continue
+        weaker, weaker_index = min(
+            ((a, a_index), (b, b_index)), key=lambda item: (score_of(item[1]), item[0])
+        )
+        released.add(weaker)
+        if (p, weaker) in sticky_set:
+            set_lifecycle(weaker_index, _PROVISIONAL, "structure disagrees: 240 V pair capacity")
+
+    # Sticky decisions: kept unless the structure positively disagrees.
+    held: dict[str, str] = {}
+    for child, indices in sorted(inferred.items()):
+        kept = decided_in.get(child)
+        if child in fixed or kept is None or kept in ignored_parents or child in released:
+            continue
+        kept_index = next((i for i in indices if out[i].source_endpoint_id == kept), None)
+        if kept_index is None or lifecycle_of(kept_index) != _CONFIRMED:
+            continue
+        rivals = [
+            out[i].source_endpoint_id
+            for i in indices
+            if i != kept_index and out[i].source_endpoint_id not in ignored_parents
+        ]
+        below = next(
+            (
+                out[i].source_endpoint_id
+                for i in indices
+                if i != kept_index
+                and lifecycle_of(i) == _CONFIRMED
+                and nested(kept, out[i].source_endpoint_id)
+            ),
+            None,
+        )
+        # A decided parent that is now a confirmed ancestor of another confirmed
+        # candidate is a grandparent: the lower one is direct (transitive feed).
+        reason = (
+            f"{below} is below it"
+            if below is not None
+            else _disagreement(info, kept, child, rivals, paired=child in pair_of)
+        )
+        if reason is None:
+            held[child] = kept
+        elif (kept, child) in sticky_set:
+            set_lifecycle(kept_index, _PROVISIONAL, f"structure disagrees: {reason}")
+
+    def acyclic(parent: str, child: str) -> bool:
+        """No structural confirmation that would close a containment cycle."""
+        if nested(child, parent):
+            return False
+        return not any(
+            _is_contains(edge)
+            and edge.source_endpoint_id == child
+            and edge.target_endpoint_id == parent
+            and str(_value(edge.lifecycle)) not in _DORMANT
+            and (
+                str(_value(edge.lifecycle)) == _CONFIRMED
+                or edge.pinned
+                or edge.declared_by != "inference"
+            )
+            for edge in out
+        )
+
+    active_links = {
+        (edge.source_endpoint_id, edge.target_endpoint_id)
+        for edge in out
+        if _is_contains(edge) and str(_value(edge.lifecycle)) in (_CONFIRMED, _PROVISIONAL)
+    }
+
+    def confirmable(index: int, parents: Sequence[str]) -> bool:
+        """A PROVISIONAL edge structural confirmation may promote in this settle."""
+        edge = out[index]
+        parent, child = edge.source_endpoint_id, edge.target_endpoint_id
+        before = (previous or {}).get(edge.edge_id, str(_value(edge.lifecycle)))
+        return (
+            lifecycle_of(index) == _PROVISIONAL
+            and str(_value(before)) == _PROVISIONAL
+            and acyclic(parent, child)
+            and _structural_ok(info, parent, child, parents, [child])
+            and (allow_confirm is None or allow_confirm(edge, out))
+        )
+
+    def lower_level(index: int, confirmed: Sequence[int], parents: Sequence[str]) -> bool:
+        """A PROVISIONAL parent below a CONFIRMED one that the structure singles out.
+
+        A grandparent feed sees every step of its grandchildren, so its edge
+        reaches CONFIRMED on step counts while the direct parent's edge (the
+        busier sub-panel) may stay PROVISIONAL.  Left out of the assignment,
+        the child would sit under the grandparent and be counted twice in its
+        capacity (once itself, once inside the sub-panel), which then refuses
+        the sub-panel's own confirmation (live: a crossed sub-panel never
+        confirmed).  The provisional parent competes when a confirmed candidate
+        has an active edge to it and the regression singles it out
+        (:func:`_structural_ok` against every candidate).
+        """
+        parent = out[index].source_endpoint_id
+        return any(
+            (out[j].source_endpoint_id, parent) in active_links for j in confirmed
+        ) and confirmable(index, parents)
+
     candidates: dict[str, list[str]] = {}
     index_of: dict[tuple[str, str], int] = {}
+    soft_lower: set[tuple[str, str]] = set()
     for child, indices in sorted(inferred.items()):
         if child in fixed:
             # A user-declared parent is a fact; inference leaves the child alone.
             continue
         usable = [i for i in indices if out[i].source_endpoint_id not in ignored_parents]
+        # KCL: a parent the child alone outdraws while it runs is no parent at
+        # all.  Kept as a candidate it is still assigned when it is the child's
+        # only one, and its capacity then refuses every real child of that
+        # parent (live: a constant 300 W load on a 280 W sub-panel leg blocked
+        # the leg's own circuits).
+        over = [i for i in usable if not info.fits_alone(out[i].source_endpoint_id, child)]
+        for i in over:
+            if lifecycle_of(i) == _CONFIRMED:
+                set_lifecycle(i, _PROVISIONAL, "structure disagrees: capacity")
+        usable = [i for i in usable if i not in over]
         if not usable:
             continue
         confirmed = [i for i in usable if lifecycle_of(i) == _CONFIRMED]
@@ -739,11 +970,10 @@ def resolve(
         if child in pair_of:
             chosen = confirmed + provisional
         elif confirmed:
-            chosen = list(confirmed)
-            if not any(
-                info.fits_capacity(out[i].source_endpoint_id, [child]) for i in confirmed
-            ):
-                chosen += provisional
+            parents = [out[j].source_endpoint_id for j in usable]
+            lower = [i for i in provisional if lower_level(i, confirmed, parents)]
+            soft_lower.update((out[i].source_endpoint_id, child) for i in lower)
+            chosen = confirmed + lower
         else:
             chosen = provisional
         for i in chosen:
@@ -755,7 +985,13 @@ def resolve(
 
     score = {key: score_of(i) for key, i in index_of.items()}
     pairs = list(classified.pairs)
-    open_candidates = {child: parents for child, parents in candidates.items() if child not in held}
+    # A held leg whose partner is open stays in the assignment (fixed to its
+    # parent) so the pair rule sees both legs and splits the open one off.
+    open_candidates = {
+        child: parents
+        for child, parents in candidates.items()
+        if child not in held or (pair_of.get(child) in candidates and pair_of.get(child) not in held)
+    }
     assigned: dict[str, str] = {}
     if open_candidates:
         assigned = assign_parents(
@@ -776,23 +1012,6 @@ def resolve(
     for child, parent in {**fixed, **assigned}.items():
         children_of.setdefault(parent, []).append(child)
 
-    def acyclic(parent: str, child: str) -> bool:
-        """No structural confirmation that would close a containment cycle."""
-        if nested(child, parent):
-            return False
-        return not any(
-            _is_contains(edge)
-            and edge.source_endpoint_id == child
-            and edge.target_endpoint_id == parent
-            and str(_value(edge.lifecycle)) not in _DORMANT
-            and (
-                str(_value(edge.lifecycle)) == _CONFIRMED
-                or edge.pinned
-                or edge.declared_by != "inference"
-            )
-            for edge in out
-        )
-
     decided_out: dict[str, str] = {}
     for child in sorted(assigned):
         parent = assigned[child]
@@ -812,6 +1031,12 @@ def resolve(
             and (allow_confirm is None or allow_confirm(chosen_edge, out))
         ):
             set_lifecycle(chosen_index, _CONFIRMED, "structural")
+        if (parent, child) in soft_lower and lifecycle_of(chosen_index) != _CONFIRMED:
+            # A lower-level parent that did not confirm after all (its
+            # siblings' capacity) never orphans the child: the confirmed
+            # grandparent stays until a later settle decides.
+            del decided_out[child]
+            continue
         for other in candidates[child]:
             if other == parent:
                 continue

@@ -12,7 +12,7 @@ import statistics
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from ..api.facade import InvalidRequest, maybe_await
@@ -23,6 +23,8 @@ from ..disaggregation.auto_placement import (
     mapping_edges_for_plan,
     reader_roles,
 )
+from ..electrical.topology_memory import MEMORY_STEP_S, MEMORY_WINDOW_S
+from ..electrical.topology_resolve import AlignedSeries
 from ..ingestion.discovery import (
     devices_for_candidate_endpoints,
     discover_candidate_endpoints,
@@ -39,10 +41,13 @@ TOPOLOGY_BOOTSTRAP_WAIT_S = 30.0
 #: a full state scan, so retrying every inference cycle (5 s) would be wasteful.
 TOPOLOGY_RETRY_INTERVAL_S = 60.0
 #: Grid and span of the aligned absolute series a history replay hands the
-#: structural pass (W2 "History replay"): 10 s like the live view, capped to the
-#: most recent 24 h so a week-long lookback stays cheap (ADR-0033).
-HISTORY_ALIGNED_STEP_S = 10.0
-HISTORY_ALIGNED_MAX_S = 24 * 3600.0
+#: structural pass (W2 "History replay"): the live structural memory's 30 s
+#: grid over the whole lookback, up to the memory's week (design §5 T5).  A
+#: week of 46 readers is ~0.9 M samples; each reader is aligned in its own
+#: step with a GIL yield in between (ADR-0033).  A 24 h cap once hid the hot
+#: tub (on 3 % of the week) and halved the sub-panel feeds' regression.
+HISTORY_ALIGNED_STEP_S = MEMORY_STEP_S
+HISTORY_ALIGNED_MAX_S = MEMORY_WINDOW_S
 
 
 class DiscoveryApiMixin:
@@ -341,32 +346,38 @@ class DiscoveryApiMixin:
             learned, stats = learn_topology_from_history(seed, history, known=known, levels=levels)
             return learned, stats.as_dict(), levels, _aligned(history)
 
-        def _aligned(history: Mapping[str, Any]) -> dict[str, Any]:
+        def _aligned(history: Mapping[str, Any]) -> AlignedSeries:
             """Aligned absolute series for the structural pass (W2, M4 ``align``).
 
             Recorder rows are change-only, so the hold is unlimited; the grid is
-            10 s over the most recent :data:`HISTORY_ALIGNED_MAX_S` of the
-            lookback -- a week x 46 readers would be 2.8 M points (ADR-0033).
-            Each reader keeps its last row before the window: that held value is
-            its level at the window's start.
+            :data:`HISTORY_ALIGNED_STEP_S` over the lookback (at most
+            :data:`HISTORY_ALIGNED_MAX_S`), starting on a grid multiple so it
+            can seed the live structural memory.  Each reader keeps its last row
+            before the window: that held value is its level at the window's start.
             """
+            step = HISTORY_ALIGNED_STEP_S
             window_start = max(start, end - timedelta(seconds=HISTORY_ALIGNED_MAX_S))
-            trimmed: dict[str, list[Any]] = {}
-            for reader, rows in history.items():
+            start_ts = math.ceil(window_start.timestamp() / step) * step
+            window_start = datetime.fromtimestamp(start_ts, tz=window_start.tzinfo)
+            series = AlignedSeries(step_s=step, start_ts=start_ts)
+            for reader, rows in sorted(history.items()):
                 ordered = sorted(
                     ((t, v) for t, v in rows if v is not None), key=lambda row: row[0]
                 )
                 times = [t for t, _v in ordered]
                 first = max(bisect.bisect_right(times, window_start) - 1, 0)
                 if ordered:
-                    trimmed[reader] = ordered[first:]
-            return align(
-                trimmed,
-                start=window_start,
-                end=end,
-                step_s=HISTORY_ALIGNED_STEP_S,
-                max_hold_s=None,
-            )
+                    series.update(
+                        align(
+                            {reader: ordered[first:]},
+                            start=window_start,
+                            end=end,
+                            step_s=step,
+                            max_hold_s=None,
+                        )
+                    )
+                time.sleep(0)  # yield the GIL between readers (ADR-0033)
+            return series
 
         learned, stats, levels, aligned = await asyncio.to_thread(_replay)
 
@@ -380,15 +391,14 @@ class DiscoveryApiMixin:
                 # The structural pass in ``_settle`` (linking v2 W2a) reads the
                 # view's ``aligned`` series -- not ``absolute``, which would also
                 # switch on the per-edge containment >= 0.995 gate that
-                # unsynchronised recorder samples can fail.  The live view keeps
-                # its own series afterwards: the live runtime feeds a recent
-                # window, and a day of history would make every live fold work
-                # over 8640 points (ADR-0033).
-                # The structural pass (capacity, paired legs, regression) reads
-                # the replay's aligned history; the live view keeps its own.
-                staged = replace(current, aligned=aligned)
+                # unsynchronised recorder samples can fail.
+                # The replay's week seeds the live structural memory (live
+                # samples win where both exist), and the structural pass runs
+                # on the memory's series: the very object the next live fold
+                # gets, so its analysis is computed once.
+                structural = self._seeded_structure_series(aligned)
+                staged = replace(current, aligned=structural)
                 merged = staged.merge_evidence(learned, levels=levels)
-                merged = replace(merged, aligned=current.aligned)
                 self.topology_inference = merged
                 # The replay's structural decisions are sticky: the next live
                 # fold on its shorter window keeps them unless the structure
@@ -428,6 +438,28 @@ class DiscoveryApiMixin:
                 {"parent": parent, "child": child} for parent, child in summary["confirmed"]
             ],
         }
+
+    def _seeded_structure_series(self, aligned: AlignedSeries) -> Mapping[str, Any]:
+        """Seed the runtime's structural memory with ``aligned``; its series.
+
+        Without a runtime memory (a bare test double) ``aligned`` itself is
+        the structural series.
+        """
+        memory = getattr(self, "_t5_memory", None)
+        if memory is None or aligned.start_ts is None:
+            return aligned
+        try:
+            memory.seed(aligned)
+        except Exception:  # noqa: BLE001 - seeding is best effort
+            log.debug("structure memory seed skipped", exc_info=True)
+            return aligned
+        self._t5_aligned = None
+        self._t5_aligned_at = None
+        series = self._t5_aligned_series()
+        persist = getattr(self, "_persist_structure_memory", None)
+        if callable(persist):
+            persist()
+        return series if series else aligned
 
     async def _discover_device_placements(
         self,

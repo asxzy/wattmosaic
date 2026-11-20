@@ -1,8 +1,8 @@
 """Topology linking v2 live wiring (design §5 T5): health persistence, aligned series, API.
 
 * the edge-health book survives a restart (``engine_state`` key ``t5_edge_health``);
-* the runtime keeps a bounded 10 s history and hands the ledger one cached
-  aligned series object between rebuilds;
+* the runtime keeps a bounded 30 s structural memory and hands the ledger one
+  cached aligned series object between rebuilds;
 * ``GET /topology/v3`` CONTAINS rows carry ``health``.
 """
 
@@ -44,16 +44,22 @@ def test_aligned_series_are_built_from_a_bounded_history_and_cached(tmp_path: Pa
         core._t5_record("a", at, 100.0 + (i // 10) * 50.0)  # noqa: SLF001
         if i % 3 == 0:
             core._t5_record("b", at, 40.0)  # noqa: SLF001
-    # Two samples share each 10 s bucket: only the last one is kept.
-    assert len(core._t5_history["a"]) == 60  # noqa: SLF001
+    memory = core._t5_memory  # noqa: SLF001
+    step = memory.step_s
+    snapshot = memory.series(T0.timestamp() + 595)
+    # Six samples share each 30 s bucket: only the last one is kept.
+    assert len(snapshot["a"]) == 20
+    assert snapshot["a"][0] == 100.0 + (5 // 10) * 50.0
+    assert snapshot["a"][3] == 100.0 + (23 // 10) * 50.0
     # Late samples never rewrite the past.
     core._t5_record("a", T0, 9999.0)  # noqa: SLF001
-    assert core._t5_history["a"][0][2] != 9999.0  # noqa: SLF001
+    assert memory.series(T0.timestamp() + 595)["a"][0] != 9999.0
+    assert step == 30.0
 
     now[0] = T0 + timedelta(seconds=600)
     first = core._t5_aligned_series()  # noqa: SLF001
     assert first is not None and set(first) == {"a", "b"}
-    assert len(first["a"]) == len(first["b"]) == 60
+    assert len(first["a"]) == len(first["b"]) == 21
     assert first["b"][-1] == 40.0  # a quiet reader is held (recorder semantics)
     now[0] = T0 + timedelta(seconds=700)
     assert core._t5_aligned_series() is first  # noqa: SLF001 - cached object
