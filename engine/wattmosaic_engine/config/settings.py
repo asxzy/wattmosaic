@@ -11,7 +11,7 @@ import logging
 import math
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -48,6 +48,12 @@ ISOLATION_TIMING_KEYS: tuple[str, ...] = (
 #: shipped default is now 7 d (the V2 DB-growth finding: raw samples are ~88 %
 #: of growth, ~21-28 GB at 30 d on a Pi-class host).
 RETENTION_DAYS_RAW_RANGE: tuple[int, int] = (1, 90)
+
+#: Accepted range for raw CT capture, in days.  0 disables persistence
+#: entirely; the HA recorder is the production history (ADR-0042).  The
+#: add-on schema's ``raw_capture_days`` bound is pinned to this range by a
+#: parity test.
+RAW_CAPTURE_DAYS_RANGE: tuple[int, int] = (0, 90)
 
 #: Accepted range for every derived-table retention horizon, in days.  The
 #: add-on does not expose these (they are engine/env settings), but the same
@@ -189,7 +195,13 @@ class EngineConfig:
     #: ``REQ-STORAGE-002`` asks for a 7-14 d band and ``OD-31`` requires the
     #: validator to be a superset of ``{7, 14, 30}``, so the accepted range is
     #: 1-90 rather than the literal 7-14; see :data:`RETENTION_DAYS_RAW_RANGE`.
+    #: ADR-0042: this horizon no longer governs ``ct_samples``.  Raw CT capture
+    #: now has its own setting, :attr:`raw_capture_days`, defaulting to off.
     retention_days_raw: int = 7
+    #: Days of full-rate canonical CT readings kept in ``ct_samples``.
+    #: 0 (default) = do not persist readings; the HA recorder is the production
+    #: history (ADR-0042).  >0 = debug/dev capture with its own horizon.
+    raw_capture_days: int = 0
     #: L3 aggregate horizon, in days.
     retention_days_aggregates: int = 730
     #: L2 event-evidence horizon.  ``None`` means disabled: evidence is
@@ -360,6 +372,13 @@ class EngineConfig:
             get("WM_RETENTION_DAYS_RAW", default=str(cfg.retention_days_raw))
             or cfg.retention_days_raw
         )
+        # ADR-0042: an explicit 0 disables capture and must survive parsing.
+        # The neighbouring `or default` pattern would turn it into the shipped
+        # default, so handle the empty/missing case explicitly here.
+        raw_capture = get("WM_RAW_CAPTURE_DAYS", default="")
+        cfg.raw_capture_days = (
+            int(raw_capture) if raw_capture not in (None, "") else cfg.raw_capture_days
+        )
         cfg.retention_days_aggregates = int(
             get("WM_RETENTION_DAYS_AGGREGATES", default=str(cfg.retention_days_aggregates)) or 730
         )
@@ -528,6 +547,9 @@ class EngineConfig:
                 f"retention_days_raw must be in {raw_low}-{raw_high} "
                 f"(got {self.retention_days_raw})"
             )
+        cap_low, cap_high = RAW_CAPTURE_DAYS_RANGE
+        if not cap_low <= self.raw_capture_days <= cap_high:
+            problems.append(f"raw_capture_days must be in {cap_low}-{cap_high}")
         agg_low, agg_high = RETENTION_DAYS_AGGREGATES_RANGE
         if not agg_low <= self.retention_days_aggregates <= agg_high:
             problems.append(
@@ -641,6 +663,10 @@ class EngineConfig:
                     )
         return problems
 
+    def to_dict(self) -> dict[str, Any]:
+        """A full view of every setting.  Use :meth:`redacted` for logging."""
+        return asdict(self)
+
     def redacted(self) -> dict[str, Any]:
         return {
             "ha_url": self.ha_url,
@@ -650,6 +676,7 @@ class EngineConfig:
             "api_token": ("***" if self.api_token else ""),
             "database_path": self.database_path,
             "retention_days_raw": self.retention_days_raw,
+            "raw_capture_days": self.raw_capture_days,
             "retention_days_aggregates": self.retention_days_aggregates,
             "retention_days_evidence": self.retention_days_evidence,
             "retention_days_versions": self.retention_days_versions,
