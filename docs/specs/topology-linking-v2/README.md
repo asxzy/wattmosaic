@@ -44,6 +44,7 @@ reader to a parent reader when the parent moved by the child's delta
 | `electrical/topology_explain.py` | [M1-explain.md](M1-explain.md) |
 | `electrical/topology_capacity.py` | [M2-capacity.md](M2-capacity.md) |
 | `electrical/topology_health.py` | [M3-health.md](M3-health.md) |
+| `electrical/topology_regression.py` | [M4-regression.md](M4-regression.md) |
 
 Rules for every wave 1 module:
 
