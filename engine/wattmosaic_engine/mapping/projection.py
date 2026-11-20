@@ -52,6 +52,7 @@ __all__: list[str] = [
     "operator_root_readers",
     "physical_total_from_cells",
     "reader_totals_from_cells",
+    "totals_from_snapshot",
 ]
 
 _SUBJECT_DELIMITER = "|"
@@ -826,6 +827,82 @@ def physical_total_from_cells(
         residual_w=residual_w,
         total_w=total,
     )
+
+
+def _stale_readers(snapshot: Any) -> set[str]:
+    """Reader ids the snapshot lists as stale (``reader`` or ``reader: reason``)."""
+    out: set[str] = set()
+    for entry in _resolve(snapshot, "stale_sources") or ():
+        reader = str(entry).split(":", 1)[0].strip()
+        if reader:
+            out.add(reader)
+    return out
+
+
+def totals_from_snapshot(
+    cells: Sequence[MappingCell],
+    snapshot: Any,
+    *,
+    root_reader_ids: Sequence[str] = (),
+) -> tuple[dict[str, ReaderColumnSummary], PhysicalTotal]:
+    """Per-reader and physical totals for the *current* matrix view.
+
+    The cell-only aggregation knows the contributions but not what each reader
+    measured or what it left unexplained, so a served matrix built from cells
+    alone had null measured/residual columns and a null physical total.  This
+    folds in the published snapshot (HB §12.1, HB §19.4):
+
+    * ``measured_w`` is the reader's own normalised reading;
+    * ``residual_w`` is the reader's residual point (a residual cell wins);
+    * ``known_contrib_w`` sums the estimated and directly measured device
+      cells; ``unknown_w`` stays the unknown-profile cell sum;
+    * the physical total counts each estimate once, each group sum once and
+      the residual of the topology's root reader(s) once (design §8).
+
+    A stale reader keeps null measured and residual totals -- its reason lives
+    in ``stale_sources`` -- never a held or fabricated 0 W (HB §18, AT-17).
+    """
+    stale = _stale_readers(snapshot)
+    readings: dict[str, float | None] = {}
+    for measurement in _resolve(snapshot, "reader_measurements") or ():
+        reader = _resolve(measurement, "reader_id")
+        if reader is not None:
+            readings[str(reader)] = finite_or_none(_resolve(measurement, "active_power_w"))
+    residuals: dict[str, float | None] = {}
+    for point in _resolve(snapshot, "residual_estimates") or ():
+        reader = _resolve(point, "reader_id")
+        if reader is not None:
+            residuals[str(reader)] = finite_or_none(_resolve(point, "residual_w"))
+    for reader in stale:
+        readings[reader] = None
+        residuals[reader] = None
+
+    base = reader_totals_from_cells(cells, None)
+    totals: dict[str, ReaderColumnSummary] = {}
+    for reader in sorted(set(base) | set(readings) | set(residuals)):
+        cell_totals = base.get(reader) or ReaderColumnSummary()
+        residual = None if reader in stale else (
+            cell_totals.residual_w if cell_totals.residual_w is not None else residuals.get(reader)
+        )
+        # The cell-only ``measured_w`` is the sum of directly measured device
+        # cells: with the reader's own reading in its place, those are known
+        # contributions too (a plug's device is known, not residual).
+        known_parts = [v for v in (cell_totals.known_contrib_w, cell_totals.measured_w) if v is not None]
+        totals[reader] = ReaderColumnSummary(
+            measured_w=readings.get(reader),
+            known_contrib_w=sum(known_parts) if known_parts else None,
+            residual_w=residual,
+            unknown_w=cell_totals.unknown_w,
+        )
+
+    total = physical_total_from_cells(
+        cells,
+        _device_estimates(snapshot),
+        list(_resolve(snapshot, "group_estimates") or ()),
+        residuals,
+        root_reader_ids=root_reader_ids,
+    )
+    return totals, total
 
 
 def materialise_matrix(

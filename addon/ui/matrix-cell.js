@@ -6,7 +6,7 @@
    ========================================================================== */
 
 import { badge, card, clock, el, emptyState, get, kv, label, num, state, statusBadge, watts } from './core.js';
-import { CATEGORIES, cellView, headerRows, matrixConfidence, matrixContext } from './matrix-model.js';
+import { CATEGORIES, cellView, headerRows, mappingSummary, matrixConfidence, matrixContext } from './matrix-model.js';
 
 function matrixTraceCard(trace, mapping) {
   const dbg = state.matrix;
@@ -324,20 +324,22 @@ function matrixCellsCard(mapping, ctx) {
  * model.  Σ colSpan per level equals the number of reader leaves (AT-12).
  * ---------------------------------------------------------------------- */
 
-// Render the nested column header as a DOM <table> with one thead row per
-// level.  Exposed for the AT-12 acceptance test which inspects the DOM.
-function matrixHeaderTable(columns) {
+// One <tr> per header level (L0–L4), one <th> per node at that level, with
+// colSpan from the pure model.  ``lead`` cells (the grid's frozen identity
+// columns) are prepended to the first row and span every level.
+function matrixHeaderRowEls(columns, lead) {
   const rows = headerRows(columns);
-  const thead = el('thead', {}, rows.map((row) => el('tr', { dataset: { level: row.level } },
-    row.cells.map((cell) => {
+  return rows.map((row, idx) => el('tr', { dataset: { level: row.level } }, [
+    ...(idx === 0 && Array.isArray(lead) ? lead : []),
+    ...row.cells.map((cell) => {
       const chips = (Array.isArray(cell.annotations) ? cell.annotations : [])
         .map((a) => el('span', {
           class: 'matrix-anno',
           title: String((a && (a.kind || a.label)) || 'secondary relation'),
         }, String((a && a.label) || (a && a.kind) || '')));
-      const text = cell.kind === 'reader' && cell.readerId
-        ? `${cell.label} · ${cell.readerId}`
-        : cell.label;
+      // HB §19.1: a leaf shows its readable name and, when different, its id.
+      const isReader = cell.kind === 'reader' && cell.readerId;
+      const showId = isReader && cell.readerId !== cell.label;
       return el('th', {
         class: `matrix-hdr-${row.level.toLowerCase()}${cell.synthetic ? ' matrix-hdr-span' : ''}`,
         colspan: String(cell.colSpan),
@@ -348,11 +350,24 @@ function matrixHeaderTable(columns) {
           nodeId: cell.nodeId,
           reader: cell.readerId || '',
         },
-        title: cell.kind === 'reader' && cell.readerId ? String(cell.readerId) : cell.label,
-      }, [el('span', { class: 'matrix-hdr-text' }, text), ...chips]);
-    })
-  )));
-  return el('table', { class: 'data matrix-grid-header' }, [thead]);
+        title: isReader ? String(cell.readerId) : cell.label,
+      }, [
+        // A level a branch skips is a spanning placeholder: no repeated label.
+        el('span', { class: 'matrix-hdr-text' }, cell.synthetic ? '' : cell.label),
+        showId ? el('span', { class: 'matrix-hdr-id' }, ` · ${cell.readerId}`) : null,
+        ...chips,
+      ]);
+    }),
+  ]));
+}
+
+// Render the nested column header as a DOM <table> with one thead row per
+// level.  Exposed for the AT-12 acceptance test which inspects the DOM; the
+// grid itself puts the same rows straight into its own <thead>.
+function matrixHeaderTable(columns) {
+  return el('table', { class: 'data matrix-grid-header' }, [
+    el('thead', {}, matrixHeaderRowEls(columns)),
+  ]);
 }
 
 // The legend lists all eight categories with their distinct text + glyph,
@@ -370,20 +385,37 @@ function matrixLegend() {
   ));
 }
 
-// A compact cell: status glyph + text, value or interval, confidence glyph and
-// age.  Everything else lives in the drill-down (DEC-29).
+// A compact cell (DEC-29): glyph + value (or the interval when there is no
+// point), the category text, then mapping status · observability · matched
+// events and the evidence age (HB §19.3).  The rest lives in the drill-down.
 function matrixCompactCell(cell) {
   const view = cellView(cell);
+  const hasValue = view.value !== '—';
+  const primary = hasValue ? view.value : (view.interval || '—');
+  const events = view.matchedEvents
+    ? `${view.matchedEvents} event${view.matchedEvents === 1 ? '' : 's'}` : '';
+  const meta = [mappingSummary(view), events].filter(Boolean).join(' · ');
+  const tip = [
+    view.text,
+    meta,
+    view.relation ? `Relation: ${label(view.relation)}` : '',
+    view.interval ? `Interval: ${view.interval}` : '',
+    view.confidence !== '—' ? `Confidence ${view.confidence} (dimensions assessed; not a probability)` : '',
+    view.age !== '—' ? `Last evidence ${view.age}` : '',
+  ].filter(Boolean).join('\n');
   return el('span', {
     class: `matrix-cell-compact matrix-cat-${view.category}`,
     dataset: { category: view.category },
-    title: `${view.text}${view.interval ? ` · ${view.interval}` : ''}`,
+    title: tip,
   }, [
-    el('span', { class: 'matrix-cell-glyph' }, view.glyph),
+    el('span', { class: 'matrix-cell-line' }, [
+      el('span', { class: 'matrix-cell-glyph' }, view.glyph),
+      el('span', { class: `matrix-cell-value${hasValue ? '' : ' matrix-cell-value-none'}` }, primary),
+      hasValue && view.interval ? el('span', { class: 'matrix-cell-interval' }, view.interval) : null,
+      el('span', { class: 'matrix-cell-confidence' }, view.confidence),
+    ]),
     el('span', { class: 'matrix-cell-text' }, view.text),
-    el('span', { class: 'matrix-cell-value' }, view.value),
-    view.interval ? el('span', { class: 'matrix-cell-interval' }, view.interval) : null,
-    el('span', { class: 'matrix-cell-confidence' }, view.confidence),
+    meta ? el('span', { class: 'matrix-cell-meta' }, meta) : null,
     el('span', { class: 'matrix-cell-age' }, view.age),
   ]);
 }
@@ -395,6 +427,7 @@ export {
   matrixPivotCard,
   matrixCellsCard,
   matrixHeaderTable,
+  matrixHeaderRowEls,
   matrixLegend,
   matrixCompactCell
 };

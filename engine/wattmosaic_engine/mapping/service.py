@@ -55,7 +55,7 @@ from wattmosaic_engine.contracts import (
 )
 
 from .cells import stable_json
-from .projection import physical_total_from_cells, reader_totals_from_cells
+from .projection import physical_total_from_cells, reader_totals_from_cells, totals_from_snapshot
 
 __all__: list[str] = [
     "CellSource",
@@ -632,8 +632,21 @@ class MatrixService:
         mapping, _ = self._version_info([])
         return etag_for(mapping, self.source.fingerprint())
 
-    def payload(self, filters: MatrixFilters | None = None, *, fingerprint: str | None = None) -> MatrixPayload:
-        """The full matrix view with filters and paging applied to its cells."""
+    def payload(
+        self,
+        filters: MatrixFilters | None = None,
+        *,
+        fingerprint: str | None = None,
+        snapshot: Any = None,
+        root_reader_ids: Sequence[str] = (),
+    ) -> MatrixPayload:
+        """The full matrix view with filters and paging applied to its cells.
+
+        With the published ``snapshot`` (current view only), the per-reader
+        and physical totals carry the readers' measured power and residuals
+        (HB §19.4); without it they are the cell-only sums.  Totals are always
+        computed over every current cell, never just the filtered page.
+        """
         filters = filters or MatrixFilters()
         if filters.at is not None:
             all_cells = self.source.cells_as_of(filters.at)
@@ -645,8 +658,13 @@ class MatrixService:
             self._mapping_version_id = mapping
 
         cells = self._filter_cells(all_cells, filters)
-        reader_totals = reader_totals_from_cells(all_cells, None)
-        total = physical_total_from_cells(all_cells)
+        if snapshot is not None and filters.at is None:
+            reader_totals, total = totals_from_snapshot(
+                all_cells, snapshot, root_reader_ids=root_reader_ids
+            )
+        else:
+            reader_totals = reader_totals_from_cells(all_cells, None)
+            total = physical_total_from_cells(all_cells)
         generated = self._clock()
         return MatrixPayload(
             mapping_version_id=mapping,

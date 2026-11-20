@@ -678,3 +678,91 @@ def test_etag_changes_when_mapping_version_changes(db_path: Path) -> None:
     assert _max_depth(payload.columns[0]) == 5
     assert len(_leaf_ids(payload.columns)) == len(_HB17_READERS)
 
+
+def test_rows_pick_up_a_device_created_after_the_first_build(db_path: Path) -> None:
+    """A device created without a version bump still becomes a row.
+
+    Regression: the row tree was cached on the (topology, mapping) version pair
+    alone, so a device created (or a group / unknown profile formed) after the
+    first ``/matrix`` request never appeared until the engine restarted.
+    """
+    db = Database(db_path)
+    _set_active_map(db)
+    _seed_hb17_topology(db)
+    facade = MatrixFacade(db_path)
+
+    before = {row.row_id for row in _all_rows(facade.matrix_payload().rows)}
+    assert "dev_kettle" not in before
+
+    db.repos.entities.upsert_device(
+        dict(device_id="dev_kettle", name="Kettle", origin="user", created_at=_ORIGIN)
+    )
+    rows = _all_rows(facade.matrix_payload().rows)
+    devices = {row.row_id: row.label for row in rows if str(row.kind) == "device"}
+    assert devices.get("dev_kettle") == "Kettle"
+
+
+def test_current_view_totals_come_from_the_published_snapshot(db_path: Path) -> None:
+    """Reader columns carry measured power and residual; the total is not null.
+
+    Regression: the served payload aggregated the cells alone, so every
+    reader's measured/residual total and the whole physical total were null
+    even while the snapshot published readings and residuals (HB §19.4).
+    """
+    from types import SimpleNamespace
+
+    db = Database(db_path)
+    _set_active_map(db)
+    _seed_hb17_topology(db)
+    _seed(
+        db,
+        [
+            _make_cell("dev_tv", "Circuit A", power_w=80.0, at=_ORIGIN),
+            _make_cell("dev_tv", "Main", power_w=80.0, at=_ORIGIN),
+            _make_cell("dev_lamp", "Circuit C", power_w=12.0, at=_ORIGIN,
+                       status=EstimateStatus.MEASURED, measured=True),
+        ],
+    )
+
+    def reading(reader: str, watts: float) -> Any:
+        return SimpleNamespace(reader_id=reader, active_power_w=watts)
+
+    def residual(reader: str, watts: float | None) -> Any:
+        return SimpleNamespace(reader_id=reader, residual_w=watts)
+
+    snapshot = SimpleNamespace(
+        versions=SimpleNamespace(topology_version_id="topo-1"),
+        reader_measurements=[reading("Main", 1200.0), reading("Circuit A", 80.0), reading("Circuit B", 40.0)],
+        residual_estimates=[residual("Main", 1120.0), residual("Circuit A", 0.0), residual("Circuit B", 40.0)],
+        device_estimates=[
+            SimpleNamespace(subject_id="dev_tv", point_w=80.0, status="estimated", identifiability="identifiable")
+        ],
+        group_estimates=[],
+        stale_sources=["Circuit B: silent past missing_after_s"],
+    )
+    facade = MatrixFacade(db_path)
+    facade._v3_snapshot = lambda: snapshot  # type: ignore[attr-defined]
+    facade._root_readers = lambda versions: ("Main",)  # type: ignore[attr-defined]
+
+    payload = facade.matrix_payload()
+    main = payload.reader_totals["Main"]
+    assert main.measured_w == 1200.0
+    assert main.residual_w == 1120.0
+    assert main.known_contrib_w == 80.0
+    # A residual of 0 W is a real value, not an absent one (HB §18).
+    assert payload.reader_totals["Circuit A"].residual_w == 0.0
+    # A directly measured device is a known contribution of its reader, while
+    # the reader's measured total is its own reading.
+    circuit_c = payload.reader_totals["Circuit C"]
+    assert circuit_c.known_contrib_w == 12.0
+    assert circuit_c.measured_w is None, "Circuit C published no reading"
+    # A stale reader stays null with its reason, never a held reading (AT-17).
+    stale = payload.reader_totals["Circuit B"]
+    assert stale.measured_w is None and stale.residual_w is None
+    assert any(s.startswith("Circuit B") for s in payload.stale_sources)
+
+    total = payload.physical_total
+    assert total.identified_w == 80.0
+    assert total.residual_w == 1120.0
+    assert total.total_w == 1200.0
+
