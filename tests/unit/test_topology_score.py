@@ -211,3 +211,42 @@ def test_extra_readers_and_markdown() -> None:
     assert "Main A" in text
     assert "Kettle" in text
     assert "alias_with_children" in text
+
+
+def _child_status(result, child):
+    return next(item for item in result["per_child"] if item["child"] == child)
+
+
+def test_wrong_structural_parent_next_to_right_one_is_not_correct():
+    """A cross-leg structural parent beside the true one must not score correct.
+
+    Regression: the first replay of real history labelled a child "correct"
+    whenever the true parent appeared at any lifecycle, even with a confirmed
+    parent on the other leg.
+    """
+    edges = [
+        edge(M1, SUB1),
+        edge(M2, SUB2),
+        edge(SUB1, K1),
+        edge(M2, K1),  # confirmed, wrong leg
+    ]
+    result = topology_score.score(edges, GT, activity_by_reader=ACTIVITY)
+    item = _child_status(result, K1)
+    assert item["level"] == "structural"
+    assert item["status"] == "correct_plus_extra"
+
+
+def test_soft_grandparent_next_to_structural_parent_is_correct():
+    edges = [edge(SUB1, K1), edge(M1, K1, lifecycle="provisional")]
+    result = topology_score.score(edges, GT, activity_by_reader=ACTIVITY)
+    item = _child_status(result, K1)
+    assert item["level"] == "structural"
+    assert item["status"] == "correct"
+
+
+def test_soft_only_parent_is_judged_at_soft_level():
+    edges = [edge(M2, K1, lifecycle="provisional")]
+    result = topology_score.score(edges, GT, activity_by_reader=ACTIVITY)
+    item = _child_status(result, K1)
+    assert item["level"] == "soft"
+    assert item["status"] == "cross_leg"

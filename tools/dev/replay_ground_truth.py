@@ -298,25 +298,67 @@ def store_factors(history_dir: Path, db: Any, gt: dict[str, Any], factors: str) 
 # --------------------------------------------------------------------------- #
 
 
-def edge_dicts(core: Any) -> list[dict[str, Any]]:
-    """Convert the engine's ``TopologyEdgeV3`` objects to the scorer's shape."""
+def _row_evidence(row: Any) -> dict[str, Any]:
+    raw = row.get("evidence") if isinstance(row, dict) else None
+    if raw is None and isinstance(row, dict):
+        raw = row.get("evidence_json")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw or "{}")
+        except ValueError:
+            raw = {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def edge_dicts(core: Any, db: Any | None = None) -> list[dict[str, Any]]:
+    """Convert the engine's topology edges to the scorer's shape.
+
+    The T5 ledger (``core.topology_inference.edges``) holds the inferred edges;
+    user declarations (PAIRED_LEG / SAME_CONDUCTOR from ``--declare``) live in
+    the stored ``topology_edges`` rows.  Both are merged; for the same
+    (relation, source, target) the ledger's live copy wins.
+    """
     view = core.topology_inference
-    result: list[dict[str, Any]] = []
+    if db is None:
+        db = getattr(core, "db", None)
+    merged: dict[tuple[str, str, str], dict[str, Any]] = {}
     for edge in getattr(view, "edges", ()) or ():
         evidence = edge.evidence
-        result.append(
-            {
-                "source": str(edge.source_endpoint_id),
-                "target": str(edge.target_endpoint_id),
-                "relation": _value(edge.relation),
-                "lifecycle": _value(edge.lifecycle),
-                "support": int(getattr(evidence, "support", 0) or 0),
-                "conflict": int(getattr(evidence, "conflict", 0) or 0),
-                "parent_only": int(getattr(evidence, "parent_only", 0) or 0),
-                "declared_by": str(getattr(edge, "declared_by", "")),
+        item = {
+            "source": str(edge.source_endpoint_id),
+            "target": str(edge.target_endpoint_id),
+            "relation": _value(edge.relation),
+            "lifecycle": _value(edge.lifecycle),
+            "support": int(getattr(evidence, "support", 0) or 0),
+            "conflict": int(getattr(evidence, "conflict", 0) or 0),
+            "parent_only": int(getattr(evidence, "parent_only", 0) or 0),
+            "declared_by": str(getattr(edge, "declared_by", "")),
+        }
+        merged[(item["relation"], item["source"], item["target"])] = item
+    repo = getattr(getattr(db, "repos", None), "topology_v3", None) if db is not None else None
+    if repo is not None:
+        for row in repo.edges():
+            if row.get("valid_until"):
+                continue
+            key = (
+                _value(row.get("relation")),
+                str(row.get("source_endpoint_id")),
+                str(row.get("target_endpoint_id")),
+            )
+            if key in merged:
+                continue
+            evidence = _row_evidence(row)
+            merged[key] = {
+                "source": key[1],
+                "target": key[2],
+                "relation": key[0],
+                "lifecycle": _value(row.get("lifecycle")),
+                "support": int(evidence.get("support", 0) or 0),
+                "conflict": int(evidence.get("conflict", 0) or 0),
+                "parent_only": int(evidence.get("parent_only", 0) or 0),
+                "declared_by": str(row.get("declared_by", "")),
             }
-        )
-    return result
+    return list(merged.values())
 
 
 def score_now(

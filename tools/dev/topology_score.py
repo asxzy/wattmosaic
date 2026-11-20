@@ -263,11 +263,23 @@ def score(
             for parent, lifecycle, detail in parents
         ]
 
-        if not parents:
+        # Judge at the strongest level present: structural parents if any, else
+        # soft ones.  A soft alternative next to a structural parent is not an
+        # error (a grandparent is kept as a soft transitive edge), but a wrong
+        # parent at the same level as the right one is.
+        strong = [item for item in parents if item[1] in structural_set]
+        level: str | None = None
+        if strong:
+            level, judged = "structural", strong
+        elif parents:
+            level, judged = "soft", parents
+        else:
+            judged = []
+        if not judged:
             status = "missing"
         else:
             statuses: list[str] = []
-            for parent, _lifecycle, _detail in parents:
+            for parent, _lifecycle, _detail in judged:
                 if parent == true_parent:
                     statuses.append("correct")
                 elif gt_child_leg is not None and gt_parent_leg is not None and gt_child_leg != gt_parent_leg:
@@ -280,8 +292,10 @@ def score(
                 else:
                     statuses.append("wrong_parent")
             # One clear status: most-specific first, then any disagreement.
-            if "correct" in statuses:
+            if set(statuses) == {"correct"}:
                 status = "correct"
+            elif "correct" in statuses:
+                status = "correct_plus_extra"
             elif "cross_leg" in statuses:
                 status = "cross_leg"
             elif "ancestor_only" in statuses:
@@ -302,6 +316,7 @@ def score(
                 "gt_parent_name": names.get(true_parent, true_parent),
                 "inferred_parents": details,
                 "status": status,
+                "level": level,
                 "unscorable": unscorable_child,
                 "activity": int(activity.get(child, 0) or 0),
             }
