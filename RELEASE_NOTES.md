@@ -1,5 +1,14 @@
 # Release Notes
 
+## v0.3.0-dev.3 — 2026-11-20 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- Merge remote-tracking branch 'origin/main' into feat/realtime-v3
+- fix(gateway): answer 404 for nested /ui paths instead of proxying them upstream
+
 ## v0.3.0-dev.2 — 2026-11-20 (development channel)
 
 Automatic development build.
