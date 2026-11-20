@@ -499,11 +499,17 @@ def load_capture_ha_history(
             skipped_entities[str(entity_id)] += len(rows or ())
             continue
         row_count = 0
+        numeric_count = 0
         for row in rows or ():
             row_count += 1
             timestamp = _row_timestamp(row)
             if timestamp is None:
                 skipped_states += 1
+                continue
+            # HA bounds are strict and chunks are contiguous, so filter to the
+            # requested window before treating a state as non-numeric: rows
+            # outside the window are not part of this capture at all.
+            if not (start <= timestamp <= end):
                 continue
             try:
                 value = float(row.get("s"))  # type: ignore[arg-type]
@@ -513,8 +519,7 @@ def load_capture_ha_history(
             if not math.isfinite(value):
                 skipped_states += 1
                 continue
-            if not (start <= timestamp <= end):
-                continue
+            numeric_count += 1
             first_by_entity[str(entity_id)] = min(
                 first_by_entity.get(str(entity_id), timestamp), timestamp
             )
@@ -532,6 +537,8 @@ def load_capture_ha_history(
             )
         if row_count == 0:
             notes.append(f"{entity_id}: no recorder history (excluded from recorder?)")
+        elif numeric_count == 0:
+            notes.append(f"{entity_id}: no numeric history")
 
     # A wired HA entity absent from the payload entirely is also an explicit
     # gap. Bare aligner aliases are not real entities and are skipped here.
@@ -580,9 +587,15 @@ async def fetch_ha_history_payload(
     """Fetch ``[start, end)`` in ``chunk`` steps and merge rows per entity.
 
     Each chunk is a separate ``history/history_during_period`` read, so a long
-    window never produces one oversized response.  Exact boundary duplicates
-    (same entity, same timestamp, same state) are dropped; rows are otherwise
-    concatenated in fetch order.
+    window never produces one oversized response. HA filters rows with strict
+    bounds (``start_time < last_updated < end_time``) and, with
+    ``include_start_time_state=True``, prepends one synthetic state stamped
+    exactly at ``start_time``. We request that synthetic row only for the first
+    chunk; later chunks set ``include_start_time_state=False`` so the state is
+    not repeated at every boundary. A real row landing exactly on an internal
+    chunk boundary may therefore be missed by both adjacent chunks (HA's bounds
+    are strict) -- an accepted limit of chunked recorder replay. Entities with
+    no rows are simply absent from a chunk's payload.
     """
     from tools.audit.ha_client import fetch_history  # noqa: PLC0415
 
@@ -593,24 +606,21 @@ async def fetch_ha_history_payload(
         raise ValueError("end must not be before start")
 
     merged: dict[str, list[dict[str, Any]]] = {str(entity_id): [] for entity_id in entity_ids}
-    seen: dict[str, set[tuple[Any, Any]]] = {str(entity_id): set() for entity_id in entity_ids}
     cursor = start
+    first = True
     while cursor < end:
         stop = min(cursor + chunk, end)
         result = await fetch_history(
-            client, list(entity_ids), start=cursor.isoformat(), end=stop.isoformat(), minimal=True
+            client,
+            list(entity_ids),
+            start=cursor.isoformat(),
+            end=stop.isoformat(),
+            minimal=True,
+            include_start_time_state=first,
         )
+        first = False
         for entity_id, rows in (result or {}).items():
-            key = str(entity_id)
-            bucket = merged.setdefault(key, [])
-            identity = seen.setdefault(key, set())
-            for row in rows or ():
-                ts = row.get("lu") if row.get("lu") is not None else row.get("lc")
-                dedup_key = (ts, row.get("s"))
-                if dedup_key in identity:
-                    continue
-                identity.add(dedup_key)
-                bucket.append(dict(row))
+            merged.setdefault(str(entity_id), []).extend(dict(row) for row in rows or ())
         cursor = stop
     return merged
 
@@ -1125,37 +1135,44 @@ def main() -> int:
 
     started = time.monotonic()
     with _Deadline(args.timeout_s):
-        try:
-            if args.ha_history:
-                from tools.audit.ha_client import HAClient  # noqa: PLC0415
+        # Only the HA-history source does network/async work and needs its own
+        # error handling. The --db and --jsonl loaders keep their original
+        # behaviour, including SystemExit for an empty/missing capture.
+        if args.ha_history:
+            import aiohttp  # noqa: PLC0415
 
-                async def _fetch() -> dict[str, list[dict[str, Any]]]:
-                    async with HAClient.from_env() as client:
-                        return await fetch_ha_history_payload(
-                            client, ha_entity_ids, start=start_time, end=end_time
-                        )
+            from tools.audit.ha_client import HAClient  # noqa: PLC0415
 
+            async def _fetch() -> dict[str, list[dict[str, Any]]]:
+                async with HAClient.from_env() as client:
+                    return await fetch_ha_history_payload(
+                        client, ha_entity_ids, start=start_time, end=end_time
+                    )
+
+            try:
                 payload = asyncio.run(_fetch())
+            except ReplayTimeout:
+                print(f"replay_capture: loading exceeded {args.timeout_s:.0f}s", file=sys.stderr)
+                return 124
+            except (RuntimeError, OSError, aiohttp.ClientError, TimeoutError) as exc:
+                print(f"replay_capture: HA history fetch failed: {exc}", file=sys.stderr)
+                return 2
+            try:
                 capture = load_capture_ha_history(
                     payload, entity_to_ct=entity_to_ct, start=start_time, end=end_time
                 )
-            elif db_path is not None:
-                capture = load_capture_db(db_path, minutes=args.minutes, entity_to_ct=entity_to_ct)
-            else:
-                capture = load_capture_jsonl(jsonl_path, minutes=args.minutes,
-                                             entity_to_ct=entity_to_ct)
-        except ReplayTimeout:
-            print(f"replay_capture: loading exceeded {args.timeout_s:.0f}s", file=sys.stderr)
-            return 124
-        except SystemExit as exc:
-            print(f"replay_capture: {exc}", file=sys.stderr)
-            return 3
-        except RuntimeError as exc:
-            print(f"replay_capture: HA history fetch failed: {exc}", file=sys.stderr)
-            return 2
-
-        for note in capture.notes:
-            print(f"note: {note}", file=sys.stderr)
+            except SystemExit as exc:
+                # The loader's message already carries the "replay_capture:"
+                # prefix; do not prefix it a second time.
+                print(str(exc), file=sys.stderr)
+                return 3
+            for note in capture.notes:
+                print(f"note: {note}", file=sys.stderr)
+        elif db_path is not None:
+            capture = load_capture_db(db_path, minutes=args.minutes, entity_to_ct=entity_to_ct)
+        else:
+            capture = load_capture_jsonl(jsonl_path, minutes=args.minutes,
+                                         entity_to_ct=entity_to_ct)
 
         if not capture.samples:
             print(

@@ -164,35 +164,50 @@ def test_loader_with_no_samples_exits() -> None:
 
 
 class _FakeClient:
-    """Minimal ws_command stand-in used by ``fetch_history``."""
+    """A ws_command stand-in that models HA's real history semantics.
 
-    def __init__(self, rows_by_start: dict[str, dict[str, list[dict[str, Any]]]]) -> None:
-        self.rows_by_start = rows_by_start
+    HA filters with strict bounds (``start < last_updated < end``) and, when
+    ``include_start_time_state`` is true, prepends one synthetic row stamped
+    exactly at ``start_time`` carrying the previous state. Real rows never
+    appear in two adjacent chunks.
+    """
+
+    def __init__(
+        self, rows_by_entity: dict[str, list[dict[str, Any]]], previous_state: str = "5"
+    ) -> None:
+        self.rows_by_entity = rows_by_entity
+        self.previous_state = previous_state
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     async def ws_command(self, msg_type: str, **params: Any) -> Any:
         self.calls.append((msg_type, dict(params)))
-        return self.rows_by_start.get(str(params.get("start_time")), {})
+        start = datetime.fromisoformat(str(params["start_time"]))
+        end = datetime.fromisoformat(str(params["end_time"]))
+        out: dict[str, list[dict[str, Any]]] = {}
+        for entity_id, rows in self.rows_by_entity.items():
+            selected: list[dict[str, Any]] = []
+            if params.get("include_start_time_state", True):
+                selected.append({"s": self.previous_state, "lu": start.timestamp()})
+            for row in rows:
+                ts = datetime.fromtimestamp(float(row["lu"]), tz=UTC)
+                if start < ts < end:
+                    selected.append(dict(row))
+            if selected:
+                out[entity_id] = selected
+        return out
 
 
-async def test_fetch_chunks_and_dedupes() -> None:
-    """A 3h window with 1h chunks makes 3 contiguous calls and drops a boundary dup."""
+async def test_fetch_chunks_and_start_state() -> None:
+    """3h/1h chunks: only the first chunk gets a synthetic start row; no dupes."""
     module = _replay_module()
     start = START
     end = start + timedelta(hours=3)
     c1 = start + timedelta(hours=1)
     c2 = start + timedelta(hours=2)
-    t0 = (start + timedelta(minutes=5)).timestamp()
-    tb = c1.timestamp()
-    row0 = {"s": "10", "lu": t0}
-    rowb = {"s": "20", "lu": tb}
-    client = _FakeClient(
-        {
-            start.isoformat(): {"sensor.ct_a": [row0]},
-            c1.isoformat(): {"sensor.ct_a": [rowb]},
-            c2.isoformat(): {"sensor.ct_a": [dict(rowb)]},  # duplicate at boundary
-        }
-    )
+    row_a = _row(start + timedelta(minutes=5), "10")
+    row_b = _row(c1 + timedelta(minutes=5), "20")
+    row_c = _row(c2 + timedelta(minutes=5), "30")
+    client = _FakeClient({"sensor.ct_a": [row_a, row_b, row_c]}, previous_state="5")
 
     payload = await module.fetch_ha_history_payload(
         client, ["sensor.ct_a"], start=start, end=end
@@ -203,8 +218,26 @@ async def test_fetch_chunks_and_dedupes() -> None:
     ends = [params["end_time"] for _, params in client.calls]
     assert starts == [start.isoformat(), c1.isoformat(), c2.isoformat()]
     assert ends == [c1.isoformat(), c2.isoformat(), end.isoformat()]
-    assert all(params["minimal_response"] is True for _, params in client.calls)
-    assert payload == {"sensor.ct_a": [row0, rowb]}
+    # Only the first chunk requests the synthetic state row.
+    assert [params["include_start_time_state"] for _, params in client.calls] == [
+        True,
+        False,
+        False,
+    ]
+    # Every query carries the real entity ids (not aliases), read-only flags
+    # and the minimal response shape.
+    for _msg, params in client.calls:
+        assert params["entity_ids"] == ["sensor.ct_a"]
+        assert params["no_attributes"] is True
+        assert params["minimal_response"] is True
+    # The first chunk's synthetic start row is kept; no fabricated hourly
+    # samples appear in later chunks.
+    assert payload["sensor.ct_a"] == [
+        {"s": "5", "lu": start.timestamp()},
+        row_a,
+        row_b,
+        row_c,
+    ]
 
 
 def test_capture_feeds_replay() -> None:
@@ -288,7 +321,10 @@ def test_cli_ha_history_end_to_end(
         "sensor.ct_a": [_row(start + timedelta(seconds=t), "10") for t in range(0, 31 * 60, 600)]
     }
 
+    recorded: dict[str, Any] = {}
+
     async def _fake_fetch(client, entity_ids, *, start, end, chunk=None):
+        recorded.update(entity_ids=list(entity_ids), start=start, end=end, chunk=chunk)
         return rows
 
     # Patch the fetch helper in the replay module (which the CLI calls directly)
@@ -324,6 +360,10 @@ def test_cli_ha_history_end_to_end(
     )
     code = module.main()
     assert code == 0, capsys.readouterr().err
+    # Wiring comes from the DB's topology: real entity ids only, no bare alias.
+    assert recorded["entity_ids"] == ["sensor.ct_a"]
+    assert recorded["start"] == end - timedelta(minutes=30)
+    assert recorded["end"] == end
 
 
 def test_cli_ha_history_without_db_missing_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -331,3 +371,29 @@ def test_cli_ha_history_without_db_missing_default(monkeypatch: pytest.MonkeyPat
     module = _replay_module()
     monkeypatch.setattr(module, "DEFAULT_DB", module.Path("/nonexistent/wm.db"))
     assert _run_cli(monkeypatch, ["--ha-history", "--minutes", "5"]) == 2
+
+
+def test_cli_db_path_empty_ct_samples_exits_as_before(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """The --db path keeps its original SystemExit for an empty ct_samples table."""
+    import sqlite3
+
+    from tests.simulation.test_replay_capture import _v3_db
+
+    module = _replay_module()
+    db_path, _topo_v, _map_v = _v3_db(tmp_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute("DELETE FROM ct_samples")  # the real DB has the table; keep it empty
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["replay_capture.py", "--db", str(db_path), "--minutes", "5", "--no-compare"],
+    )
+    with pytest.raises(SystemExit) as exc:
+        module.main()
+    # The original message from load_capture_db, not the loader-caught code 3.
+    assert "ct_samples is empty" in str(exc.value)

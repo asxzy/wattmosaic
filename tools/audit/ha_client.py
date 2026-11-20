@@ -186,6 +186,7 @@ async def fetch_history(
     end: str | None = None,
     minimal: bool = True,
     significant: bool = False,
+    include_start_time_state: bool = True,
 ) -> dict[str, Any]:
     """Read recorder history for ``entity_ids`` (read-only).
 
@@ -198,7 +199,9 @@ async def fetch_history(
     from row counts.  See ``derive_state_entities``.
 
     The window is clamped to ``days`` before ``now`` when explicit bounds are
-    not given.
+    not given. ``include_start_time_state=True`` (HA's default) makes the first
+    row per entity a synthetic state at ``start_time``; a chunked caller should
+    turn it off for later chunks so that state is not repeated at each boundary.
     """
     from datetime import UTC, datetime, timedelta
 
@@ -213,4 +216,5 @@ async def fetch_history(
         minimal_response=minimal,
         no_attributes=True,
         significant_changes_only=significant,
+        include_start_time_state=include_start_time_state,
     )
