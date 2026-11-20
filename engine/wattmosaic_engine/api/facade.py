@@ -170,6 +170,15 @@ class StubFacade(NullFacade):
             "active_version": None,
             "edges": [],
             "primary_display_tree": [],
+            "discovery": {
+                "counts": {"candidate": 0, "provisional": 0, "confirmed": 0, "conflicted": 0},
+                "top_pairs": [],
+                "thresholds": {
+                    "MIN_SUPPORT_PROVISIONAL": 3,
+                    "MIN_INDEPENDENT_CAUSES": 2,
+                    "MIN_SUPPORT_CONFIRMED": 8,
+                },
+            },
         }
         self.commands: list[ServiceCommand] = []
 

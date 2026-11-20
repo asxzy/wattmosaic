@@ -1102,6 +1102,9 @@ function v3EdgeView(edge) {
     reader_ids: readers,
     pinned: e.pinned === true,
     provisional: life === 'provisional',
+    // A stored inferred edge outside the active version.  Shown as a soft
+    // suggestion; Accept/Pin/Reject still write only on a user click.
+    in_version: e.in_version !== false,
     // Any edge still in force and not yet under user authority can be pinned.
     pinnable: !closed && e.pinned !== true && life !== 'provisional',
     matrix_drill: readers.length
@@ -1125,7 +1128,40 @@ function v3TopologyModel(payload) {
       (acc[e.edge_type] ||= []).push(e);
       return acc;
     }, {}),
+    discovery: discoverySummary(data),
   };
+}
+
+// The discovery summary from GET /topology/v3.  It counts stored inferred
+// edges by lifecycle and names the top candidate/provisional pairs, so an
+// operator can see discovery working *before* any PROVISIONAL suggestion
+// exists.  A missing summary simply renders nothing (older engines).
+function discoverySummary(payload) {
+  const d = payload && payload.discovery;
+  if (!d) return null;
+  const counts = d.counts || {};
+  const candidates = Number(counts.candidate) || 0;
+  const provisionals =
+    (Number(counts.provisional) || 0)
+    + (Number(counts.confirmed) || 0)
+    + (Number(counts.conflicted) || 0);
+  // Only show the summary while there is nothing to act on in the edges card.
+  if (provisionals > 0) return null;
+  const pairs = Array.isArray(d.top_pairs) ? d.top_pairs : [];
+  const top = pairs[0];
+  const thresholds = d.thresholds || {};
+  const provisionalSupport = Number(thresholds.MIN_SUPPORT_PROVISIONAL) || 3;
+  const independentNeeded = Number(thresholds.MIN_INDEPENDENT_CAUSES) || 2;
+  const lines = [`Discovery: ${candidates} candidate pair${candidates === 1 ? '' : 's'} observed`];
+  if (top) {
+    lines.push(
+      `; top pair ${top.source_endpoint_id || '—'}→${top.target_endpoint_id || '—'}`
+      + ` support ${Number(top.support) || 0}/${provisionalSupport}`
+      + ` from ${Number(top.independent_causes) || 0}/${independentNeeded} independent causes`
+    );
+  }
+  lines.push('. Candidate pairs are single-event observations; they are not promoted until they become provisional.');
+  return notice('Topology discovery', lines.join(''), 'info');
 }
 
 // The ONLY writes in the topology view: a user clicking Accept, Pin or
@@ -1156,9 +1192,17 @@ const edgeAction = (text, cls, action, ok, fail) =>
 function v3EdgesCard(model) {
   const m = model || v3TopologyModel(null);
   const rows = m.edges.map((edge) =>
-    el('div', { class: 'topo-v3-edge', dataset: { lifecycle: edge.lifecycle, type: edge.edge_type } }, [
+    el('div', {
+      class: 'topo-v3-edge',
+      dataset: {
+        lifecycle: edge.lifecycle,
+        type: edge.edge_type,
+        version: edge.in_version === false ? 'suggestion' : 'active',
+      },
+    }, [
       badge(label(edge.edge_type), 'info'),
       badge(label(edge.lifecycle), edge.provisional ? 'warn' : 'mute'),
+      edge.in_version === false ? badge('suggestion', 'info') : null,
       edge.pinned ? badge('Pinned', 'ok') : null,
       el('span', {}, `${edge.parent_id || '—'} → ${edge.child_id || '—'}`),
       el('a', { class: 'v3-provenance', href: `#${edge.matrix_drill}` }, 'Matrix columns'),
@@ -1184,9 +1228,11 @@ function v3EdgesCard(model) {
         : null,
     ])
   );
-  return card('Typed topology edges (v3)', rows.length ? rows : [
+  const body = rows.length ? rows.slice() : [
     el('p', { class: 'stat-hint' }, 'No typed edges published by the topology service yet.'),
-  ], {
+  ];
+  if (m.discovery) body.unshift(m.discovery);
+  return card('Typed topology edges (v3)', body, {
     id: 'topology-edges',
     foot: 'Lifecycle comes from the topology service. Only an operator Accept, Pin or Reject writes; a single event never promotes an edge past candidate.',
   });
@@ -1195,6 +1241,7 @@ function v3EdgesCard(model) {
 export {
   v3EdgeView,
   v3TopologyModel,
+  discoverySummary,
   acceptProvisionalEdge,
   rejectProvisionalEdge,
   v3EdgesCard,

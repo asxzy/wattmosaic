@@ -189,7 +189,7 @@ class _ServiceAdapter:
         self.versions.promote_topology(version_id, reason)
 
 
-def _edge_dict(edge: TopologyEdgeV3) -> dict[str, Any]:
+def _edge_dict(edge: TopologyEdgeV3, *, in_version: bool = True) -> dict[str, Any]:
     return {
         "edge_id": edge.edge_id,
         "relation": _value(edge.relation),
@@ -203,6 +203,10 @@ def _edge_dict(edge: TopologyEdgeV3) -> dict[str, Any]:
         "valid_from": edge.valid_from.isoformat(),
         "valid_until": edge.valid_until.isoformat() if edge.valid_until else None,
         "pinned": edge.pinned,
+        # True for an edge referenced by the active version's edge_ids_json;
+        # False for a stored inference suggestion surfaced alongside the
+        # version.  A suggestion is never promoted by this read (T4/HB §4.3).
+        "in_version": in_version,
     }
 
 
@@ -422,27 +426,152 @@ def _display_node_dict(node: DisplayNode) -> dict[str, Any]:
     }
 
 
-def topology_v3(service: Any, *, lifecycles: Sequence[str] | None = None) -> dict[str, Any]:
-    """The active version, its edges (all lifecycles) and T1's primary tree.
+# Lifecycles that are surfaced as inference suggestions when they are stored
+# but not yet part of the active version.  CANDIDATE is deliberately excluded:
+# one event never promotes an edge past CANDIDATE (HB §4.2/§4.3, DEC-10), so a
+# single-support pair is raw ledger noise until the caller opts in with
+# ``?lifecycles=candidate``.
+_SUGGESTION_LIFECYCLES = frozenset(
+    {
+        EdgeLifecycleV3.PROVISIONAL.value,
+        EdgeLifecycleV3.CONFIRMED.value,
+        EdgeLifecycleV3.CONFLICTED.value,
+    }
+)
+_SUMMARY_LIFECYCLES = (
+    EdgeLifecycleV3.CANDIDATE.value,
+    EdgeLifecycleV3.PROVISIONAL.value,
+    EdgeLifecycleV3.CONFIRMED.value,
+    EdgeLifecycleV3.CONFLICTED.value,
+)
 
-    PROVISIONAL edges are exposed here as soft suggestions, which is why the
-    legacy ``/topology/nesting`` endpoint is no longer needed: the read returns
-    every lifecycle by default and callers may filter with ``lifecycles=``.
+
+def _evidence_counts(edge: TopologyEdgeV3) -> dict[str, int]:
+    """support/conflict/independent-cause counts from a stored edge's evidence.
+
+    ``upsert_edge`` serialises :class:`EdgeEvidence` into the row's
+    ``evidence_json``; ``_edge_row`` decodes it back onto the contract model, so
+    reading it here is pure and needs no extra storage query.
+    """
+    evidence = edge.evidence
+    return {
+        "support": int(evidence.support),
+        "conflict": int(evidence.conflict),
+        "independent_causes": int(evidence.independent_causes),
+    }
+
+
+def _discovery_summary(stored_inferred: Sequence[TopologyEdgeV3]) -> dict[str, Any]:
+    """Counts by lifecycle and the top candidate/provisional pairs by support.
+
+    The thresholds are reported from the engine's own normative constants so a
+    caller can see what is still needed to move a pair to PROVISIONAL or
+    CONFIRMED.  Nothing here writes or promotes an edge.
+    """
+    from ..electrical.topology_inference import (
+        MIN_INDEPENDENT_CAUSES,
+        MIN_SUPPORT_CONFIRMED,
+        MIN_SUPPORT_PROVISIONAL,
+    )
+
+    by_lifecycle = {name: 0 for name in _SUMMARY_LIFECYCLES}
+    pairs: list[dict[str, Any]] = []
+    for edge in stored_inferred:
+        lifecycle = _value(edge.lifecycle)
+        if lifecycle in by_lifecycle:
+            by_lifecycle[lifecycle] += 1
+        if lifecycle not in (
+            EdgeLifecycleV3.CANDIDATE.value,
+            EdgeLifecycleV3.PROVISIONAL.value,
+        ):
+            continue
+        counts = _evidence_counts(edge)
+        support = counts["support"]
+        independent = counts["independent_causes"]
+        pairs.append(
+            {
+                "edge_id": edge.edge_id,
+                "source_endpoint_id": edge.source_endpoint_id,
+                "target_endpoint_id": edge.target_endpoint_id,
+                "lifecycle": lifecycle,
+                "declared_by": edge.declared_by,
+                **counts,
+                "needed": {
+                    "provisional": {
+                        "support": max(0, MIN_SUPPORT_PROVISIONAL - support),
+                        "independent_causes": max(0, MIN_INDEPENDENT_CAUSES - independent),
+                    },
+                    "confirmed": {
+                        "support": max(0, MIN_SUPPORT_CONFIRMED - support),
+                        "independent_causes": max(0, MIN_INDEPENDENT_CAUSES - independent),
+                    },
+                },
+            }
+        )
+    pairs.sort(key=lambda pair: (-pair["support"], pair["edge_id"]))
+    return {
+        "counts": by_lifecycle,
+        "top_pairs": pairs[:5],
+        "thresholds": {
+            "MIN_SUPPORT_PROVISIONAL": MIN_SUPPORT_PROVISIONAL,
+            "MIN_INDEPENDENT_CAUSES": MIN_INDEPENDENT_CAUSES,
+            "MIN_SUPPORT_CONFIRMED": MIN_SUPPORT_CONFIRMED,
+        },
+    }
+
+
+def topology_v3(service: Any, *, lifecycles: Sequence[str] | None = None) -> dict[str, Any]:
+    """The active version, its edges, inference suggestions and a discovery summary.
+
+    The active version's edges are returned unchanged (each with
+    ``in_version: true``).  Stored inferred edges that are *not* referenced by
+    the active version and whose lifecycle is PROVISIONAL, CONFIRMED or
+    CONFLICTED are appended as soft suggestions with ``in_version: false`` —
+    this read never promotes them into a version.  A single-event CANDIDATE pair
+    is hidden unless the caller passes ``lifecycles`` containing ``candidate``
+    (HB §4.3, DEC-10).  ``discovery`` summarises all stored inferred pairs so
+    the panel can show that discovery is working before any suggestion exists.
     """
     vid = service.current().topology_version_id
     repo = service._topo
     active = repo.active_version() or {}
-    edges = [TopologyEdgeV3(**_edge_row(row)) for row in repo.edges(vid)]
-    if lifecycles:
-        wanted = {_value(item) for item in lifecycles}
-        edges = [e for e in edges if _value(e.lifecycle) in wanted]
+    version_edges = [TopologyEdgeV3(**_edge_row(row)) for row in repo.edges(vid)]
+    version_ids = {e.edge_id for e in version_edges}
+    wanted = {_value(item) for item in lifecycles} if lifecycles else None
+
+    # Version edges keep their existing lifecycle filter semantics.
+    shown_version = version_edges
+    if wanted is not None:
+        shown_version = [e for e in shown_version if _value(e.lifecycle) in wanted]
+    output_edges = [_edge_dict(e, in_version=True) for e in shown_version]
+
+    # Stored inferred edges outside the active version.  All of the repo read;
+    # only PROVISIONAL+ pairs are suggestions by default, CANDIDATE only on
+    # explicit opt-in.  A lifecycle filter, when given, is applied to them too.
+    stored_inferred = [
+        TopologyEdgeV3(**_edge_row(row))
+        for row in repo.edges()
+        if row.get("declared_by") == "inference" and row.get("edge_id") not in version_ids
+    ]
+    eligible = set(_SUGGESTION_LIFECYCLES)
+    if wanted is not None and "candidate" in wanted:
+        eligible = eligible | {EdgeLifecycleV3.CANDIDATE.value}
+    for edge in stored_inferred:
+        lifecycle = _value(edge.lifecycle)
+        if lifecycle not in eligible:
+            continue
+        if wanted is not None and lifecycle not in wanted:
+            continue
+        output_edges.append(_edge_dict(edge, in_version=False))
+
     graph = _topology_graph(service, vid)
     return {
         "version_id": vid,
         "version": active.get("number"),
         "status": active.get("status"),
-        "edges": [_edge_dict(edge) for edge in edges],
+        "edges": output_edges,
         "primary_display_tree": [_display_node_dict(n) for n in graph.primary_display_tree()],
+        "discovery": _discovery_summary(stored_inferred),
     }
 
 

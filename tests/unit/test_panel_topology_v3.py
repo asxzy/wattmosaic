@@ -275,6 +275,77 @@ def test_topology_model_joins_endpoints_and_contains_edges() -> None:
     ]
 
 
+def _discovery(candidate: int = 0, provisional: int = 0, top_pairs: list | None = None) -> dict:
+    return {
+        "counts": {
+            "candidate": candidate,
+            "provisional": provisional,
+            "confirmed": 0,
+            "conflicted": 0,
+        },
+        "top_pairs": top_pairs or [],
+        "thresholds": {
+            "MIN_SUPPORT_PROVISIONAL": 3,
+            "MIN_INDEPENDENT_CAUSES": 2,
+            "MIN_SUPPORT_CONFIRMED": 8,
+        },
+    }
+
+
+def test_edges_card_renders_suggestions_with_in_version_flag() -> None:
+    """Suggestions (in_version false) appear as rows with Accept/Pin/Reject."""
+    suggestion = _edge("s1", "ct_feed", "ct_sub", "provisional")
+    suggestion["in_version"] = False
+    version_edge = _edge("v1", "ct_feed", "ct_oven", "confirmed")
+    version_edge["in_version"] = True
+    api = _api(edges=[version_edge, suggestion])
+    api["/topology/v3"]["discovery"] = _discovery(provisional=1)
+    result = _render(api)
+    text = result["text"]
+    assert "Typed topology edges (v3)" in text
+    assert "ct_feed → ct_sub" in text
+    assert "ct_feed → ct_oven" in text
+    assert "Accept" in text and "Reject" in text  # the provisional suggestion
+    _assert_only_3_0_reads(result["requests"])
+
+
+def test_discovery_summary_shown_when_no_provisional_edges() -> None:
+    """A candidate-only topology still shows that discovery is working."""
+    top_pairs = [
+        {
+            "edge_id": "inf-1",
+            "source_endpoint_id": "ct_feed",
+            "target_endpoint_id": "ct_sub",
+            "lifecycle": "candidate",
+            "support": 2,
+            "conflict": 0,
+            "independent_causes": 1,
+            "needed": {
+                "provisional": {"support": 1, "independent_causes": 1},
+                "confirmed": {"support": 6, "independent_causes": 1},
+            },
+        }
+    ]
+    api = _api(edges=[])  # no PROVISIONAL+ edges
+    api["/topology/v3"]["discovery"] = _discovery(candidate=3, top_pairs=top_pairs)
+    result = _render(api)
+    text = result["text"]
+    assert "Discovery:" in text
+    assert "candidate pairs observed" in text
+    assert "ct_feed→ct_sub" in text
+    assert "support 2/3" in text
+    assert "1/2 independent causes" in text
+
+
+def test_discovery_summary_hidden_when_provisional_exists() -> None:
+    suggestion = _edge("s1", "ct_feed", "ct_sub", "provisional")
+    suggestion["in_version"] = False
+    api = _api(edges=[suggestion])
+    api["/topology/v3"]["discovery"] = _discovery(candidate=3, provisional=1)
+    result = _render(api)
+    assert "Discovery:" not in result["text"]
+
+
 def test_edges_card_offers_pin_and_accept_only_on_click() -> None:
     """Accept (PROVISIONAL) and Pin (CANDIDATE) POST /pin, and only when clicked."""
     edges = [
