@@ -9,7 +9,7 @@ wire shape the panel renderer reads.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from ..contracts import utcnow
@@ -31,6 +31,7 @@ def build_display_tree_v3(
     graph: TopologyGraph,
     *,
     generated_at: Any = None,
+    devices_by_reader: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """Build the panel wire shape from T1's ``TopologyGraph`` (Z1).
 
@@ -42,13 +43,47 @@ def build_display_tree_v3(
 
     ``generated_at`` is injected by the caller; this module never reads a clock.
     Absent values are ``None``, never 0.0.
+
+    ``devices_by_reader`` maps a reader to the subjects the active *mapping*
+    places on it (``device_id``, ``label``, ``lifecycle``, ``declared_by``).
+    A mapping edge names the most specific reader and ancestors come from
+    topology (contract ``MappingEdge``), so each subject is drawn under its
+    reader wherever that reader sits -- under "Unassigned measurements" while
+    the reader has no confirmed parent, and with the reader once topology finds
+    one.  Placing a device never waits for topology.
     """
     nodes: tuple[DisplayNode, ...] = graph.primary_display_tree()
+    devices_by_reader = devices_by_reader or {}
+    placed_devices: list[dict[str, Any]] = []
+
+    def _device(subject: Mapping[str, Any], reader_id: str, depth: int) -> dict[str, Any]:
+        lifecycle = subject.get("lifecycle")
+        node = {
+            "id": f"device:{subject['device_id']}@{reader_id}",
+            "kind": "device",
+            "label": subject.get("label") or subject["device_id"],
+            "device_id": subject["device_id"],
+            "depth_hint": depth,
+            "reader_id": reader_id,
+            "latest_power_w": None,
+            "measurement": None,
+            "mapping_lifecycle": lifecycle,
+            "declared_by": subject.get("declared_by"),
+            "subtitle": f"mapped to this circuit ({lifecycle})" if lifecycle else None,
+            "children": [],
+        }
+        placed_devices.append(node)
+        return node
 
     def _node(node: DisplayNode, depth: int) -> dict[str, Any]:
         children = [_node(child, depth + 1) for child in node.children]
         # A leaf is an L4 reader node; internal nodes are grouping/panel nodes.
         is_reader = node.reader_id is not None
+        if is_reader:
+            children.extend(
+                _device(subject, str(node.reader_id), depth + 1)
+                for subject in devices_by_reader.get(str(node.reader_id), ())
+            )
         return {
             "id": f"reader:{node.reader_id}" if is_reader else f"group:{node.label}:{depth}",
             "kind": "circuit" if is_reader else "group",
@@ -61,11 +96,20 @@ def build_display_tree_v3(
 
     roots = [_node(node, 1) for node in nodes]
     all_nodes = list(_walk(roots))
+    placed_readers = {str(node["reader_id"]) for node in all_nodes if node["kind"] == "circuit"}
     stats = {
         "panels": 0,
         "circuits": sum(1 for node in all_nodes if node["kind"] == "circuit"),
-        "devices": 0,
-        "unplaced_devices": 0,
+        "devices": len({node["device_id"] for node in placed_devices}),
+        # Mapped onto a reader the topology does not know: never dropped silently.
+        "unplaced_devices": len(
+            {
+                str(subject["device_id"])
+                for reader_id, subjects in devices_by_reader.items()
+                if reader_id not in placed_readers
+                for subject in subjects
+            }
+        ),
         "unplaced_circuits": 0,
         "max_depth": max((int(node["depth_hint"]) for node in all_nodes), default=0),
         "duplicate_feeds": 0,
@@ -79,7 +123,14 @@ def build_display_tree_v3(
         "topology_version": None,
         "stats": stats,
         "roots": roots,
-        "flat": {"panels": [], "circuits": [], "devices": []},
+        "flat": {
+            "panels": [],
+            "circuits": [],
+            "devices": [
+                {"device_id": node["device_id"], "label": node["label"], "reader_id": node["reader_id"]}
+                for node in placed_devices
+            ],
+        },
         "notes": list(graph.problems),
     }
 

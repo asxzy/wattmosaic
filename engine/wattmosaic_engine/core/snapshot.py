@@ -551,10 +551,56 @@ class SnapshotMixin:
         versions = self._matrix_versions()
         graph = self._matrix_topology_graph(endpoints, versions["topology_version_id"])
         tree = build_display_tree_v3(
-            graph, generated_at=self._clock().isoformat().replace("+00:00", "Z")
+            graph,
+            generated_at=self._clock().isoformat().replace("+00:00", "Z"),
+            devices_by_reader=self._mapped_devices_by_reader(versions["mapping_version_id"]),
         )
         tree["topology_version"] = versions["topology_version_id"]
+        tree["mapping_version"] = versions["mapping_version_id"]
         return tree
+
+    def _mapped_devices_by_reader(self, mapping_version_id: str) -> dict[str, list[dict[str, Any]]]:
+        """reader -> the devices/components the active mapping places on it.
+
+        Independent of topology: a mapping edge names the most specific reader,
+        so a device assigned to a channel is shown with that channel wherever
+        the channel currently sits in the hierarchy.
+        """
+        try:
+            rows = self.db.repos.mapping.mapping_edges(mapping_version_id)
+        except Exception:  # noqa: BLE001 - no mapping yet is an empty mapping
+            log.debug("mapping edges unavailable for the panel tree", exc_info=True)
+            return {}
+        names: dict[str, str] = {}
+        out: dict[str, list[dict[str, Any]]] = {}
+        seen: set[tuple[str, str]] = set()
+        for row in rows:
+            kind = str(row.get("subject_kind") or "")
+            lifecycle = str(row.get("lifecycle") or "")
+            if kind not in ("device", "component") or lifecycle in ("rejected", "retired"):
+                continue
+            if row.get("valid_until"):
+                continue
+            subject, reader = str(row.get("subject_id") or ""), str(row.get("endpoint_id") or "")
+            if not subject or not reader or (subject, reader) in seen:
+                continue
+            seen.add((subject, reader))
+            if subject not in names:
+                device = None
+                try:
+                    device = self.db.repos.entities.get_device(subject)
+                except Exception:  # noqa: BLE001 - a label is cosmetic
+                    device = None
+                names[subject] = str((device or {}).get("name") or subject)
+            out.setdefault(reader, []).append(
+                {
+                    "device_id": subject,
+                    "label": names[subject],
+                    "lifecycle": lifecycle or None,
+                    "declared_by": row.get("declared_by"),
+                }
+            )
+        return out
 
     def export(self, device_id: str) -> dict[str, Any]:
         try:
