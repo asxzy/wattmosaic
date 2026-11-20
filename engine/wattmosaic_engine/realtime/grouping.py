@@ -85,6 +85,14 @@ CONFIRMED_LIFECYCLES = (EdgeLifecycleV3.CONFIRMED, EdgeLifecycleV3.PROVISIONAL)
 DEFAULT_CONTEXT_MAX_SPREAD_S = 60.0
 DEFAULT_TOLERANCE_S = 5.0
 DEFAULT_QUIET_S = 60.0
+#: How long a closed (CONFIRMED/UNRESOLVED/terminal) group stays in memory.
+#: Long enough for a late reader step to re-open an HA-only group and for the
+#: event loop to read a just-published group; after it the group lives on disk
+#: only.  Without eviction every intake scanned every group ever formed.
+DEFAULT_RETAIN_CLOSED_S = 3600.0
+#: Longest span of one group from its first sub-event (seconds).  Covers the
+#: default 120 s post-window plus the reader cadence; see ``_within_span``.
+DEFAULT_MAX_SPAN_S = 180.0
 
 GroupSink = Callable[[EventGroup], None]
 GroupPersistence = Callable[[EventGroup], None]
@@ -120,11 +128,15 @@ class GroupConfig:
     context_max_spread_s: float = DEFAULT_CONTEXT_MAX_SPREAD_S
     tolerance_s: float = DEFAULT_TOLERANCE_S
     quiet_s: float = DEFAULT_QUIET_S
+    retain_closed_s: float = DEFAULT_RETAIN_CLOSED_S
+    max_span_s: float = DEFAULT_MAX_SPAN_S
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "context_max_spread_s", _seconds(self.context_max_spread_s, "context_max_spread_s"))
         object.__setattr__(self, "tolerance_s", _seconds(self.tolerance_s, "tolerance_s"))
         object.__setattr__(self, "quiet_s", _seconds(self.quiet_s, "quiet_s"))
+        object.__setattr__(self, "retain_closed_s", _seconds(self.retain_closed_s, "retain_closed_s"))
+        object.__setattr__(self, "max_span_s", _seconds(self.max_span_s, "max_span_s"))
 
 
 # --------------------------------------------------------------------------- #
@@ -520,6 +532,9 @@ class GroupingEngine:
         # group has revision+1 and is therefore persisted as a new row.
         self._persisted: set[tuple[str, int]] = set()
         self._lifecycle: dict[tuple[str, int], tuple[str, datetime | None]] = {}
+        #: Content each stored revision froze; a change means a new revision.
+        self._content: dict[tuple[str, int], tuple[Any, ...]] = {}
+        self._latest_revision: dict[str, int] = {}
         self._update_lifecycle = getattr(repository, "update_group_lifecycle", None)
         # ``_persisted`` starts empty on every process start, but group ids are
         # content-derived: a restart that replays HA states or backfills history
@@ -547,8 +562,33 @@ class GroupingEngine:
         entry = self._entries.get(group_id)
         return () if entry is None else tuple(entry.ha_events)
 
-    def _persist(self, group: EventGroup) -> None:
+    @staticmethod
+    def _content_key(group: EventGroup) -> tuple[Any, ...]:
+        """What a stored revision freezes: its sub-events and reader deltas."""
+        return (
+            tuple(sub.sub_event_id for sub in group.sub_events),
+            tuple(
+                (d.reader_id, d.delta_w, d.sigma_w, d.evidence_ref.id if d.evidence_ref else None)
+                for d in group.reader_deltas
+            ),
+        )
+
+    def _persist(self, group: EventGroup) -> EventGroup:
+        """Write ``group`` append-only and return the revision that now stands.
+
+        A revision is immutable once stored.  A lifecycle move of the same
+        content (MATCHING -> PROVISIONAL -> CONFIRMED) updates only the
+        lifecycle columns of that row.  A *content* change -- a reader step or
+        HA change that joined the group after its revision was written -- is a
+        new ``revision + 1`` row: otherwise the stored group never gains the
+        reader steps and deltas it was handed to inference with (the live
+        install persisted only the HA sub-event of every group a step joined).
+        """
         key = (group.group_id, group.revision)
+        content = self._content_key(group)
+        if key in self._persisted and self._content.get(key, content) != content:
+            group = group.model_copy(update={"revision": self._next_revision(group.group_id)})
+            key = (group.group_id, group.revision)
         lifecycle = (str(getattr(group.status, "value", group.status)), group.closed_at)
         if key in self._persisted:
             # Same revision, new lifecycle state (MATCHING -> PROVISIONAL ->
@@ -556,25 +596,45 @@ class GroupingEngine:
             if self._lifecycle.get(key) != lifecycle and self._update_lifecycle is not None:
                 self._update_lifecycle(group)
                 self._lifecycle[key] = lifecycle
-            return
+            return group
         if self._has_revision is not None and self._has_revision(*key):
             # Re-derived after a restart: the stored revision stays the audit
             # record (revisions are immutable); only a lifecycle move is written.
             self._persisted.add(key)
+            self._content[key] = content
+            self._latest_revision[group.group_id] = max(
+                self._latest_revision.get(group.group_id, 0), group.revision
+            )
             if self._update_lifecycle is not None:
                 self._update_lifecycle(group)
             self._lifecycle[key] = lifecycle
-            return
+            return group
         self._put_group(group)
         self._persisted.add(key)
+        self._content[key] = content
+        self._latest_revision[group.group_id] = max(
+            self._latest_revision.get(group.group_id, 0), group.revision
+        )
         self._lifecycle[key] = lifecycle
         # DEC-17: when a group first becomes evidence, persist the ring-held
         # unlinked HA events it references (linked events are persisted by P1).
         if self.ring is not None and self.persist_ha_event is not None:
             referenced = {sub.ref.id for sub in group.sub_events if sub.ref.kind == "ha_event"}
-            for event in self.ring:
-                if not event.linked and event.event_id in referenced:
-                    self.persist_ha_event(event)
+            if referenced:
+                for event in self.ring:
+                    if not event.linked and event.event_id in referenced:
+                        self.persist_ha_event(event)
+        return group
+
+    def _next_revision(self, group_id: str) -> int:
+        """The next unused revision number of ``group_id`` (append-only)."""
+        latest = self._latest_revision.get(group_id, 0)
+        candidate = latest + 1
+        while (group_id, candidate) in self._persisted or (
+            self._has_revision is not None and self._has_revision(group_id, candidate)
+        ):
+            candidate += 1
+        return candidate
 
     def _merge(self, group: EventGroup, *, now: datetime) -> _Entry:
         """Insert or merge a freshly-formed group into the live set."""
@@ -635,7 +695,7 @@ class GroupingEngine:
         target: _Entry | None = None
         reason: str | None = None
         for entry in self._entries.values():
-            if entry.terminal:
+            if entry.terminal or not self._within_span(entry, event.observed_at):
                 # Closed by a version promotion: interpreted under its old triple.
                 continue
             for other in entry.ha_events:
@@ -674,7 +734,7 @@ class GroupingEngine:
         )[0]
         entry = self._merge(group, now=now)
         entry.ha_events.append(event)
-        self._persist(entry.group)
+        entry.group = self._persist(entry.group)
         return entry.group
 
     def on_reader_step(
@@ -698,7 +758,7 @@ class GroupingEngine:
         ha_reason: str | None = None
         related_window = timedelta(seconds=self.config.context_max_spread_s)
         for entry in self._entries.values():
-            if not self._joinable(entry):
+            if not self._joinable(entry) or not self._within_span(entry, step.onset_lo):
                 continue
             for other in entry.steps:
                 overlaps = temporal_reason(step, other.event, self.config.tolerance_s) is not None
@@ -723,7 +783,7 @@ class GroupingEngine:
                     and not entry.steps
                     and not entry.terminal
                 )
-                if not (self._joinable(entry) or reopenable):
+                if not (self._joinable(entry) or reopenable) or not self._within_span(entry, step.onset_lo):
                     continue
                 for event in entry.ha_events:
                     ha_reason = ha_temporal_reason(event, step, self.config.tolerance_s)
@@ -767,8 +827,9 @@ class GroupingEngine:
 
         # Transition DETECTED -> MATCHING when the group has reader evidence.
         if entry.group.status == EventGroupStatus.DETECTED and entry.group.reader_deltas:
-            entry.group = entry.group.model_copy(update={"status": EventGroupStatus.MATCHING})
-            self._persist(entry.group)
+            entry.group = self._persist(
+                entry.group.model_copy(update={"status": EventGroupStatus.MATCHING})
+            )
             if self.on_ready is not None:
                 self.on_ready(entry.group)
         elif target is not None:
@@ -777,14 +838,15 @@ class GroupingEngine:
         # A fully-explained group with all windows closed and quiet becomes
         # CONFIRMED (DEC-14/§12.3).  HA-only groups stay DETECTED.
         if (
-            entry.group.status == EventGroupStatus.MATCHING
+            entry.group.status in (EventGroupStatus.MATCHING, EventGroupStatus.PROVISIONAL)
             and self._all_closed(entry, now)
             and (now - entry.last_activity) >= timedelta(seconds=self.config.quiet_s)
         ):
-            entry.group = entry.group.model_copy(
-                update={"status": EventGroupStatus.CONFIRMED, "closed_at": now}
+            entry.group = self._persist(
+                entry.group.model_copy(
+                    update={"status": EventGroupStatus.CONFIRMED, "closed_at": now}
+                )
             )
-            self._persist(entry.group)
         return entry.group
 
     def _all_closed(self, entry: _Entry, now: datetime) -> bool:
@@ -810,11 +872,23 @@ class GroupingEngine:
             EventGroupStatus.REVISED,
         )
 
+    def _within_span(self, entry: _Entry, at: datetime) -> bool:
+        """Whether a sub-event at ``at`` may still join ``entry`` (bounded span).
+
+        Pairwise overlap chains: an automation firing every few seconds, or a
+        binary sensor flapping, links each change to the previous one, so one
+        group grew for as long as the house was active, never went quiet and
+        never reached CONFIRMED.  A group spans at most ``max_span_s`` from its
+        first sub-event; a later change starts a new group (design §4: a group
+        is one physical event, not a session).
+        """
+        return abs((_aware(at) - entry.group.opened_at).total_seconds()) <= self.config.max_span_s
+
     def _temporal_target(self, event: HAEvent) -> tuple[_Entry | None, str | None]:
         """The first open group with a sub-event overlapping ``event`` in time."""
         tolerance = self.config.tolerance_s
         for entry in self._entries.values():
-            if not self._joinable(entry):
+            if not self._joinable(entry) or not self._within_span(entry, event.observed_at):
                 continue
             for other in [*entry.ha_events, *(step.event for step in entry.steps)]:
                 reason = ha_temporal_reason(event, other, tolerance)
@@ -846,10 +920,9 @@ class GroupingEngine:
                     EventGroupStatus.DETECTED,
                     EventGroupStatus.MATCHING,
                 ):
-                    entry.group = entry.group.model_copy(
-                        update={"status": EventGroupStatus.PROVISIONAL}
+                    entry.group = self._persist(
+                        entry.group.model_copy(update={"status": EventGroupStatus.PROVISIONAL})
                     )
-                    self._persist(entry.group)
                 return entry.group
         return None
 
@@ -918,7 +991,7 @@ class GroupingEngine:
                 update={"sub_events": [*prior.sub_events, build_reader_sub_event(step, wrapped.evidence_id)]}
             )
             self._update_deltas(entry)
-            self._persist(entry.group)
+            entry.group = self._persist(entry.group)
             return entry.group
 
         wrapped = _Step(step, evidence_id or f"evd-{step.event_id}")
@@ -935,7 +1008,7 @@ class GroupingEngine:
         entry.steps.append(wrapped)
         entry.group = revised
         self._update_deltas(entry)
-        self._persist(revised)
+        revised = entry.group = self._persist(entry.group)
         if self.on_revised is not None:
             self.on_revised(revised)
         return revised
@@ -976,9 +1049,10 @@ class GroupingEngine:
                 and entry.group.status in (EventGroupStatus.MATCHING, EventGroupStatus.REVISED)
                 else EventGroupStatus.UNRESOLVED
             )
-            entry.group = entry.group.model_copy(update={"status": status, "closed_at": now})
+            entry.group = self._persist(
+                entry.group.model_copy(update={"status": status, "closed_at": now})
+            )
             entry.terminal = True
-            self._persist(entry.group)
             closed.append(entry.group)
         return closed
 
@@ -990,18 +1064,57 @@ class GroupingEngine:
         for entry in list(self._entries.values()):
             group = entry.group
             quiet_enough = (now - entry.last_activity) >= timedelta(seconds=self.config.quiet_s)
-            if group.status == EventGroupStatus.MATCHING and self._all_closed(entry, now) and quiet_enough:
-                entry.group = group.model_copy(
-                    update={"status": EventGroupStatus.CONFIRMED, "closed_at": now}
+            has_watts = bool(group.reader_deltas)
+            if (
+                group.status in (EventGroupStatus.MATCHING, EventGroupStatus.PROVISIONAL)
+                and has_watts
+                and self._all_closed(entry, now)
+                and quiet_enough
+            ):
+                # Reader evidence with every window closed and a quiet period:
+                # CONFIRMED (design §4).  P4's first post-sample moves a reader
+                # group to PROVISIONAL; that is the normal path to CONFIRMED,
+                # never to UNRESOLVED (which would starve T5 and L4 of every
+                # reader-step group).
+                entry.group = self._persist(
+                    group.model_copy(update={"status": EventGroupStatus.CONFIRMED, "closed_at": now})
                 )
-                self._persist(entry.group)
                 changed.append(entry.group)
-            elif group.status in (EventGroupStatus.DETECTED, EventGroupStatus.PROVISIONAL) and quiet_enough:
-                # No reader evidence ever arrived (or the unknown alternative
-                # won): there are no watts to publish, so the group is UNRESOLVED.
-                entry.group = group.model_copy(
-                    update={"status": EventGroupStatus.UNRESOLVED, "closed_at": now}
+            elif (
+                group.status in (EventGroupStatus.DETECTED, EventGroupStatus.PROVISIONAL)
+                and not has_watts
+                and quiet_enough
+            ):
+                # No reader evidence ever arrived: there are no watts to
+                # publish, so the group is UNRESOLVED.
+                entry.group = self._persist(
+                    group.model_copy(update={"status": EventGroupStatus.UNRESOLVED, "closed_at": now})
                 )
-                self._persist(entry.group)
                 changed.append(entry.group)
+        self._evict_closed(now)
         return changed
+
+    def _evict_closed(self, now: datetime) -> None:
+        """Drop closed groups older than ``retain_closed_s`` from memory.
+
+        Their revisions are on disk; only the in-memory working set is bounded,
+        so intake stays proportional to the *open* groups, not to every group
+        ever formed.
+        """
+        horizon = timedelta(seconds=self.config.retain_closed_s)
+        closed = (EventGroupStatus.CONFIRMED, EventGroupStatus.UNRESOLVED)
+        stale = [
+            group_id
+            for group_id, entry in self._entries.items()
+            if (entry.terminal or entry.group.status in closed)
+            and now - _aware(entry.group.closed_at or entry.last_activity) >= horizon
+        ]
+        for group_id in stale:
+            del self._entries[group_id]
+            self._latest_revision.pop(group_id, None)
+        if stale:
+            gone = set(stale)
+            for key in [k for k in self._persisted if k[0] in gone]:
+                self._persisted.discard(key)
+                self._content.pop(key, None)
+                self._lifecycle.pop(key, None)
