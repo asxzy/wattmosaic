@@ -108,4 +108,53 @@ async def test_the_apply_run_does_not_replay_topology_again(tmp_path: Path) -> N
     assert all("sensor.feed_power" not in call for call in recorder.calls)
 
 
+async def test_discover_hands_the_replay_known_children_and_aligned_history(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Linking v2 W2: explain-away needs the live CONFIRMED children, and the
+    # structural pass gets the history hold-aligned (change-only recorder rows:
+    # unlimited hold) on a 10 s grid, capped to the most recent 24 h.
+    import wattmosaic_engine.electrical.topology_history as history_module
+    import wattmosaic_engine.electrical.topology_regression as regression
+
+    house = _house()
+    now = max(t for rows in house.values() for t, _ in rows) + timedelta(minutes=1)
+    payload = {
+        ENTITY[reader]: [{"s": f"{value:.1f}", "lu": t.timestamp()} for t, value in rows]
+        for reader, rows in house.items()
+    }
+    core = _core(tmp_path, now)
+    core.hasource = _Recorder(payload)
+    first = await core.discover_placements(lookback_hours=8.0)
+    assert {"parent": "feed", "child": "branch_hrv"} in first["topology"]["confirmed"]
+    absolute_before = core.topology_inference.absolute
+
+    seen: dict[str, Any] = {}
+    real_learn, real_align = history_module.learn_topology_from_history, regression.align
+
+    def learn(view, history, **kwargs):
+        seen["known"] = set(kwargs.get("known", ()))
+        return real_learn(view, history, **kwargs)
+
+    def align(history, **kwargs):
+        seen["align"] = kwargs
+        seen["aligned"] = real_align(history, **kwargs)
+        return seen["aligned"]
+
+    monkeypatch.setattr(history_module, "learn_topology_from_history", learn)
+    monkeypatch.setattr(regression, "align", align)
+    again = await core.discover_placements(lookback_hours=48.0)
+
+    assert again["topology"]["ok"] is True
+    assert ("feed", "branch_hrv") in seen["known"]
+    assert seen["align"]["max_hold_s"] is None
+    assert seen["align"]["step_s"] == 10.0
+    span = (seen["align"]["end"] - seen["align"]["start"]).total_seconds()
+    assert span == 24 * 3600.0
+    assert set(seen["aligned"]) == set(ENTITY)
+    assert {len(values) for values in seen["aligned"].values()} == {8640}
+    # The live view does not keep a day of history (ADR-0033).
+    assert core.topology_inference.absolute == absolute_before
+
+
 _ = UTC
