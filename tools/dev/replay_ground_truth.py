@@ -117,7 +117,20 @@ def load_history(
     """
     samples: list[tuple[datetime, dict[str, Any]]] = []
     events: list[tuple[datetime, dict[str, Any]]] = []
+    def _day_in_range(path: Path) -> bool:
+        # Files are named <kind>-YYYY-MM-DD.jsonl.gz (UTC days): skip whole days
+        # outside [since, until] instead of parsing every row of the history.
+        try:
+            day = datetime.strptime(path.name.split("-", 1)[1][:10], "%Y-%m-%d").replace(tzinfo=UTC)
+        except ValueError:
+            return True
+        if since and day + timedelta(days=1) <= since:
+            return False
+        return not (until and day > until)
+
     for path in sorted(history_dir.glob("samples-*.jsonl.gz")):
+        if not _day_in_range(path):
+            continue
         for row in _iter_jsonl_gz(path):
             if entities is not None and row.get("entity_id") not in entities:
                 continue
@@ -135,6 +148,8 @@ def load_history(
                 continue
             samples.append((sample["t"], sample))
     for path in sorted(history_dir.glob("events-*.jsonl.gz")):
+        if not _day_in_range(path):
+            continue
         for row in _iter_jsonl_gz(path):
             event = {
                 "entity_id": str(row.get("entity_id", "")),

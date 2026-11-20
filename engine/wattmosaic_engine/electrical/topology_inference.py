@@ -698,7 +698,11 @@ class TopologyInferenceView:
                 # parent's step also carries other loads changing in the same
                 # window -- neutral, not evidence against containment (live
                 # mains almost always carry concurrent changes).
-                if key[:2] in multi:
+                # The step-anchored one-to-one measurement wins whenever it
+                # exists: the multi-child explanation uses the parent's net move
+                # over the whole group, where unrelated steps cancel, so it is
+                # only a fallback (real-history replay, 2026-11-20).
+                if key[:2] in multi and anchored.get(parent) is None:
                     verdict = multi[key[:2]]
                 else:
                     verdict = _classify_step(
@@ -740,7 +744,7 @@ class TopologyInferenceView:
                 # No measurement: P3 saw no step on an observed parent, i.e. it
                 # did not move.  A measured level (P3 may simply not have flagged
                 # a small step on a busy feed) is classified like a co-step.
-                if (parent, child) in multi:
+                if (parent, child) in multi and anchored.get(parent) is None:
                     verdict = multi[(parent, child)]
                 else:
                     verdict = _classify_step(
@@ -787,7 +791,7 @@ class TopologyInferenceView:
                         measured = float(anchored[parent])
                     if measured is None:
                         continue
-                    if (parent, child) in multi:
+                    if (parent, child) in multi and anchored.get(parent) is None:
                         verdict = multi[(parent, child)]
                     else:
                         verdict = _classify_step(
@@ -1325,7 +1329,9 @@ class TopologyInferenceView:
             unknown = [
                 reader
                 for reader in candidates
-                if reader not in known
+                # A step inside the parent's noise cannot explain any part of it.
+                if abs(steps[reader].delta) > _SIGMA_FACTOR * sigma_p
+                and reader not in known
                 and reader not in below_known
                 and not any(alike(steps[reader], steps[child]) for child in known)
             ]

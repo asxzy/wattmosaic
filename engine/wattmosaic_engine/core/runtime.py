@@ -1760,6 +1760,20 @@ class RuntimeMixin:
         steady path pass the *same* evidence to I7.  A circuit CT never gains a
         pair here automatically; a user must declare and confirm its scope.
         """
+        # One registry read per clock instant: the steady pass asks once per
+        # reader, and each ask opened a fresh SQLite reader connection.
+        clock = getattr(self, "_clock", None)
+        if clock is None:
+            return self._declared_single_subject_pairs_uncached()
+        now = clock()
+        cached = getattr(self, "_declared_pairs_cache", None)
+        if cached is not None and cached[0] == now:
+            return cached[1]
+        result = self._declared_single_subject_pairs_uncached()
+        self._declared_pairs_cache = (now, result)
+        return result
+
+    def _declared_single_subject_pairs_uncached(self) -> frozenset[tuple[str, str]]:
         entities = getattr(getattr(self.db, "repos", None), "entities", None)
         if entities is None:
             return frozenset()
@@ -2528,7 +2542,12 @@ class RuntimeMixin:
                 self._persist_structure_decisions(updated.structure_decisions)
             repo = self.db.repos.topology_v3
             changed = 0
+            # observe_group keeps untouched edges as the very same objects:
+            # only new or modified ledger rows need a write.
+            before = {id(edge) for edge in view.edges}
             for edge in updated.edges:
+                if id(edge) in before:
+                    continue
                 try:
                     repo.upsert_edge(edge)
                     changed += 1

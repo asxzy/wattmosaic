@@ -23,6 +23,7 @@ persist queue or their own short transactions (single-writer rule ADR-0004).
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
@@ -157,12 +158,18 @@ class BackgroundExecutor:
         with self._lock:
             self.submitted += 1
         future = self._pool.submit(self._wrap, fn, args, kwargs)
-        future.add_done_callback(self._on_done)
+        # Track before the callback is attached: a job that already finished
+        # runs _on_done immediately, and must find (and drop) its entry.
         with self._lock:
             self._jobs.append(future)
+        future.add_done_callback(self._on_done)
         return future
 
     def _on_done(self, future: Future[Any]) -> None:
+        # A finished job is no longer pending: keeping every Future (and its
+        # result) forever leaks memory and makes drain_background O(jobs ever).
+        with self._lock, contextlib.suppress(ValueError):
+            self._jobs.remove(future)
         try:
             future.result()
         except Exception as exc:  # noqa: BLE001 - a failed job must not kill the worker

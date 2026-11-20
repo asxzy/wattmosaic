@@ -70,7 +70,6 @@ class _CoreConsumer:
         self._last_state: dict[str, str | None] = {}
 
     def on_state_changed(self, msg: dict[str, Any]) -> None:
-        import asyncio
 
         from ..contracts import HAEvent
 
@@ -111,10 +110,19 @@ class _CoreConsumer:
         ring = getattr(self.core, "candidate_ring", None)
         if not linked and ring is not None:
             ring.add(event, now=received)
-        asyncio.run(self.core.on_ha_event(event))
+        self._run_async(self.core.on_ha_event(event))
+
+    def _run_async(self, coro: Any) -> Any:
+        """Run one coroutine on a loop reused across records (asyncio.run per
+        reading created and tore down an event loop ~0.4 ms each)."""
+        import asyncio
+
+        loop = getattr(self, "_loop", None)
+        if loop is None or loop.is_closed():
+            loop = self._loop = asyncio.new_event_loop()
+        return loop.run_until_complete(coro)
 
     def on_sample(self, payload: dict[str, Any]) -> None:
-        import asyncio
 
         from ..contracts import MeasurementType, QualityFlag, ReaderMeasurement
 
@@ -142,7 +150,7 @@ class _CoreConsumer:
             quality_flags=flags,
             sequence=self._seq,
         )
-        asyncio.run(self.core.on_reading(reading))
+        self._run_async(self.core.on_reading(reading))
 
 
 class EngineHarness:
@@ -395,4 +403,7 @@ class EngineHarness:
             core.background_executor.shutdown(wait=False)
         if getattr(core, "inference_executor", None) is not None:
             core.inference_executor.shutdown(wait=False)
+        loop = getattr(self, "_loop", None)
+        if loop is not None and not loop.is_closed():
+            loop.close()
         self.db.close()
