@@ -46,6 +46,9 @@ ALLOWLIST_LINE_MARKERS = (
     "192.168.1.10",
     "192.0.2.",
     "172.30.32.2",
+    # docker-compose.dev.yml's own fixed bridge subnet (engine + ingress
+    # stand-in proxy), not a household address.
+    "172.31.250.",
     "127.0.0.1",
     "0.0.0.0",
     "255.255",
