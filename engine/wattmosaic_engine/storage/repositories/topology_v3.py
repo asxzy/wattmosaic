@@ -14,6 +14,7 @@ writes take ``self._lock`` and run in ``BEGIN IMMEDIATE``.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any
 
 from ..repositories import Repository, as_utc, enum_value, iso
@@ -160,27 +161,61 @@ class TopologyV3Repository(Repository):
     def insert_version(self, version: Any) -> None:
         """Append one immutable topology version (refuse a duplicate id)."""
         data = _model_dict(version)
-        edge_ids = data.get("edge_ids", data.get("edge_ids_json", []))
-        metadata = data.get("metadata", data.get("metadata_json", {}))
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
-                self._conn.execute(
-                    """INSERT INTO topology_versions_v3(
-                        version_id, number, parent_version_id, edge_ids_json, status,
-                        change_event_id, created_at, digest, metadata_json)
-                    VALUES(?,?,?,?,?,?,?,?,?)""",
-                    (
-                        data["version_id"], int(data["number"]), data.get("parent_version_id"),
-                        _json(edge_ids), enum_value(data.get("status") or "candidate"),
-                        data.get("change_event_id"), _time(data["created_at"]),
-                        data["digest"], _json(metadata),
-                    ),
-                )
+                self._insert_version_row(data)
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
                 raise
+
+    def insert_next_version(self, build: Callable[[int, str | None], Any]) -> dict[str, Any]:
+        """Allocate the next version number and append the version, atomically.
+
+        ``build(number, active_version_id)`` returns the version to insert.  The
+        number (``MAX(number) + 1``) and the active parent are read inside the
+        same ``BEGIN IMMEDIATE`` transaction as the insert, under the writer
+        lock, so two concurrent proposers can never be handed the same number
+        (read-max-then-insert outside one transaction is a lost-update race).
+        Returns the inserted version as a dict.
+        """
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                number = int(
+                    self._conn.execute(
+                        "SELECT COALESCE(MAX(number), 0) + 1 FROM topology_versions_v3"
+                    ).fetchone()[0]
+                )
+                active = self._conn.execute(
+                    "SELECT version_id FROM topology_versions_v3 "
+                    "WHERE status = 'active' ORDER BY number DESC LIMIT 1"
+                ).fetchone()
+                data = _model_dict(build(number, str(active[0]) if active is not None else None))
+                self._insert_version_row(data)
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+        return data
+
+    def _insert_version_row(self, data: dict[str, Any]) -> None:
+        """INSERT one version row; the caller holds the lock and a transaction."""
+        edge_ids = data.get("edge_ids", data.get("edge_ids_json", []))
+        metadata = data.get("metadata", data.get("metadata_json", {}))
+        self._conn.execute(
+            """INSERT INTO topology_versions_v3(
+                version_id, number, parent_version_id, edge_ids_json, status,
+                change_event_id, created_at, digest, metadata_json)
+            VALUES(?,?,?,?,?,?,?,?,?)""",
+            (
+                data["version_id"], int(data["number"]), data.get("parent_version_id"),
+                _json(edge_ids), enum_value(data.get("status") or "candidate"),
+                data.get("change_event_id"), _time(data["created_at"]),
+                data["digest"], _json(metadata),
+            ),
+        )
 
     def versions(self) -> list[dict[str, Any]]:
         with self._reader() as conn:

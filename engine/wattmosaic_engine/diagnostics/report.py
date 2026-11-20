@@ -199,36 +199,48 @@ def storage_health_section(database: Any, *, now: datetime | None = None) -> dic
         result[table] = base
         if database is None:
             continue
-        try:
-            columns = {
-                str(row[1])
-                for row in database._conn.execute(f"PRAGMA table_info({table})").fetchall()
-            }
-        except Exception:  # noqa: BLE001 - a missing table reports an empty health row
-            continue
-        if not columns:
-            continue
-        with contextlib.suppress(Exception):  # noqa: BLE001 - a missing table is an empty health row
-            base["row_count"] = int(
-                database._conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
-            )
-        column = time_column_of(table)
-        if column is None or column not in columns:
-            continue
-        with contextlib.suppress(Exception):  # noqa: BLE001
-            oldest = database._conn.execute(
-                f"SELECT MIN({column}) AS oldest FROM {table}"
-            ).fetchone()["oldest"]
-            base["oldest_row"] = None if oldest is None else str(oldest)
-        if has_growth(tier):
-            with contextlib.suppress(Exception):  # noqa: BLE001
-                cutoff = (current - timedelta(days=1)).isoformat()
-                base["growth_per_day"] = int(
-                    database._conn.execute(
-                        f"SELECT COUNT(*) AS n FROM {table} WHERE {column} >= ?", (cutoff,)
-                    ).fetchone()["n"]
-                )
+        # The shared connection is also used by the background executor; every
+        # read of it takes the writer lock (an unlocked read can be reset by a
+        # concurrent statement on the same connection -- see Z12).
+        lock = getattr(database, "_lock", None)
+        with lock if lock is not None else contextlib.nullcontext():
+            _table_health(database, table, tier, base, current)
     return result
+
+
+def _table_health(
+    database: Any, table: str, tier: str, base: dict[str, Any], current: datetime
+) -> None:
+    """Fill one table's health row; the caller holds the database lock."""
+    try:
+        columns = {
+            str(row[1])
+            for row in database._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+    except Exception:  # noqa: BLE001 - a missing table reports an empty health row
+        return
+    if not columns:
+        return
+    with contextlib.suppress(Exception):  # noqa: BLE001 - a missing table is an empty health row
+        base["row_count"] = int(
+            database._conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
+        )
+    column = time_column_of(table)
+    if column is None or column not in columns:
+        return
+    with contextlib.suppress(Exception):  # noqa: BLE001
+        oldest = database._conn.execute(
+            f"SELECT MIN({column}) AS oldest FROM {table}"
+        ).fetchone()["oldest"]
+        base["oldest_row"] = None if oldest is None else str(oldest)
+    if has_growth(tier):
+        with contextlib.suppress(Exception):  # noqa: BLE001
+            cutoff = (current - timedelta(days=1)).isoformat()
+            base["growth_per_day"] = int(
+                database._conn.execute(
+                    f"SELECT COUNT(*) AS n FROM {table} WHERE {column} >= ?", (cutoff,)
+                ).fetchone()["n"]
+            )
 
 
 def collect_diagnostics(

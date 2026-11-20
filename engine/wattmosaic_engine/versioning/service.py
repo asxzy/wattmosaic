@@ -573,25 +573,10 @@ class VersionService:
     def propose_topology(
         self, edges: Sequence[TopologyEdgeV3], change_event_id: str | None
     ) -> str:
-        active = self._topo.active_version()
-        parent = str(active["version_id"]) if active is not None else None
-        number = self._next_number(self._topo.versions())
-        version_id = f"topo-{number}"
         edge_ids = self._store_topology_edges(edges)
-        self._topo.insert_version(
-            {
-                "version_id": version_id,
-                "number": number,
-                "parent_version_id": parent,
-                "edge_ids": edge_ids,
-                "status": "candidate",
-                "change_event_id": change_event_id,
-                "created_at": _iso(self._clock()),
-                "digest": _digest(edge_ids),
-                "metadata": {},
-            }
+        return self._append_topology_version(
+            edge_ids, change_event_id=change_event_id, digest=_digest(edge_ids), metadata={}
         )
-        return version_id
 
     def promote_topology(self, version_id: str, reason: str) -> None:
         self._promote_topology(version_id)
@@ -599,14 +584,8 @@ class VersionService:
     def propose_mapping(
         self, edges: Sequence[MappingEdge], change_event_id: str | None
     ) -> str:
-        active_id = self._map.active_mapping_version_id()
-        number = self._next_number(self._mapping_versions())
-        version_id = f"map-{number}"
         edge_ids = self._store_mapping_edges(edges)
-        self._insert_mapping_version(
-            version_id, number, active_id, edge_ids, "candidate", change_event_id
-        )
-        return version_id
+        return self._append_mapping_version(edge_ids, "candidate", change_event_id)
 
     def promote_mapping(self, version_id: str, reason: str) -> None:
         self._promote_mapping(version_id)
@@ -626,25 +605,18 @@ class VersionService:
             if target is None:
                 raise ValueError(f"unknown topology version: {to_version_id!r}")
             edge_ids = _decode_ids(target)
-            parent = self.current().topology_version_id
-            number = self._next_number(rows)
-            new_id = f"topo-{number}"
             digest = str(target.get("digest") or _digest(edge_ids))
-            self._topo.insert_version(
-                {
-                    "version_id": new_id,
-                    "number": number,
-                    "parent_version_id": parent,
-                    "edge_ids": edge_ids,
-                    "status": "candidate",
-                    "change_event_id": None,
-                    "created_at": _iso(self._clock()),
-                    "digest": digest,
-                    "metadata": {"rollback_of": to_version_id},
-                }
-            )
-            self._topo.set_active(new_id)
-            self._topo_activated[new_id] = self._clock()
+            # Allocate + activate as one critical section so no concurrent
+            # promote can slip in between and be silently superseded.
+            with _lock_of(self._topo):
+                new_id = self._append_topology_version(
+                    edge_ids,
+                    change_event_id=None,
+                    digest=digest,
+                    metadata={"rollback_of": to_version_id},
+                )
+                self._topo.set_active(new_id)
+                self._topo_activated[new_id] = self._clock()
             self._notify("topology", new_id)
             return new_id
         if kind == "mapping":
@@ -652,70 +624,63 @@ class VersionService:
             target = next((row for row in rows if row["version_id"] == to_version_id), None)
             if target is None:
                 raise ValueError(f"unknown mapping version: {to_version_id!r}")
-            conn = self._conn(self._map)
-            edge_ids: list[str] = []
-            digest = ""
-            if conn is not None:
-                row = conn.execute(
-                    "SELECT mapping_edge_ids_json, digest FROM mapping_versions WHERE version_id=?",
-                    (to_version_id,),
-                ).fetchone()
-                if row is not None:
-                    edge_ids = list(json.loads(row[0] or "[]"))
-                    digest = str(row[1] or _digest(edge_ids))
-            parent = self.current().mapping_version_id
-            number = self._next_number(rows)
-            new_id = f"map-{number}"
-            self._insert_mapping_version(
-                new_id,
-                number,
-                parent,
-                edge_ids,
-                "candidate",
-                f"rollback:{to_version_id}",
-                digest=digest,
-            )
-            self._set_active_mapping(new_id)
-            self._map_activated[new_id] = self._clock()
+            edge_ids = list(json.loads(target.get("mapping_edge_ids_json") or "[]"))
+            digest = str(target.get("digest") or _digest(edge_ids))
+            with _lock_of(self._map):
+                new_id = self._append_mapping_version(
+                    edge_ids, "candidate", f"rollback:{to_version_id}", digest=digest
+                )
+                self._activate_mapping_locked(new_id)
+                self._map_activated[new_id] = self._clock()
+            self._notify("mapping", new_id)
             return new_id
         raise ValueError(f"unknown version kind: {kind!r}")
 
     # -- internals ---------------------------------------------------------- #
 
     def _promote_topology(self, version_id: str) -> None:
-        rows = {row["version_id"]: row for row in self._topo.versions()}
-        target = rows.get(version_id)
-        if target is None:
-            raise ValueError(f"unknown topology version: {version_id!r}")
-        expected = target.get("parent_version_id")
-        active = self._topo.active_version()
-        actual = str(active["version_id"]) if active is not None else None
-        if actual != expected:
-            raise VersionConflictError("topology", version_id, expected, actual)
-        if target.get("status") == "active":
-            return
-        self._topo.set_active(version_id)
-        self._topo_activated[version_id] = self._clock()
+        # The parent check and the activation are one critical section under the
+        # repository's (re-entrant) writer lock, which ``set_active`` re-takes: a
+        # concurrent promote landing between them would otherwise be silently
+        # superseded instead of raising VersionConflictError.  Listeners are
+        # notified after the lock is released.
+        with _lock_of(self._topo):
+            rows = {row["version_id"]: row for row in self._topo.versions()}
+            target = rows.get(version_id)
+            if target is None:
+                raise ValueError(f"unknown topology version: {version_id!r}")
+            expected = target.get("parent_version_id")
+            active = self._topo.active_version()
+            actual = str(active["version_id"]) if active is not None else None
+            if actual != expected:
+                raise VersionConflictError("topology", version_id, expected, actual)
+            if target.get("status") == "active":
+                return
+            self._topo.set_active(version_id)
+            self._topo_activated[version_id] = self._clock()
         self._notify("topology", version_id)
 
     def _promote_mapping(self, version_id: str) -> None:
         conn = self._conn(self._map)
         if conn is None:
             raise RuntimeError("mapping repository has no connection")
-        row = conn.execute(
-            "SELECT parent_version_id, status FROM mapping_versions WHERE version_id=?",
-            (version_id,),
-        ).fetchone()
-        if row is None:
-            raise ValueError(f"unknown mapping version: {version_id!r}")
-        expected = row[0]
-        actual = self._map.active_mapping_version_id()
-        if actual != expected:
-            raise VersionConflictError("mapping", version_id, expected, actual)
-        if row[1] == "active":
-            return
-        self._set_active_mapping(version_id)
-        self._map_activated[version_id] = self._clock()
+        # Check-then-activate in one critical section (see ``_promote_topology``).
+        with _lock_of(self._map):
+            row = conn.execute(
+                "SELECT parent_version_id, status FROM mapping_versions WHERE version_id=?",
+                (version_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"unknown mapping version: {version_id!r}")
+            expected = row[0]
+            actual = self._active_mapping_row_id(conn)
+            if actual != expected:
+                raise VersionConflictError("mapping", version_id, expected, actual)
+            if row[1] == "active":
+                return
+            self._activate_mapping_locked(version_id)
+            self._map_activated[version_id] = self._clock()
+        self._notify("mapping", version_id)
 
     @staticmethod
     def _conn(repo: Any) -> Any:
@@ -726,67 +691,154 @@ class VersionService:
         conn = VersionService._conn(repo)
         if conn is None:
             return
-        lock = getattr(repo, "_lock", None)
-        ctx = lock if lock is not None else _NullLock()
-        with ctx:
+        with _lock_of(repo):
             conn.execute(sql, params)
 
-    def _mapping_versions(self) -> list[dict[str, Any]]:
-        conn = self._conn(self._map)
+    @staticmethod
+    def _conn_fetchall(sql: str, params: tuple[Any, ...], repo: Any) -> list[dict[str, Any]]:
+        """Run a read on the repository's shared connection under its lock.
+
+        The shared ``sqlite3`` connection is used from the loop thread and the
+        background executor alike.  An unlocked read races every other statement
+        on that connection: the same SQL text run from two threads at once shares
+        one cached prepared statement, and one reader's result set is reset under
+        it -- it comes back *empty* (Z12: the Z9 matrix reconciler's
+        ``_mapping_versions`` read made a concurrent ``propose_mapping`` compute
+        ``map-1`` again).  Every read of the shared connection takes the lock.
+        """
+        conn = VersionService._conn(repo)
         if conn is None:
             return []
-        rows = conn.execute(
-            "SELECT version_id, number, parent_version_id, mapping_edge_ids_json, status, "
-            "change_event_id, created_at, digest FROM mapping_versions ORDER BY number"
-        ).fetchall()
+        with _lock_of(repo):
+            rows = conn.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
+
+    def _mapping_versions(self) -> list[dict[str, Any]]:
+        return self._conn_fetchall(
+            "SELECT version_id, number, parent_version_id, mapping_edge_ids_json, status, "
+            "change_event_id, created_at, digest FROM mapping_versions ORDER BY number",
+            (),
+            self._map,
+        )
 
     def _mapping_edge_rows(self, edge_id: str) -> list[dict[str, Any]]:
-        conn = self._conn(self._map)
-        if conn is None:
-            return []
-        rows = conn.execute(
+        return self._conn_fetchall(
             "SELECT * FROM mapping_edges WHERE mapping_edge_id=? ORDER BY valid_from",
             (edge_id,),
-        ).fetchall()
-        return [dict(row) for row in rows]
+            self._map,
+        )
 
-    def _insert_mapping_version(
+    @staticmethod
+    def _active_mapping_row_id(conn: Any) -> str | None:
+        """The stored active mapping version id, or ``None`` (caller holds the lock).
+
+        Unlike the repository's ``active_mapping_version_id`` this never falls
+        back to an invented ``"map-1"``: a version's parent must be a real row,
+        or a proposal on an empty table would name itself as its own parent.
+        """
+        row = conn.execute(
+            "SELECT version_id FROM mapping_versions WHERE status='active' "
+            "ORDER BY number DESC LIMIT 1"
+        ).fetchone()
+        return str(row[0]) if row is not None else None
+
+    def _append_mapping_version(
         self,
-        version_id: str,
-        number: int,
-        parent: str | None,
         edge_ids: list[str],
         status: str,
         change_event_id: str | None,
         *,
         digest: str | None = None,
-    ) -> None:
-        self._conn_execute(
-            "INSERT INTO mapping_versions(version_id, number, parent_version_id, "
-            "mapping_edge_ids_json, status, change_event_id, created_at, digest) "
-            "VALUES(?,?,?,?,?,?,?,?)",
-            (
-                version_id,
-                int(number),
-                parent,
-                json.dumps(edge_ids, separators=(",", ":")),
-                status,
-                change_event_id,
-                _iso(self._clock()),
-                digest if digest is not None else _digest(edge_ids),
-            ),
-            self._map,
-        )
+    ) -> str:
+        """Allocate ``map-<n>`` and insert it in one ``BEGIN IMMEDIATE`` transaction.
+
+        The next number (``MAX(number) + 1``), the parent (the active version)
+        and the INSERT happen under the writer lock in one transaction, so
+        concurrent proposers (loop thread, background executor, another process)
+        always get distinct numbers and a parent that exists.
+        """
+        conn = self._conn(self._map)
+        if conn is None:
+            raise RuntimeError("mapping repository has no connection")
+        with _lock_of(self._map):
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                number = int(
+                    conn.execute(
+                        "SELECT COALESCE(MAX(number), 0) + 1 FROM mapping_versions"
+                    ).fetchone()[0]
+                )
+                version_id = f"map-{number}"
+                conn.execute(
+                    "INSERT INTO mapping_versions(version_id, number, parent_version_id, "
+                    "mapping_edge_ids_json, status, change_event_id, created_at, digest) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        version_id,
+                        number,
+                        self._active_mapping_row_id(conn),
+                        json.dumps(edge_ids, separators=(",", ":")),
+                        status,
+                        change_event_id,
+                        _iso(self._clock()),
+                        digest if digest is not None else _digest(edge_ids),
+                    ),
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        return version_id
+
+    def _append_topology_version(
+        self,
+        edge_ids: list[str],
+        *,
+        change_event_id: str | None,
+        digest: str,
+        metadata: dict[str, Any],
+    ) -> str:
+        """Allocate ``topo-<n>`` and insert it atomically (``insert_next_version``)."""
+
+        def build(number: int, active_id: str | None) -> dict[str, Any]:
+            return {
+                "version_id": f"topo-{number}",
+                "number": number,
+                "parent_version_id": active_id,
+                "edge_ids": edge_ids,
+                "status": "candidate",
+                "change_event_id": change_event_id,
+                "created_at": _iso(self._clock()),
+                "digest": digest,
+                "metadata": metadata,
+            }
+
+        allocate = getattr(self._topo, "insert_next_version", None)
+        if callable(allocate):
+            return str(allocate(build)["version_id"])
+        # A repository without the atomic seam (a test double): allocate under
+        # its lock so in-process callers still cannot collide.
+        with _lock_of(self._topo):
+            active = self._topo.active_version()
+            version = build(
+                self._next_number(self._topo.versions()),
+                str(active["version_id"]) if active is not None else None,
+            )
+            self._topo.insert_version(version)
+        return str(version["version_id"])
 
     def _set_active_mapping(self, version_id: str) -> None:
         """Promote one mapping version to active, superseding the prior, atomically."""
+        with _lock_of(self._map):
+            self._activate_mapping_locked(version_id)
+        self._notify("mapping", version_id)
+
+    def _activate_mapping_locked(self, version_id: str) -> None:
+        """The activation transaction; the caller holds the mapping lock."""
         conn = self._conn(self._map)
         if conn is None:
             return
-        lock = getattr(self._map, "_lock", None)
-        ctx = lock if lock is not None else _NullLock()
-        with ctx:
+        with _lock_of(self._map):
             conn.execute("BEGIN IMMEDIATE")
             try:
                 previous = conn.execute(
@@ -810,8 +862,7 @@ class VersionService:
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
-        self._map_views.clear()
-        self._notify("mapping", version_id)
+            self._map_views.clear()
 
     @staticmethod
     def _next_number(rows: list[dict[str, Any]]) -> int:
@@ -864,28 +915,23 @@ class VersionService:
                 return _map_edge_contract(row)
         # A retired edge may no longer be referenced by the active version's
         # edge-id list; fall back to a full table scan for history-aware reads.
-        conn = self._conn(self._map)
-        if conn is not None:
-            query = "SELECT * FROM mapping_edges WHERE subject_id=?"
-            params: tuple[Any, ...] = (subject,)
-            if endpoint is not None:
-                query += " AND endpoint_id=?"
-                params = (subject, endpoint)
-            query += " ORDER BY valid_from DESC LIMIT 1"
-            row = conn.execute(query, params).fetchone()
-            if row is not None:
-                return _map_edge_contract(dict(row))
+        query = "SELECT * FROM mapping_edges WHERE subject_id=?"
+        params: tuple[Any, ...] = (subject,)
+        if endpoint is not None:
+            query += " AND endpoint_id=?"
+            params = (subject, endpoint)
+        query += " ORDER BY valid_from DESC LIMIT 1"
+        rows = self._conn_fetchall(query, params, self._map)
+        if rows:
+            return _map_edge_contract(rows[0])
         return None
 
     def _all_mapping_edge_rows(self, subject: str) -> list[dict[str, Any]]:
-        conn = self._conn(self._map)
-        if conn is None:
-            return []
-        rows = conn.execute(
+        return self._conn_fetchall(
             "SELECT * FROM mapping_edges WHERE subject_id=? ORDER BY valid_from",
             (subject,),
-        ).fetchall()
-        return [dict(row) for row in rows]
+            self._map,
+        )
 
     def _retire_mapping_edge(self, subject: str, endpoint: str, *, at: datetime) -> None:
         """Retire one mapping edge, giving it a ``valid_until`` (never delete it)."""
@@ -954,14 +1000,11 @@ class VersionService:
         return event
 
     def _all_mapping_edge_rows_for_endpoint(self, endpoint: str) -> list[dict[str, Any]]:
-        conn = self._conn(self._map)
-        if conn is None:
-            return []
-        rows = conn.execute(
+        return self._conn_fetchall(
             "SELECT * FROM mapping_edges WHERE endpoint_id=? ORDER BY valid_from",
             (endpoint,),
-        ).fetchall()
-        return [dict(row) for row in rows]
+            self._map,
+        )
 
     def _mark_cells_suspected(self, reader_id: str) -> None:
         """Flip all cells on ``reader_id`` to SUSPECTED_CHANGE via M2."""
@@ -1110,6 +1153,12 @@ class _NullLock:
 
     def __exit__(self, *args: Any) -> None:
         return None
+
+
+def _lock_of(repo: Any) -> Any:
+    """The repository's writer lock (the shared ``Database`` RLock), or a no-op."""
+    lock = getattr(repo, "_lock", None)
+    return lock if lock is not None else _NullLock()
 
 
 __all__ = ["VersionConflictError", "VersionService"]
