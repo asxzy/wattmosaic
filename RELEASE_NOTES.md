@@ -1,5 +1,14 @@
 # Release Notes
 
+## v0.3.0-dev.5 — 2026-11-20 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- ci(release): release on demand via workflow_dispatch, never on push
+- fix(packaging): ship inference/evidence_weights.json in the wheel
+
 ## v0.3.0-dev.4 — 2026-11-20 (development channel)
 
 Automatic development build.
