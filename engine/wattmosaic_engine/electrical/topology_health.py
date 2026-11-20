@@ -163,27 +163,47 @@ class HealthBook:
 
     @classmethod
     def from_json(cls, text: str | None) -> HealthBook:
-        """Load a book; ``None``/empty/invalid input yields an empty book."""
+        """Load a book; ``None``/empty/invalid input yields an empty book.
+
+        A malformed entry (bad key, missing/invalid ``recent`` tokens -- only
+        ``"s"``/``"c"`` are verdicts) is skipped on its own; the rest of the
+        book is kept.
+        """
         if not text:
             return cls()
         try:
             payload = json.loads(text)
-            if not isinstance(payload, dict):
-                return cls()
-            entries: dict[tuple[str, str], EdgeHealth] = {}
-            for key, value in payload.items():
-                parent, child = key.split("\x00", 1)
-                entries[(parent, child)] = EdgeHealth(
-                    parent=parent,
-                    child=child,
-                    recent=tuple(value["recent"]),
-                    last_support_at=_parse_datetime(value.get("last_support_at")),
-                    last_conflict_at=_parse_datetime(value.get("last_conflict_at")),
-                    checked=int(value.get("checked", 0)),
-                )
-            return cls(entries=entries)
-        except (AttributeError, KeyError, TypeError, ValueError):
+        except (TypeError, ValueError):
             return cls()
+        if not isinstance(payload, dict):
+            return cls()
+        entries: dict[tuple[str, str], EdgeHealth] = {}
+        for key, value in payload.items():
+            entry = _entry_from_json(key, value)
+            if entry is not None:
+                entries[(entry.parent, entry.child)] = entry
+        return cls(entries=entries)
+
+
+def _entry_from_json(key: Any, value: Any) -> EdgeHealth | None:
+    """One persisted entry, or None when it is malformed."""
+    try:
+        parent, child = key.split("\x00", 1)
+        recent = value["recent"]
+        if not parent or not child or not isinstance(recent, list):
+            return None
+        if any(token not in ("s", "c") for token in recent):
+            return None
+        return EdgeHealth(
+            parent=parent,
+            child=child,
+            recent=tuple(recent)[-HEALTH_WINDOW:],
+            last_support_at=_parse_datetime(value.get("last_support_at")),
+            last_conflict_at=_parse_datetime(value.get("last_conflict_at")),
+            checked=int(value.get("checked", 0)),
+        )
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
 
 
 def _attr(edge: Any, name: str) -> str | None:

@@ -897,24 +897,28 @@ def learn_topology_from_history(
                 affected = [
                     parent
                     for parent in candidates_2
+                    # ``parent in changes`` guards BOTH alternatives: the
+                    # ancestor test reads ``changes[parent]``.
                     if parent in changes
-                    and any(
-                        (parent, c) in new
-                        or (
-                            (parent, c) in known1
-                            and (ctx.descendants.get(c, set()) & members)
-                            != (ctx2.descendants.get(c, set()) & members)
+                    and (
+                        any(
+                            (parent, c) in new
+                            or (
+                                (parent, c) in known1
+                                and (ctx.descendants.get(c, set()) & members)
+                                != (ctx2.descendants.get(c, set()) & members)
+                            )
+                            for c in members
                         )
-                        for c in members
-                    )
-                    or (
-                        (ctx.ancestors.get(parent, set()) & members)
-                        != (ctx2.ancestors.get(parent, set()) & members)
-                        and ctx2.ancestors_matter(
-                            parent,
-                            changes[parent],
-                            (ctx.ancestors.get(parent, set()) ^ ctx2.ancestors.get(parent, set()))
-                            & members,
+                        or (
+                            (ctx.ancestors.get(parent, set()) & members)
+                            != (ctx2.ancestors.get(parent, set()) & members)
+                            and ctx2.ancestors_matter(
+                                parent,
+                                changes[parent],
+                                (ctx.ancestors.get(parent, set()) ^ ctx2.ancestors.get(parent, set()))
+                                & members,
+                            )
                         )
                     )
                 ]

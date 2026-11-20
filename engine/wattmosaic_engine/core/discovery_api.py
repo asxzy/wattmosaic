@@ -390,6 +390,11 @@ class DiscoveryApiMixin:
                 merged = staged.merge_evidence(learned, levels=levels)
                 merged = replace(merged, aligned=current.aligned)
                 self.topology_inference = merged
+                # The replay's structural decisions are sticky: the next live
+                # fold on its shorter window keeps them unless the structure
+                # positively disagrees (design §5 T5).
+                if dict(merged.structure_decisions) != dict(current.structure_decisions):
+                    self._persist_structure_decisions(merged.structure_decisions)
                 repo = self.db.repos.topology_v3
                 for edge in merged.edges:
                     try:

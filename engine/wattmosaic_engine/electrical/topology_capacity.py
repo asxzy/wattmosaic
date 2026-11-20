@@ -217,6 +217,7 @@ class _Cost:
         options: Mapping[str, tuple[str, ...]],
         candidate_sets: Mapping[str, frozenset[str]],
         min_children_w: float = 0.0,
+        capacity_cache: dict[tuple[str, tuple[str, ...]], float] | None = None,
     ) -> None:
         self._min_children_w = float(min_children_w)
         self._series = series
@@ -226,7 +227,11 @@ class _Cost:
         self._score = score
         self._options = options
         self._candidate_sets = candidate_sets
-        self._capacity: dict[tuple[str, tuple[str, ...]], float] = {}
+        # A caller-owned cache outlives this call (same series, same
+        # ``min_children_w``): repeated folds never recompute a capacity.
+        self._capacity: dict[tuple[str, tuple[str, ...]], float] = (
+            capacity_cache if capacity_cache is not None else {}
+        )
 
     def _candidate_set(self, child: str) -> frozenset[str]:
         known = self._candidate_sets.get(child)
@@ -307,6 +312,7 @@ def assign_parents(
     fixed: Mapping[str, str] | None = None,
     score: Mapping[tuple[str, str], float] | None = None,
     min_children_w: float = 0.0,
+    capacity_cache: dict[tuple[str, tuple[str, ...]], float] | None = None,
 ) -> dict[str, str]:
     """Choose one parent per child, honouring capacity and paired legs.
 
@@ -319,6 +325,10 @@ def assign_parents(
     The cost of a complete assignment is, in order: paired legs forced onto the
     same parent, summed capacity violation, negative evidence score, summed
     parent levels, then the chosen parent ids as a deterministic tie break.
+
+    ``capacity_cache`` (keyed ``(parent, sorted children)``) is reused and
+    filled; it must only be shared between calls over the same ``series`` and
+    ``min_children_w``.
     """
     fixed_map = dict(fixed or {})
     score_map = dict(score or {})
@@ -345,7 +355,15 @@ def assign_parents(
         return assigned
 
     cost = _Cost(
-        series, levels, tuple(pairs), fixed_map, score_map, options, declared, min_children_w
+        series,
+        levels,
+        tuple(pairs),
+        fixed_map,
+        score_map,
+        options,
+        declared,
+        min_children_w,
+        capacity_cache,
     )
     combinations = math.prod(len(options[child]) for child in ambiguous)
     if combinations <= _ASSIGNMENT_ENUMERATION_LIMIT:

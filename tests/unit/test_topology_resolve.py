@@ -389,3 +389,6 @@ def test_settle_with_46_readers_and_six_hours_is_fast() -> None:
     # Spec target: < 200 ms per settle; generous bounds for slow CI runners.
     assert warm < 1.0
     assert cold < 3.0
+    # Spec target (ADR-0033): a warm settle reuses the cached analysis,
+    # fits and capacities.
+    assert warm < 0.2

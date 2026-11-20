@@ -344,3 +344,21 @@ def test_workflow_rebases_a_candidate_whose_parent_moved_on() -> None:
     assert result.status == "confirmed"
     assert result.candidate_topology_version_id != stale
     assert svc.current().topology_version_id == result.candidate_topology_version_id
+
+
+def test_a_suspicion_below_the_threshold_leaves_no_orphan_candidate_version() -> None:
+    # Live: a history replay's promotion re-ran the detectors; the first
+    # corroboration proposed a candidate topology that was never promoted.
+    svc = _RecordingVersionService()
+    workflow = ConfigurationWorkflow(svc, clock=lambda: T0)
+    record = workflow.record(_event())
+    workflow.begin(record.event_id, edge_ids=["e1"], mapping_edge_ids=["m1"])
+    for i in range(CONFIRMED_EVENTS - 1):
+        workflow.observe_confirming_event(record.event_id, source=f"source-{i}")
+    assert record.candidate_topology_version_id is None
+    assert record.candidate_mapping_version_id is None
+    assert (svc._topo_n, svc._map_n) == (1, 1)  # noqa: SLF001 - nothing proposed
+    result = workflow.observe_confirming_event(record.event_id, source="last")
+    assert result.status == "confirmed"
+    assert (svc._topo_n, svc._map_n) == (2, 2)  # noqa: SLF001 - one proposal each, promoted
+    assert svc.current().topology_version_id == result.candidate_topology_version_id
