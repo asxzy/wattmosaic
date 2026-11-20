@@ -170,6 +170,7 @@ class RuntimeMixin:
         # fast-loop callbacks and the event loop have typed providers, even when
         # the supervisor (not ``start``) owns the loop tasks.
         self._wire_v3_services()
+        self._warm_start_readers()
         await self.hasource.start(
             on_reading=self.on_reading,
             on_ha_event=self.on_ha_event,
@@ -1615,6 +1616,42 @@ class RuntimeMixin:
                 log.exception("steady pass failed")
             finally:
                 self._record_latency("background", (time.monotonic() - started) * 1000.0)
+
+    #: How far back a restart may seed P2 from stored readings.  Older history
+    #: would hand P3 a stale level and make the first live sample look like a
+    #: step; after a longer outage the detector warms up normally instead.
+    _WARM_START_WINDOW_S = 1800.0
+
+    def _warm_start_readers(self) -> None:
+        """Seed P2 from recently stored readings so P3 is not blind after a restart."""
+        samples_repo = getattr(getattr(self.db, "repos", None), "samples", None)
+        entities = getattr(getattr(self.db, "repos", None), "entities", None)
+        recent = getattr(samples_repo, "recent_readings", None)
+        if recent is None or entities is None:
+            return
+        since = self._clock() - timedelta(seconds=self._WARM_START_WINDOW_S)
+        limit = int(self.change_detector.config.sigma_warmup_samples) + 16
+        seeded = 0
+        try:
+            endpoints = entities.endpoints(enabled_only=True)
+        except Exception:  # noqa: BLE001 - warm start is best effort
+            return
+        for row in endpoints:
+            reader = str(row["endpoint_id"])
+            try:
+                readings = recent(reader, since=since, limit=limit)
+            except Exception:  # noqa: BLE001
+                continue
+            for reading in readings:
+                self.reader_state.add(reading)
+                last = self._reader_last_seen.get(reader)
+                at = reading.observed_at
+                self._reader_last_seen[reader] = at if last is None else max(last, at)
+            if readings:
+                self.change_detector.prime(reader, len(readings))
+                seeded += 1
+        if seeded:
+            log.info("warm start: seeded %d readers from stored readings", seeded)
 
     def _bind_ha_ingestion(self) -> None:
         """Give the production HA source its P1 seam from the S13 repositories.

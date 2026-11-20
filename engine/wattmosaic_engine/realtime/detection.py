@@ -328,6 +328,18 @@ class ChangeDetector:
         sm = self._states.get(reader)
         return DetectorState.STABLE if sm is None else sm.state
 
+    def prime(self, reader: str, samples: int) -> None:
+        """Count ``samples`` already-seen observations toward σ warm-up.
+
+        P2's noise and baseline state is in memory, so every restart used to
+        re-learn σ from scratch: ``sigma_warmup_samples`` (64) samples at HA's
+        real cadence (~18 s per CT) is ~19 minutes with no detection at all.
+        The runtime seeds P2 from recently stored readings and then calls this so
+        the detector trusts that history instead of waiting for it again.
+        """
+        sm = self._states.setdefault(reader, _ReaderSM())
+        sm.observation_count = max(sm.observation_count, int(samples))
+
     def process(self, reader: str, at: datetime) -> None:
         """Advance ``reader``'s detector using the held reading at ``at``.
 

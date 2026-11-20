@@ -137,6 +137,18 @@ class SamplesRepository(Repository):
             ).fetchall()
         return [self.reading_from_row(row) for row in rows]
 
+    def recent_readings(
+        self, reader_id: str, *, since: datetime, limit: int
+    ) -> list[ReaderMeasurement]:
+        """Up to ``limit`` newest readings observed at or after ``since``, oldest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM ct_samples WHERE ct_id=? AND observed_at >= ? "
+                "ORDER BY observed_at DESC, sequence DESC LIMIT ?",
+                (reader_id, iso(since), int(limit)),
+            ).fetchall()
+        return [self.reading_from_row(row) for row in reversed(rows)]
+
     def latest_reading(self, reader_id: str) -> ReaderMeasurement | None:
         """The newest persisted reader measurement for one endpoint, or ``None``."""
         with self._lock:
