@@ -304,3 +304,43 @@ def test_user_declared_conflicted_edge_downgrades_not_deleted() -> None:
     assert edge.lifecycle == EdgeLifecycleV3.CONFLICTED
     # The edge row is retained, not deleted.
     assert any(e.edge_id == "te-user" for e in view.edges)
+
+
+class _ParentCheckingVersionService(_RecordingVersionService):
+    """Promotion refuses a candidate proposed on a since-superseded parent."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.parent_of: dict[str, str] = {}
+
+    def propose_topology(self, edges: Any, change_event_id: Any) -> str:
+        version_id = super().propose_topology(edges, change_event_id)
+        self.parent_of[version_id] = self.triple.topology_version_id
+        return version_id
+
+    def promote_topology(self, version_id: str, reason: str) -> None:
+        from wattmosaic_engine.versioning.service import VersionConflictError
+
+        expected, actual = self.parent_of[version_id], self.triple.topology_version_id
+        if expected != actual:
+            raise VersionConflictError("topology", version_id, expected, actual)
+        super().promote_topology(version_id, reason)
+
+
+def test_workflow_rebases_a_candidate_whose_parent_moved_on() -> None:
+    # Live dev server: T5 promoted newer topologies between a suspected change's
+    # first corroboration (candidate proposed) and its last (promote), and every
+    # detector cycle failed with "promoted on stale parent".
+    svc = _ParentCheckingVersionService()
+    workflow = ConfigurationWorkflow(svc, clock=lambda: T0)
+    record = workflow.record(_event())
+    workflow.begin(record.event_id, edge_ids=["e1"], mapping_edge_ids=["m1"])
+    workflow.observe_confirming_event(record.event_id, source="source-0")
+    stale = record.candidate_topology_version_id
+    # T5 promotes its own version meanwhile.
+    svc.promote_topology(svc.propose_topology([], "t5"), "T5 confirmed edge")
+    for i in range(1, CONFIRMED_EVENTS):
+        result = workflow.observe_confirming_event(record.event_id, source=f"source-{i}")
+    assert result.status == "confirmed"
+    assert result.candidate_topology_version_id != stale
+    assert svc.current().topology_version_id == result.candidate_topology_version_id

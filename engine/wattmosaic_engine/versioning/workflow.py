@@ -40,6 +40,8 @@ from wattmosaic_engine.contracts import (
 )
 from wattmosaic_engine.runtime.interfaces import VersionService
 
+from .service import VersionConflictError
+
 __all__: list[str] = [
     "CONFIRMED_EVENTS",
     "REJECT_AFTER",
@@ -278,9 +280,31 @@ class ConfigurationWorkflow:
         model_before = self.versions.current().model_set_id
         reason = f"HB14: {record.kind} corroborated by {len(record.independent_sources)} events"
         if record.candidate_topology_version_id is not None:
-            self.versions.promote_topology(record.candidate_topology_version_id, reason)
+            try:
+                self.versions.promote_topology(record.candidate_topology_version_id, reason)
+            except VersionConflictError:
+                # The candidate was proposed on an earlier corroboration; T5 has
+                # promoted a newer topology since, so its parent is stale (live:
+                # "topo-10 promoted on stale parent topo-9 (now topo-12)" on
+                # every cycle).  Rebase on the current edges and promote that.
+                edges = candidate_topology_edges
+                if edges is None:
+                    edges = self._current_topology_edges()
+                record.candidate_topology_version_id = self.versions.propose_topology(
+                    list(edges), change_event_id
+                )
+                self.versions.promote_topology(record.candidate_topology_version_id, reason)
         if record.candidate_mapping_version_id is not None:
-            self.versions.promote_mapping(record.candidate_mapping_version_id, reason)
+            try:
+                self.versions.promote_mapping(record.candidate_mapping_version_id, reason)
+            except VersionConflictError:
+                edges = candidate_mapping_edges
+                if edges is None:
+                    edges = self._current_mapping_edges()
+                record.candidate_mapping_version_id = self.versions.propose_mapping(
+                    list(edges), change_event_id
+                )
+                self.versions.promote_mapping(record.candidate_mapping_version_id, reason)
         # Rule 20 / AT-15: promoting topology or mapping never changes the model.
         assert self.versions.current().model_set_id == model_before, (
             "the self-healing workflow must never change the power-model version"

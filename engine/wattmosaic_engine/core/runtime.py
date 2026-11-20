@@ -358,6 +358,9 @@ class RuntimeMixin:
             clock=self._clock,
         )
         self.candidate_ring = CandidateRing()
+        # Recent P3 step instants per reader, for T5's step-anchored parent
+        # measurement (bounded: a few dozen steps per reader).
+        self._t5_steps: dict[str, deque[tuple[str | None, datetime, datetime, float]]] = {}
         self.change_detector = ChangeDetector(self.reader_state, self._on_reading_event)
         self.window_collector = WindowCollector(
             self.reader_state,
@@ -756,6 +759,11 @@ class RuntimeMixin:
                 evidence_id = window.evidence.evidence_id
         except Exception:  # noqa: BLE001 - never let bookkeeping break ingestion
             log.exception("event window open failed")
+        if event.delta_w is not None:
+            steps = self._t5_steps.get(event.reader_id)
+            if steps is None:
+                steps = self._t5_steps[event.reader_id] = deque(maxlen=self._T5_STEPS_KEPT)
+            steps.append((evidence_id, event.onset_lo, event.onset_hi, float(event.delta_w)))
         if self.grouping_engine is not None:
             try:
                 self.grouping_engine.on_reader_step(event, now=at, evidence_id=evidence_id)
@@ -2105,6 +2113,17 @@ class RuntimeMixin:
     _T5_PRE_S = 120.0
     _T5_SETTLE_S = 5.0
     _T5_POST_S = 150.0
+    #: Median windows either side of a child's *own* step (P3 onset_lo/onset_hi)
+    #: for the step-anchored parent measurement: 2-3 samples at the ~15-20 s
+    #: cadence of panel CT monitors, short enough that a busy feed's unrelated
+    #: changes rarely fall inside.
+    _T5_ANCHOR_S = 45.0
+    #: Without a sample in the pre window the parent's held value counts, if it
+    #: was reported within this lookback (a quiet reader only reports changes).
+    _T5_HOLD_LOOKBACK_S = 600.0
+    #: A group member's step is matched to a recorded P3 step this close in time.
+    _T5_STEP_MATCH_S = 900.0
+    _T5_STEPS_KEPT = 64
 
     def _observed_readers(
         self, group: EventGroup | None = None
@@ -2177,6 +2196,89 @@ class RuntimeMixin:
             return None
         return float(statistics.median(post) - statistics.median(pre))
 
+    def _member_step(self, group: EventGroup, delta: Any) -> tuple[datetime, datetime] | None:
+        """The P3 step instant (onset_lo, onset_hi) behind one group member."""
+        steps = self._t5_steps.get(str(delta.reader_id))
+        if not steps or delta.delta_w is None:
+            return None
+        ref = getattr(getattr(delta, "evidence_ref", None), "id", None)
+        if ref is not None:
+            for evidence_id, lo, hi, _step in reversed(steps):
+                if evidence_id == ref:
+                    return lo, hi
+        # A revised evidence row has a new id: take the same-sign step nearest
+        # the group's onset.
+        onset = group.opened_at
+        best: tuple[float, datetime, datetime] | None = None
+        for _evidence_id, lo, hi, step in steps:
+            if (step > 0) != (float(delta.delta_w) > 0):
+                continue
+            distance = abs((lo - onset).total_seconds())
+            if distance <= self._T5_STEP_MATCH_S and (best is None or distance < best[0]):
+                best = (distance, lo, hi)
+        return None if best is None else (best[1], best[2])
+
+    def _anchored_level_change(self, reader: str, lo: datetime, hi: datetime) -> float | None:
+        """``reader``'s median level after ``hi`` minus its level before ``lo``.
+
+        Samples between ``lo`` and ``hi`` are ambiguous (the step happened
+        somewhere in that interval) and are not used.  ``None`` when there is no
+        post-step sample yet or no level before the step.
+        """
+        span = timedelta(seconds=self._T5_ANCHOR_S)
+        post = [
+            s.active_power_w
+            for s in self.reader_state.window(reader, hi, hi + span)
+            if s.active_power_w is not None
+        ]
+        if not post:
+            return None
+        pre = [
+            s.active_power_w
+            for s in self.reader_state.window(reader, lo - span, lo)
+            if s.active_power_w is not None
+        ]
+        if not pre:
+            held = [
+                s.active_power_w
+                for s in self.reader_state.window(
+                    reader, lo - timedelta(seconds=self._T5_HOLD_LOOKBACK_S), lo
+                )
+                if s.active_power_w is not None
+            ]
+            if not held:
+                return None
+            pre = held[-1:]
+        return float(statistics.median(post) - statistics.median(pre))
+
+    def _step_anchored_changes(
+        self, group: EventGroup, observed: Mapping[str, Any]
+    ) -> dict[str, dict[str, float]]:
+        """child -> {candidate parent: level change across the child's own step}.
+
+        A group's onset can sit a minute or more from a member's step (live:
+        -61 s .. +103 s, 10th-90th percentile), so a parent measured around the
+        onset mixes in a busy feed's unrelated changes and true parents read
+        flat or off-size.  Anchoring on the child's own P3 step removes that.
+        """
+        out: dict[str, dict[str, float]] = {}
+        for delta in group.reader_deltas:
+            interval = self._member_step(group, delta)
+            if interval is None:
+                continue
+            lo, hi = interval
+            child = str(delta.reader_id)
+            changes: dict[str, float] = {}
+            for reader in observed:
+                if reader == child:
+                    continue
+                change = self._anchored_level_change(str(reader), lo, hi)
+                if change is not None:
+                    changes[str(reader)] = change
+            if changes:
+                out[child] = changes
+        return out
+
     def _fold_group_ledger(self, group: EventGroup) -> int:
         """Fold ``group``'s reader deltas into the T5 ledger and persist edges.
 
@@ -2194,8 +2296,20 @@ class RuntimeMixin:
             from ..electrical.topology_inference import DeltaObservation
 
             obs = DeltaObservation.from_group(group)
+            observed = self._observed_readers(group)
+            # A reader whose level could not be measured across the window is
+            # not evidence either way: leaving it "observed" without a
+            # measurement would read as "did not move" (conflict).
+            observed = {
+                reader: entry
+                for reader, entry in observed.items()
+                if reader in obs.deltas or not isinstance(entry, tuple) or entry[1] is not None
+            }
             updated = view.observe_group(
-                obs, observed=self._observed_readers(group), levels=self._typical_levels()
+                obs,
+                observed=observed,
+                levels=self._typical_levels(),
+                measured_by_child=self._step_anchored_changes(group, observed),
             )
             self.topology_inference = updated
             repo = self.db.repos.topology_v3

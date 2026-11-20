@@ -116,6 +116,11 @@ SCALED_COPY_RATIO_SPREAD_MAX = 0.02
 MIN_PAIR_ACTIVE_W = 200.0
 
 _SIGMA_FACTOR = 3.0
+#: Two CTs reading one step differ by a few percent (CT accuracy, sampling
+#: instant, ramp).  A match tolerance of 3 sigma alone made every large clean
+#: step (a 2 kW element read 2 % apart) neutral, so big loads never built
+#: support (live dev server, 2026-11-20).
+MATCH_RELATIVE_TOLERANCE = 0.20
 _CONTAINS = "contains"
 _CORRELATED = "correlated"
 _SAME_CONDUCTOR = "same_conductor"
@@ -156,6 +161,40 @@ class TopologyEvidence(EdgeEvidence):
     @property
     def conflicting(self) -> int:
         return self.conflict
+
+
+def _classify_step(
+    parent_move: float,
+    child_delta: float,
+    *,
+    sigma_p: float,
+    sigma_c: float,
+    beta: float = 1.0,
+) -> str | None:
+    """``"support"``, ``"conflict"`` or ``None`` (neutral) for one child step.
+
+    * support: the parent *moved* (beyond its own 3 sigma) by the child's step,
+      within the combined 3-sigma noise plus :data:`MATCH_RELATIVE_TOLERANCE`.
+    * conflict: the parent stayed within its 3-sigma noise while the child moved
+      beyond it, and the parent's change is outside the support tolerance
+      (design §5 T5: "a child step with no matching parent step beyond
+      3 sigma_p").  The bands are disjoint, so one reading is never both.
+    * neutral: anything else -- a parent that moved by another amount carries
+      concurrent loads, and a child step inside the parent's noise is invisible.
+    """
+    scaled = beta * child_delta
+    flat_band = _SIGMA_FACTOR * sigma_p
+    tolerance = _SIGMA_FACTOR * math.sqrt(sigma_p**2 + (beta * sigma_c) ** 2)
+    tolerance += MATCH_RELATIVE_TOLERANCE * abs(scaled)
+    if abs(parent_move) > flat_band and abs(parent_move - scaled) <= tolerance:
+        return "support"
+    if (
+        abs(parent_move) <= flat_band
+        and abs(scaled) > flat_band
+        and abs(parent_move - scaled) > tolerance
+    ):
+        return "conflict"
+    return None
 
 
 def _observed_entry(value: Any) -> tuple[float | None, float | None]:
@@ -463,8 +502,17 @@ class TopologyInferenceView:
         channel_meta: Mapping[str, Mapping[str, Any]] | None = None,
         observed: Mapping[str, Any] | None = None,
         levels: Mapping[str, float] | None = None,
+        measured_by_child: Mapping[str, Mapping[str, float]] | None = None,
     ) -> TopologyInferenceView:
         """Fold one FINAL event group into every affected pair's ledger.
+
+        ``measured_by_child`` maps a stepping child to each candidate parent's
+        level change measured across *that child's own step* (its last pre-step
+        and first post-step samples).  It is the most direct evidence there is
+        and wins over both P3's group delta for the parent and the group-level
+        ``observed`` measurement: a group's onset can sit a minute or more away
+        from a member's step, so a busy feed measured around the onset mixes in
+        unrelated changes (live: true parents read flat or off-size).
 
         ``levels`` maps readers to their typical (recent median) power.  When a
         child ends up with several CONFIRMED inferred parents, containment is
@@ -527,11 +575,17 @@ class TopologyInferenceView:
                 )
                 edges[by_index[key]] = current.model_copy(update={"evidence": evidence})
 
+        anchored_by_child = measured_by_child or {}
+
         # -- child steps against every candidate parent --------------------- #
         for child, (child_delta, child_sigma) in decisive.items():
+            anchored = anchored_by_child.get(child) or {}
             for parent, (parent_delta, parent_sigma) in decisive.items():
                 if parent == child:
                     continue
+                if parent in anchored and anchored[parent] is not None:
+                    # The parent's level across the child's own step.
+                    parent_delta = float(anchored[parent])
                 key = (parent, child, _CONTAINS)
                 position = by_index.get(key)
                 if position is None:
@@ -558,19 +612,22 @@ class TopologyInferenceView:
                 beta = edge.beta if edge.beta is not None else 1.0
                 sigma_p = parent_sigma if parent_sigma is not None else self.sigma_floor_w
                 sigma_c = child_sigma if child_sigma is not None else self.sigma_floor_w
-                tol = _SIGMA_FACTOR * math.sqrt(sigma_p**2 + (beta * sigma_c) ** 2)
-                if abs(parent_delta - beta * child_delta) <= tol:
-                    field_name, stamp = "support", "last_support_at"
-                elif abs(parent_delta) <= _SIGMA_FACTOR * sigma_p < abs(beta * child_delta):
-                    # Design §5: the parent did not move (its delta is within
-                    # 3 sigma_p of zero) while the child moved beyond it.
-                    field_name, stamp = "conflict", "last_conflict_at"
-                else:
-                    # Both readers moved, by different amounts: the parent's step
-                    # also carries other loads changing in the same window.  That
-                    # is neutral, not evidence against containment (live mains
-                    # almost always carry concurrent changes).
+                # Design §5: support when the parent moved by the child's step,
+                # conflict when it did not move (within 3 sigma_p of zero) while
+                # the child clearly did.  Both moved by different amounts: the
+                # parent's step also carries other loads changing in the same
+                # window -- neutral, not evidence against containment (live
+                # mains almost always carry concurrent changes).
+                verdict = _classify_step(
+                    parent_delta, child_delta, sigma_p=sigma_p, sigma_c=sigma_c, beta=beta
+                )
+                if verdict is None:
                     continue
+                field_name, stamp = (
+                    ("support", "last_support_at")
+                    if verdict == "support"
+                    else ("conflict", "last_conflict_at")
+                )
                 causes.setdefault(key, set()).add(cause)
                 evidence = edge.evidence.model_copy(
                     update={
@@ -589,24 +646,30 @@ class TopologyInferenceView:
                 parent, child = edge.source_endpoint_id, edge.target_endpoint_id
                 if child not in decisive or parent in decisive or parent not in observed:
                     continue
-                child_delta = decisive[child][0]
+                child_delta, child_sigma = decisive[child]
                 sigma_p, measured = _observed_entry(observed.get(parent))
                 sigma_p = max(sigma_p or self.sigma_floor_w, self.sigma_floor_w)
+                anchored = anchored_by_child.get(child) or {}
+                if anchored.get(parent) is not None:
+                    measured = float(anchored[parent])
                 beta = edge.beta if edge.beta is not None else 1.0
-                noise = _SIGMA_FACTOR * sigma_p
-                if abs(beta * child_delta) <= noise:
-                    # Hidden in the parent's noise: not evidence either way.
+                # No measurement: P3 saw no step on an observed parent, i.e. it
+                # did not move.  A measured level (P3 may simply not have flagged
+                # a small step on a busy feed) is classified like a co-step.
+                verdict = _classify_step(
+                    0.0 if measured is None else measured,
+                    child_delta,
+                    sigma_p=sigma_p,
+                    sigma_c=child_sigma if child_sigma is not None else self.sigma_floor_w,
+                    beta=beta,
+                )
+                if verdict is None:
                     continue
-                field_name, stamp = "conflict", "last_conflict_at"
-                if measured is not None:
-                    # The parent's level was measured across the window: P3 may
-                    # simply not have flagged a small step on a busy feed.
-                    if abs(measured - beta * child_delta) <= noise:
-                        field_name, stamp = "support", "last_support_at"
-                    elif abs(measured) > noise:
-                        # The parent moved, just not by the child's amount:
-                        # concurrent loads, not a contradiction (neutral).
-                        continue
+                field_name, stamp = (
+                    ("support", "last_support_at")
+                    if verdict == "support"
+                    else ("conflict", "last_conflict_at")
+                )
                 key = (parent, child, _CONTAINS)
                 causes.setdefault(key, set()).add(cause)
                 current = edges[position]
@@ -623,7 +686,8 @@ class TopologyInferenceView:
             # no edge exists yet (P3 did not flag the parent's step, so the
             # co-step pass above never created the pair).  A flat or unmeasured
             # parent never creates an edge: there is nothing to count against.
-            for child, (child_delta, _child_sigma) in decisive.items():
+            for child, (child_delta, child_sigma) in decisive.items():
+                anchored = anchored_by_child.get(child) or {}
                 for parent, entry in observed.items():
                     if parent == child or parent in decisive:
                         continue
@@ -631,10 +695,17 @@ class TopologyInferenceView:
                     if key in by_index:
                         continue
                     sigma_p, measured = _observed_entry(entry)
+                    if anchored.get(parent) is not None:
+                        measured = float(anchored[parent])
                     if measured is None:
                         continue
-                    noise = _SIGMA_FACTOR * max(sigma_p or self.sigma_floor_w, self.sigma_floor_w)
-                    if abs(child_delta) <= noise or abs(measured - child_delta) > noise:
+                    verdict = _classify_step(
+                        measured,
+                        child_delta,
+                        sigma_p=max(sigma_p or self.sigma_floor_w, self.sigma_floor_w),
+                        sigma_c=child_sigma if child_sigma is not None else self.sigma_floor_w,
+                    )
+                    if verdict != "support":
                         continue
                     causes.setdefault(key, set()).add(cause)
                     edges.append(

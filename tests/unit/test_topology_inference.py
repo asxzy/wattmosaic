@@ -503,3 +503,57 @@ def test_a_parent_that_moved_by_another_amount_is_neutral():
     )
     edge = view.edge("main", "sub")
     assert edge is None or (edge.evidence.conflict == 0 and edge.evidence.support == 0)
+
+
+# -- Matching on real CTs (dev-server finding, 2026-11-20) -------------------- #
+
+
+def test_a_large_step_read_a_few_percent_apart_is_support():
+    # Two CTs read a 2 kW element 3 % apart; 3 sigma alone (~8.5 W) made it
+    # neutral, so the biggest, cleanest loads never built any support.
+    view = _chain_view()
+    for i in range(3):
+        view = view.observe_group(
+            _delta(f"g{i}", {"main": 2060.0, "sub": 2000.0}, cause=f"cause-{i}")
+        )
+    edge = view.edge("main", "sub")
+    assert edge is not None
+    assert (edge.evidence.support, edge.evidence.conflict) == (3, 0)
+
+
+def test_a_flat_parent_never_supports_a_small_child_step():
+    # The relative tolerance must not let a parent that did not move "match".
+    view = _chain_view().observe_group(_delta("g0", {"main": 25.0, "sub": 25.0}, cause="c0"))
+    view = view.observe_group(
+        _delta("g1", {"sub": 9.0}, cause="c1"),
+        observed={"main": (2.0, 0.0), "sub": (2.0, 9.0)},
+    )
+    edge = view.edge("main", "sub")
+    assert edge is not None
+    assert edge.evidence.support == 1  # only the seeding co-step
+
+
+def test_the_step_anchored_parent_change_wins_over_the_group_delta():
+    # P3 flagged an unrelated small step on the parent in the same group; across
+    # the child's own step the parent moved with it.
+    view = _chain_view().observe_group(
+        _delta("g0", {"main": 1.0, "sub": 300.0}, cause="c0"),
+        measured_by_child={"sub": {"main": 296.0}},
+    )
+    edge = view.edge("main", "sub")
+    assert edge is not None
+    assert (edge.evidence.support, edge.evidence.conflict) == (1, 0)
+    # Without the anchored measurement the same group is a conflict.
+    plain = _chain_view().observe_group(_delta("g0", {"main": 1.0, "sub": 300.0}, cause="c0"))
+    assert plain.edge("main", "sub").evidence.conflict == 1
+
+
+def test_a_busy_parent_that_stayed_inside_its_noise_counts_against_the_edge():
+    # sigma_p = 23 W (a busy main): a 130 W child step while the parent moved
+    # 20 W is a contradiction, not "hidden in the noise".
+    view = _chain_view().observe_group(_delta("g0", {"main": 130.0, "sub": 130.0}, cause="c0"))
+    view = view.observe_group(
+        _delta("g1", {"sub": 130.0}, cause="c1"),
+        observed={"main": (23.0, 20.0), "sub": (1.0, 130.0)},
+    )
+    assert view.edge("main", "sub").evidence.conflict == 1
