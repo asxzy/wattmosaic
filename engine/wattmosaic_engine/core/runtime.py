@@ -2357,12 +2357,15 @@ class RuntimeMixin:
         kwargs: dict[str, Any] = {}
         remaining = getattr(budget, "remaining_s", None)
         if remaining is not None:
+            # A budget that exposes remaining_s() always caps the pass.  Even a
+            # spent (0.0) allowance still runs one batch: purge_ct_samples checks
+            # the time budget only after a batch commits, so progress is made.
             try:
                 allowance = float(remaining())
             except Exception:  # noqa: BLE001 - a broken budget is not fatal
                 allowance = 0.0
-            if allowance > 0.0:
-                kwargs["time_budget_s"] = allowance
+            kwargs["time_budget_s"] = max(allowance, 0.0)
+        # No budget (or one without remaining_s()) -> purge_ct_samples defaults.
         try:
             result = purge_ct_samples(self.db._conn, self.db._lock, cutoff=cutoff, **kwargs)
         except Exception:  # noqa: BLE001 - degraded, never a crash loop
@@ -2440,7 +2443,15 @@ class RuntimeMixin:
                 # event loop (DEC-37).  The capture purge owns ct_samples.
                 self.submit_background(self._prune_evidence)
                 self.submit_background(self._prune_derived)
-                self.submit_background(self._purge_raw_capture)
+                # A slow legacy drain can outlive a maintenance interval; never
+                # stack another purge on top of a still-running one.
+                if (
+                    self._raw_capture_purge_future is None
+                    or self._raw_capture_purge_future.done()
+                ):
+                    self._raw_capture_purge_future = self.submit_background(
+                        self._purge_raw_capture
+                    )
             except Exception:  # noqa: BLE001
                 log.exception("maintenance cycle failed")
             try:

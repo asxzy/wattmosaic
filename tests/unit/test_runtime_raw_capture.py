@@ -183,6 +183,35 @@ def test_purge_job_failure_is_degraded(tmp_db_path: Any, monkeypatch: Any) -> No
 # --------------------------------------------------------------------------- #
 
 
+def test_purge_job_maps_budget_remaining_to_time_budget(
+    tmp_db_path: Any, monkeypatch: Any
+) -> None:
+    """A budget exposing remaining_s() always caps the pass via time_budget_s;
+    even a spent allowance is forwarded (the purge still runs one batch)."""
+    import wattmosaic_engine.storage.capture as capture
+    from wattmosaic_engine.storage.database import Database
+
+    db = Database(tmp_db_path)
+    try:
+        core = _job_core(EngineConfig(raw_capture_days=2), db)
+        budget = SimpleNamespace(remaining_s=lambda: 0.5)
+        seen: dict[str, Any] = {}
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            seen.update(kwargs)
+            return capture.PurgeResult(0, 1, True)
+
+        monkeypatch.setattr(capture, "purge_ct_samples", spy)
+        core._purge_raw_capture(budget=budget)
+        assert seen["time_budget_s"] == 0.5
+
+        seen.clear()
+        core._purge_raw_capture(budget=SimpleNamespace(remaining_s=lambda: 0.0))
+        assert seen["time_budget_s"] == 0.0
+    finally:
+        db.close()
+
+
 def test_prune_evidence_never_touches_ct_samples(tmp_db_path: Any) -> None:
     """AC5: the evidence prune no longer issues a DELETE against ct_samples —
     an old row survives even with a tiny evidence-raw horizon."""
@@ -212,6 +241,7 @@ def test_maintenance_passes_capture_days() -> None:
     core._stop_event = asyncio.Event()
     core._stop_event.set()
     core.aligner = SimpleNamespace(prune=lambda: None)
+    core._raw_capture_purge_future = None
 
     seen: dict[str, Any] = {}
 
@@ -233,3 +263,56 @@ def test_maintenance_passes_capture_days() -> None:
     assert seen["capture_days"] == 7
     assert seen["args"] == (core.config.retention_days_raw, core.config.retention_days_aggregates)
     assert core._purge_raw_capture in submitted
+
+
+class _NeverSet:
+    """A stop event whose wait() always times out, driving another loop cycle."""
+
+    async def wait(self) -> None:
+        raise TimeoutError
+
+
+class _Future:
+    def __init__(self) -> None:
+        self._done = False
+
+    def done(self) -> bool:
+        return self._done
+
+
+def test_maintenance_skips_overlapping_purge() -> None:
+    """A still-running purge is not resubmitted on the next maintenance tick;
+    once its future is done, a later tick submits again."""
+    core = object.__new__(EngineCore)
+    core.config = EngineConfig(raw_capture_days=2)
+    core._stopping = False
+    core._stop_event = _NeverSet()
+    core.aligner = SimpleNamespace(prune=lambda: None)
+    core.db = SimpleNamespace(prune=lambda *a, **k: {})
+    core._raw_capture_purge_future = None
+
+    purge_future = _Future()
+    submitted: list[Any] = []
+
+    def submit(fn: Any, *a: Any, **k: Any) -> Any:
+        submitted.append(fn)
+        # Bound methods are fresh objects on each access, so compare by name.
+        return purge_future if getattr(fn, "__name__", "") == "_purge_raw_capture" else None
+
+    core.submit_background = submit  # type: ignore[method-assign]
+
+    calls = [0]
+
+    async def bootstrap() -> None:
+        calls[0] += 1
+        if calls[0] == 2:
+            # First purge finished after cycle 2 skipped it.
+            purge_future._done = True
+        elif calls[0] >= 3:
+            core._stopping = True
+
+    core.maybe_bootstrap_topology = bootstrap  # type: ignore[method-assign]
+    asyncio.run(core._maintenance_loop())
+
+    assert calls[0] == 3
+    assert submitted.count(core._purge_raw_capture) == 2  # cycles 1 and 3, not 2

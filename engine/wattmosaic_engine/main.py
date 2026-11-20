@@ -277,6 +277,8 @@ class EngineCore(
         self.samples_persisted = 0
         #: Rows removed by the off-loop ``_purge_raw_capture`` job (ADR-0042).
         self.raw_capture_purged = 0
+        #: In-flight future for the capture purge; prevents overlap across ticks.
+        self._raw_capture_purge_future: Any | None = None
         self.events_persisted = 0
         self.persistence_errors = 0
         self.cycles = 0
