@@ -10,6 +10,16 @@ import { eventEvidenceCard, suspectedChangesCard } from './view-devices.js';
 
 /* --- Diagnostics ------------------------------------------------------ */
 
+// Raw CT capture (ADR-0042): HA's recorder is the production history, so an
+// engine that keeps no local readings is the default and not a fault.  A null
+// value means an older engine that does not report the additive detail yet.
+function rawCaptureText(capture) {
+  if (capture === null || capture === undefined) return '—';
+  if (!capture.enabled) return 'Off (history comes from the Home Assistant recorder)';
+  const days = capture.days;
+  return `On, keeping ${days} day${days === 1 ? '' : 's'}`;
+}
+
 async function renderDiagnostics(root, signal) {
   // Additive B4-UIb evidence payloads.  Both are optional: an older engine that
   // does not serve /isolation (or a /status without an audit bundle) still gets
@@ -53,6 +63,7 @@ async function renderDiagnostics(root, signal) {
           ['Learning', health.learning_active ? badge('Active', 'ok', { dot: true }) : badge('Paused', 'mute', { dot: true })],
           ['Last inference', ago(health.inference_last_run_at)],
           ['Last successful cycle', ago(report.last_successful_processing_at)],
+          ['Raw CT capture', rawCaptureText(health.raw_capture)],
           ['Generated', ago(report.generated_at)],
           ['Report OK', report.ok ? badge('Yes', 'ok') : badge('No', 'bad')],
         ]),

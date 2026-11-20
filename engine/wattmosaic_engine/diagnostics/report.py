@@ -263,6 +263,11 @@ def collect_diagnostics(
     generated = now if now is not None else utcnow()
     core_health = _safe_call(core, "health") if core is not None else None
     health = _health_section(core_health, None)
+    # ``_health_section`` drops ``details`` (it is additive and schema-free), so
+    # read the raw-capture flag from the full health response the same way the
+    # other keys are read.  An older engine without the key reports ``None``.
+    details = _health_details(core_health)
+    raw_capture = details.get("raw_capture") if details is not None else None
     engine_health = {
         "status": health.get("status", "unknown"),
         "contract_version": health.get("contract_version", CONTRACT_VERSION),
@@ -271,6 +276,7 @@ def collect_diagnostics(
         "learning_active": health.get("learning_active"),
         "queue_depth": health.get("queue_depth"),
         "inference_last_run_at": health.get("inference_last_run_at"),
+        "raw_capture": raw_capture if isinstance(raw_capture, Mapping) else None,
     }
     ha = {
         "connected": bool(_safe_call(hasource, "connected", False)) if hasource is not None else False,
