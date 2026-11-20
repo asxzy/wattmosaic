@@ -46,6 +46,8 @@ Usage::
     .venv/bin/python tools/audit/replay_capture.py --db data/wattmosaic.db --minutes 30
     .venv/bin/python tools/audit/replay_capture.py \\
         --jsonl data/raw/ct_events.jsonl --out /tmp/replay.json
+    .venv/bin/python tools/audit/replay_capture.py --ha-history --db data/copy.db \\
+        --minutes 60 --end 2026-01-01T12:00:00Z  # HA recorder (dev tooling)
     .venv/bin/python tools/audit/replay_capture.py --db data/wattmosaic.db \\
         --versions topo-7,map-4,mset-abc123  # explicit override
 
@@ -70,7 +72,9 @@ silently replaying against the wrong triple.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
+import math
 import os
 import signal
 import sqlite3
@@ -78,6 +82,7 @@ import sys
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -450,6 +455,176 @@ def load_capture_jsonl(
                    window_end=end, notes=notes)
 
 
+def _row_timestamp(row: Mapping[str, Any]) -> datetime | None:
+    """Epoch-seconds ``lu`` (else ``lc``) of an HA compressed history row."""
+    raw = row.get("lu") if row.get("lu") is not None else row.get("lc")
+    try:
+        ts = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(ts) or ts <= 0:
+        return None
+    return datetime.fromtimestamp(ts, tz=UTC)
+
+
+def load_capture_ha_history(
+    payload: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    entity_to_ct: Mapping[str, str],
+    start: datetime,
+    end: datetime,
+) -> Capture:
+    """Turn a compressed HA recorder payload into a replayable ``Capture`` (pure).
+
+    ``payload`` maps entity ids to ``history/history_during_period`` rows (``s``
+    is the state, ``lu`` the ``last_updated`` epoch seconds, falling back to
+    ``lc``).  Only wired CT entities are lifted; the topology is supplied by the
+    caller (``entity_to_ct``), so this function never reads a database or HA.
+    ``received_at`` is HA's ``last_updated`` because the recorder has no engine
+    arrival time (ADR-0042).
+    """
+    samples: list[CaptureSample] = []
+    notes: list[str] = [
+        "received_at = HA last_updated; arrival jitter not available (ADR-0042)"
+    ]
+    skipped_states = 0
+    skipped_entities: dict[str, int] = defaultdict(int)
+    first_by_entity: dict[str, datetime] = {}
+
+    for entity_id, rows in payload.items():
+        ct_id = entity_to_ct.get(str(entity_id)) or entity_to_ct.get(
+            aligner_key(str(entity_id))
+        )
+        if ct_id is None:
+            skipped_entities[str(entity_id)] += len(rows or ())
+            continue
+        row_count = 0
+        numeric_count = 0
+        for row in rows or ():
+            row_count += 1
+            timestamp = _row_timestamp(row)
+            if timestamp is None:
+                skipped_states += 1
+                continue
+            # HA bounds are strict and chunks are contiguous, so filter to the
+            # requested window before treating a state as non-numeric: rows
+            # outside the window are not part of this capture at all.
+            if not (start <= timestamp <= end):
+                continue
+            try:
+                value = float(row.get("s"))  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                skipped_states += 1
+                continue
+            if not math.isfinite(value):
+                skipped_states += 1
+                continue
+            numeric_count += 1
+            first_by_entity[str(entity_id)] = min(
+                first_by_entity.get(str(entity_id), timestamp), timestamp
+            )
+            samples.append(
+                CaptureSample(
+                    ct_id=str(ct_id),
+                    entity_id=str(entity_id),
+                    value_w=value,
+                    state_timestamp=timestamp,
+                    received_at=timestamp,
+                    quality="good",
+                    repeated=False,
+                    sequence=0,
+                )
+            )
+        if row_count == 0:
+            notes.append(f"{entity_id}: no recorder history (excluded from recorder?)")
+        elif numeric_count == 0:
+            notes.append(f"{entity_id}: no numeric history")
+
+    # A wired HA entity absent from the payload entirely is also an explicit
+    # gap. Bare aligner aliases are not real entities and are skipped here.
+    for entity_id in entity_to_ct:
+        if "." in entity_id and entity_id not in payload:
+            notes.append(f"{entity_id}: no recorder history (excluded from recorder?)")
+
+    for entity_id, first in first_by_entity.items():
+        if first > start + timedelta(hours=1):
+            notes.append(
+                f"{entity_id}: recorder history starts at {first.isoformat()} "
+                "(purge_keep_days?)"
+            )
+    if skipped_states:
+        notes.append(
+            f"{skipped_states} non-numeric states skipped (unavailable/unknown/empty)"
+        )
+    if skipped_entities:
+        top = sorted(skipped_entities.items(), key=lambda kv: -kv[1])[:5]
+        notes.append(
+            f"{sum(skipped_entities.values())} rows skipped: entity not in topology "
+            f"(e.g. {', '.join(f'{k} x{v}' for k, v in top)})"
+        )
+
+    samples.sort(key=lambda sample: (sample.received_at, sample.ct_id))
+    for sequence, sample in enumerate(samples):
+        sample.sequence = sequence
+    if not samples:
+        raise SystemExit(
+            "replay_capture: no HA recorder samples mapped into the topology window; "
+            "check the entity ids, --minutes and the recorder history"
+        )
+    return Capture(
+        samples=samples, source="ha-history", window_start=start, window_end=end, notes=notes
+    )
+
+
+async def fetch_ha_history_payload(
+    client: Any,
+    entity_ids: Sequence[str],
+    *,
+    start: datetime,
+    end: datetime,
+    chunk: timedelta = timedelta(hours=1),
+) -> dict[str, list[dict[str, Any]]]:
+    """Fetch ``[start, end)`` in ``chunk`` steps and merge rows per entity.
+
+    Each chunk is a separate ``history/history_during_period`` read, so a long
+    window never produces one oversized response. HA filters rows with strict
+    bounds (``start_time < last_updated < end_time``) and, with
+    ``include_start_time_state=True``, prepends one synthetic state stamped
+    exactly at ``start_time``. We request that synthetic row only for the first
+    chunk; later chunks set ``include_start_time_state=False`` so the state is
+    not repeated at every boundary. A real row landing exactly on an internal
+    chunk boundary may therefore be missed by both adjacent chunks (HA's bounds
+    are strict) -- an accepted limit of chunked recorder replay. Entities with
+    no rows are simply absent from a chunk's payload.
+    """
+    from tools.audit.ha_client import fetch_history  # noqa: PLC0415
+
+    step = chunk.total_seconds()
+    if step <= 0:
+        raise ValueError("chunk must be a positive timedelta")
+    if end < start:
+        raise ValueError("end must not be before start")
+
+    merged: dict[str, list[dict[str, Any]]] = {str(entity_id): [] for entity_id in entity_ids}
+    cursor = start
+    first = True
+    while cursor < end:
+        stop = min(cursor + chunk, end)
+        result = await fetch_history(
+            client,
+            list(entity_ids),
+            start=cursor.isoformat(),
+            end=stop.isoformat(),
+            minimal=True,
+            include_start_time_state=first,
+        )
+        first = False
+        for entity_id, rows in (result or {}).items():
+            merged.setdefault(str(entity_id), []).extend(dict(row) for row in rows or ())
+        cursor = stop
+    return merged
+
+
 # --------------------------------------------------------------------------- #
 # Replay (v3 surface)
 # --------------------------------------------------------------------------- #
@@ -756,6 +931,17 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--db", type=Path, default=None, help="engine SQLite database (read-only)")
     ap.add_argument("--jsonl", type=Path, default=None, help="captured ct_events.jsonl")
+    ap.add_argument(
+        "--ha-history",
+        action="store_true",
+        help="take samples from HA recorder history (dev tooling; needs HA_URL/HA_TOKEN)",
+    )
+    ap.add_argument(
+        "--end",
+        default=None,
+        metavar="ISO8601",
+        help="window end for --ha-history (default now, UTC)",
+    )
     ap.add_argument("--minutes", type=float, default=60.0, help="window length from the capture end")
     ap.add_argument(
         "--model-set",
@@ -809,14 +995,27 @@ def main() -> int:
     )
     args = ap.parse_args()
 
+    # --ha-history is a different sample source, not a third on-disk capture:
+    # it is mutually exclusive with --jsonl and --end only makes sense with it.
+    if args.ha_history and args.jsonl is not None:
+        ap.error("--ha-history is mutually exclusive with --jsonl")
+    if args.end is not None and not args.ha_history:
+        ap.error("--end requires --ha-history")
+
+    end_time: datetime | None = None
+    if args.ha_history:
+        end_time = _as_utc(args.end) if args.end else datetime.now(UTC)
+        if end_time is None:
+            ap.error(f"--end must be an ISO-8601 timestamp, got {args.end!r}")
+
     variant = getattr(args, "variant", None) or "as-shipped"
 
     db_path = args.db
     jsonl_path = args.jsonl
-    if db_path is None and jsonl_path is None:
+    if not args.ha_history and db_path is None and jsonl_path is None:
         db_path = DEFAULT_DB if DEFAULT_DB.exists() else None
         jsonl_path = None if db_path else (DEFAULT_JSONL if DEFAULT_JSONL.exists() else None)
-    if db_path is None and jsonl_path is None:
+    if not args.ha_history and db_path is None and jsonl_path is None:
         print(
             "replay_capture: no capture available. Pass --db <sqlite> or --jsonl <file>; "
             f"neither {DEFAULT_DB} nor {DEFAULT_JSONL} exists.",
@@ -832,7 +1031,8 @@ def main() -> int:
 
     # The v3 replay binds its operator to an explicit version triple, so the
     # topology archive is still read (read-only) for the channel map and the
-    # reported topology version. A JSONL capture does not carry wiring.
+    # reported topology version. A JSONL capture does not carry wiring. With
+    # --ha-history the wiring still comes from --db/DEFAULT_DB.
     topology_db = db_path or DEFAULT_DB
     topology_version = 0
     entity_to_ct: dict[str, str] = {}
@@ -868,6 +1068,32 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    elif args.ha_history:
+        print(
+            "replay_capture: --ha-history needs --db (or the default database) "
+            f"to supply the topology and version triple ({topology_db} does not exist)",
+            file=sys.stderr,
+        )
+        return 2
+
+    # --ha-history needs a wiring map from the topology and real entity ids to
+    # fetch (aligner aliases are not HA entity ids).
+    if args.ha_history:
+        if not entity_to_ct:
+            print(
+                "replay_capture: no CT channels in the topology; cannot replay from HA history",
+                file=sys.stderr,
+            )
+            return 2
+        assert end_time is not None  # set above for --ha-history
+        start_time = end_time - timedelta(minutes=args.minutes)
+        ha_entity_ids = sorted({eid for eid in entity_to_ct if "." in eid})
+        if not ha_entity_ids:
+            print(
+                "replay_capture: the topology has no HA entity ids to fetch history for",
+                file=sys.stderr,
+            )
+            return 2
 
     # Resolve the version triple the replay will report.  A --versions override
     # wins; otherwise the active versions are read from the database being
@@ -878,6 +1104,17 @@ def main() -> int:
     if args.versions is not None:
         versions = parse_versions_override(args.versions)
         versions_source = "cli-override"
+    elif args.ha_history:
+        versions = read_versions_from_db(topology_db)
+        versions_source = "database"
+        if versions is None:
+            print(
+                "replay_capture: no active topology/mapping/model versions in "
+                f"{topology_db}. Pass --versions TOPOLOGY,MAPPING,MODEL_SET to "
+                "replay explicitly.",
+                file=sys.stderr,
+            )
+            return 2
     elif db_path is not None:
         versions = read_versions_from_db(db_path)
         versions_source = "database"
@@ -898,15 +1135,44 @@ def main() -> int:
 
     started = time.monotonic()
     with _Deadline(args.timeout_s):
-        try:
-            if db_path is not None:
-                capture = load_capture_db(db_path, minutes=args.minutes, entity_to_ct=entity_to_ct)
-            else:
-                capture = load_capture_jsonl(jsonl_path, minutes=args.minutes,
-                                             entity_to_ct=entity_to_ct)
-        except ReplayTimeout:
-            print(f"replay_capture: loading exceeded {args.timeout_s:.0f}s", file=sys.stderr)
-            return 124
+        # Only the HA-history source does network/async work and needs its own
+        # error handling. The --db and --jsonl loaders keep their original
+        # behaviour, including SystemExit for an empty/missing capture.
+        if args.ha_history:
+            import aiohttp  # noqa: PLC0415
+
+            from tools.audit.ha_client import HAClient  # noqa: PLC0415
+
+            async def _fetch() -> dict[str, list[dict[str, Any]]]:
+                async with HAClient.from_env() as client:
+                    return await fetch_ha_history_payload(
+                        client, ha_entity_ids, start=start_time, end=end_time
+                    )
+
+            try:
+                payload = asyncio.run(_fetch())
+            except ReplayTimeout:
+                print(f"replay_capture: loading exceeded {args.timeout_s:.0f}s", file=sys.stderr)
+                return 124
+            except (RuntimeError, OSError, aiohttp.ClientError, TimeoutError) as exc:
+                print(f"replay_capture: HA history fetch failed: {exc}", file=sys.stderr)
+                return 2
+            try:
+                capture = load_capture_ha_history(
+                    payload, entity_to_ct=entity_to_ct, start=start_time, end=end_time
+                )
+            except SystemExit as exc:
+                # The loader's message already carries the "replay_capture:"
+                # prefix; do not prefix it a second time.
+                print(str(exc), file=sys.stderr)
+                return 3
+            for note in capture.notes:
+                print(f"note: {note}", file=sys.stderr)
+        elif db_path is not None:
+            capture = load_capture_db(db_path, minutes=args.minutes, entity_to_ct=entity_to_ct)
+        else:
+            capture = load_capture_jsonl(jsonl_path, minutes=args.minutes,
+                                         entity_to_ct=entity_to_ct)
 
         if not capture.samples:
             print(

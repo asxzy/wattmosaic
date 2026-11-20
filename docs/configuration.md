@@ -43,12 +43,13 @@ incompatible contract. The `/mapping` endpoint and v2 forms are gone — use
 | Variable | Default | Description |
 | --- | --- | --- |
 | `WM_DATABASE_PATH` | `data/wattmosaic.db` | SQLite file. On HA OS use `/data/wattmosaic.db` (persistent volume). |
-| `WM_RETENTION_DAYS_RAW` | `7` | L1 raw reader-sample retention. The validator accepts 1–90 days; must exceed your longest model-training horizon. Reduced from 30 to 7: raw samples are ~88 % of database growth (~710 MB/day at 30 samples/s), so 30 d meant a 21–28 GB steady state on Pi-class hosts. The add-on `retention_days_raw` option has the same bounds. |
+| `WM_RAW_CAPTURE_DAYS` | `0` | Debug only. Days of full-rate canonical CT readings kept in `ct_samples`. 0 = not persisted; the Home Assistant recorder is the production history (ADR-0042). 0–90; App option `raw_capture_days`. |
+| `WM_RETENTION_DAYS_RAW` | `7` | L1 raw retention for `device_state_samples`, `inference_results`, `reconciliation_results`, `data_quality_events` and `system_events`. It no longer governs `ct_samples`. The validator accepts 1–90 days. The add-on `retention_days_raw` option has the same bounds. |
 | `WM_RETENTION_DAYS_AGGREGATES` | `730` | L3 aggregate retention (30–36500 days). |
 | `WM_RETENTION_DAYS_EVIDENCE` | unset | L2 event-evidence horizon in days. Empty disables it: evidence is long-term and only an explicit operator action bounds it. |
 | `WM_RETENTION_DAYS_VERSIONS` | unset | L4 version-history horizon in days. Empty disables it, for the same reason. |
 | `WM_EVIDENCE_RETENTION_DAYS` | `400` | Derived-evidence horizon (DEC-30). |
-| `WM_EVIDENCE_RAW_RETENTION_DAYS` | `30` | Raw samples cited by evidence; expires sooner than derived evidence. |
+| `WM_EVIDENCE_RAW_RETENTION_DAYS` | `30` | Thins the high-resolution points inside `event_evidence.samples_json`; expires sooner than derived evidence. It no longer deletes `ct_samples`. |
 | `WM_RETENTION_DAYS_SNAPSHOTS` | `90` | Age horizon for `inference_snapshots` (~51–52 MB/day). |
 | `WM_RETENTION_DAYS_RECORDS` | `90` | Age horizon for `event_inference_records`. |
 | `WM_RETENTION_DAYS_HA_EVENTS` | `90` | Age horizon for `ha_events_v3`. |
@@ -68,6 +69,51 @@ An explicit L2/L4 horizon must be at least as long as the raw horizon: evidence
 that does not outlive the raw window it explains cannot be audited.
 Before any migration numbered ≥ 13 the engine automatically writes a
 pre-migration backup next to the database (see [`docs/deployment.md`](deployment.md)).
+
+### Debugging production with Home Assistant history
+
+By default the engine does not persist raw CT readings (`WM_RAW_CAPTURE_DAYS=0`,
+ADR-0042). HA's recorder already holds the same `state_changed` stream, so it is
+the production raw history. To debug a production issue, first check that the
+recorder actually holds the CT entities, then replay from that history. Both
+tools read HA history over the WebSocket API and take the HA connection from the
+environment (or a `.env` file): `HA_URL` (or `HA_HOST`) and a long-lived access
+token in `HA_TOKEN`. Neither writes to a live install and neither reads HA
+registries. On the database side, replay takes the wiring and the version triple
+from `--db`; the coverage probe takes only the CT entity ids from the latest
+`topology_versions` in `--db`.
+
+Check coverage (per CT entity: row count, first/last timestamp, largest gap and
+an `ok` / `short` / `missing` status; exits non-zero if any entity is `missing`).
+Options include `--days` (default 10), `--entities ID ...` to supply ids directly
+instead of reading them from `--db`, and `--json` for machine-readable output:
+
+```bash
+python tools/audit/check_recorder_coverage.py --db <copy> [--days 10] [--entities ID ...] [--json]
+```
+
+Replay the last hour of recorder history (wiring and versions come from `--db`):
+
+```bash
+python tools/audit/replay_capture.py --ha-history --db <copy> --minutes 60 [--end 2026-11-19T12:00:00]
+```
+
+Three caveats apply (ADR-0042):
+
+1. **Recorder exclusions.** Users who exclude 1 Hz power sensors from the recorder
+   or lower `purge_keep_days` have no HA history. The coverage probe detects it;
+   such users can set `raw_capture_days` to keep a debug capture in the engine.
+2. **Not byte-identical.** HA history has no engine `received_at`, so a replay
+   loses arrival delay and reordering. Timing bugs need `raw_capture_days > 0`
+   to reproduce.
+3. **No deep re-detection.** After a detector fix, previously missed events can
+   be recovered only within the recorder window (10 days by default). Learning
+   continues from live data.
+
+Turn on `raw_capture_days` when the recorder excludes the CT entities or when
+reproducing an arrival-time or reordering bug. Deleting captured rows reuses
+SQLite pages, so the database file stops growing but does not shrink; a manual
+`VACUUM` with the engine stopped reclaims the disk. No automated shrink runs.
 
 ## Behaviour
 
@@ -231,6 +277,7 @@ WM_API_TOKEN=<random 32+ chars>
 WM_DATABASE_PATH=/data/wattmosaic.db
 WM_LEARNING_ENABLED=true
 WM_STALE_AFTER_S=120
+WM_RAW_CAPTURE_DAYS=0
 WM_RETENTION_DAYS_RAW=7
 WM_EVENT_QUEUE_MAX=1000
 WM_STEADY_HEARTBEAT_S=60

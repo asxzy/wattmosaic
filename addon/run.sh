@@ -52,6 +52,7 @@ retention_days_raw|WM_RETENTION_DAYS_RAW|7
 retention_days_aggregates|WM_RETENTION_DAYS_AGGREGATES|730
 retention_days_evidence|WM_RETENTION_DAYS_EVIDENCE|
 retention_days_versions|WM_RETENTION_DAYS_VERSIONS|
+raw_capture_days|WM_RAW_CAPTURE_DAYS|0
 queue_max_size|WM_QUEUE_MAX_SIZE|5000
 auto_placement|WM_AUTO_PLACEMENT|false
 "
@@ -243,7 +244,8 @@ esac
 
 for numeric in WM_STALE_AFTER_S WM_INFERENCE_INTERVAL_S WM_RETENTION_DAYS_RAW \
                WM_RETENTION_DAYS_AGGREGATES WM_QUEUE_MAX_SIZE \
-               WM_RETENTION_DAYS_EVIDENCE WM_RETENTION_DAYS_VERSIONS; do
+               WM_RETENTION_DAYS_EVIDENCE WM_RETENTION_DAYS_VERSIONS \
+               WM_RAW_CAPTURE_DAYS; do
   # The L2/L4 horizons are optional: empty means disabled (EngineConfig reads
   # it as None), so only validate a value when one was actually supplied.
   [[ -z "${!numeric}" ]] && continue

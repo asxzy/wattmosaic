@@ -106,6 +106,14 @@ class DiagnosticsApiMixin:
                 # new top-level field so an older HA integration keeps parsing
                 # the response unchanged.
                 "learning_status": self._learning_status_payload(),
+                # Whether raw CT readings are kept locally (ADR-0042).  HA's
+                # recorder is the production history; raw capture is a debug
+                # option.  ``details`` is additive and schema-free, so an older
+                # integration keeps parsing this response unchanged.
+                "raw_capture": {
+                    "days": int(self.config.raw_capture_days),
+                    "enabled": self.config.raw_capture_days > 0,
+                },
                 "samples_ingested": self.samples_ingested,
                 "events_ingested": self.events_ingested,
                 "queue": self.persist_queue.stats(),

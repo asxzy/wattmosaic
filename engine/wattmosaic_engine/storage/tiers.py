@@ -48,7 +48,8 @@ TIERS: tuple[str, ...] = ("L1", "L2", "L3", "L4")
 #: evidence / aggregate / versioned -- rather than omitted:
 #:
 #: * ``device_state_samples`` -- per-device state rows, pruned on the raw
-#:   horizon like every other per-instant row (L1).
+#:   horizon like the other per-instant telemetry rows (L1).  ``ct_samples`` is
+#:   the exception: it has its own capture horizon (ADR-0042).
 #: * ``inference_results``, ``reconciliation_results``, ``data_quality_events``,
 #:   ``system_events`` -- per-cycle telemetry and log rows on the raw horizon,
 #:   not aggregates and not versioned state.  ``system_events`` is an
@@ -74,6 +75,7 @@ TIER_TABLES: dict[str, tuple[str, ...]] = {
     # §2.1 -- high-resolution raw measurements.  The spec names only
     # ``ct_samples``; ``device_state_samples`` and the four per-cycle telemetry
     # tables are per-instant rows on the raw horizon too (see the note below).
+    # ``ct_samples`` is L1 but ships on its own capture horizon (ADR-0042).
     "L1": (
         "ct_samples",
         "device_state_samples",
@@ -221,11 +223,13 @@ def iter_tier_tables() -> Iterator[tuple[str, str]]:
 
 #: The horizon a prunable table is deleted on.  ``"raw"`` is the L1 raw-sample
 #: horizon (``retention_days_raw``); ``"aggregate"`` is the L3 bucket horizon
-#: (``retention_days_aggregates``).  Declared per table rather than derived from
-#: the tier so a table whose shipped retention predates the tier model keeps the
-#: behaviour its readers already depend on.
+#: (``retention_days_aggregates``); ``"capture"`` is the dedicated ct-sample
+#: horizon handed to the background purge (ADR-0042).  Declared per table rather
+#: than derived from the tier so a table whose shipped retention predates the tier
+#: model keeps the behaviour its readers already depend on.
 RAW_HORIZON = "raw"
 AGGREGATE_HORIZON = "aggregate"
+CAPTURE_HORIZON = "capture"
 
 
 def is_prunable(table: str) -> bool:
@@ -245,9 +249,11 @@ def prunable_tables() -> tuple[tuple[str, str, str], ...]:
     """``(table, timestamp_column, horizon)`` for every table the retention pass deletes.
 
     The column is the age key each table is actually pruned by, and the horizon
-    is :data:`RAW_HORIZON` or :data:`AGGREGATE_HORIZON`.  Both are kept here so
-    ``Database.prune`` reads one declaration instead of a second hand-written
-    list that can drift from the registry.
+    is :data:`RAW_HORIZON`, :data:`AGGREGATE_HORIZON` or :data:`CAPTURE_HORIZON`.
+    They are kept here so ``Database.prune`` reads one declaration instead of a
+    second hand-written list that can drift from the registry.  A capture-horizon
+    table is skipped by the on-loop prune when ``capture_days`` is passed and
+    deleted by the background purge instead (ADR-0042).
 
     This is the shipped behaviour, entry by entry.  The legacy
     ``device_events`` log used to be age-pruned here; migration 25 archives it
@@ -255,7 +261,7 @@ def prunable_tables() -> tuple[tuple[str, str, str], ...]:
     would abort on its read-only trigger).
     """
     return (
-        ("ct_samples", "received_at", RAW_HORIZON),
+        ("ct_samples", "received_at", CAPTURE_HORIZON),
         ("device_state_samples", "received_at", RAW_HORIZON),
         ("inference_results", "timestamp", RAW_HORIZON),
         ("reconciliation_results", "timestamp", RAW_HORIZON),
@@ -880,11 +886,18 @@ def partition_decision() -> str:
 #: is 1-90 (``RETENTION_DAYS_RAW_RANGE``), which the add-on schema mirrors.
 RAW_RETENTION_ENV = "WM_RETENTION_DAYS_RAW"
 
+#: ``addon/run.sh`` maps the App option ``raw_capture_days`` onto this variable
+#: (ADR-0042).  Named here so the capture option surface and the engine field
+#: cannot drift apart in prose.  The default is 0 (no persistence); the accepted
+#: range is 0-90, which the add-on schema mirrors.
+RAW_CAPTURE_ENV = "WM_RAW_CAPTURE_DAYS"
+
 
 __all__ = [
     "AGGREGATE_HORIZON",
     "BASE_TIER_TABLES",
     "CANONICAL_EVIDENCE_TABLE",
+    "CAPTURE_HORIZON",
     "DEFAULT_DERIVED_RETENTION_DAYS",
     "DEFAULT_EVIDENCE_RETENTION_DAYS",
     "DEFAULT_SAMPLES_RETENTION_DAYS",
@@ -893,6 +906,7 @@ __all__ = [
     "DERIVED_RETENTION_TABLES",
     "LEGACY_EVENT_TABLES",
     "PRUNABLE_TABLES",
+    "RAW_CAPTURE_ENV",
     "RAW_HORIZON",
     "RAW_RETENTION_ENV",
     "TABLE_TIERS",

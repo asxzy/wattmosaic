@@ -13,8 +13,14 @@ item is in [verification-report.md](verification-report.md) §8 and §10 and in
 - **Implied steady state** with the 3.0 defaults (raw 7 days, derived 90 days):
   ≈ 5 GB raw + ≈ 4.5 GB snapshots.
 - **TODO.**
-  - [ ] Store raw readings as change points (drop repeated values within the
-        reader's resolution/σ) or downsample after a short full-rate horizon.
+  - [x] Raw CT readings are no longer persisted by default; see ADR-0042 and the
+        implementation plan in `docs/specs/raw-capture/`. Measured with
+        `tools/dev/perf_runtime.py --quick` (T10, 2026-11-19): at the default
+        `raw_capture_days=0`, `ct_samples` growth is **0 B/day** (table absent from
+        the per-table report) and total DB growth is **≈ 537 MB/day**; with
+        `raw_capture_days=7` the raw share returns (**≈ 507 MB/day** in
+        `ct_samples`, **≈ 1.39 GB/day** total). Evidence and full numbers in
+        `docs/specs/raw-capture/verification.md` §AC9.
   - [ ] Store snapshots as change points or deltas, or shorten the default
         snapshot horizon for Pi-class installs.
   - [ ] Expose the derived-table retention settings (`WM_RETENTION_DAYS_*`) as

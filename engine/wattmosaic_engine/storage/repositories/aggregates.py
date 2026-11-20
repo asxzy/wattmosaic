@@ -19,7 +19,7 @@ from typing import Any
 from ...contracts import utcnow
 from ..migrations import LATEST_VERSION
 from ..repositories import Repository, iso
-from ..tiers import AGGREGATE_HORIZON, TABLE_TIERS, prunable_tables, table_tiers
+from ..tiers import AGGREGATE_HORIZON, CAPTURE_HORIZON, TABLE_TIERS, prunable_tables, table_tiers
 
 
 class AggregatesRepository(Repository):
@@ -76,7 +76,9 @@ class AggregatesRepository(Repository):
             ).fetchone()
         return float(row["e"]) if row else 0.0
 
-    def prune(self, raw_days: int = 30, aggregate_days: int = 730) -> dict[str, int]:
+    def prune(
+        self, raw_days: int = 30, aggregate_days: int = 730, *, capture_days: int | None = None
+    ) -> dict[str, int]:
         """Delete rows past their horizon; never delete long-term state.
 
         Which tables are pruned, by which timestamp column and on which horizon,
@@ -84,9 +86,12 @@ class AggregatesRepository(Repository):
         rather than restated here.  The registry's horizon is authoritative for a
         table.
 
-        The signature and its defaults are unchanged: ``main.py``'s maintenance
-        loop still calls ``prune(retention_days_raw, retention_days_aggregates)``
-        and gets exactly the behaviour it had before.
+        ``capture_days`` controls the :data:`~wattmosaic_engine.storage.tiers.CAPTURE_HORIZON`
+        tables (``ct_samples``).  When it is ``None`` (the default) they use the
+        raw cutoff, preserving the legacy behaviour for direct storage callers.
+        When it is any ``int`` (including 0) they are **skipped** and reported as
+        ``0``: the background purge owns them (ADR-0042).  The existing defaults
+        and positional order are unchanged.
         """
         now = utcnow()
         raw_cutoff = iso(now - timedelta(days=raw_days))
@@ -96,6 +101,10 @@ class AggregatesRepository(Repository):
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 for table, col, horizon in prunable_tables():
+                    if horizon == CAPTURE_HORIZON and capture_days is not None:
+                        # The background purge owns this tier (ADR-0042); the
+                        # exempt-table loop below reports it with a count of 0.
+                        continue
                     cutoff = agg_cutoff if horizon == AGGREGATE_HORIZON else raw_cutoff
                     cur = self._conn.execute(f"DELETE FROM {table} WHERE {col} < ?", (cutoff,))
                     removed[table] = cur.rowcount

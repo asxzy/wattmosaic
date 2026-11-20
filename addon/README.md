@@ -88,6 +88,7 @@ Open the app → **Configuration**:
 | `database_path` | `/data/wattmosaic.db` | SQLite file inside the persistent volume. |
 | `retention_days_raw` | `7` | Raw sample/event retention (1–90 days; reduced from 30 to keep the database small on Pi-class hosts). |
 | `retention_days_aggregates` | `730` | Aggregate retention. |
+| `raw_capture_days` | `0` | Debug only: days of full-rate CT readings kept locally (0–90; `0` = off). Production history comes from Home Assistant's recorder (`purge_keep_days`, default 10), so full-rate local capture is normally unnecessary. |
 | `queue_max_size` | `5000` | Bounded ingestion queue. |
 
 Generate an API token with:
