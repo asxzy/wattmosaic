@@ -8,18 +8,29 @@ layer (a config revision plus a configuration event).
 
 from __future__ import annotations
 
+from typing import Any
+
 from aiohttp import web
 
-from ..facade import InvalidRequest
+from ..facade import FacadeUnavailable, InvalidRequest
 from ..server import _facade, _ok, _read_json, maybe_await
 
 
+def _require(request: web.Request, name: str) -> Any:
+    """The facade method, or 503 when this backend has no endpoints surface."""
+    method = getattr(_facade(request), name, None)
+    if method is None:
+        raise FacadeUnavailable(f"{name} is not supported by this backend")
+    return method
+
+
 async def endpoints(request: web.Request) -> web.Response:
-    return _ok(await maybe_await(_facade(request).endpoints()))
+    return _ok(await maybe_await(_require(request, "endpoints")()))
 
 
 async def endpoint(request: web.Request) -> web.Response:
-    return _ok(await maybe_await(_facade(request).endpoint(request.match_info["endpoint_id"])))
+    method = _require(request, "endpoint")
+    return _ok(await maybe_await(method(request.match_info["endpoint_id"])))
 
 
 async def endpoint_scope(request: web.Request) -> web.Response:
@@ -35,7 +46,7 @@ async def endpoint_scope(request: web.Request) -> web.Response:
         raise InvalidRequest("subject_id must be a string")
     return _ok(
         await maybe_await(
-            _facade(request).set_endpoint_scope(
+            _require(request, "set_endpoint_scope")(
                 request.match_info["endpoint_id"], action, subject_id
             )
         )
@@ -55,7 +66,7 @@ async def endpoint_update(request: web.Request) -> web.Response:
         raise InvalidRequest("enabled must be a boolean")
     return _ok(
         await maybe_await(
-            _facade(request).update_endpoint(
+            _require(request, "update_endpoint")(
                 request.match_info["endpoint_id"],
                 display_name=display_name,
                 enabled=enabled,

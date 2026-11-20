@@ -82,6 +82,23 @@ class MappingProvider(Protocol):
 
 
 @runtime_checkable
+class EndpointsProvider(Protocol):
+    """Measurement Endpoint reads and the D2 scope/update writes."""
+
+    def endpoints(self) -> Any: ...
+
+    def endpoint(self, endpoint_id: str) -> Any: ...
+
+    def set_endpoint_scope(
+        self, endpoint_id: str, action: str, subject_id: str | None = None
+    ) -> Any: ...
+
+    def update_endpoint(
+        self, endpoint_id: str, *, display_name: str | None = None, enabled: bool | None = None
+    ) -> Any: ...
+
+
+@runtime_checkable
 class ModelsProvider(Protocol):
     """Power-model reads for one device."""
 
@@ -122,6 +139,7 @@ class DiagnosticsProvider(Protocol):
 __all__ = [
     "DiagnosticsProvider",
     "DiscoveryProvider",
+    "EndpointsProvider",
     "MappingProvider",
     "ModelsProvider",
     "SnapshotProvider",

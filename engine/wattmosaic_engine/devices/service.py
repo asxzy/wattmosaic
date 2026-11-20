@@ -11,8 +11,10 @@ from K01/K03.  It never imports ``runtime.fakes``.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Iterable
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 
 from ..contracts import (
     ChangeDetection,
@@ -28,6 +30,8 @@ from ..contracts import (
     ScopeStatus,
     utcnow,
 )
+
+log = logging.getLogger(__name__)
 
 
 def confirmed_endpoint_estimate_status(
@@ -79,6 +83,71 @@ def _as_datetime(value: Any) -> datetime:
     return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
 
 
+class EndpointRows(Protocol):
+    """The S13 read surface the endpoint builders need (the ``entities`` repo)."""
+
+    def endpoints(self, *, enabled_only: bool = False) -> list[dict[str, Any]]: ...
+
+    def revisions(self, endpoint_id: str) -> list[dict[str, Any]]: ...
+
+
+def endpoint_from_row(
+    row: dict[str, Any], revision_rows: Iterable[dict[str, Any]] = ()
+) -> MeasurementEndpoint:
+    """Build the :class:`MeasurementEndpoint` contract from a raw S13 row.
+
+    The repository row carries storage-only columns (``metadata_json``) that the
+    contract forbids, so the contract is built field by field instead of with
+    ``MeasurementEndpoint(**row)``.  The revisions are passed in rather than
+    defaulted away: a confirmed single-subject CT validates only with its
+    user-declared latest revision (DEC-05).  Raises on an invalid row.
+    """
+    return MeasurementEndpoint(
+        endpoint_id=row["endpoint_id"],
+        kind=row.get("kind") or "ct",
+        entity_id=row.get("entity_id"),
+        energy_entity_id=row.get("energy_entity_id"),
+        display_name=row.get("display_name"),
+        scope=row.get("scope") or "unknown",
+        scope_status=row.get("scope_status") or "candidate",
+        scope_subject_id=row.get("scope_subject_id"),
+        panel_id=row.get("panel_id"),
+        enabled=bool(row.get("enabled", True)),
+        created_at=_as_datetime(row["created_at"]),
+        revisions=[_revision_from_row(r) for r in revision_rows],
+    )
+
+
+def load_endpoint(entities: EndpointRows, row: dict[str, Any]) -> MeasurementEndpoint:
+    """One endpoint contract, with its revisions loaded from ``entities``."""
+    try:
+        revisions = entities.revisions(row["endpoint_id"])
+    except Exception:  # noqa: BLE001 - no revision source -> none
+        revisions = []
+    return endpoint_from_row(row, revisions)
+
+
+def endpoints_from_repo(
+    entities: EndpointRows, *, enabled_only: bool = False
+) -> list[MeasurementEndpoint]:
+    """Every valid S13 endpoint as a contract; an invalid row is skipped.
+
+    This is the one place raw ``entities.endpoints()`` rows become contracts.
+    The endpoints API, the topology v3 read and the matrix column tree all
+    share it.  A malformed row is logged and skipped instead of failing the
+    whole read, which would otherwise turn ``/topology/v3`` into a 400.
+    """
+    out: list[MeasurementEndpoint] = []
+    for row in entities.endpoints(enabled_only=enabled_only):
+        try:
+            out.append(load_endpoint(entities, row))
+        except Exception as exc:  # noqa: BLE001 - one bad row must not break the read
+            log.warning(
+                "skipping invalid measurement endpoint %r: %s", row.get("endpoint_id"), exc
+            )
+    return out
+
+
 class DeviceService:
     """Create/retire devices and manage endpoint scope lifecycles."""
 
@@ -123,29 +192,14 @@ class DeviceService:
     # -- Measurement Endpoints -------------------------------------------- #
 
     def _endpoint(self, row: dict[str, Any]) -> MeasurementEndpoint:
-        endpoint_id = row["endpoint_id"]
-        revisions = [_revision_from_row(r) for r in self.db.repos.entities.revisions(endpoint_id)]
-        return MeasurementEndpoint(
-            endpoint_id=endpoint_id,
-            kind=row.get("kind") or "ct",
-            entity_id=row.get("entity_id"),
-            energy_entity_id=row.get("energy_entity_id"),
-            display_name=row.get("display_name"),
-            scope=row.get("scope") or "unknown",
-            scope_status=row.get("scope_status") or "candidate",
-            scope_subject_id=row.get("scope_subject_id"),
-            panel_id=row.get("panel_id"),
-            enabled=bool(row.get("enabled", True)),
-            created_at=_as_datetime(row["created_at"]),
-            revisions=revisions,
-        )
+        return load_endpoint(self.db.repos.entities, row)
 
     def get_endpoint(self, endpoint_id: str) -> MeasurementEndpoint | None:
         row = self.db.repos.entities.get_endpoint(endpoint_id)
         return self._endpoint(row) if row else None
 
     def list_endpoints(self) -> list[MeasurementEndpoint]:
-        return [self._endpoint(row) for row in self.db.repos.entities.endpoints()]
+        return endpoints_from_repo(self.db.repos.entities)
 
     def upsert_endpoint(self, endpoint: MeasurementEndpoint) -> MeasurementEndpoint:
         """Persist a discovered endpoint and its initial config revision."""
@@ -307,5 +361,9 @@ class EndpointFacade:
 __all__ = [
     "DeviceService",
     "EndpointFacade",
+    "EndpointRows",
     "confirmed_endpoint_estimate_status",
+    "endpoint_from_row",
+    "endpoints_from_repo",
+    "load_endpoint",
 ]

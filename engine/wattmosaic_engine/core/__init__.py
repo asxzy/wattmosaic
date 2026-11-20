@@ -17,6 +17,7 @@ from .discovery_api import (
     DiscoveryApiMixin,
     _is_numeric_state,
 )
+from .endpoints_api import EndpointsApiMixin
 from .mapping_api import MappingApiMixin
 from .models_api import ModelsApiMixin
 from .runtime import (
@@ -36,6 +37,7 @@ __all__ = [
     "ComponentStatus",
     "DiagnosticsApiMixin",
     "DiscoveryApiMixin",
+    "EndpointsApiMixin",
     "MAINTENANCE_INTERVAL_S",
     "MappingApiMixin",
     "ModelsApiMixin",

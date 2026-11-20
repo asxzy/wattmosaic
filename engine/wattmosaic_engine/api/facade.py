@@ -23,6 +23,7 @@ from ..contracts import CONTRACT_VERSION, ServiceCommand, ServiceResult
 from .protocols import (
     DiagnosticsProvider,
     DiscoveryProvider,
+    EndpointsProvider,
     MappingProvider,
     ModelsProvider,
     SnapshotProvider,
@@ -56,12 +57,13 @@ class EngineFacade(
     MappingProvider,
     ModelsProvider,
     DiscoveryProvider,
+    EndpointsProvider,
     DiagnosticsProvider,
     Protocol,
 ):
     """Everything the HTTP layer needs from the engine.
 
-    This is the composition of the six per-area protocols in
+    This is the composition of the seven per-area protocols in
     :mod:`api.protocols`.  It declares no methods of its own, so existing
     facades and test doubles that satisfy the old monolithic protocol keep
     working unchanged.

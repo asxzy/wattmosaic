@@ -18,10 +18,10 @@ from ..contracts import (
     EdgeEvidence,
     EdgeLifecycleV3,
     EndpointConfigRevision,
-    MeasurementEndpoint,
     RelationType,
     TopologyEdgeV3,
 )
+from ..devices.service import endpoints_from_repo
 from ..electrical.topology_graph import DisplayNode, TopologyGraph
 
 # --------------------------------------------------------------------------- #
@@ -216,9 +216,9 @@ def _topology_graph(service: Any, version_id: str | None = None) -> TopologyGrap
     vid = version_id or service.current().topology_version_id
     repo = service._topo
     edges = [TopologyEdgeV3(**_edge_row(row)) for row in repo.edges(vid)]
-    endpoints = [
-        MeasurementEndpoint(**row) for row in service._endpoints.endpoints()
-    ]
+    # Raw S13 rows carry the storage-only ``metadata_json`` column, which the
+    # contract forbids; the shared builder drops it and loads the revisions.
+    endpoints = endpoints_from_repo(service._endpoints)
     return TopologyGraph.from_edges(edges, endpoints, at=_now(service))
 
 

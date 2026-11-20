@@ -115,32 +115,14 @@ class MappingApiMixin:
 
     def _matrix_endpoints(self) -> list[Any]:
         """Canonical S13 measurement endpoints as contract models."""
-        from ..contracts import MeasurementEndpoint
+        from ..devices.service import endpoints_from_repo
 
+        # The shared builder drops the storage-only ``metadata_json`` column,
+        # loads each endpoint's revisions and skips a row that does not validate.
         try:
-            rows = self.db.repos.entities.endpoints()
+            return list(endpoints_from_repo(self.db.repos.entities))
         except Exception:  # noqa: BLE001 - no S13 source -> no endpoints
             return []
-        out: list[Any] = []
-        for row in rows:
-            data = dict(row)
-            # The repository exposes the storage-only ``metadata_json`` column;
-            # the contract forbids extra keys, so drop it before validation.
-            data.pop("metadata_json", None)
-            # A confirmed single-subject CT validates only with its user-declared
-            # revision, so the revisions are loaded rather than defaulted away.
-            try:
-                data["revisions"] = [
-                    {k: v for k, v in dict(r).items() if k != "id"}
-                    for r in self.db.repos.entities.revisions(data["endpoint_id"])
-                ]
-            except Exception:  # noqa: BLE001 - no revision source -> none
-                data["revisions"] = []
-            try:
-                out.append(MeasurementEndpoint(**data))
-            except Exception:  # noqa: BLE001 - one bad row must not break the tree
-                continue
-        return out
 
     def _matrix_topology_graph(self, endpoints: Sequence[Any], version_id: str) -> Any:
         """T1 graph over the active topology version's edges and the endpoints."""

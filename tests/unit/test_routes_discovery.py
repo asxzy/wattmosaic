@@ -150,6 +150,7 @@ def test_facade_composes_area_protocols() -> None:
     from wattmosaic_engine.api.protocols import (
         DiagnosticsProvider,
         DiscoveryProvider,
+        EndpointsProvider,
         MappingProvider,
         ModelsProvider,
         SnapshotProvider,
@@ -162,6 +163,7 @@ def test_facade_composes_area_protocols() -> None:
         MappingProvider,
         ModelsProvider,
         DiscoveryProvider,
+        EndpointsProvider,
         DiagnosticsProvider,
     ):
         assert issubclass(EngineFacade, protocol)

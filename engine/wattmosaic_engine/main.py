@@ -66,6 +66,7 @@ from .core import (
     ComponentStatus,
     DiagnosticsApiMixin,
     DiscoveryApiMixin,
+    EndpointsApiMixin,
     MappingApiMixin,
     ModelsApiMixin,
     RuntimeMixin,
@@ -203,6 +204,7 @@ class EngineCore(
     MappingApiMixin,
     ModelsApiMixin,
     DiscoveryApiMixin,
+    EndpointsApiMixin,
     DiagnosticsApiMixin,
 ):
     """Owns runtime state and implements :class:`EngineFacade`.
