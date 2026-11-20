@@ -158,6 +158,22 @@ class TopologyEvidence(EdgeEvidence):
         return self.conflict
 
 
+def _observed_entry(value: Any) -> tuple[float | None, float | None]:
+    """``observed`` values are a sigma, or ``(sigma, measured_delta)``.
+
+    ``measured_delta`` is the reader's level change across the group's window
+    (post median minus pre median), or ``None`` when it could not be measured.
+    """
+    if isinstance(value, tuple):
+        sigma = value[0] if len(value) > 0 else None
+        measured = value[1] if len(value) > 1 else None
+        return (
+            float(sigma) if sigma is not None else None,
+            float(measured) if measured is not None else None,
+        )
+    return (float(value) if value is not None else None, None)
+
+
 @dataclass(frozen=True, slots=True)
 class DeltaObservation:
     """One FINAL event group reduced to signed per-reader deltas.
@@ -538,8 +554,16 @@ class TopologyInferenceView:
                 tol = _SIGMA_FACTOR * math.sqrt(sigma_p**2 + (beta * sigma_c) ** 2)
                 if abs(parent_delta - beta * child_delta) <= tol:
                     field_name, stamp = "support", "last_support_at"
-                else:
+                elif abs(parent_delta) <= _SIGMA_FACTOR * sigma_p < abs(beta * child_delta):
+                    # Design §5: the parent did not move (its delta is within
+                    # 3 sigma_p of zero) while the child moved beyond it.
                     field_name, stamp = "conflict", "last_conflict_at"
+                else:
+                    # Both readers moved, by different amounts: the parent's step
+                    # also carries other loads changing in the same window.  That
+                    # is neutral, not evidence against containment (live mains
+                    # almost always carry concurrent changes).
+                    continue
                 causes.setdefault(key, set()).add(cause)
                 evidence = edge.evidence.model_copy(
                     update={
@@ -559,22 +583,73 @@ class TopologyInferenceView:
                 if child not in decisive or parent in decisive or parent not in observed:
                     continue
                 child_delta = decisive[child][0]
-                sigma_p = observed.get(parent) or self.sigma_floor_w
+                sigma_p, measured = _observed_entry(observed.get(parent))
+                sigma_p = max(sigma_p or self.sigma_floor_w, self.sigma_floor_w)
                 beta = edge.beta if edge.beta is not None else 1.0
-                if abs(beta * child_delta) <= _SIGMA_FACTOR * max(sigma_p, self.sigma_floor_w):
+                noise = _SIGMA_FACTOR * sigma_p
+                if abs(beta * child_delta) <= noise:
                     # Hidden in the parent's noise: not evidence either way.
                     continue
+                field_name, stamp = "conflict", "last_conflict_at"
+                if measured is not None:
+                    # The parent's level was measured across the window: P3 may
+                    # simply not have flagged a small step on a busy feed.
+                    if abs(measured - beta * child_delta) <= noise:
+                        field_name, stamp = "support", "last_support_at"
+                    elif abs(measured) > noise:
+                        # The parent moved, just not by the child's amount:
+                        # concurrent loads, not a contradiction (neutral).
+                        continue
                 key = (parent, child, _CONTAINS)
                 causes.setdefault(key, set()).add(cause)
                 current = edges[position]
                 evidence = current.evidence.model_copy(
                     update={
-                        "conflict": current.evidence.conflict + 1,
-                        "last_conflict_at": at,
+                        field_name: getattr(current.evidence, field_name) + 1,
+                        stamp: at,
                         "independent_causes": len(causes[key]),
                     }
                 )
                 edges[position] = current.model_copy(update={"evidence": evidence})
+
+            # A measured parent that moved with the child is support even when
+            # no edge exists yet (P3 did not flag the parent's step, so the
+            # co-step pass above never created the pair).  A flat or unmeasured
+            # parent never creates an edge: there is nothing to count against.
+            for child, (child_delta, _child_sigma) in decisive.items():
+                for parent, entry in observed.items():
+                    if parent == child or parent in decisive:
+                        continue
+                    key = (parent, child, _CONTAINS)
+                    if key in by_index:
+                        continue
+                    sigma_p, measured = _observed_entry(entry)
+                    if measured is None:
+                        continue
+                    noise = _SIGMA_FACTOR * max(sigma_p or self.sigma_floor_w, self.sigma_floor_w)
+                    if abs(child_delta) <= noise or abs(measured - child_delta) > noise:
+                        continue
+                    causes.setdefault(key, set()).add(cause)
+                    edges.append(
+                        TopologyEdgeV3(
+                            edge_id=f"te-inf::{parent}::{child}",
+                            relation=RelationType.CONTAINS,
+                            source_endpoint_id=parent,
+                            target_endpoint_id=child,
+                            lifecycle=EdgeLifecycleV3.CANDIDATE,
+                            declared_by="inference",
+                            beta=1.0,
+                            beta_basis="unity",
+                            evidence=TopologyEvidence(
+                                support=1,
+                                last_support_at=at,
+                                independent_causes=len(causes[key]),
+                            ),
+                            valid_from=at,
+                            pinned=False,
+                        )
+                    )
+                    by_index[key] = len(edges) - 1
 
         # -- co-response without containment -> CORRELATED ------------------- #
         readers = sorted(decisive)

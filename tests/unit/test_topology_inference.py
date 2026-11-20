@@ -445,3 +445,61 @@ def test_infer_topology_accepts_event_group_contracts():
 def test_missing_reader_delta_is_absent_not_zero():
     group = _delta("g1", {"main": 25.0})
     assert "sub" not in group.deltas
+
+
+# -- Live mains carry concurrent changes (dev-server finding, 2026-11-20) ----- #
+# On a real house every main/sub-feed step mixes the child's change with other
+# loads, and a small branch step on a busy feed is often not flagged by P3.  The
+# old ledger counted both as conflict, so true containments went CONFLICTED
+# (36-74 % conflict) and nothing was ever suggested.
+
+
+def test_a_co_step_of_a_different_size_is_neutral_not_conflict():
+    view = _chain_view()
+    for i in range(4):
+        view = view.observe_group(
+            _delta(f"g{i}", {"main": 60.0, "sub": 25.0}, cause=f"cause-{i}")
+        )
+    edge = view.edge("main", "sub")
+    assert edge is None or (edge.evidence.conflict == 0 and edge.evidence.support == 0)
+
+
+def test_a_measured_parent_level_change_counts_as_support():
+    view = _chain_view()
+    for i in range(3):
+        view = view.observe_group(
+            _delta(f"g{i}", {"sub": 25.0}, cause=f"cause-{i}"),
+            observed={"main": (2.0, 24.0), "sub": (2.0, 25.0)},
+        )
+    edge = view.edge("main", "sub")
+    assert edge is not None
+    assert edge.evidence.support == 3
+    assert edge.evidence.conflict == 0
+
+
+def test_a_measured_flat_parent_counts_as_conflict():
+    # A co-step creates the pair; a later child step under a parent measured
+    # flat counts against it.  A flat parent alone never creates an edge.
+    view = _chain_view().observe_group(_delta("g0", {"main": 25.0, "sub": 25.0}, cause="c0"))
+    view = view.observe_group(
+        _delta("g1", {"sub": 25.0}, cause="cause-1"),
+        observed={"main": (2.0, 0.5), "sub": (2.0, 25.0)},
+    )
+    edge = view.edge("main", "sub")
+    assert edge is not None
+    assert edge.evidence.support == 1
+    assert edge.evidence.conflict == 1
+    fresh = _chain_view().observe_group(
+        _delta("g2", {"sub": 25.0}, cause="cause-2"),
+        observed={"main": (2.0, 0.5), "sub": (2.0, 25.0)},
+    )
+    assert fresh.edge("main", "sub") is None
+
+
+def test_a_parent_that_moved_by_another_amount_is_neutral():
+    view = _chain_view().observe_group(
+        _delta("g0", {"sub": 25.0}, cause="cause-0"),
+        observed={"main": (2.0, 90.0), "sub": (2.0, 25.0)},
+    )
+    edge = view.edge("main", "sub")
+    assert edge is None or (edge.evidence.conflict == 0 and edge.evidence.support == 0)

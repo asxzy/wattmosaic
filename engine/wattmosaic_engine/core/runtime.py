@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import statistics
 import threading
 import time
 from collections import deque
@@ -2053,23 +2054,62 @@ class RuntimeMixin:
         """
         self.submit_background(self._fold_group_ledger, group)
 
-    def _observed_readers(self) -> dict[str, float | None]:
+    #: Pre/post windows around a group's onset used to measure a reader's level
+    #: change for T5 (a step on a busy feed is often not flagged by P3).
+    _T5_PRE_S = 120.0
+    _T5_SETTLE_S = 5.0
+    _T5_POST_S = 150.0
+
+    def _observed_readers(
+        self, group: EventGroup | None = None
+    ) -> dict[str, Any]:
         """Readers holding a usable reading now, with their noise sigma (T5).
 
         A reader that is stale, missing or excluded by the D3 quality gate is
-        not "observed": its silence is never conflict evidence (HB §18).
+        not "observed": its silence is never conflict evidence (HB §18).  With a
+        ``group``, each value is ``(sigma, measured_delta)``: the reader's median
+        level after the group's onset minus its median level before it, or
+        ``None`` when either side has fewer than two samples.  T5 then counts a
+        parent as "did not move" only when it was measured flat.
         """
         now = self._clock()
         excluded = set(excluded_readers(self.latest_quality))
-        out: dict[str, float | None] = {}
+        onset = getattr(group, "opened_at", None) if group is not None else None
+        out: dict[str, Any] = {}
         for reader in self.reader_state.readers():
             if reader in excluded:
                 continue
             held = self.reader_state.held(reader, now)
             if held.value is None or str(held.state) != "held":
                 continue
-            out[str(reader)] = self.reader_state.sigma(reader)
+            sigma = self.reader_state.sigma(reader)
+            if onset is None:
+                out[str(reader)] = sigma
+                continue
+            out[str(reader)] = (sigma, self._measured_level_change(str(reader), onset))
         return out
+
+    def _measured_level_change(self, reader: str, onset: datetime) -> float | None:
+        """Median level after ``onset`` minus median level before it, or None."""
+        pre = [
+            s.active_power_w
+            for s in self.reader_state.window(
+                reader, onset - timedelta(seconds=self._T5_PRE_S), onset
+            )
+            if s.active_power_w is not None
+        ]
+        post = [
+            s.active_power_w
+            for s in self.reader_state.window(
+                reader,
+                onset + timedelta(seconds=self._T5_SETTLE_S),
+                onset + timedelta(seconds=self._T5_POST_S),
+            )
+            if s.active_power_w is not None
+        ]
+        if len(pre) < 2 or len(post) < 2:
+            return None
+        return float(statistics.median(post) - statistics.median(pre))
 
     def _fold_group_ledger(self, group: EventGroup) -> int:
         """Fold ``group``'s reader deltas into the T5 ledger and persist edges.
@@ -2088,7 +2128,7 @@ class RuntimeMixin:
             from ..electrical.topology_inference import DeltaObservation
 
             obs = DeltaObservation.from_group(group)
-            updated = view.observe_group(obs, observed=self._observed_readers())
+            updated = view.observe_group(obs, observed=self._observed_readers(group))
             self.topology_inference = updated
             repo = self.db.repos.topology_v3
             changed = 0
