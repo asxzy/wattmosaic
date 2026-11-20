@@ -9,7 +9,7 @@ import { slots } from './slots.js';
 import { applyRoute, el, get, hideBanner, notify, parseHash, pollTick, render, startPolling, state, stopPolling } from './core.js';
 import { renderOverview } from './view-overview.js';
 import { eventEvidenceCard, groupRangesCard, mappingMatrixCard, renderDevice, renderDevices, residualDecompositionCard, suspectedChangesCard, versionHistoryCard } from './view-devices.js';
-import { confirmTopology, renderTopology } from './view-topology.js';
+import { renderTopology, reviewTopologyEdges } from './view-topology.js';
 import { discoverWindowSelect, runDiscovery, topologyDiscoverSlot, topologyLearningBanner } from './view-discover.js';
 import { renderQuality } from './view-quality.js';
 import { renderDiagnostics } from './view-diagnostics.js';
@@ -91,7 +91,7 @@ Object.assign(slots, {
   topologyDiscoverSlot,
   runDiscovery,
   topologyLearningBanner,
-  confirmTopology,
+  reviewTopologyEdges,
 });
 
 function boot() {

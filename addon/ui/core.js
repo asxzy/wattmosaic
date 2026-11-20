@@ -318,7 +318,7 @@ const STRINGS = {
   // publish a reduced confidence rather than gating.  These read as status,
   // never as a block or a required confirmation.
   topology_dynamic: 'Dynamic topology',
-  topology_confirm_optional: 'Confirm topology (optional — raises confidence)',
+  topology_confirm_optional: 'Confirm topology edges (optional — raises confidence)',
 };
 const label = (value) => STRINGS[value] || titleCase(value || 'unknown');
 
@@ -597,10 +597,6 @@ const state = {
     closed: new Set(),    // node ids the user explicitly collapsed
     filter: '',
   },
-  // Nesting compares a historical window, so its answer stays true for
-  // minutes.  Caching it means revisiting the tab paints instantly instead
-  // of paying the whole comparison again.
-  nesting: { data: null, at: 0, inflight: false },
   // Placement discovery is explicit: it only runs when the user asks, so its
   // result is kept here and survives a repaint of the same tab.
   discover: {
@@ -618,13 +614,6 @@ const state = {
     ranWindow: null,
   },
 };
-
-const NESTING_TTL_MS = 10 * 60 * 1000;
-// A refresh younger than this is not worth repeating: a just-completed
-// comparison would otherwise be fetched again the instant the tab is
-// reopened.
-const NESTING_REFRESH_AFTER_MS = 60 * 1000;
-const NESTING_PATH = '/topology/nesting?hours=12';
 
 const viewRoot = () => document.getElementById('view');
 
@@ -667,24 +656,15 @@ function setFooter(health) {
 }
 
 /* ---------------------------------------------------------------------- *
- * Tier vocabulary (fetched once; the engine owns the labels)
+ * Tier vocabulary
  * ---------------------------------------------------------------------- */
 
+// Contract 3.0 removed GET /confidence_tiers (interfaces.md §9, "Removed at
+// Z1") and has no replacement route: confidence is a vector now.  The legacy
+// tier labels are the panel's static ``TIER_ORDER``/``tierInfo`` vocabulary,
+// so this resolves without a request and the callers keep their shape.
 async function loadTiers() {
-  if (state.tiers) return state.tiers;
-  try {
-    const payload = await get('/confidence_tiers');
-    if (payload && Array.isArray(payload.tiers)) {
-      state.tiers = payload;
-      for (const tier of payload.tiers) {
-        state.tierMap.set(tier.tier, tier);
-      }
-    }
-  } catch {
-    // Static fallback: the vocabulary is stable, and a missing fetch must not
-    // stop the panel from rendering.  Labels stay honest either way.
-    state.tiers = { tiers: [], calibrated: false };
-  }
+  if (!state.tiers) state.tiers = { tiers: [], calibrated: false };
   return state.tiers;
 }
 
@@ -732,24 +712,22 @@ function applyRoute() {
  * ---------------------------------------------------------------------- */
 
 async function fetchOverview(signal) {
-  const [health, status, snapshot, devices, residuals, mapping] = await Promise.all([
+  const [health, status, snapshot, devices, residuals] = await Promise.all([
     get('/health', signal),
     get('/status', signal).catch(() => null),
     get('/snapshot', signal).catch(() => null),
     get('/devices', signal).catch(() => []),
-    // Additive derived data: an engine that predates these routes still shows
-    // the overview, just without the new cards.
+    // Additive derived data: an engine that predates this route still shows
+    // the overview, just without the new cards.  (The legacy flat mapping
+    // route was removed in 3.0; the Matrix tab reads /matrix.)
     get('/residuals', signal).catch(() => null),
-    get('/mapping', signal).catch(() => null),
   ]);
-  return { health, status, snapshot, devices, residuals, mapping };
+  return { health, status, snapshot, devices, residuals };
 }
 
 // The 8s live poll only feeds updateOverviewLive(), which reads health,
-// status, snapshot and devices.  /residuals and /mapping are expensive
-// (the latter is an N+1 model read) and their results were discarded on
-// every tick, so the timer never fetches them.  The Matrix tab calls
-// /mapping itself when actually opened; the initial render uses fetchOverview.
+// status, snapshot and devices.  /residuals is expensive and its result was
+// discarded on every tick, so the timer never fetches it.
 async function fetchOverviewLive(signal) {
   const [health, status, snapshot, devices] = await Promise.all([
     get('/health', signal),
@@ -967,9 +945,6 @@ export {
   discoverWindowLabel,
   discoverLongRun,
   state,
-  NESTING_TTL_MS,
-  NESTING_REFRESH_AFTER_MS,
-  NESTING_PATH,
   viewRoot,
   setConnection,
   setBanner,

@@ -26,5 +26,5 @@ export const slots = {
   topologyDiscoverSlot: null,
   runDiscovery: null,
   topologyLearningBanner: null,
-  confirmTopology: null,
+  reviewTopologyEdges: null,
 };

@@ -1033,8 +1033,8 @@ function topologyLearningBanner(status, topology) {
       el('button', {
         class: 'btn btn-sm',
         type: 'button',
-        onclick: slots.confirmTopology,
-        title: 'Optional — raises wiring confidence; learning and results already use the active topology',
+        onclick: () => slots.reviewTopologyEdges(),
+        title: 'Optional — pin edges one by one in the edges card; learning and results already use the active topology',
       }, STRINGS.topology_confirm_optional),
     ]),
   ]);

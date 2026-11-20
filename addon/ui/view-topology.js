@@ -6,7 +6,7 @@
    ========================================================================== */
 
 import { slots } from './slots.js';
-import { NESTING_PATH, NESTING_REFRESH_AFTER_MS, NESTING_TTL_MS, STRINGS, ago, api, badge, card, clear, describeError, el, emptyState, frag, get, label, notice, notify, num, percent, post, render, sourceTone, statCard, state, statusBadge, titleCase, toneFor, watts } from './core.js';
+import { STRINGS, ago, badge, card, clear, describeError, el, emptyState, frag, get, label, notice, notify, percent, post, render, sourceTone, statCard, state, statusBadge, toneFor, watts } from './core.js';
 import { suspectedChangesCard, versionHistoryCard } from './view-devices.js';
 
 /* --- Topology --------------------------------------------------------- */
@@ -16,8 +16,21 @@ import { suspectedChangesCard, versionHistoryCard } from './view-devices.js';
 // entity ids.  A second derivation in the browser is exactly what used to
 // produce a silently wrong tree, so the engine owns the hierarchy and the
 // panel renders it verbatim.
+//
+// Contract 3.0 has no single "topology object" any more (the legacy
+// GET /topology, /topology/nesting and POST /topology/confirm were removed at
+// the cutover).  The view reads three 3.0 surfaces and joins them in
+// ``topologyModel``:
+//   * GET /topology/v3  — active version, typed edges (every lifecycle; the
+//     PROVISIONAL ones are the old nesting suggestions) and the primary tree;
+//   * GET /endpoints    — the measurement endpoints (the "CT channels");
+//   * GET /topology/tree — the engine-owned hierarchy.
+// ``/health`` carries ``details.topology.configured``: the only signal that
+// decides "No topology configured" (no measurement endpoint at all).
 
 const TREE_PATH = '/topology/tree';
+const V3_PATH = '/topology/v3';
+const ENDPOINTS_PATH = '/endpoints';
 const CT_TONES = { main: 'accent', branch: 'info' };
 // ADR-0029 retired the third CT role.  A payload from an older engine can
 // still carry it; ``STRINGS`` above aliases it to "Branch CT" so the badge
@@ -49,12 +62,15 @@ const topologyHead = (topology) =>
         onclick: () => slots.runDiscovery(),
         disabled: state.discover.running ? true : null,
       }, state.discover.running ? 'Discovering…' : 'Discover devices'),
-      topology
+      // 3.0 has no blanket "confirm topology" write: confirmation is per edge
+      // (POST /topology/edges/{id}/pin), from the edges card, on a user click.
+      // This button only moves focus there; it never writes.
+      topology && (topology.edges || []).length
         ? el('button', {
           class: 'btn',
           type: 'button',
-          onclick: confirmTopology,
-          title: 'Optional — raises wiring confidence; learning and results already use the active topology',
+          onclick: reviewTopologyEdges,
+          title: 'Optional — pin edges one by one in the edges card; learning and results already use the active topology',
         }, STRINGS.topology_confirm_optional)
         : null,
     ]),
@@ -80,82 +96,100 @@ async function renderTopology(root, signal) {
   root.append(topologyHead(null));
   root.append(topologySkeleton());
 
-  // 2. Only the fast endpoints are awaited here.  /topology/nesting compares
-  //    a 12-hour window and can take tens of seconds; putting it in this
-  //    Promise.all is what made the whole tab wait for it.  /status is cheap
-  //    and carries the learning state the banner needs, so it joins here.
-  const [topology, treeResult, status, topologyV3] = await Promise.all([
-    get('/topology', signal).catch((err) => {
-      if (err && err.status === 404) return null;
-      throw err;
-    }),
-    get(TREE_PATH, signal).then(
-      (data) => ({ ok: true, data, err: null }),
-      (err) => ({ ok: false, data: null, err })
-    ),
+  // 2. Every request here is a cheap read of persisted state; they run
+  //    together.  /status carries the learning state the banner needs and
+  //    /health carries ``details.topology.configured``.
+  const settle = (promise) => promise.then(
+    (data) => ({ ok: true, data, err: null }),
+    (err) => ({ ok: false, data: null, err })
+  );
+  const [v3Result, endpointsResult, treeResult, status, health] = await Promise.all([
+    settle(get(V3_PATH, signal)),
+    settle(get(ENDPOINTS_PATH, signal)),
+    settle(get(TREE_PATH, signal)),
     get('/status', signal).catch(() => null),
-    // U2: the v3 typed-edge payload (T4).  A backend without it renders an
-    // explicit unavailable state; the rest of the topology view stays intact.
-    get('/topology/v3', signal).catch(() => null),
+    get('/health', signal).catch(() => null),
   ]);
   if (signal.aborted) return;
 
-  clear(root);
-  root.append(topologyHead(topology));
+  const tree = treeResult.ok && treeResult.data && Array.isArray(treeResult.data.roots)
+    ? treeResult.data
+    : null;
+  const topology = topologyModel({
+    v3: v3Result.ok ? v3Result.data : null,
+    endpoints: endpointsResult.ok ? endpointsResult.data : null,
+    tree,
+    health,
+  });
 
-  if (!topology) {
+  clear(root);
+  root.append(topologyHead(topology.configured === false ? null : topology));
+
+  // "No topology configured" means the engine has no measurement endpoint at
+  // all — exactly ``health.details.topology.configured === false``.  An
+  // empty 3.0 topology (endpoints, no edges yet) is a real topology and is
+  // rendered below with an explicit "no confirmed edges yet" state.
+  if (topology.configured === false) {
     root.append(
       emptyState(
         'No topology configured',
-        'The engine cannot disaggregate without a topology. Configure it in the WattMosaic integration; results stay unavailable until then.',
+        'The engine has no measurement endpoints yet, so it cannot disaggregate. Configure the WattMosaic integration (or run discovery); results stay unavailable until then.',
         { tone: 'warn' }
       )
     );
     return;
   }
 
-  const tree = treeResult.ok && treeResult.data && Array.isArray(treeResult.data.roots)
-    ? treeResult.data
-    : null;
+  // Neither the endpoints nor the topology read answered: say so, with the
+  // real error, instead of guessing "not configured".
+  if (topology.configured === null && !v3Result.ok && !endpointsResult.ok) {
+    root.append(
+      notice(
+        'Topology unavailable',
+        `The engine did not return its topology (${describeError(v3Result.err || endpointsResult.err)}). Nothing was changed; try again.`,
+        'bad'
+      )
+    );
+    return;
+  }
 
   const learningBanner = slots.topologyLearningBanner(status, topology);
   if (learningBanner) root.append(learningBanner);
   root.append(topologySummary(topology, tree));
+  const empty = noConfirmedEdgesNotice(topology);
+  if (empty) root.append(empty);
   if (!tree) root.append(topologyFallbackNotice(treeResult.err));
 
   // The hierarchy is the subject of this tab, so it gets the full width: a
   // tree squeezed into half a page forces every ct_id to wrap.
   root.append(topologyHierarchyCard(topology, tree));
 
-  // Additive B4-UIb cards: the topology's append-only version history and any
-  // suspected configuration changes the audit pass detected.  Both read only
-  // payloads already fetched for this view (/topology and /status).
+  // Additive B4-UIb cards: the topology's version and any suspected
+  // configuration changes the audit pass detected.  Both read only payloads
+  // already fetched for this view (/topology/v3 and /status).
   root.append(versionHistoryCard(topology, null, null));
   root.append(suspectedChangesCard(status, null));
-
-  // U2: v3 typed edges with their lifecycle, PROVISIONAL accept/reject (writes
-  // only on user action) and a link to the matching matrix columns.
-  root.append(topologyV3
-    ? v3EdgesCard(v3TopologyModel(topologyV3))
-    : emptyState(
-        'Typed topology edges unavailable',
-        'GET /api/v1/topology/v3 returned no payload. The hierarchy above is still usable; no edge is promoted or written in the meantime.'
-      ));
 
   // Placement discovery renders into its own slot; it is only populated when
   // the user asks for it (or when a previous answer is cached in state).
   root.append(slots.topologyDiscoverSlot());
 
-  // The candidates card is a real card from the start: either the cached
-  // comparison or an explicit loading state.  It is replaced in place.
+  // The measurement endpoints, and the typed edges with their lifecycle.
+  // PROVISIONAL edges are the engine's nesting suggestions (they replace the
+  // removed /topology/nesting); Accept / Pin / Reject write only on a click.
   root.append(
     el('div', { class: 'topo-grid' }, [
-      topologyChannelsCard(topology),
-      topologyCandidatesSlot(),
+      topologyChannelsCard(topology, endpointsResult.ok ? null : endpointsResult.err),
+      v3Result.ok
+        ? v3EdgesCard(v3TopologyModel(v3Result.data))
+        : card('Typed topology edges (v3)', [
+          el('p', { class: 'stat-hint' },
+            `GET /api/v1/topology/v3 failed (${describeError(v3Result.err)}). The hierarchy above is still usable; no edge is promoted or written in the meantime.`),
+        ], { id: 'topology-edges' }),
     ])
   );
 
-  const notes = [...(topology.notes || []), ...((tree && tree.notes) || [])];
+  const notes = (tree && tree.notes) || [];
   if (notes.length) {
     root.append(
       card(
@@ -166,18 +200,165 @@ async function renderTopology(root, signal) {
       )
     );
   }
-
-  // 3. Everything above is on screen.  Now, and only now, ask for the slow
-  //    comparison; it fills one card when it lands.
-  fillNestingCandidates(signal);
 }
 
 function topologyFallbackNotice(err) {
   const missing = Boolean(err && err.status === 404);
   const text = missing
-    ? 'This engine does not serve /api/v1/topology/tree (HTTP 404), so the engine-owned hierarchy cannot be drawn. The hierarchy card falls back to CT containment from parent_ct_id only, and devices are not placed.'
-    : `The hierarchy could not be loaded (${describeError(err)}). The hierarchy card falls back to CT containment from parent_ct_id only, and devices are not placed.`;
+    ? 'This engine does not serve /api/v1/topology/tree (HTTP 404), so the engine-owned hierarchy cannot be drawn. The hierarchy card falls back to containment from confirmed CONTAINS edges only, and devices are not placed.'
+    : `The hierarchy could not be loaded (${describeError(err)}). The hierarchy card falls back to containment from confirmed CONTAINS edges only, and devices are not placed.`;
   return notice('Hierarchy unavailable', text, 'warn');
+}
+
+/* --- The 3.0 topology model (pure, node-testable) ---------------------- */
+
+const _absent = (value) => value === null || value === undefined;
+const _edgeText = (value) => (_absent(value) || value === '' ? null : String(value));
+const _lower = (value) => String(value || '').toLowerCase();
+
+// An edge still in force: not rejected or retired, and not closed.
+const edgeInForce = (edge) =>
+  Boolean(edge)
+  && !['rejected', 'retired'].includes(_lower(edge.lifecycle))
+  && _absent(edge.valid_until);
+
+// The authority test the engine's ``_topology_health`` uses: an edge counts
+// as confirmed when its lifecycle is CONFIRMED or a user pinned it.
+const edgeConfirmed = (edge) =>
+  edgeInForce(edge) && (_lower(edge.lifecycle) === 'confirmed' || edge.pinned === true);
+
+// "confirmed" when any active edge is CONFIRMED or pinned, else "candidate".
+const topologyStatusFromEdges = (edges) =>
+  ((Array.isArray(edges) ? edges : []).some(edgeConfirmed) ? 'confirmed' : 'candidate');
+
+// GET /endpoints answers ``{endpoints: [...]}``; tolerate a bare list.
+const endpointList = (payload) => {
+  if (Array.isArray(payload)) return payload;
+  if (payload && Array.isArray(payload.endpoints)) return payload.endpoints;
+  return null;
+};
+
+const latestRevision = (endpoint) => {
+  const revisions = Array.isArray(endpoint && endpoint.revisions) ? endpoint.revisions : [];
+  return revisions.reduce(
+    (best, rev) => (!best || Number(rev.revision) > Number(best.revision) ? rev : best),
+    null
+  );
+};
+
+// child endpoint -> parent endpoint, from confirmed CONTAINS edges only.  A
+// PROVISIONAL edge is a soft suggestion and never places a node (HB §16).
+function containsParents(edges) {
+  const parents = new Map();
+  for (const edge of Array.isArray(edges) ? edges : []) {
+    if (_lower(edge && edge.relation) !== 'contains' || !edgeConfirmed(edge)) continue;
+    const parent = _edgeText(edge.source_endpoint_id);
+    const child = _edgeText(edge.target_endpoint_id);
+    if (parent && child && parent !== child && !parents.has(child)) parents.set(child, parent);
+  }
+  return parents;
+}
+
+// One measurement endpoint as the channel row the cards render.  The CT role
+// is read from the declared scope and the confirmed CONTAINS edges; it is
+// never guessed from a name or an id.
+function endpointChannel(endpoint, parents, hasChildren) {
+  const id = String(endpoint.endpoint_id);
+  const rev = latestRevision(endpoint) || {};
+  const parent = parents.get(id) || null;
+  const scope = _lower(endpoint.scope);
+  const ctType = scope === 'panel_feed' || (!parent && hasChildren.has(id))
+    ? 'main'
+    : parent || scope === 'circuit'
+      ? 'branch'
+      : 'unknown';
+  return {
+    ct_id: id,
+    name: _edgeText(endpoint.display_name),
+    entity_id: _edgeText(endpoint.entity_id),
+    kind: _edgeText(endpoint.kind),
+    scope: _edgeText(endpoint.scope),
+    scope_status: _edgeText(endpoint.scope_status),
+    ct_type: ctType,
+    phase: _edgeText(rev.phase) || 'unknown',
+    polarity: _edgeText(rev.polarity) || 'normal',
+    enabled: endpoint.enabled !== false,
+    parent_ct_id: parent,
+  };
+}
+
+// health.details.topology.configured is authoritative; without it, "has at
+// least one endpoint" is the same rule.  ``null`` means "cannot tell".
+function topologyConfigured(health, endpoints) {
+  const details = health && health.details && health.details.topology;
+  if (details && typeof details.configured === 'boolean') return details.configured;
+  return Array.isArray(endpoints) ? endpoints.length > 0 : null;
+}
+
+/**
+ * Join the 3.0 reads into the one object the topology cards render.
+ *
+ * ``v3`` is GET /topology/v3, ``endpoints`` GET /endpoints, ``tree`` GET
+ * /topology/tree and ``health`` GET /health; any of them may be null.
+ */
+function topologyModel({ v3 = null, endpoints = null, tree = null, health = null } = {}) {
+  const edges = v3 && Array.isArray(v3.edges) ? v3.edges : [];
+  const list = endpointList(endpoints);
+  const parents = containsParents(edges);
+  const hasChildren = new Set(parents.values());
+  const channels = (list || [])
+    .filter((ep) => ep && !_absent(ep.endpoint_id))
+    .map((ep) => endpointChannel(ep, parents, hasChildren));
+  const healthTopology = (health && health.details && health.details.topology) || {};
+  const stats = (tree && tree.stats) || {};
+  return {
+    configured: topologyConfigured(health, list),
+    status: topologyStatusFromEdges(edges),
+    version: v3 && !_absent(v3.version) ? v3.version : null,
+    version_id: (v3 && _edgeText(v3.version_id)) || _edgeText(healthTopology.version),
+    created_at: null,
+    channels,
+    endpoint_count: list ? list.length : (Number(healthTopology.endpoints) || 0),
+    edges,
+    edge_count: edges.length,
+    active_edge_count: edges.filter(edgeInForce).length,
+    confirmed_edge_count: edges.filter(edgeConfirmed).length,
+    device_count: !_absent(stats.devices) ? Number(stats.devices)
+      : (!_absent(healthTopology.devices) ? Number(healthTopology.devices) : null),
+    primary_display_tree: v3 && Array.isArray(v3.primary_display_tree) ? v3.primary_display_tree : [],
+  };
+}
+
+// An empty 3.0 topology is normal on a fresh install: the endpoints exist but
+// no containment edge has been confirmed yet.  Say exactly that.
+function noConfirmedEdgesNotice(topology) {
+  if (!topology || topology.configured === false) return null;
+  if ((topology.confirmed_edge_count || 0) > 0) return null;
+  const endpoints = topology.endpoint_count || (topology.channels || []).length;
+  const suggested = topology.active_edge_count || 0;
+  return notice(
+    'No confirmed edges yet',
+    `${endpoints} measurement endpoint${endpoints === 1 ? '' : 's'} known, but no containment edge is confirmed, so the hierarchy lists them unplaced. `
+      + (suggested
+        ? `${suggested} suggested edge${suggested === 1 ? '' : 's'} can be pinned or rejected in the edges card below.`
+        : 'Run discovery, or let the engine propose edges from events; suggestions appear in the edges card below.'),
+    'info'
+  );
+}
+
+// Moves focus to the edges card.  It never writes: in 3.0 an edge is
+// confirmed one at a time with POST /topology/edges/{id}/pin, on a click.
+function reviewTopologyEdges() {
+  const target = document.getElementById('topology-edges');
+  if (target && typeof target.scrollIntoView === 'function') {
+    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+  if (target && typeof target.focus === 'function') {
+    // A section is not focusable by default; -1 lets focus land without
+    // adding the card to the tab order.
+    target.setAttribute('tabindex', '-1');
+    target.focus({ preventScroll: true });
+  }
 }
 
 function topologySummary(topology, tree) {
@@ -193,7 +374,9 @@ function topologySummary(topology, tree) {
     : String(counts.branch + counts.unknown);
   const devices = stats && stats.devices !== undefined
     ? String(stats.devices)
-    : String((topology.devices || []).length);
+    : topology.device_count !== undefined && topology.device_count !== null
+      ? String(topology.device_count)
+      : String((topology.devices || []).length);
   const unplaced = stats
     ? (Number(stats.unplaced_devices) || 0) + (Number(stats.unplaced_circuits) || 0)
     : 0;
@@ -206,7 +389,7 @@ function topologySummary(topology, tree) {
       ? null
       : notice(
           STRINGS.topology_dynamic + ' — authoritative for inference and learning',
-          'The current topology drives results and learning now. Candidate wiring carries a reduced confidence score; samples are collected with topology confidence tracked. Confirming the CT roles is optional and raises that confidence.',
+          'The current topology drives results and learning now. Candidate wiring carries a reduced confidence score; samples are collected with topology confidence tracked. Pinning edges in the edges card is optional and raises that confidence.',
           'info'
         );
 
@@ -222,7 +405,9 @@ function topologySummary(topology, tree) {
         tone: unplaced ? 'warn' : null,
       }),
       statCard('Status', label(topology.status), { tone: toneFor(topology.status) }),
-      statCard('Version', String(topology.version ?? '—'), { hint: ago(topology.created_at) }),
+      statCard('Version', String(topology.version ?? '—'), {
+        hint: topology.created_at ? ago(topology.created_at) : (topology.version_id || ''),
+      }),
     ]),
   ]);
 }
@@ -596,7 +781,7 @@ function topologyHierarchyCard(topology, tree) {
     actions: [filter, expandAll, collapseAll],
     foot: tree
       ? `Computed by the engine${tree.version !== undefined ? ` (contract v${tree.version})` : ''} at ${ago(tree.generated_at)}. Each device appears once, under the circuit that measures it.`
-      : 'Fallback view: CT containment from parent_ct_id only. Devices are not placed.',
+      : 'Fallback view: containment from confirmed CONTAINS edges only. Devices are not placed.',
   });
 
   // Paint in the same task as the card so the tree is never a frame late.
@@ -833,14 +1018,17 @@ function hierarchyRow(node, depth, expanded, key, ctx, childCount) {
 
 const GLYPHS = { panel: '▤', group: '▫', circuit: '◉', device: '◆' };
 
-function topologyChannelsCard(topology) {
+function topologyChannelsCard(topology, err = null) {
   const channels = [...(topology.channels || [])].sort((a, b) => {
     const order = { main: 0, branch: 1, unknown: 2 };
     return (order[a.ct_type] ?? 9) - (order[b.ct_type] ?? 9) || String(a.ct_id).localeCompare(String(b.ct_id));
   });
+  const empty = err
+    ? emptyState('Endpoints unavailable', `GET /api/v1/endpoints failed (${describeError(err)}).`)
+    : emptyState('No measurement endpoints', 'The engine has no measurement endpoints yet.');
   return el('section', { class: 'card', id: 'topology-channels' }, [
     el('div', { class: 'card-head' }, [
-      el('h2', {}, 'CT channels'),
+      el('h2', {}, 'Measurement endpoints'),
       el('span', { class: 'spacer' }),
       el('span', { class: 'stat-hint' }, `${channels.length} total`),
     ]),
@@ -863,241 +1051,67 @@ function topologyChannelsCard(topology) {
               ]),
               el('div', { class: 'ch-tags' }, [
                 badge(label(ch.ct_type), ctTone(ch.ct_type)),
+                ch.kind && ch.kind !== 'ct' ? badge(label(ch.kind), 'mute') : null,
                 badge(label(ch.phase), 'mute'),
                 ch.enabled === false ? badge('Disabled', 'bad') : null,
-                ch.topology_status && ch.topology_status !== 'confirmed' ? statusBadge(ch.topology_status) : null,
+                ch.scope === 'single_subject' && ch.scope_status && ch.scope_status !== 'confirmed'
+                  ? statusBadge(ch.scope_status)
+                  : null,
                 ch.polarity === 'inverted' ? badge('Inverted', 'warn') : null,
-                ch.alias_of_ct_id ? badge(`alias of ${ch.alias_of_ct_id}`, 'warn') : null,
               ]),
             ])
           )
-        : emptyState('No channels', 'This topology has no CT channels.')
+        : empty
     ),
   ]);
-}
-
-/* --- Nesting candidates (slow; fills in after the tree) ---------------- */
-
-const nestingIsFresh = () =>
-  Boolean(state.nesting.data) && Date.now() - state.nesting.at < NESTING_TTL_MS;
-
-function topologyCandidatesSlot() {
-  if (nestingIsFresh()) {
-    // Only promise a background refresh when fillNestingCandidates will
-    // actually issue one: inside the refresh-after window it deliberately
-    // does not, and the footer must not claim otherwise.
-    const willRefresh = Date.now() - state.nesting.at >= NESTING_REFRESH_AFTER_MS;
-    return topologyCandidatesCard(state.nesting.data, { cached: true, willRefresh });
-  }
-  return topologyCandidatesLoadingCard();
-}
-
-function topologyCandidatesLoadingCard() {
-  return card(
-    'Parent and alias candidates',
-    [
-      el('div', { class: 'cand-loading', role: 'status' }, [
-        el('span', { class: 'spinner', 'aria-hidden': 'true' }),
-        el('span', {}, 'Comparing a 12-hour window for shared conductors and nested feeds…'),
-      ]),
-      el('div', { class: 'skeleton h-row' }),
-      el('div', { class: 'skeleton h-row' }),
-      el('div', { class: 'skeleton h-row' }),
-    ],
-    {
-      id: 'topology-candidates',
-      foot: 'The hierarchy above is already usable. This comparison only adds advisory candidates; nothing is written until you confirm it.',
-    }
-  );
-}
-
-function topologyCandidatesErrorCard(err) {
-  return card(
-    'Parent and alias candidates',
-    [
-      el('p', { class: 'stat-hint', style: 'margin-bottom:12px' },
-        `The comparison did not finish: ${describeError(err)}`),
-      el('button', { class: 'btn btn-sm', type: 'button', onclick: () => render() }, 'Try again'),
-    ],
-    { id: 'topology-candidates' }
-  );
-}
-
-function fillNestingCandidates(signal) {
-  // One request at a time.  A second render (a poll, a hash change, a
-  // refresh) while a comparison is in flight must not queue another 12-hour
-  // window on top of it.
-  if (state.nesting.inflight) return;
-  const age = Date.now() - state.nesting.at;
-  if (nestingIsFresh() && age < NESTING_REFRESH_AFTER_MS) return;
-
-  state.nesting.inflight = true;
-  const done = () => { state.nesting.inflight = false; };
-  get(NESTING_PATH, signal)
-    .then((data) => {
-      done();
-      if (signal.aborted || !data) return;
-      state.nesting = { data, at: Date.now(), inflight: false };
-      swapCandidates(topologyCandidatesCard(data));
-    })
-    .catch((err) => {
-      done();
-      if (!err || err.name === 'AbortError') return;
-      if (signal.aborted) return;
-      // A cached answer is still a true answer for this window: keep it.
-      if (nestingIsFresh()) return;
-      swapCandidates(topologyCandidatesErrorCard(err));
-    });
-}
-
-function swapCandidates(node) {
-  const current = document.getElementById('topology-candidates');
-  if (current) current.replaceWith(node);
-}
-
-function topologyCandidatesCard(nesting, { cached = false, willRefresh = false } = {}) {
-  const candidates = nesting.candidates || [];
-  const ambiguous = nesting.ambiguous || [];
-  const suppressed = nesting.suppressed || [];
-  const notInferable = nesting.not_inferable || [];
-  const aliases = nesting.candidate_aliases || {};
-  const aliasEntries = Object.entries(aliases);
-
-  const body = [];
-  if (candidates.length) {
-    body.push(
-      el('p', { class: 'stat-hint', style: 'margin-bottom:12px' },
-        'Candidates only. No parent link is written until a user confirms it.'),
-      ...candidates.map((candidate) => {
-        const duplicate = candidate.kind === 'duplicate';
-        const evidence = candidate.evidence || {};
-        const detail = evidence.reason
-          ? evidence.reason
-          : duplicate
-            ? 'Same conductor measured twice.'
-            : 'Contained at every comparable instant.';
-        const facts = duplicate
-          ? [
-              evidence.activity_ratio !== undefined ? `${percent(evidence.activity_ratio, 0)} co-active` : null,
-              evidence.magnitude_ratio !== undefined ? `${num(evidence.magnitude_ratio, 2)}× magnitude` : null,
-            ]
-          : [
-              evidence.containment !== undefined ? `${percent(evidence.containment, 1)} containment` : null,
-              evidence.instants !== undefined ? `${evidence.instants} instants` : null,
-            ];
-        return el('div', { class: 'cand' }, [
-          el('div', { class: 'cand-title' }, [
-            badge(duplicate ? 'Duplicate feed' : 'Nested feed', duplicate ? 'warn' : 'info'),
-            el('span', {}, candidate.child_ct_id),
-            el('span', { class: 'arrow', 'aria-hidden': 'true' }, '→'),
-            el('span', {}, candidate.parent_ct_id),
-          ]),
-          el('div', { class: 'cand-ev' }, detail),
-          facts.filter(Boolean).length
-            ? el('div', { class: 'cand-ev' }, facts.filter(Boolean).join(' · '))
-            : null,
-        ]);
-      })
-    );
-  } else {
-    body.push(
-      el('p', { class: 'stat-hint' }, nesting.reason || 'No parent or duplicate candidates in the comparison window.')
-    );
-  }
-  if (aliasEntries.length) {
-    body.push(
-      el('p', { class: 'stat-hint', style: 'margin-top:12px' },
-        `Aliases measured: ${aliasEntries.map(([alias, canonical]) => `${alias} = ${canonical}`).join(', ')}. These are one conductor seen twice, never summed.`)
-    );
-  }
-  if (ambiguous.length) {
-    body.push(
-      el('div', { class: 'notice', dataset: { tone: 'warn' }, style: 'margin-top:14px' }, [
-        el('div', { class: 'banner-icon', 'aria-hidden': 'true' }, '!'),
-        el('div', {}, [
-          el('strong', {}, `${ambiguous.length} channel${ambiguous.length === 1 ? '' : 's'} ambiguous`),
-          el('p', {}, 'Measurement cannot establish a level. The engine reports the options instead of guessing.'),
-        ]),
-      ])
-    );
-  }
-  if (notInferable.length) {
-    body.push(
-      el('p', { class: 'stat-hint', style: 'margin-top:12px' },
-        `${notInferable.length} load${notInferable.length === 1 ? '' : 's'} cannot be placed by measurement; a declared parent is needed.`)
-    );
-  }
-  if (suppressed.length) {
-    const reasons = {};
-    for (const row of suppressed) reasons[row.reason] = (reasons[row.reason] || 0) + 1;
-    body.push(
-      el('p', { class: 'stat-hint', style: 'margin-top:12px' },
-        `${suppressed.length} relationship${suppressed.length === 1 ? '' : 's'} suppressed (`
-        + `${Object.entries(reasons).map(([reason, count]) => `${titleCase(reason)}: ${count}`).join(', ')}).`)
-    );
-  }
-  return card('Parent and alias candidates', body, {
-    id: 'topology-candidates',
-    foot: nesting.instants
-      ? `Compared over ${nesting.instants} instants across ${nesting.channels_compared || 0} channels.`
-        + (cached
-          ? (willRefresh
-            ? ' Showing the cached result; refreshing in the background.'
-            : ' Showing the cached result from a moment ago.')
-          : '')
-      : null,
-  });
-}
-
-async function confirmTopology() {
-  try {
-    await post('/topology/confirm', {});
-    notify('Topology confirmed', 'Confidence for this topology is now at its maximum. Learning and results were already using it.');
-    render();
-  } catch (err) {
-    notify('Could not confirm topology', describeError(err), 'bad');
-  }
 }
 
 /* ====================================================================== *
  *  U2 — v3 typed-edge topology (pure view helpers).
  * ---------------------------------------------------------------------- *
- *  GET /topology (T4) publishes typed edges with a lifecycle state.  Only a
- *  user action writes: accepting a PROVISIONAL suggestion POSTs /pin, rejecting
- *  POSTs /reject.  Nothing here mutates on render.  Each edge can link to the
- *  matching matrix columns for its reader(s).
+ *  GET /topology/v3 (T4) publishes typed edges with a lifecycle state.  Only
+ *  a user action writes: accepting a PROVISIONAL suggestion or pinning any
+ *  other edge POSTs /pin, rejecting POSTs /reject.  Nothing here mutates on
+ *  render.  Each edge can link to the matching matrix columns for its
+ *  reader(s).
  * ====================================================================== */
-
-const _absent = (value) => value === null || value === undefined;
-const _edgeText = (value) => (_absent(value) || value === '' ? null : String(value));
 
 // Normalise a T4 topology edge into the fields the panel renders.  Lifecycle
 // is published verbatim; an absent lifecycle is 'candidate', never promoted.
+// The 3.0 field names (relation, source/target_endpoint_id) are read first;
+// the older aliases are kept so a stale payload still renders.
 function v3EdgeView(edge) {
   const e = edge || {};
   const lifecycle = _edgeText(e.lifecycle)
     || _edgeText(e.status)
     || (e.confirmed === true ? 'confirmed' : 'candidate');
-  const edgeType = _edgeText(e.edge_type) || _edgeText(e.type) || 'unknown';
+  const edgeType = _edgeText(e.relation) || _edgeText(e.edge_type) || _edgeText(e.type) || 'unknown';
+  const child = _edgeText(e.target_endpoint_id) || _edgeText(e.child_id) || _edgeText(e.child_device_id);
   const readers = Array.isArray(e.reader_ids)
     ? e.reader_ids.filter(Boolean).map(String)
-    : [e.reader_id].filter((v) => !_absent(v)).map(String);
+    : [e.reader_id !== undefined ? e.reader_id : _edgeText(e.target_endpoint_id)]
+      .filter((v) => !_absent(v)).map(String);
+  const life = String(lifecycle).toLowerCase();
+  const closed = !_absent(e.valid_until) || life === 'rejected' || life === 'retired';
   return {
     edge_id: _edgeText(e.edge_id) || _edgeText(e.id),
     edge_type: edgeType,
-    lifecycle: String(lifecycle).toLowerCase(),
-    parent_id: _edgeText(e.parent_id) || _edgeText(e.parent_device_id),
-    child_id: _edgeText(e.child_id) || _edgeText(e.child_device_id),
+    lifecycle: life,
+    parent_id: _edgeText(e.source_endpoint_id) || _edgeText(e.parent_id) || _edgeText(e.parent_device_id),
+    child_id: child,
     reader_ids: readers,
-    provisional: String(lifecycle).toLowerCase() === 'provisional',
+    pinned: e.pinned === true,
+    provisional: life === 'provisional',
+    // Any edge still in force and not yet under user authority can be pinned.
+    pinnable: !closed && e.pinned !== true && life !== 'provisional',
     matrix_drill: readers.length
       ? `/matrix/readers/${encodeURIComponent(readers[0])}`
       : '/matrix',
   };
 }
 
-// Build the typed-edge model from a /topology payload.  Edges with a published
-// lifecycle are all kept; nothing is promoted past CANDIDATE by this panel.
+// Build the typed-edge model from a /topology/v3 payload.  Edges with a
+// published lifecycle are all kept; nothing is promoted past CANDIDATE here.
 function v3TopologyModel(payload) {
   const data = payload || {};
   const edges = Array.isArray(data.edges)
@@ -1114,8 +1128,8 @@ function v3TopologyModel(payload) {
   };
 }
 
-// The ONLY writes in the topology view: a user clicking Accept or Reject.  A
-// PROVISIONAL edge accept POSTs /pin; a reject POSTs /reject.  No render path
+// The ONLY writes in the topology view: a user clicking Accept, Pin or
+// Reject.  Accept and Pin POST /pin; Reject POSTs /reject.  No render path
 // calls these (HB §16: one event never promotes an edge past CANDIDATE).
 async function acceptProvisionalEdge(edgeId, http = post) {
   if (!_edgeText(edgeId)) return null;
@@ -1127,40 +1141,54 @@ async function rejectProvisionalEdge(edgeId, http = post) {
   return http(`/topology/edges/${encodeURIComponent(String(edgeId))}/reject`, {});
 }
 
-// Render the typed-edge card.  Accept/Reject buttons are wired to the user
-// actions above; PROVISIONAL edges are soft and always show a lifecycle badge.
+const edgeAction = (text, cls, action, ok, fail) =>
+  el('button', {
+    class: cls,
+    type: 'button',
+    onclick: () => action().then(
+      () => { notify(ok[0], ok[1]); render(); },
+      (err) => notify(fail, describeError(err), 'bad')
+    ),
+  }, text);
+
+// Render the typed-edge card.  The buttons are wired to the user actions
+// above; PROVISIONAL edges are soft and always show a lifecycle badge.
 function v3EdgesCard(model) {
   const m = model || v3TopologyModel(null);
   const rows = m.edges.map((edge) =>
     el('div', { class: 'topo-v3-edge', dataset: { lifecycle: edge.lifecycle, type: edge.edge_type } }, [
       badge(label(edge.edge_type), 'info'),
       badge(label(edge.lifecycle), edge.provisional ? 'warn' : 'mute'),
+      edge.pinned ? badge('Pinned', 'ok') : null,
       el('span', {}, `${edge.parent_id || '—'} → ${edge.child_id || '—'}`),
       el('a', { class: 'v3-provenance', href: `#${edge.matrix_drill}` }, 'Matrix columns'),
-      edge.provisional
+      edge.provisional || edge.pinnable
         ? el('span', { class: 'topo-v3-actions' }, [
-            el('button', {
-              class: 'btn btn-sm', type: 'button',
-              onclick: () => acceptProvisionalEdge(edge.edge_id).then(
-                () => notify('Edge accepted', 'The provisional edge was pinned.'),
-                (err) => notify('Could not accept edge', describeError(err), 'bad')
-              ),
-            }, 'Accept'),
-            el('button', {
-              class: 'btn btn-sm btn-ghost', type: 'button',
-              onclick: () => rejectProvisionalEdge(edge.edge_id).then(
-                () => notify('Edge rejected', 'The provisional edge was rejected.'),
-                (err) => notify('Could not reject edge', describeError(err), 'bad')
-              ),
-            }, 'Reject'),
+            edgeAction(
+              edge.provisional ? 'Accept' : 'Pin',
+              'btn btn-sm',
+              () => acceptProvisionalEdge(edge.edge_id),
+              edge.provisional
+                ? ['Edge accepted', 'The provisional edge was pinned.']
+                : ['Edge pinned', 'The edge is now under your authority and confirmed.'],
+              edge.provisional ? 'Could not accept edge' : 'Could not pin edge'
+            ),
+            edgeAction(
+              'Reject',
+              'btn btn-sm btn-ghost',
+              () => rejectProvisionalEdge(edge.edge_id),
+              ['Edge rejected', 'The edge was rejected.'],
+              'Could not reject edge'
+            ),
           ])
         : null,
     ])
   );
   return card('Typed topology edges (v3)', rows.length ? rows : [
-    el('p', { class: 'stat-hint' }, 'No typed edges published by the topology service.'),
+    el('p', { class: 'stat-hint' }, 'No typed edges published by the topology service yet.'),
   ], {
-    foot: 'Lifecycle comes from the topology service. Only an operator Accept or Reject writes; a single event never promotes an edge past candidate.',
+    id: 'topology-edges',
+    foot: 'Lifecycle comes from the topology service. Only an operator Accept, Pin or Reject writes; a single event never promotes an edge past candidate.',
   });
 }
 
@@ -1171,6 +1199,18 @@ export {
   rejectProvisionalEdge,
   v3EdgesCard,
   TREE_PATH,
+  V3_PATH,
+  ENDPOINTS_PATH,
+  edgeInForce,
+  edgeConfirmed,
+  topologyStatusFromEdges,
+  endpointList,
+  containsParents,
+  endpointChannel,
+  topologyConfigured,
+  topologyModel,
+  noConfirmedEdgesNotice,
+  reviewTopologyEdges,
   CT_TONES,
   ctTone,
   topologyHead,
@@ -1212,13 +1252,5 @@ export {
   renderEntry,
   hierarchyRow,
   GLYPHS,
-  topologyChannelsCard,
-  nestingIsFresh,
-  topologyCandidatesSlot,
-  topologyCandidatesLoadingCard,
-  topologyCandidatesErrorCard,
-  fillNestingCandidates,
-  swapCandidates,
-  topologyCandidatesCard,
-  confirmTopology
+  topologyChannelsCard
 };

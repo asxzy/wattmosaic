@@ -21,13 +21,12 @@ function rawCaptureText(capture) {
 }
 
 async function renderDiagnostics(root, signal) {
-  // Additive B4-UIb evidence payloads.  Both are optional: an older engine that
-  // does not serve /isolation (or a /status without an audit bundle) still gets
-  // the full diagnostics view, with the evidence cards reading whatever the
-  // diagnostics bundle already carries.
-  const [report, isolation, status] = await Promise.all([
+  // Additive B4-UIb evidence payload: a /status without an audit bundle still
+  // gets the full diagnostics view.  Contract 3.0 removed the legacy
+  // isolation-verdict route with no replacement, so the event-evidence card
+  // reads the diagnostics event log only.
+  const [report, status] = await Promise.all([
     get('/diagnostics', signal),
-    get('/isolation', signal).catch(() => null),
     get('/status', signal).catch(() => null),
   ]);
   if (signal.aborted) return;
@@ -93,10 +92,10 @@ async function renderDiagnostics(root, signal) {
   root.append(errorsCard(report.errors || {}));
 
   // Additive B4-UIb: suspected changes (from the status audit bundle and the
-  // diagnostics event log) and the event evidence list (event log + isolation
-  // verdicts).  All fields come from the payloads above.
+  // diagnostics event log) and the event evidence list (the event log).
+  // All fields come from the payloads above.
   root.append(suspectedChangesCard(status, report));
-  root.append(eventEvidenceCard(report, isolation));
+  root.append(eventEvidenceCard(report, null));
 
   root.append(
     detailsPanel('Configuration (redacted)', [
