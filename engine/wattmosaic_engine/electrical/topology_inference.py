@@ -85,10 +85,8 @@ from .topology_pairs import (
     CONTAIN_DECISIVE_INFORMATIVE,
     CONTAIN_MIN_INFORMATIVE,
     MIRROR_MIN,
-    STEP_LIFT_MIN_STEPS,
-    STEP_MATCH_MIN,
-    STEP_WLIFT_MIN,
     PairAnalysis,
+    lift_gate_passes,
 )
 from .topology_resolve import StructureAnalysis, analyse, resolve, structure_series
 
@@ -2160,9 +2158,7 @@ class TopologyInferenceView:
         # gate is not evaluated and the historical verdicts still apply.
         lift_gate = True
         if pairs is not None:
-            stats = pairs.stats_for(parent, child)
-            if stats is not None and stats.n >= STEP_LIFT_MIN_STEPS:
-                lift_gate = stats.wlift >= STEP_WLIFT_MIN and stats.match >= STEP_MATCH_MIN
+            lift_gate = lift_gate_passes(pairs.stats_for(parent, child))
 
         # The containment gate reads its fraction from the E4 cache (same number
         # as E3, computed once per rebuild) when available.

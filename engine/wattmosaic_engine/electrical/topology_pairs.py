@@ -35,6 +35,7 @@ from typing import Any
 import numpy as np
 
 __all__: list[str] = [
+    "lift_gate_passes",
     "CONTAIN_DECISIVE_INFORMATIVE",
     "CONTAIN_MIN_INFORMATIVE",
     "KCL_MIN",
@@ -56,7 +57,24 @@ __all__: list[str] = [
 # still decides).
 STEP_LIFT_MIN_STEPS = 8
 STEP_WLIFT_MIN = 0.13
-STEP_MATCH_MIN = 0.5
+#: Raw match floor on the engine's 30 s grid.  The 0.5 measured offline at 5 s
+#: resolution is unreachable here: true pairs match 0.40-0.48 on busy mains.
+#: On the 10-day reference replay 0.3 keeps every false pair out except
+#: balanced 240 V legs (left to sibling ambiguity / KCL) and lifts direct-pair
+#: recall from 0.43 to 0.70; ``wlift`` stays the discriminating score.
+STEP_MATCH_MIN = 0.3
+
+
+def lift_gate_passes(stats: Any | None) -> bool:
+    """E4 §2 promotion gate for an inferred CONTAINS pair.
+
+    Not evaluated (passes) without stats or with fewer than
+    :data:`STEP_LIFT_MIN_STEPS` child steps; otherwise the pair must clear the
+    rarity-weighted lift and the raw match floor.
+    """
+    if stats is None or int(getattr(stats, "n", 0)) < STEP_LIFT_MIN_STEPS:
+        return True
+    return float(stats.wlift) >= STEP_WLIFT_MIN and float(stats.match) >= STEP_MATCH_MIN
 
 #: A mirror at/above this value is positive asymmetric evidence for a parent;
 #: below half of it (or absent) is no evidence (E4 §2).

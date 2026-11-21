@@ -145,3 +145,26 @@ def test_leaf_zero_floor_veto() -> None:
     )
     other = with_child.stats_for("p", "c")
     assert other is not None and not other.zero_floor
+
+
+def test_lift_gate_admits_busy_main_child_and_refuses_coincidence() -> None:
+    """Regression: a raw match floor of 0.5 blocked true children of busy mains.
+
+    On the engine's 30 s grid true pairs on a busy main match 0.40-0.48 of the
+    time (10-day reference replay); the rarity-weighted lift is what separates
+    them from coincidental feeds, so the raw floor is 0.3.
+    """
+    from wattmosaic_engine.electrical.topology_pairs import (
+        STEP_LIFT_MIN_STEPS,
+        PairStats,
+        lift_gate_passes,
+    )
+
+    busy_main_child = PairStats(wlift=0.29, match=0.40, n=1050)
+    coincidence = PairStats(wlift=0.04, match=0.62, n=900)
+    too_few_steps = PairStats(wlift=0.0, match=0.0, n=STEP_LIFT_MIN_STEPS - 1)
+    assert lift_gate_passes(busy_main_child) is True
+    assert lift_gate_passes(coincidence) is False
+    assert lift_gate_passes(PairStats(wlift=0.5, match=0.2, n=50)) is False
+    assert lift_gate_passes(too_few_steps) is True
+    assert lift_gate_passes(None) is True
