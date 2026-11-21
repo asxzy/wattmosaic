@@ -2158,8 +2158,10 @@ class RuntimeMixin:
     #: Median windows either side of a child's *own* step (P3 onset_lo/onset_hi)
     #: for the step-anchored parent measurement: 2-3 samples at the ~15-20 s
     #: cadence of panel CT monitors, short enough that a busy feed's unrelated
-    #: changes rarely fall inside.
-    _T5_ANCHOR_S = 45.0
+    #: changes rarely fall inside.  30 s (2 samples at ~15.7 s): a 45 s window
+    #: caught a busy feed's next change about twice as often (real-history
+    #: replay: 17 % of true-pair verdicts were conflict at 45 s).
+    _T5_ANCHOR_S = 30.0
     #: Without a sample in the pre window the parent's held value counts, if it
     #: was reported within this lookback (a quiet reader only reports changes).
     _T5_HOLD_LOOKBACK_S = 600.0
@@ -2310,6 +2312,43 @@ class RuntimeMixin:
         self._declared_constraints_cache = (version_id, result)
         return result
 
+    #: A declared alias stays out of CONTAINS while its canonical reader has a
+    #: sample within ``max(MIN, FACTOR x the slower of the two cadences)``.
+    _ALIAS_STALE_FACTOR = 3.0
+    _ALIAS_STALE_MIN_S = 120.0
+
+    def _fresh_canonicals(self, aliases: Mapping[str, str]) -> frozenset[str]:
+        """Canonical readers of declared aliases that reported recently (P4).
+
+        Freshness is time-based, not "stepped in this group": a slow alias
+        (one sample per ~100 s) almost never steps in the same group as its
+        fast canonical, so the per-group test let the alias collect CONTAINS
+        evidence as a parent of the canonical's own children.
+        """
+        if not aliases:
+            return frozenset()
+        now = self._clock()
+        fresh: set[str] = set()
+        for alias, canonical in aliases.items():
+            cadence = max(
+                self._parent_sample_interval_uncapped(canonical),
+                self._parent_sample_interval_uncapped(alias),
+            )
+            window = max(self._ALIAS_STALE_MIN_S, self._ALIAS_STALE_FACTOR * cadence)
+            try:
+                recent = self.reader_state.window(canonical, now - timedelta(seconds=window), now)
+            except Exception:  # noqa: BLE001 - unknown reader: not fresh
+                recent = ()
+            if any(sample.active_power_w is not None for sample in recent):
+                fresh.add(canonical)
+        return frozenset(fresh)
+
+    def _parent_sample_interval_uncapped(self, reader: str) -> float:
+        cadence = getattr(self.reader_state, "cadence", None)
+        info = None if cadence is None else cadence(reader)
+        seconds = getattr(info, "seconds", None)
+        return float(seconds) if isinstance(seconds, (int, float)) and seconds > 0 else 0.0
+
     def _typical_levels(self, window_s: float = 600.0) -> dict[str, float]:
         """Median absolute power per reader over the recent window (T5 tie-break).
 
@@ -2390,10 +2429,20 @@ class RuntimeMixin:
 
     def _anchored_level_change(
         self, reader: str, lo: datetime, hi: datetime, *, lag_s: float = 0.0
-    ) -> tuple[float, float] | None:
+    ) -> tuple[float, float, float] | None:
         """``reader``'s level change across a step plus its pre/post spread.
 
-        Returns ``(median(post) - median(pre), max(spread_pre, spread_post))``.
+        Returns ``(median(post) - median(pre), max(spread_pre, spread_post),
+        span_deviation)``.  ``span_deviation`` is the largest deviation from the
+        pre-window median of *every* sample from the start of the pre window to
+        the end of the post window, the unmeasured gap ``(lo, hi + lag)``
+        included.  "The parent did not follow" (conflict) needs the parent flat
+        over that whole span: a concurrent change inside the gap, a step the
+        parent shows one sample early or late, or a child pulse shorter than
+        the post window all leave a net-zero change with flat windows, and
+        each read as conflict on true feeders (real-history replay, 2026-11-20).
+        The pre window also starts ``lag_s`` earlier so a child that reports a
+        sample after its parent is covered symmetrically.
         The spread is what makes "parent flat" mean *flat*, not net zero (spec
         P6): a concurrent opposite step inside the window can net to zero while
         the parent was not flat at all, which proves nothing about containment.
@@ -2412,9 +2461,10 @@ class RuntimeMixin:
         ]
         if not post:
             return None
+        pre_start = lo - span - timedelta(seconds=lag_s)
         pre = [
             s.active_power_w
-            for s in self.reader_state.window(reader, lo - span, lo)
+            for s in self.reader_state.window(reader, pre_start, lo)
             if s.active_power_w is not None
         ]
         if not pre:
@@ -2445,12 +2495,23 @@ class RuntimeMixin:
             return float(deviations[-2] if len(deviations) >= 2 else deviations[-1])
 
         spread = max(_spread(pre, pre_med), _spread(post, post_med))
-        return (change, spread)
+        every = [
+            s.active_power_w
+            for s in self.reader_state.window(reader, pre_start, post_start + span)
+            if s.active_power_w is not None
+        ]
+        span_deviation = max((abs(float(v) - float(pre_med)) for v in every), default=0.0)
+        return (change, spread, span_deviation)
 
     def _step_anchored_changes(
         self, group: EventGroup, observed: Mapping[str, Any]
-    ) -> tuple[dict[str, dict[str, float]], dict[str, tuple[float, float]]]:
-        """child -> {candidate parent: level change}, and parent -> spreads.
+    ) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, tuple[float, float]]]]:
+        """child -> {candidate parent: level change}, and child -> parent -> flatness.
+
+        Flatness is ``(window spread, span deviation)`` measured around *that
+        child's* step: a parent's flatness is a property of the anchor, so it
+        is keyed per child (keyed per parent, the last member of a group
+        overwrote every other member's measurement).
 
         A group's onset can sit a minute or more from a member's step (live:
         -61 s .. +103 s, 10th-90th percentile), so a parent measured around the
@@ -2460,7 +2521,7 @@ class RuntimeMixin:
         the child's step (P6) so a device reporting one tick late is still seen.
         """
         out: dict[str, dict[str, float]] = {}
-        spreads: dict[str, tuple[float, float]] = {}
+        spreads: dict[str, dict[str, tuple[float, float]]] = {}
         for delta in group.reader_deltas:
             interval = self._member_step(group, delta)
             if interval is None:
@@ -2475,12 +2536,46 @@ class RuntimeMixin:
                     str(reader), lo, hi, lag_s=self._parent_sample_interval(str(reader))
                 )
                 if result is not None:
-                    change, spread = result
+                    change, spread, span_deviation = result
                     changes[str(reader)] = change
-                    spreads[str(reader)] = spread
+                    spreads.setdefault(child, {})[str(reader)] = (spread, span_deviation)
             if changes:
                 out[child] = changes
         return out, spreads
+
+    def _local_step_sigmas(self, group: EventGroup) -> dict[str, float]:
+        """child -> its own noise around its step (spread of its pre/post windows).
+
+        The long-run sigma is a MAD over hours, so a load whose noise comes in
+        bursts (a plug with a fluctuating appliance) reads ~1 W while it swings
+        by 100+ W sample to sample around the step.  Its "step" is then
+        "resolvable" and matches a busy feed by coincidence (real-history
+        replay: cross-leg STRUCTURAL edges from such children).  The local
+        spread is a floor on the child's sigma for this one step.
+        """
+        out: dict[str, float] = {}
+        span = timedelta(seconds=self._T5_ANCHOR_S)
+        for delta in group.reader_deltas:
+            interval = self._member_step(group, delta)
+            if interval is None:
+                continue
+            lo, hi = interval
+            child = str(delta.reader_id)
+            local = 0.0
+            for since, until in ((lo - span, lo), (hi, hi + span)):
+                values = [
+                    float(s.active_power_w)
+                    for s in self.reader_state.window(child, since, until)
+                    if s.active_power_w is not None
+                ]
+                if len(values) < 2:
+                    continue
+                median = statistics.median(values)
+                deviations = sorted(abs(v - median) for v in values)
+                local = max(local, deviations[-2])
+            if local > 0.0:
+                out[child] = local
+        return out
 
     def _group_level_changes(
         self, group: EventGroup, observed: Mapping[str, Any]
@@ -2669,6 +2764,7 @@ class RuntimeMixin:
             anchored, parent_spreads = self._step_anchored_changes(group, observed)
             readers = [str(r) for r in observed]
             pairs, aliases = self._declared_topology_constraints()
+            fresh = self._fresh_canonicals(aliases)
             updated = view.observe_group(
                 obs,
                 observed=observed,
@@ -2680,6 +2776,8 @@ class RuntimeMixin:
                 parent_spreads=parent_spreads,
                 declared_pairs=pairs,
                 alias_canonical=aliases,
+                canonical_fresh=fresh,
+                local_sigmas=self._local_step_sigmas(group),
             )
             self.topology_inference = updated
             self._persist_edge_health_throttled(

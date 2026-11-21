@@ -128,6 +128,14 @@ KEEP_CONFLICT_RATIO_STRUCTURAL = 0.10
 #: Topology versions are debounced: at most one inferred version per window
 #: unless the change *removes* an edge from STRUCTURAL (which must publish now).
 TOPOLOGY_VERSION_DEBOUNCE_S = 900.0
+#: Leaving the good states judges the conflict *rate*, not the point ratio of a
+#: handful of events: a one-sided Wilson bound at z = 1.0 (84 %).  CONFLICTED
+#: needs the lower bound above CONFLICT_RATIO_CONFLICTED (2 conflicts in 6
+#: events is no longer enough -- true pairs with few events ended CONFLICTED on
+#: real data -- while 3 of 6, or any cross-leg pair at > 90 % conflict, still
+#: is), and an already STRUCTURAL edge stays while the lower bound is below
+#: CONFLICT_RATIO_PROVISIONAL.  Promotion keeps the point-ratio rule (DEC-10).
+CONFLICT_BOUND_Z = 1.0
 #: Structural passes per settle (each may build on the previous one's
 #: confirmations; stops early once a pass changes nothing).
 STRUCTURE_ROUNDS = 3
@@ -148,6 +156,18 @@ _CONTAINS = "contains"
 _CORRELATED = "correlated"
 _SAME_CONDUCTOR = "same_conductor"
 _DORMANT = frozenset((TopologyEdgeState.REJECTED, TopologyEdgeState.RETIRED))
+
+
+def _wilson_bounds(conflict: float, decisive: float, z: float = CONFLICT_BOUND_Z) -> tuple[float, float]:
+    """Wilson score interval of the conflict rate ``conflict / decisive``."""
+    if decisive <= 0:
+        return 0.0, 1.0
+    p = conflict / decisive
+    zz = z * z
+    denominator = 1.0 + zz / decisive
+    centre = p + zz / (2.0 * decisive)
+    margin = z * math.sqrt(p * (1.0 - p) / decisive + zz / (4.0 * decisive * decisive))
+    return max(0.0, (centre - margin) / denominator), min(1.0, (centre + margin) / denominator)
 
 
 def _value(item: Any) -> Any:
@@ -194,6 +214,7 @@ def _classify_step(
     sigma_c: float,
     beta: float = 1.0,
     parent_spread: float | None = None,
+    span_deviation: float | None = None,
 ) -> str | None:
     """``"support"``, ``"conflict"`` or ``None`` (neutral) for one child step.
 
@@ -213,6 +234,12 @@ def _classify_step(
     proves nothing, so the verdict is neutral instead of conflict (spec P6).
     ``None`` means no spread is known (a direct caller that did not measure it),
     which keeps the historical single-number behaviour.
+
+    ``span_deviation`` is the parent's largest deviation from its pre-step
+    level over the *whole* anchored span, the unmeasured gap between the
+    windows included (spec P8).  Conflict requires the parent flat over that
+    span; a parent that moved anywhere in it (a concurrent change, its own copy
+    of the step one sample early/late, a short child pulse) is neutral.
     """
     scaled = beta * child_delta
     flat_band = _SIGMA_FACTOR * sigma_p
@@ -234,6 +261,8 @@ def _classify_step(
         and abs(scaled) > flat_band
         and abs(parent_move - scaled) > tolerance
     ):
+        if span_deviation is not None and span_deviation > flat_band:
+            return None
         return "conflict"
     return None
 
@@ -625,6 +654,8 @@ class TopologyInferenceView:
         parent_spreads: Mapping[str, tuple[float, float] | float] | None = None,
         declared_pairs: frozenset[frozenset[str]] = frozenset(),
         alias_canonical: Mapping[str, str] | None = None,
+        canonical_fresh: frozenset[str] | None = None,
+        local_sigmas: Mapping[str, float] | None = None,
     ) -> TopologyInferenceView:
         """Fold one FINAL event group into every affected pair's ledger.
 
@@ -674,7 +705,13 @@ class TopologyInferenceView:
         PAIRED_LEG/SAME_CONDUCTOR pairs (spec P4): CONTAINS between their legs
         is never scored.  ``alias_canonical`` maps a SAME_CONDUCTOR alias to the
         canonical reader in force; an alias whose canonical reader is present
-        never becomes a CONTAINS parent or child.
+        never becomes a CONTAINS parent or child.  ``canonical_fresh`` is the
+        set of canonical readers that reported within the staleness window: an
+        alias of a fresh canonical is dropped from every pass (co-step,
+        observed, multi-child, parent-only, co-response), and an alias of a
+        stale canonical is renamed to the canonical, so a declared alias is
+        never itself a CONTAINS endpoint.  ``None`` keeps the legacy rule
+        (suppressed only while the canonical steps in the same group).
         """
         obs = _coerce_group(group, self.sigma_floor_w)
         if obs.group_id in self.seen_groups:
@@ -711,6 +748,18 @@ class TopologyInferenceView:
         decisive = {
             reader: values for reader, values in obs.deltas.items() if values[0] is not None
         }
+        # A child's own noise around its step floors its long-run sigma (a
+        # bursty load's MAD over hours reads ~1 W while it swings by 100 W).
+        if local_sigmas:
+            decisive = {
+                reader: (
+                    delta,
+                    max(float(sigma if sigma is not None else self.sigma_floor_w), float(local_sigmas[reader]))
+                    if reader in local_sigmas
+                    else sigma,
+                )
+                for reader, (delta, sigma) in decisive.items()
+            }
         # P3: divide a monitor-applied factor out of the child's step before any
         # classification (delta *and* sigma); absent factor means scale 1.0.
         if scales:
@@ -725,13 +774,48 @@ class TopologyInferenceView:
         # Normalise pairs to unordered reader sets in either direction.
         blocked: set[frozenset[str]] = {frozenset(pair) for pair in declared_pairs}
         canonical = dict(alias_canonical or {})
+        suppressed: set[str] = set()
+        rename: dict[str, str] = {}
         if canonical:
             blocked |= {frozenset((alias, target)) for alias, target in canonical.items()}
-            # Only skip the alias while its canonical reader actually holds a
-            # reading this group (HB §18: absent is not zero).
-            suppressed = {alias for alias, target in canonical.items() if target in decisive}
-        else:
-            suppressed = set()
+            for alias, target in canonical.items():
+                if canonical_fresh is None:
+                    # Legacy callers: skip the alias while its canonical reader
+                    # holds a reading this group (HB §18: absent is not zero).
+                    if target in decisive:
+                        suppressed.add(alias)
+                elif target in canonical_fresh or target in decisive:
+                    # The canonical reported recently: the alias is the same
+                    # conductor read again and is never a CONTAINS endpoint.
+                    suppressed.add(alias)
+                else:
+                    # Canonical stale (offline): the alias stands in for it, and
+                    # its evidence is folded under the canonical's identity.
+                    rename[alias] = target
+        if suppressed or rename:
+
+            def _alias_keys(mapping: Mapping[str, Any] | None) -> dict[str, Any] | None:
+                if mapping is None:
+                    return None
+                return {
+                    rename.get(key, key): value
+                    for key, value in mapping.items()
+                    if key not in suppressed
+                }
+
+            decisive = _alias_keys(decisive) or {}
+            observed = _alias_keys(observed)
+            group_moves = _alias_keys(group_moves)
+            parent_spreads = {
+                key: (_alias_keys(value) if isinstance(value, Mapping) else value)
+                for key, value in (_alias_keys(parent_spreads) or {}).items()
+            }
+            if measured_by_child is not None:
+                measured_by_child = {
+                    rename.get(child, child): _alias_keys(changes) or {}
+                    for child, changes in measured_by_child.items()
+                    if child not in suppressed
+                }
 
         def _pair_blocked(a: str, b: str) -> bool:
             return a != b and frozenset((a, b)) in blocked
@@ -739,14 +823,25 @@ class TopologyInferenceView:
         def _suppressed(reader: str) -> bool:
             return reader in suppressed
 
-        def _spread(parent: str) -> float | None:
-            """Max pre/post anchor spread of ``parent`` (P6), or None."""
-            entry = (parent_spreads or {}).get(parent)
-            if entry is None:
-                return None
+        def _flatness(parent: str, child: str) -> dict[str, float | None]:
+            """Anchor flatness of ``parent`` around ``child``'s step (P6, P8).
+
+            Accepts the per-child form ``{child: {parent: (spread, span)}}``
+            and the legacy per-parent form ``{parent: spread | (pre, post)}``.
+            """
+            spreads = parent_spreads or {}
+            nested = spreads.get(child)
+            if isinstance(nested, Mapping):
+                entry = nested.get(parent)
+                if entry is None:
+                    return {"parent_spread": None, "span_deviation": None}
+                return {"parent_spread": float(entry[0]), "span_deviation": float(entry[1])}
+            entry = spreads.get(parent)
+            if entry is None or isinstance(entry, Mapping):
+                return {"parent_spread": None, "span_deviation": None}
             if isinstance(entry, (tuple, list)):
-                return max(float(entry[0]), float(entry[1]))
-            return float(entry)
+                return {"parent_spread": max(float(entry[0]), float(entry[1])), "span_deviation": None}
+            return {"parent_spread": float(entry), "span_deviation": None}
 
         # -- parent-only steps: neutral residual evidence -------------------- #
         for edge in list(edges):
@@ -834,7 +929,7 @@ class TopologyInferenceView:
                 else:
                     verdict = _classify_step(
                         parent_delta, child_delta, sigma_p=sigma_p, sigma_c=sigma_c, beta=beta,
-                        parent_spread=_spread(parent),
+                        **_flatness(parent, child),
                     )
                 if verdict is None:
                     continue
@@ -877,7 +972,7 @@ class TopologyInferenceView:
                         sigma_p=sigma_p,
                         sigma_c=child_sigma if child_sigma is not None else self.sigma_floor_w,
                         beta=beta,
-                        parent_spread=_spread(parent),
+                        **_flatness(parent, child),
                     )
                 if verdict is None:
                     continue
@@ -920,7 +1015,7 @@ class TopologyInferenceView:
                             child_delta,
                             sigma_p=max(sigma_p or self.sigma_floor_w, self.sigma_floor_w),
                             sigma_c=child_sigma if child_sigma is not None else self.sigma_floor_w,
-                            parent_spread=_spread(parent),
+                            **_flatness(parent, child),
                         )
                     if verdict != "support":
                         continue
@@ -994,6 +1089,7 @@ class TopologyInferenceView:
             structure=structure,
             health=health,
             declared_pairs=frozenset(blocked),
+            declared_aliases=frozenset(canonical),
         )
         health = _prune_health(health, edges)
 
@@ -1030,6 +1126,7 @@ class TopologyInferenceView:
         structure: Mapping[str, Sequence[float | None]] | None = None,
         health: HealthBook | None = None,
         declared_pairs: frozenset[frozenset[str]] = frozenset(),
+        declared_aliases: frozenset[str] = frozenset(),
     ) -> tuple[list[str], dict[str, str], frozenset[str]]:
         """Apply lifecycle transitions in place; return the version-worthy ones.
 
@@ -1077,6 +1174,18 @@ class TopologyInferenceView:
                         labels[index] = f"{edge.edge_id} (declared_pair)"
                     edges[index] = edge.model_copy(
                         update={"lifecycle": TopologyEdgeState.REJECTED}
+                    )
+        # A declared SAME_CONDUCTOR alias is the canonical conductor read again:
+        # it is never a CONTAINS endpoint.  An inferred edge left over from
+        # before the declaration is RETIRED (not wrong, redundant).
+        if declared_aliases:
+            for index, edge in enumerate(edges):
+                if _relation(edge.relation) != _CONTAINS or edge.pinned or edge.lifecycle in _DORMANT:
+                    continue
+                if {edge.source_endpoint_id, edge.target_endpoint_id} & declared_aliases:
+                    labels[index] = f"{edge.edge_id} (declared_alias)"
+                    edges[index] = edge.model_copy(
+                        update={"lifecycle": TopologyEdgeState.RETIRED}
                     )
 
         # (1) Evidence.
@@ -1569,11 +1678,15 @@ class TopologyInferenceView:
         key = (edge.source_endpoint_id, edge.target_endpoint_id, _CONTAINS)
         n_causes = len(causes.get(key, ()))
         declared = edge.declared_by == "user"
-
-        # CONFLICTED is no longer absorbing: a recovered edge falls through to
-        # PROVISIONAL / STRUCTURAL on the same table.  It only applies when
-        # recent decisive evidence is both sufficient and strongly contradictory.
-        if total >= MIN_EVENTS_CONFLICTED and ratio > CONFLICT_RATIO_CONFLICTED:
+        # Leaving the good states judges the recent conflict *rate* with a
+        # one-sided Wilson lower bound over the decayed weights, not the point
+        # ratio of a handful of verdicts (real-history replay: true pairs with few
+        # events ended CONFLICTED on 2 of 6).  CONFLICTED is not absorbing: a
+        # recovered edge falls through to PROVISIONAL / STRUCTURAL on the same
+        # table.  A user edge moves to CONFLICTED under the same rule -- never
+        # deleted -- so the user can re-affirm it (DEC-10 T7, ADR-0043).
+        lower, _upper = _wilson_bounds(cw, total)
+        if total >= MIN_EVENTS_CONFLICTED and lower > CONFLICT_RATIO_CONFLICTED:
             return TopologyEdgeState.CONFLICTED
 
         parent, child = edge.source_endpoint_id, edge.target_endpoint_id
@@ -1590,7 +1703,7 @@ class TopologyInferenceView:
             gates_ok
             and _value(edge.lifecycle) == _value(TopologyEdgeState.STRUCTURAL)
             and sw >= KEEP_SUPPORT_STRUCTURAL
-            and ratio < KEEP_CONFLICT_RATIO_STRUCTURAL
+            and lower < KEEP_CONFLICT_RATIO_STRUCTURAL
         ):
             # Hysteresis band: promotion needs sw >= 8 with r < 0.05, but an
             # already-STRUCTURAL edge holds while sw >= 6 and r < 0.10.  It
@@ -1656,6 +1769,15 @@ class TopologyInferenceView:
             or edge.declared_by != "inference"
             or _value(edge.lifecycle) == _value(TopologyEdgeState.STRUCTURAL)
         ]
+        # User declarations (PAIRED_LEG, SAME_CONDUCTOR, pinned edges) live in
+        # the active version, not in the evidence ledger.  Carry them forward:
+        # a version built from the ledger alone silently dropped every
+        # declaration at the first inferred promotion, and the fold then lost
+        # its declared-pair/alias constraints (real-history replay, P4).
+        ledger_ids = {edge.edge_id for edge in structural}
+        structural.extend(
+            edge for edge in self._declared_in_force(service) if edge.edge_id not in ledger_ids
+        )
         current = self._active_edge_ids(service)
         if current is not None and {e.edge_id for e in structural} == current:
             # Same structure as the active version: nothing to publish.
@@ -1676,6 +1798,22 @@ class TopologyInferenceView:
         version_id = service.propose_topology(structural, None)
         service.promote_topology(version_id, reason)
         return replace(self, version_id=version_id, last_version_at=self.clock())
+
+    @staticmethod
+    def _declared_in_force(service: Any) -> list[TopologyEdgeV3]:
+        """The active version's user-declared or pinned edges (never inferred ones)."""
+        try:
+            triple = service.current()
+            view = service.topology_view(triple.topology_version_id)
+            edges = list(view.edges())
+        except Exception:  # noqa: BLE001 - no active version: nothing to carry
+            return []
+        return [
+            edge
+            for edge in edges
+            if isinstance(edge, TopologyEdgeV3)
+            and (edge.pinned or str(edge.declared_by) != "inference")
+        ]
 
     @staticmethod
     def _active_edge_ids(service: Any) -> set[str] | None:
