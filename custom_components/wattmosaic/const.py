@@ -43,6 +43,8 @@ CONF_SCAN_INTERVAL = "scan_interval"
 CONF_STALE_AFTER = "stale_after"
 CONF_UNAVAILABLE_AFTER = "unavailable_after"
 CONF_CT_ASSIGNMENTS = "ct_assignments"
+CONF_TOPOLOGY_STRUCTURAL_EDGES = "topology_structural_edges"
+#: Legacy reconciliation key, mapped to a structural-edge count (ADR-0043).
 CONF_TOPOLOGY_CONFIRMED = "topology_confirmed"
 CONF_TOPOLOGY_VERSION = "topology_version"
 #: Options-flow checkbox that branches into the per-device configuration step.

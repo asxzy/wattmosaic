@@ -400,11 +400,9 @@ class DiscoveryApiMixin:
                 staged = replace(current, aligned=structural)
                 merged = staged.merge_evidence(learned, levels=levels)
                 self.topology_inference = merged
-                # The replay's structural decisions are sticky: the next live
-                # fold on its shorter window keeps them unless the structure
-                # positively disagrees (design §5 T5).
-                if dict(merged.structure_decisions) != dict(current.structure_decisions):
-                    self._persist_structure_decisions(merged.structure_decisions)
+                # ADR-0043: remembered structural decisions are a pure
+                # tie-break cache, not a lifecycle source; nothing is persisted
+                # and no edge is held STRUCTURAL by a past decision.
                 repo = self.db.repos.topology_v3
                 for edge in merged.edges:
                     try:

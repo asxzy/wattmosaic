@@ -137,24 +137,28 @@ def test_one_coincident_event_leaves_the_pair_candidate():
     assert edge.evidence.independent_causes == 1
 
 
-def test_eight_mirrored_child_steps_from_two_causes_confirm():
+def test_twelve_mirrored_child_steps_from_two_causes_make_it_structural():
+    # ADR-0043: evidence decays, so STRUCTURAL needs recent support_w >= 8,
+    # which twelve clean verdicts reach (eight is only PROVISIONAL now).
     view = _chain_view()
-    for i in range(8):
+    for i in range(12):
         # Two distinct causes (unknown profiles) alternate.
         view = view.observe_group(
             _delta(f"g{i}", {"main": 25.0, "sub": 25.0}, cause=f"cause-{i % 2}")
         )
     edge = view.edge("main", "sub")
     assert edge is not None
-    assert edge.evidence.support == 8
+    assert edge.evidence.support == 12
     assert edge.evidence.independent_causes == 2
     assert edge.evidence.conflict_ratio == 0.0
+    assert edge.evidence.support_w >= 8
     assert edge.lifecycle == TopologyEdgeState.STRUCTURAL
 
 
-def test_three_support_from_two_causes_becomes_provisional():
+def test_four_support_from_two_causes_becomes_provisional():
+    # ADR-0043: three decaying supports give support_w ~= 2.7 < 3; four cross it.
     view = _chain_view()
-    for i, cause in enumerate(("a", "a", "b")):
+    for i, cause in enumerate(("a", "a", "b", "b")):
         view = view.observe_group(_delta(f"g{i}", {"main": 10.0, "sub": 10.0}, cause=cause))
     edge = view.edge("main", "sub")
     assert edge is not None
@@ -209,7 +213,7 @@ def test_versions_proposed_and_promoted_on_confirmation():
         at=view.at,
         absolute=view.absolute,
     )
-    for i in range(8):
+    for i in range(12):
         view = view.observe_group(
             _delta(f"g{i}", {"main": 25.0, "sub": 25.0}, cause=f"cause-{i % 2}")
         )
@@ -279,7 +283,7 @@ def _relation(item) -> RelationType | str:
 def test_branch_ct_parents_can_be_inferred_from_delta_evidence():
     """Branch CTs are no longer silently 'not inferable' (nesting.py:726-736)."""
     view = _view(absolute={"main": [1000.0] * 30, "branch": [300.0] * 30})
-    for i in range(8):
+    for i in range(12):  # ADR-0043: decaying support needs 12 for STRUCTURAL
         view = view.observe_group(
             _delta(f"g{i}", {"main": 30.0, "branch": 30.0}, cause=f"c{i % 2}")
         )
@@ -393,7 +397,7 @@ def test_infer_topology_accepts_event_group_contracts():
         topology_version_id="topo-1", mapping_version_id="map-1", model_set_id="mset-x"
     )
     groups = []
-    for i in range(8):
+    for i in range(12):
         groups.append(
             EventGroup(
                 group_id=f"g{i}",
@@ -434,8 +438,8 @@ def test_infer_topology_accepts_event_group_contracts():
         clock=lambda: T0,
         # Feed the absolute gate via the ledger after construction.
     )
-    # Without absolute series the containment gate is not applied; 8 mirrored
-    # groups from 2 causes still confirm.
+    # ADR-0043: without absolute series the containment gate is not applied;
+    # twelve decaying mirrored groups from 2 causes make the edge structural.
     edge = view.edge("main", "sub")
     assert edge is not None
     assert edge.lifecycle == TopologyEdgeState.STRUCTURAL

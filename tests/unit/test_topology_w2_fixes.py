@@ -131,13 +131,15 @@ def _quiet(view: TopologyInferenceView, name: str, **kw) -> TopologyInferenceVie
 
 
 def _structurally_confirmed() -> tuple[TopologyInferenceView, _Versions, dict[str, list[float | None]]]:
+    # ADR-0043: a genuine STRUCTURAL edge now needs recent support_w >= 8.
+    # Twelve clean supports supply that by evidence alone -- no sticky lock.
     series = _crossed()
     versions = _Versions()
     edges = [
-        _edge("main_1", "sub_1", PROVISIONAL, support=5),
-        _edge("main_2", "sub_1", PROVISIONAL, support=5),
-        _edge("main_1", "sub_2", PROVISIONAL, support=5),
-        _edge("main_2", "sub_2", PROVISIONAL, support=5),
+        _edge("main_1", "sub_1", PROVISIONAL, support=12),
+        _edge("main_2", "sub_1", PROVISIONAL, support=12),
+        _edge("main_1", "sub_2", PROVISIONAL, support=12),
+        _edge("main_2", "sub_2", PROVISIONAL, support=12),
     ]
     view = _quiet(_view(edges, versions=versions, require_direction=True), "g0", aligned=series)
     assert _life(view, "main_2", "sub_1") == "structural"
@@ -146,7 +148,7 @@ def _structurally_confirmed() -> tuple[TopologyInferenceView, _Versions, dict[st
 
 
 # --------------------------------------------------------------------------- #
-# Finding 1: sticky structural confirmation.
+# Finding 1: structural state follows evidence (ADR-0043 replaces stickiness).
 # --------------------------------------------------------------------------- #
 
 

@@ -294,15 +294,22 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
         return dict(topology)
 
     @property
-    def topology_confirmed(self) -> bool:
-        """Whether the engine's own topology is confirmed.
+    def topology_structural_edges(self) -> int:
+        """Number of STRUCTURAL edges the engine currently publishes (ADR-0043).
 
-        This is the engine's word, not the config entry's flag: the two can
-        disagree (a database reset, a failed confirm), and the engine's answer is
-        the one that decides whether learning accepts samples.
+        Topology follows the evidence in both directions; there is no terminal
+        confirmation.  The health payload's ``structural_edges`` count is the
+        engine's word, with ``state == 'structural'`` as a legacy fallback.
         """
         topology = self.engine_topology or {}
-        return str(topology.get("status") or "").strip().lower() == "confirmed"
+        count = topology.get("structural_edges")
+        if count is not None:
+            try:
+                return max(0, int(count))
+            except (TypeError, ValueError):
+                pass
+        state = str(topology.get("state") or topology.get("status") or "").strip().lower()
+        return 1 if state == "structural" else 0
 
     def device_result(self, device_id: str) -> dict[str, Any] | None:
         if self.data is None:

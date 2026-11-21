@@ -50,6 +50,12 @@ BALANCED_TAGS = ("html", "head", "body", "header", "nav", "main", "footer")
 #: scan rather than a review checklist.
 RETIRED_VOCABULARY = re.compile(r"dedicat", re.I)
 
+#: ADR-0043 removes topology confirmation.  The panel must not suggest a
+#: terminal "confirmed topology"; it publishes each edge's dynamic state and
+#: strength instead.  A legacy single edge lifecycle of "confirmed" is still
+#: accepted for old payloads, so this guards the *phrase*, not that word.
+RETIRED_TOPOLOGY_CONFIRMATION = re.compile(r"confirmed topology", re.I)
+
 #: The single allowlisted occurrence: the legacy alias key in ``STRINGS``, whose
 #: value renders "Branch CT".  It is matched by *content*, not by line number, so
 #: the allowlist cannot drift onto an unrelated line when code is inserted above
@@ -215,6 +221,10 @@ def check(root: Path) -> list[str]:
     #    allowlisted line and it renders "Branch CT".
     for name, text in texts:
         errors.extend(retired_vocabulary_errors(name, text))
+        # ADR-0043: there is no terminal topology confirmation.
+        for match in RETIRED_TOPOLOGY_CONFIRMATION.finditer(text):
+            lineno = text.count("\n", 0, match.start()) + 1
+            errors.append(f"{name}:{lineno} still offers 'confirmed topology' (ADR-0043)")
 
     # 8. AC-7: a legacy payload must still render the branch label.
     errors.extend(render_smoke_errors(core_js))

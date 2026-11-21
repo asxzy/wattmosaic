@@ -602,7 +602,6 @@ class RuntimeMixin:
             require_direction=True,
             causes_by_edge=causes,
             health=self._load_edge_health(),
-            structure_decisions=self._load_structure_decisions(),
         )
         self._load_structure_memory()
         self.reconciler = Reconciler(
@@ -2519,7 +2518,6 @@ class RuntimeMixin:
     _T5_ALIGN_EVERY_S = 300.0
     _T5_HEALTH_KEY = "t5_edge_health"
     _T5_HEALTH_EVERY_S = 30.0
-    _T5_STRUCTURE_KEY = "t5_structure_decisions"
     _T5_MEMORY_KEY = "t5_structure_memory"
     _T5_MEMORY_EVERY_S = 1800.0
 
@@ -2639,30 +2637,6 @@ class RuntimeMixin:
         self._t5_health_saved_at = now
         self._t5_health_dirty = False
 
-    def _load_structure_decisions(self) -> dict[str, str]:
-        """The persisted sticky structural decisions (child -> direct parent)."""
-        try:
-            text = self.db.get_state(self._T5_STRUCTURE_KEY)
-            payload = json.loads(text) if isinstance(text, str) and text else {}
-        except Exception:  # noqa: BLE001 - resuming is best effort
-            return {}
-        if not isinstance(payload, dict):
-            return {}
-        return {
-            str(child): str(parent)
-            for child, parent in payload.items()
-            if isinstance(child, str) and isinstance(parent, str) and child != parent
-        }
-
-    def _persist_structure_decisions(self, decisions: Mapping[str, str]) -> None:
-        try:
-            self.db.set_state(
-                self._T5_STRUCTURE_KEY,
-                json.dumps(dict(decisions), sort_keys=True, separators=(",", ":")),
-            )
-        except Exception:  # noqa: BLE001 - a state write must not abort the fold
-            log.debug("topology structure decisions write skipped", exc_info=True)
-
     def _fold_group_ledger(self, group: EventGroup) -> int:
         """Fold ``group``'s reader deltas into the T5 ledger and persist edges.
 
@@ -2712,8 +2686,6 @@ class RuntimeMixin:
                 updated.health,
                 changed=updated.health is not view.health and updated.health != view.health,
             )
-            if dict(updated.structure_decisions) != dict(view.structure_decisions):
-                self._persist_structure_decisions(updated.structure_decisions)
             repo = self.db.repos.topology_v3
             changed = 0
             # observe_group keeps untouched edges as the very same objects:

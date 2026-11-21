@@ -209,12 +209,13 @@ def _learning_section(
         "summary": "The engine did not report learning accounting.",
     }
     topology = getattr(coordinator, "engine_topology", None) or {}
-    learning["entry_topology_confirmed"] = bool(
-        config.get(CONF_TOPOLOGY_CONFIRMED, False)
+    # ADR-0043: topology has no confirmation; report the STRUCTURAL edge count.
+    learning["entry_topology_structural_edges"] = int(
+        bool(config.get(CONF_TOPOLOGY_CONFIRMED, False))
     )
-    learning["engine_topology_confirmed"] = str(
-        topology.get("status") or ""
-    ).strip().lower() == "confirmed"
+    learning["engine_topology_structural_edges"] = getattr(
+        coordinator, "topology_structural_edges", 0
+    )
     return learning
 
 

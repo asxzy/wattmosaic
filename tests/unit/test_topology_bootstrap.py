@@ -495,7 +495,7 @@ def test_health_reports_a_configured_topology(tmp_path: Path) -> None:
         health = core.health()
         topology = health.details["topology"]
         assert topology["configured"] is True
-        assert topology["status"] == "candidate"
+        assert topology["state"] == "candidate"
         assert topology["endpoints"] > 0
     finally:
         db.close()

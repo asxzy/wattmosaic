@@ -136,9 +136,6 @@ class TopologyService:
     def edit_config(self, endpoint_id: str, changes: Mapping[str, Any]) -> dict[str, Any]:
         return self._call(edit_endpoint_config, endpoint_id, changes)
 
-    def edges_confirmed_for(self, subject_id: str) -> bool:
-        return self._call(edges_confirmed_for, subject_id)
-
     # -- internals --------------------------------------------------------- #
     def _adapter(self) -> _ServiceAdapter:
         return _ServiceAdapter(self.versions, self.topology_repo, self.endpoints_repo, self.clock)
@@ -697,56 +694,6 @@ def edit_endpoint_config(
     }
 
 
-def edges_confirmed_for(service: Any, subject_id: str) -> bool:
-    """Per-subject learning gate (replaces the aggregate topology flag, T11).
-
-    A subject may learn when every CONTAINS edge on the STRUCTURAL chain from the
-    subject's mapped reader up through its ancestors is STRUCTURAL.  When the
-    subject has no mapped reader, or no structural edges at all, the gate is
-    open: there is no *contradictory* structure to block learning.  A subject
-    with a CANDIDATE or PROVISIONAL parent is not yet established.
-    """
-    vid = service.current().topology_version_id
-    edges = [TopologyEdgeV3(**_edge_row(row)) for row in service._topo.edges(vid)]
-    mapped = None
-    try:
-        view = service.mapping_view(service.current().mapping_version_id)
-        mapped = view.most_specific_reader(("device", subject_id))
-        if mapped is None:
-            mapped = view.most_specific_reader(("component", subject_id))
-    except (KeyError, AttributeError):
-        mapped = None
-    # Fall back to the endpoint carrying the subject id when there is no mapping.
-    if mapped is None and any(
-        e.target_endpoint_id == subject_id or e.source_endpoint_id == subject_id for e in edges
-    ):
-        mapped = subject_id
-    if mapped is None:
-        return True
-
-    # Walk the structural chain from the mapped reader upward.  Every parent
-    # edge must be STRUCTURAL; a softer lifecycle on the path closes the gate.
-    current = mapped
-    seen = {current}
-    while True:
-        parent_edges = [
-            e
-            for e in edges
-            if e.target_endpoint_id == current
-            and _value(e.relation) == "contains"
-            and e.lifecycle not in (TopologyEdgeState.REJECTED, TopologyEdgeState.RETIRED)
-        ]
-        if not parent_edges:
-            return True
-        if not any(e.lifecycle == TopologyEdgeState.STRUCTURAL for e in parent_edges):
-            return False
-        structural = next(e for e in parent_edges if e.lifecycle == TopologyEdgeState.STRUCTURAL)
-        current = structural.source_endpoint_id
-        if current in seen:
-            return True
-        seen.add(current)
-
-
 class TopologyApiMixin:
     """Behaviour for one responsibility of :class:`EngineCore`."""
 
@@ -819,16 +766,15 @@ class TopologyApiMixin:
     def edit_endpoint_config(self, endpoint_id: str, changes: Mapping[str, Any]) -> dict[str, Any]:
         return self._v3_topology_service().edit_config(endpoint_id, changes)
 
-    def edges_confirmed_for(self, subject_id: str) -> bool:
-        return self._v3_topology_service().edges_confirmed_for(subject_id)
-
     def _topology_health(self) -> dict[str, Any]:
         """Topology presence for ``/health``; no measurement endpoint is not healthy.
 
         ``configured`` means at least one v3 :class:`MeasurementEndpoint` exists:
         a fresh install with none answers every probe and infers nothing, so it
-        must not report ``ok``.  ``status`` is ``confirmed`` once the active
-        topology version holds a STRUCTURAL (or pinned) edge, else ``candidate``.
+        must not report ``ok``.  ADR-0043 removes topology confirmation: the
+        payload reports ``state`` (``structural`` / ``candidate``), the count of
+        ``structural_edges`` and each edge's ``state``, ``strength`` and
+        ``conflict_ratio`` so a pinned edge's disagreement stays visible.
         """
         repos = self.db.repos
         try:
@@ -841,28 +787,60 @@ class TopologyApiMixin:
                 "reason": self.topology_bootstrap_error or "no measurement endpoints configured",
             }
         version_id: str | None = None
-        edges: list[dict[str, Any]] = []
+        rows: list[dict[str, Any]] = []
         try:
             active = repos.topology_v3.active_version()
             if active is not None:
                 version_id = str(active.get("version_id") or "") or None
-                edges = repos.topology_v3.edges(version_id) if version_id else []
+                rows = repos.topology_v3.edges(version_id) if version_id else []
         except Exception:  # noqa: BLE001 - health must never fail
-            edges = []
-        structural = any(
-            str(_value(edge.get("lifecycle"))) == TopologyEdgeState.STRUCTURAL.value
-            or bool(edge.get("pinned"))
-            for edge in edges
-        )
+            rows = []
+        edges: list[dict[str, Any]] = []
+        structural_edges = 0
+        for edge in rows:
+            lifecycle = str(_value(edge.get("lifecycle")))
+            evidence = edge.get("evidence")
+            if isinstance(evidence, str):
+                try:
+                    evidence = json.loads(evidence or "{}")
+                except (TypeError, ValueError):
+                    evidence = {}
+            evidence = evidence if isinstance(evidence, dict) else {}
+            sw = float(evidence.get("support_w") or 0.0)
+            cw = float(evidence.get("conflict_w") or 0.0)
+            decisive = sw + cw
+            ratio = cw / decisive if decisive > 0 else 0.0
+            if not decisive:
+                support, conflict = int(evidence.get("support") or 0), int(evidence.get("conflict") or 0)
+                decisive = support + conflict
+                ratio = conflict / decisive if decisive else 0.0
+                sw = float(support)
+            is_structural = (
+                lifecycle == TopologyEdgeState.STRUCTURAL.value or bool(edge.get("pinned"))
+            )
+            structural_edges += int(is_structural)
+            edges.append(
+                {
+                    "edge_id": edge.get("edge_id"),
+                    "source_endpoint_id": edge.get("source_endpoint_id"),
+                    "target_endpoint_id": edge.get("target_endpoint_id"),
+                    "state": lifecycle,
+                    "strength": sw,
+                    "conflict_ratio": ratio,
+                    "pinned": bool(edge.get("pinned")),
+                }
+            )
         try:
             devices = len(repos.entities.devices())
         except Exception:  # noqa: BLE001
             devices = 0
         return {
             "configured": True,
-            "status": "confirmed" if structural else "candidate",
+            "state": "structural" if structural_edges else "candidate",
+            "structural_edges": structural_edges,
             "version": version_id,
             "endpoints": len(endpoints),
             "edges": len(edges),
             "devices": devices,
+            "edge_states": edges,
         }

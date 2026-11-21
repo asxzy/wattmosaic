@@ -162,7 +162,7 @@ def test_typed_edges_group_by_type_and_render_actions() -> None:
     result = run_esm(program, shim=EVENT_DOM_SHIM)
     assert set(result["types"]) == {"contains", "peer"}
     assert "Typed topology edges (v3)" in result["text"]
-    assert "Accept" in result["text"] and "Reject" in result["text"]
+    assert "Pin" in result["text"] and "Reject" in result["text"]
     assert "Matrix columns" in result["text"]
 
 

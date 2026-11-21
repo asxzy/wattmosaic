@@ -986,7 +986,8 @@ def test_topology_messaging_is_dynamic_not_gated(
     assert "Dynamic topology" in combined
     assert "authoritative" in combined
     assert "reduced confidence" in combined
-    assert "optional" in combined
+    # ADR-0043: pinning is an explicit action, not an optional confirmation gate.
+    assert "Review edges" in combined
 
 
 def test_learning_banner_with_topology_note_is_informational(
@@ -1000,7 +1001,7 @@ def test_learning_banner_with_topology_note_is_informational(
     # The backend's real note text is surfaced verbatim, plus the active framing.
     assert _DYNAMIC_TOPOLOGY_NOTE in banner
     assert "learning is active" in banner.lower()
-    assert "confirm topology" in banner.lower()  # optional action, not a prerequisite
+    assert "review edges" in banner.lower()  # navigation action, not a prerequisite
     # And crucially it is NOT a paused/rejected/ambiguous block.
     for stale in _STALE_GATING_STRINGS:
         assert stale.lower() not in banner.lower(), (

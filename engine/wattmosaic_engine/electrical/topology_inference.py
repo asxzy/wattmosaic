@@ -89,6 +89,8 @@ __all__: list[str] = [
     "MIN_INDEPENDENT_CAUSES",
     "MIN_SUPPORT_STRUCTURAL",
     "MIN_SUPPORT_PROVISIONAL",
+    "EVIDENCE_DECAY",
+    "EVIDENCE_WINDOW",
     "TopologyEvidence",
     "DeltaObservation",
     "TopologyInferenceView",
@@ -110,6 +112,22 @@ CONFLICT_RATIO_STRUCTURAL = 0.05
 CONFLICT_RATIO_CONFLICTED = 0.25
 MIN_EVENTS_CONFLICTED = 6
 MIN_CORRELATED_EVENTS = 5
+#: Decaying evidence (ADR-0043).  Each decisive verdict folds as
+#: ``weight = EVIDENCE_DECAY * weight + (1 if that verdict else 0)``, so recent
+#: evidence dominates and an edge follows the wiring in both directions.  Decay
+#: is by verdict count, never wall clock: quiet periods do not erode a true edge
+#: and replay needs no clock.  The pair sums to ``EVIDENCE_WINDOW`` at steady state.
+EVIDENCE_DECAY = 0.95
+EVIDENCE_WINDOW = 20  # round(1 / (1 - EVIDENCE_DECAY))
+#: Hysteresis band: a STRUCTURAL edge keeps that state while its recent support
+#: stays above KEEP_SUPPORT_STRUCTURAL and its conflict ratio below
+#: KEEP_CONFLICT_RATIO_STRUCTURAL, even though it no longer meets the promotion
+#: bar.  A plug move still demotes it once the recent conflicts accumulate.
+KEEP_SUPPORT_STRUCTURAL = 6
+KEEP_CONFLICT_RATIO_STRUCTURAL = 0.10
+#: Topology versions are debounced: at most one inferred version per window
+#: unless the change *removes* an edge from STRUCTURAL (which must publish now).
+TOPOLOGY_VERSION_DEBOUNCE_S = 900.0
 #: Structural passes per settle (each may build on the previous one's
 #: confirmations; stops early once a pass changes nothing).
 STRUCTURE_ROUNDS = 3
@@ -218,6 +236,33 @@ def _classify_step(
     ):
         return "conflict"
     return None
+
+
+def _fold_verdict(
+    evidence: EdgeEvidence, verdict: str, *, at: datetime
+) -> dict[str, Any]:
+    """Return the ``model_copy`` update for one decisive verdict (ADR-0043).
+
+    Every decisive verdict decays *both* weights and adds 1 to the one that
+    fired: ``support_w = D * support_w + (1 if support else 0)`` and
+    ``conflict_w = D * conflict_w + (1 if conflict else 0)``.  The matching
+    integer lifetime counter moves too.  A parent-only verdict never reaches
+    here (it only moves ``parent_only``, decaying nothing).
+    """
+    support = verdict == "support"
+    # Seed an unweighted legacy row from its lifetime counts before folding,
+    # exactly as migration v029 does (support_w=support when no weight exists).
+    sw = evidence.support_w or float(evidence.support)
+    cw = evidence.conflict_w or float(evidence.conflict)
+    update: dict[str, Any] = {
+        "support_w": EVIDENCE_DECAY * sw + (1.0 if support else 0.0),
+        "conflict_w": EVIDENCE_DECAY * cw + (0.0 if support else 1.0),
+    }
+    if support:
+        update.update(support=evidence.support + 1, last_support_at=at)
+    else:
+        update.update(conflict=evidence.conflict + 1, last_conflict_at=at)
+    return update
 
 
 def _observed_entry(value: Any) -> tuple[float | None, float | None]:
@@ -482,6 +527,9 @@ class TopologyInferenceView:
     co_response_causes: Mapping[frozenset[str], frozenset[str]] = field(default_factory=dict)
     co_response_events: Mapping[frozenset[str], int] = field(default_factory=dict)
     version_id: str | None = None
+    #: Last inferred topology-version publication time (ADR-0043 §4).  Used
+    #: only for the debounce; an edge *leaving* STRUCTURAL publishes regardless.
+    last_version_at: datetime | None = None
     #: Refuse to CONFIRM a containment whose reverse is an equally supported,
     #: uncontradicted alternative (see :meth:`_direction_cap`).  The runtime
     #: sets it: an online ledger must never promote a containment cycle.
@@ -791,16 +839,10 @@ class TopologyInferenceView:
                 if verdict is None:
                     continue
                 _track(parent, child, verdict)
-                field_name, stamp = (
-                    ("support", "last_support_at")
-                    if verdict == "support"
-                    else ("conflict", "last_conflict_at")
-                )
                 causes.setdefault(key, set()).add(cause)
                 evidence = edge.evidence.model_copy(
                     update={
-                        field_name: getattr(edge.evidence, field_name) + 1,
-                        stamp: at,
+                        **_fold_verdict(edge.evidence, verdict, at=at),
                         "independent_causes": len(causes[key]),
                     }
                 )
@@ -840,18 +882,12 @@ class TopologyInferenceView:
                 if verdict is None:
                     continue
                 _track(parent, child, verdict)
-                field_name, stamp = (
-                    ("support", "last_support_at")
-                    if verdict == "support"
-                    else ("conflict", "last_conflict_at")
-                )
                 key = (parent, child, _CONTAINS)
                 causes.setdefault(key, set()).add(cause)
                 current = edges[position]
                 evidence = current.evidence.model_copy(
                     update={
-                        field_name: getattr(current.evidence, field_name) + 1,
-                        stamp: at,
+                        **_fold_verdict(current.evidence, verdict, at=at),
                         "independent_causes": len(causes[key]),
                     }
                 )
@@ -901,6 +937,7 @@ class TopologyInferenceView:
                             beta_basis="unity",
                             evidence=TopologyEvidence(
                                 support=1,
+                                support_w=1.0,
                                 last_support_at=at,
                                 independent_causes=len(causes[key]),
                             ),
@@ -1001,18 +1038,19 @@ class TopologyInferenceView:
         undo what an earlier one did -- the evidence rule re-confirms an edge the
         structural pass then demotes again -- which is no transition at all).
 
-        Stages: (1) the evidence rule per edge, with a decided structural parent
-        kept STRUCTURAL while the evidence still holds it PROVISIONAL (sticky);
+        Stages: (1) the evidence rule per edge -- the lifecycle is a pure
+        function of recent weights, gates and the current state (ADR-0043);
         (2) edge health: BROKEN edges are demoted and leave the candidates;
         (3) one direct parent per child -- the structural pass on adequate
         aligned series, else the remembered decisions plus the lowest-level
-        rule for undecided children.  Missing series never demote a decision.
+        rule for undecided children.  Remembered decisions may choose a parent
+        or demote a transitive grandparent, but never keep an edge STRUCTURAL
+        whose evidence is below PROVISIONAL.
         """
         original = [_value(edge.lifecycle) for edge in edges]
         previous = {edge.edge_id: str(_value(edge.lifecycle)) for edge in edges}
         labels: dict[int, str] = {}
         decided = dict(self.structure_decisions)
-        sticky: set[tuple[str, str]] = set()
         unidentified: frozenset[str] = frozenset()
 
         def note(stage: Sequence[str], before: Sequence[TopologyEdgeV3]) -> None:
@@ -1052,17 +1090,6 @@ class TopologyInferenceView:
                 and edge.declared_by != "user"
             ):
                 new_lifecycle = self._direction_cap(edge, edges, new_lifecycle, absolute_now)
-            if (
-                new_lifecycle == TopologyEdgeState.PROVISIONAL
-                and edge.lifecycle == TopologyEdgeState.STRUCTURAL
-                and edge.declared_by == "inference"
-                and decided.get(edge.target_endpoint_id) == edge.source_endpoint_id
-            ):
-                # Sticky structural confirmation: the evidence still holds the
-                # edge (gates pass, conflict below the PROVISIONAL bound), and
-                # the structure decided it; support alone never undoes that.
-                new_lifecycle = TopologyEdgeState.STRUCTURAL
-                sticky.add((edge.source_endpoint_id, edge.target_endpoint_id))
             if new_lifecycle != edge.lifecycle:
                 labels[index] = edge.edge_id
                 edges[index] = edge.model_copy(update={"lifecycle": new_lifecycle})
@@ -1090,7 +1117,6 @@ class TopologyInferenceView:
                     )
                 note(stage, before)
         for parent, child in broken:
-            sticky.discard((parent, child))
             if decided.get(child) == parent:
                 del decided[child]
 
@@ -1125,7 +1151,6 @@ class TopologyInferenceView:
                     levels=levels,
                     analysis=analysis,
                     decided=decided,
-                    sticky=sticky,
                     previous=previous,
                     excluded=broken,
                     allow_confirm=self._confirm_gate(absolute_now),
@@ -1522,59 +1547,64 @@ class TopologyInferenceView:
         basis: Mapping[str, MeasurementBasis | str],
         meta: Mapping[str, Mapping[str, Any]],
     ) -> TopologyEdgeState:
+        """Pure function of (recent evidence weights, gates, current state) (ADR-0043).
+
+        An edge's state follows recent evidence in both directions.  ``sw`` /
+        ``cw`` are the decaying support/conflict weights; ``r = cw/(sw+cw)``.
+        Decay is by verdict count, not wall clock, so the same verdicts give the
+        same state on a replay.  ``causes`` supplies the independent-cause gate
+        (counted from the lifetime audit set, not decayed); for a user edge the
+        cause gate is waived because the declaration is itself the cause.
+        """
         evidence = edge.evidence
-        support, conflict = evidence.support, evidence.conflict
-        decisive = support + conflict
+        # A legacy/unseeded row may carry only the lifetime counts (migration
+        # v029 seeds weights, but a direct caller or an older payload need not).
+        # Use those counts as the initial weights -- exactly the migration's
+        # rule for n <= EVIDENCE_WINDOW -- so the lifecycle is never decided
+        # from an empty ledger when the counts say otherwise.
+        sw = evidence.support_w or float(evidence.support)
+        cw = evidence.conflict_w or float(evidence.conflict)
+        total = sw + cw
         ratio = evidence.conflict_ratio
         key = (edge.source_endpoint_id, edge.target_endpoint_id, _CONTAINS)
         n_causes = len(causes.get(key, ()))
+        declared = edge.declared_by == "user"
 
-        if decisive >= MIN_EVENTS_CONFLICTED and ratio > CONFLICT_RATIO_CONFLICTED:
-            # DEC-10 (T7): a user-declared STRUCTURAL CONTAINS edge is a fact, but
-            # persistent, strong contradiction (>= 6 independent events with a
-            # conflict ratio > 0.25) must move it to CONFLICTED — never delete it.
-            # The edge row and its history are retained; only the lifecycle moves
-            # so downstream confidence is degraded while the user can re-affirm.
+        # CONFLICTED is no longer absorbing: a recovered edge falls through to
+        # PROVISIONAL / STRUCTURAL on the same table.  It only applies when
+        # recent decisive evidence is both sufficient and strongly contradictory.
+        if total >= MIN_EVENTS_CONFLICTED and ratio > CONFLICT_RATIO_CONFLICTED:
             return TopologyEdgeState.CONFLICTED
 
         parent, child = edge.source_endpoint_id, edge.target_endpoint_id
         gates_ok = (
-            n_causes >= MIN_INDEPENDENT_CAUSES
+            (declared or n_causes >= MIN_INDEPENDENT_CAUSES)
             and _containment_gate(absolute.get(parent), absolute.get(child))
             and not _scaled_copy(absolute.get(parent), absolute.get(child))
             and _value(basis.get(parent, MeasurementBasis.CT_MEASURED)) != MeasurementBasis.UNKNOWN
             and _value(basis.get(child, MeasurementBasis.CT_MEASURED)) != MeasurementBasis.UNKNOWN
         )
-        if (
-            gates_ok
-            and support >= MIN_SUPPORT_STRUCTURAL
-            and ratio < CONFLICT_RATIO_STRUCTURAL
-        ):
+        if gates_ok and sw >= MIN_SUPPORT_STRUCTURAL and ratio < CONFLICT_RATIO_STRUCTURAL:
             return TopologyEdgeState.STRUCTURAL
         if (
             gates_ok
             and _value(edge.lifecycle) == _value(TopologyEdgeState.STRUCTURAL)
-            and support >= MIN_SUPPORT_STRUCTURAL
-            and ratio < CONFLICT_RATIO_PROVISIONAL
+            and sw >= KEEP_SUPPORT_STRUCTURAL
+            and ratio < KEEP_CONFLICT_RATIO_STRUCTURAL
         ):
-            # Hysteresis: confirming needs < 5 % conflict, but an already
-            # STRUCTURAL edge keeps that status until conflict passes the 10 %
-            # suggestion limit.  Live, one extra conflicting event (30 support,
-            # 2 conflict = 6.3 %) dropped a real branch out of the hierarchy and
-            # the next supporting event put it back.
+            # Hysteresis band: promotion needs sw >= 8 with r < 0.05, but an
+            # already-STRUCTURAL edge holds while sw >= 6 and r < 0.10.  It
+            # still falls when the recent conflicts accumulate, and the
+            # structural pass may demote it as transitive in the same settle.
             return TopologyEdgeState.STRUCTURAL
-        if (
-            gates_ok
-            and support >= MIN_SUPPORT_PROVISIONAL
-            and ratio < CONFLICT_RATIO_PROVISIONAL
-        ):
+        if gates_ok and sw >= MIN_SUPPORT_PROVISIONAL and ratio < CONFLICT_RATIO_PROVISIONAL:
             return TopologyEdgeState.PROVISIONAL
-        if support >= MIN_SUPPORT_CANDIDATE:
-            if edge.lifecycle == TopologyEdgeState.STRUCTURAL and edge.declared_by == "user":
-                # DEC-10: a user-declared parent is a fact.  Inference never
-                # downgrades it; only the user may pin/reject it.  Absence of
-                # delta evidence is not evidence against a wiring fact.
-                return TopologyEdgeState.STRUCTURAL
+        if declared:
+            # A user declaration is a prior, not a terminal truth: with no
+            # recent contradiction it stays STRUCTURAL even through quiet
+            # periods; sustained conflict above moves it to CONFLICTED.
+            return TopologyEdgeState.STRUCTURAL
+        if evidence.support >= MIN_SUPPORT_CANDIDATE:
             return TopologyEdgeState.CANDIDATE
         return edge.lifecycle
 
@@ -1630,10 +1660,22 @@ class TopologyInferenceView:
         if current is not None and {e.edge_id for e in structural} == current:
             # Same structure as the active version: nothing to publish.
             return self
+        # Debounce inferred versions (ADR-0043 §4).  A change that *removes* an
+        # edge from STRUCTURAL must publish at once (it changes what H uses
+        # right now); a promotion may wait, and the transitions inside the
+        # window are coalesced into the single version published when it opens.
+        structural_value = _value(TopologyEdgeState.STRUCTURAL)
+        removal = any(
+            f": {structural_value} -> " in text for text in transitions
+        )
+        if not removal and self.last_version_at is not None:
+            elapsed = (self.clock() - self.last_version_at).total_seconds()
+            if 0.0 <= elapsed < TOPOLOGY_VERSION_DEBOUNCE_S:
+                return self
         reason = "topology evidence ledger: " + "; ".join(transitions)
         version_id = service.propose_topology(structural, None)
         service.promote_topology(version_id, reason)
-        return replace(self, version_id=version_id)
+        return replace(self, version_id=version_id, last_version_at=self.clock())
 
     @staticmethod
     def _active_edge_ids(service: Any) -> set[str] | None:
@@ -1840,7 +1882,8 @@ class NestingCandidate:
     parent_id: str
     kind: str  # "nested" | "duplicate"
     evidence: dict[str, Any] = field(default_factory=dict)
-    requires_confirmation: bool = True
+    # ADR-0043: there is no topology confirmation; a candidate is simply a
+    # proposal whose edge state follows recent evidence (HB §4.3, DEC-10).
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -1848,7 +1891,6 @@ class NestingCandidate:
             "parent_id": self.parent_id,
             "kind": self.kind,
             "evidence": dict(self.evidence),
-            "requires_confirmation": self.requires_confirmation,
             "status": "candidate",
         }
 

@@ -63,6 +63,7 @@ __all__: list[str] = [
     # Null policy
     "NULL_SUFFIXES",
     "NULL_FIELD_NAMES",
+    "NULL_EXEMPT_FIELD_NAMES",
     "is_null_sensitive_field_name",
     "iter_null_sensitive_fields",
     "audit_model_null_policy",
@@ -361,9 +362,18 @@ NULL_SUFFIXES: tuple[str, ...] = ("_w", "_kwh", "_wh", "_a", "_var")
 NULL_FIELD_NAMES: frozenset[str] = frozenset({"confidence"})
 
 
+#: Dimensionless evidence *weights* are not measurements (HB §18): a zero
+#: weight means "no recent verdict", never an absent 0 W reading.  They are
+#: therefore exempt from the ``_w`` null-policy rule.
+NULL_EXEMPT_FIELD_NAMES: frozenset[str] = frozenset({"support_w", "conflict_w"})
+
+
 def is_null_sensitive_field_name(name: str) -> bool:
     """Whether ``name`` is subject to the null policy (HB §18)."""
-    return name in NULL_FIELD_NAMES or name.endswith(NULL_SUFFIXES)
+    return (
+        name not in NULL_EXEMPT_FIELD_NAMES
+        and (name in NULL_FIELD_NAMES or name.endswith(NULL_SUFFIXES))
+    )
 
 
 def iter_null_sensitive_fields(model: type[Any]) -> list[tuple[str, Any]]:

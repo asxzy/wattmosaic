@@ -11,7 +11,7 @@ Covers the task's acceptance points:
 - ``/topology/v3`` exposes PROVISIONAL edges as suggestions;
 - versions chain through ``parent_version_id``;
 - a calibration edit appends a revision without altering older revisions;
-- ``edges_confirmed_for`` is a per-subject learning gate.
+- the health payload reports the dynamic state and structural edge count.
 """
 
 from __future__ import annotations
@@ -28,10 +28,7 @@ from wattmosaic_engine.api import routes as route_pkg
 from wattmosaic_engine.api.facade import maybe_await
 from wattmosaic_engine.contracts import (
     EdgeEvidence,
-    EdgeLifecycleV3,
     EndpointConfigRevision,
-    MappingEdge,
-    Observability,
     RelationType,
     TopologyEdgeState,
     TopologyEdgeV3,
@@ -283,44 +280,14 @@ def test_calibration_edit_appends_revision_and_event(env) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Per-subject learning gate.
+# Dynamic topology: no per-subject confirmation gate (ADR-0043).
 # --------------------------------------------------------------------------- #
 
 
-def test_edges_confirmed_for_is_per_subject(env) -> None:
-    def mapping_edge(edge_id: str, subject: str, endpoint: str) -> MappingEdge:
-        return MappingEdge(
-            mapping_edge_id=edge_id,
-            subject_kind="device",
-            subject_id=subject,
-            endpoint_id=endpoint,
-            observability=Observability.DIRECT,
-            lifecycle=EdgeLifecycleV3.CONFIRMED,
-            declared_by="migration",
-            evidence=EdgeEvidence(),
-            valid_from=T0,
-        )
-
-    db, _clock, service = env
-    confirmed = _edge("e1", "main", "ct_a", declared_by="user")
-    provisional = _edge(
-        "e2",
-        "main",
-        "ct_b",
-        lifecycle=TopologyEdgeState.PROVISIONAL,
-        declared_by="inference",
-    )
-    vid = service.versions.propose_topology([confirmed, provisional], None)
-    service.versions.promote_topology(vid, "seed")
-    map_vid = service.versions.propose_mapping(
-        [mapping_edge("me1", "dev_a", "ct_a"), mapping_edge("me2", "dev_b", "ct_b")], None
-    )
-    service.versions.promote_mapping(map_vid, "seed mapping")
-
-    # dev_a's reader (ct_a) has only a CONFIRMED parent -> gate open.
-    assert service.edges_confirmed_for("dev_a") is True
-    # dev_b's reader (ct_b) is mapped under a PROVISIONAL parent -> gate closed.
-    assert service.edges_confirmed_for("dev_b") is False
+def test_topology_service_has_no_confirmation_gate(env) -> None:
+    """ADR-0043: per-subject topology confirmation is gone from the service."""
+    _db, _clock, service = env
+    assert not hasattr(service, "edges_confirmed_for")
 
 
 # --------------------------------------------------------------------------- #

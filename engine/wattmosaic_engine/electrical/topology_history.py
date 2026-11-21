@@ -712,6 +712,10 @@ def _flat_readers(group: _Group, changes: Mapping[str, float], ctx: _Context) ->
 class _Counts:
     support: dict[tuple[str, str], int] = field(default_factory=dict)
     conflict: dict[tuple[str, str], int] = field(default_factory=dict)
+    #: Decaying recent weights (ADR-0043), folded per decisive verdict exactly
+    #: as :func:`~.topology_inference._fold_verdict` does for the live ledger.
+    support_w: dict[tuple[str, str], float] = field(default_factory=dict)
+    conflict_w: dict[tuple[str, str], float] = field(default_factory=dict)
     parent_only: dict[tuple[str, str], int] = field(default_factory=dict)
     causes: dict[tuple[str, str], set[str]] = field(default_factory=dict)
     first_at: dict[tuple[str, str], datetime] = field(default_factory=dict)
@@ -719,10 +723,16 @@ class _Counts:
     last_conflict: dict[tuple[str, str], datetime] = field(default_factory=dict)
 
     def apply(self, at: datetime, ops: Iterable[_Op]) -> None:
+        from .topology_inference import EVIDENCE_DECAY
+
         for kind, parent, child, cause in ops:
             key = (parent, child)
+            sw = EVIDENCE_DECAY * self.support_w.get(key, 0.0)
+            cw = EVIDENCE_DECAY * self.conflict_w.get(key, 0.0)
             if kind == "support":
                 self.support[key] = self.support.get(key, 0) + 1
+                self.support_w[key] = sw + 1.0
+                self.conflict_w[key] = cw
                 self.causes.setdefault(key, set()).add(cause)
                 self.first_at.setdefault(key, at)
                 self.last_support[key] = at
@@ -730,6 +740,8 @@ class _Counts:
                 # As in observe_group: a pair exists from its first support,
                 # and only an existing pair collects conflict.
                 self.conflict[key] = self.conflict.get(key, 0) + 1
+                self.support_w[key] = sw
+                self.conflict_w[key] = cw + 1.0
                 self.causes[key].add(cause)
                 self.last_conflict[key] = at
 
@@ -768,6 +780,8 @@ def _learned_view(view: TopologyInferenceView, counts: _Counts) -> TopologyInfer
             evidence=TopologyEvidence(
                 support=count,
                 conflict=counts.conflict.get((parent, child), 0),
+                support_w=counts.support_w.get((parent, child), 0.0),
+                conflict_w=counts.conflict_w.get((parent, child), 0.0),
                 parent_only=counts.parent_only.get((parent, child), 0),
                 independent_causes=len(counts.causes[(parent, child)]),
                 last_support_at=counts.last_support.get((parent, child)),

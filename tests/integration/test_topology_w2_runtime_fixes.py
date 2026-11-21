@@ -105,20 +105,25 @@ def test_a_fold_never_overwrites_a_concurrent_merge(tmp_path: Path) -> None:
     assert "g-race" in core.topology_inference.seen_groups
 
 
-def test_structure_decisions_survive_a_restart(tmp_path: Path) -> None:
+def test_structure_decisions_are_not_a_lifecycle_source_after_a_restart(
+    tmp_path: Path,
+) -> None:
+    """ADR-0043: the persisted decision lock is gone; a restart keeps no lock."""
     core = _core(tmp_path, lambda: T0)
-    core._persist_structure_decisions({"sub_1": "main_2"})  # noqa: SLF001
+    # A legacy key left by migration v029 (which deletes it) must be ignored.
+    core.db.set_state("t5_structure_decisions", '{"sub_1": "main_2"}')
     restarted = _core(tmp_path, lambda: T0)
-    assert dict(restarted.topology_inference.structure_decisions) == {"sub_1": "main_2"}
+    assert dict(restarted.topology_inference.structure_decisions) == {}
+    assert not hasattr(restarted, "_persist_structure_decisions")
 
 
-def test_a_fold_persists_changed_structure_decisions(tmp_path: Path) -> None:
+def test_a_fold_never_persists_structure_decisions(tmp_path: Path) -> None:
+    """ADR-0043: decisions are a pure tie-break cache; no lifecycle reads them."""
     core = _core(tmp_path, lambda: T0)
     core.topology_inference = replace(core.topology_inference, structure_decisions={"a": "b"})
-    # The settle forgets a decision whose edge is gone; the fold persists that.
     core._fold_group_ledger(_group("g1"))  # noqa: SLF001
     assert dict(core.topology_inference.structure_decisions) == {}
-    assert core.db.get_state("t5_structure_decisions") == "{}"
+    assert core.db.get_state("t5_structure_decisions") is None
 
 
 def test_edge_health_writes_are_throttled(tmp_path: Path) -> None:

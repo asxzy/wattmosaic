@@ -125,8 +125,8 @@ class WattMosaicGlobalBinarySensor(_Base):
         if self._key == "engine_reachable":
             return bool(self.coordinator.engine_available)
         # ``learning_active`` means "samples are being accepted", not "a loop
-        # exists".  An unconfirmed topology runs the pipeline and rejects every
-        # sample, so this is ``off`` and the attributes say why (and what to do).
+        # exists".  A dynamic topology follows recent evidence; the attributes
+        # say why learning is off (ADR-0043).
         return bool(values.get("learning_active"))
 
     @property

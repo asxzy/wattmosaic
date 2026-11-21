@@ -318,7 +318,6 @@ const STRINGS = {
   // publish a reduced confidence rather than gating.  These read as status,
   // never as a block or a required confirmation.
   topology_dynamic: 'Dynamic topology',
-  topology_confirm_optional: 'Confirm topology edges (optional — raises confidence)',
 };
 const label = (value) => STRINGS[value] || titleCase(value || 'unknown');
 

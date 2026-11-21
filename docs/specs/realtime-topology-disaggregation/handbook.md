@@ -462,7 +462,15 @@ Topology inference must use:
 - Conflicting evidence.
 - Time consistency.
 
-A single event must not immediately confirm an edge.
+A single event must not immediately make an edge structural.
+
+Topology follows the evidence in both directions (ADR-0043). An edge's state
+is recomputed from *recent* evidence at every settle: decaying support and
+conflict weights (one event never moves an edge past CANDIDATE) let it move up
+and down. "Structural" means only that the observation operator H uses the
+edge right now, not a terminal confirmation. Decay is by verdict count, not
+wall clock, so quiet periods do not erode a true edge and replay stays
+deterministic. Parent-only changes are neutral. A pin is the only freeze.
 
 ## 4.4 Topology as a Versioned Prior
 

@@ -3,8 +3,10 @@
 The seven checks run in a deterministic order and every rejection reason is
 reachable; an observation from a relationship in ``SUSPECTED_CHANGE`` is held
 PROVISIONAL, and a non-identifiable member yields group-only evidence.  Pure:
-all external inputs (including the relationship-confirmation callable and the
-clock) are injected, and no legacy sample object is involved.
+all external inputs (including the clock) are injected, and no legacy sample
+object is involved.  ADR-0043 removes the ``edges_confirmed_for`` topology
+confirmation hook: topology is dynamic, and a relationship is either declared
+suspected or established by its published state, not gated on a confirmation.
 """
 
 from __future__ import annotations
@@ -27,8 +29,8 @@ from .thresholds import LearningThresholds
 #
 # The v2 gate below operates on device-attributed ``LearningObservation``
 # objects and applies the seven checks in design §9's order.  It is pure: every
-# external input -- including T4's ``edges_confirmed_for`` callable and the
-# observation's timestamp -- is injected, and it never imports runtime.fakes.
+# external input -- including the observation's timestamp -- is injected, and
+# it never imports runtime.fakes.
 # --------------------------------------------------------------------------- #
 
 
@@ -65,11 +67,9 @@ _GATE_CHECK_ORDER: tuple[GateRejection, ...] = GateRejection.order()
 class GateInputs:
     """External evidence the gate needs, injected by the caller.
 
-    ``edges_confirmed_for`` is T4's per-subject relationship-confirmation
-    callable.  It is injected as a plain callable so production depends only on
-    that seam, not on T4's not-yet-merged module.  ``edges_confirmed`` is a
-    scalar fallback for callers that have already resolved it for the subject;
-    when both are present the callable wins.
+    ``relationship_suspected`` is the declaration that a relationship is under
+    review (held PROVISIONAL).  ``edges_confirmed`` is a boolean fallback for a
+    caller that has already resolved the relationship's published state.
     """
 
     group_status: EventGroupStatus | str
@@ -81,7 +81,6 @@ class GateInputs:
     model_consistent: bool = True
     model_abs_error_w: float | None = None
     model_sigma_w: float | None = None
-    edges_confirmed_for: Callable[[str], bool] | None = None
 
 
 @dataclass(slots=True)
@@ -182,18 +181,12 @@ def evaluate_gate(
         "rejected",
     )
 
-    # 5. Relationship edges not SUSPECTED_CHANGE (T4's per-subject callable).
-    # A declared suspicion and a confirmed-false relationship are equivalent:
-    # neither may update a confirmed model, both are held PROVISIONAL.
+    # 5. Relationship edges not SUSPECTED_CHANGE.  A declared suspicion and a
+    # not-established relationship are equivalent: neither may update a
+    # confirmed model, both are held PROVISIONAL (ADR-0043).
     relationship_bad = bool(inputs.relationship_suspected) or (
         inputs.edges_confirmed is not None and not inputs.edges_confirmed
     )
-    if inputs.edges_confirmed_for is not None:
-        # The per-subject callable is authoritative for relationship validity;
-        # an explicit SUSPECTED_CHANGE declaration still holds provisional.
-        relationship_bad = relationship_bad or not inputs.edges_confirmed_for(
-            observation.subject_id
-        )
     checks[GateRejection.RELATIONSHIP_SUSPECTED_CHANGE] = (
         relationship_bad,
         "relationship_suspected_change" if relationship_bad else "relationship_confirmed",

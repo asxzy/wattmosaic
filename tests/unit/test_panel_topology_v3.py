@@ -8,10 +8,11 @@ These tests drive the real ``renderTopology`` under node with a stubbed
 ``fetch`` that serves only 3.0 payloads, and pin:
 
 * an empty 3.0 topology (endpoints, no edges) renders the endpoints and a
-  "No confirmed edges yet" state, never "No topology configured";
+  "Topology is still being learned from events" state (ADR-0043), never
+  "No topology configured";
 * "No topology configured" appears only when ``/health`` says
   ``details.topology.configured`` is false (no measurement endpoint);
-* status is "confirmed" iff an edge is CONFIRMED or pinned, else "candidate";
+* status is "structural" iff an edge is STRUCTURAL or pinned, else "candidate";
 * the hierarchy fallback nests by confirmed CONTAINS edges only;
 * rendering never writes and never requests a removed legacy route.
 """
@@ -110,7 +111,7 @@ EMPTY_TREE = {
 
 def _health(configured: bool, *, endpoints: int = 3, edges: int = 0) -> dict:
     topology = (
-        {"configured": True, "status": "candidate", "version": "topo-1",
+        {"configured": True, "state": "candidate", "structural_edges": 0, "version": "topo-1",
          "endpoints": endpoints, "edges": edges, "devices": 0}
         if configured
         else {"configured": False, "reason": "no measurement endpoints configured"}
@@ -123,7 +124,8 @@ def _api(*, edges: list[dict] | None = None, endpoints: list[dict] | None = None
     edges = edges or []
     api = {
         "/topology/v3": {"version_id": "topo-1", "version": 1, "status": "active",
-                         "edges": edges, "primary_display_tree": []},
+                         "edges": edges, "primary_display_tree": [],
+                         "discovery": {"counts": {"candidate": 0, "provisional": 0, "structural": 0, "conflicted": 0}}},
         "/endpoints": {"endpoints": ENDPOINTS if endpoints is None else endpoints},
         "/status": {"learning": {}},
         "/health": _health(configured, edges=len(edges)),
@@ -183,11 +185,11 @@ def _assert_only_3_0_reads(requests: list[list[str]]) -> None:
         assert not any(p.startswith(removed) for p in paths), (removed, paths)
 
 
-def test_empty_3_0_topology_renders_endpoints_and_no_confirmed_edges_state() -> None:
+def test_empty_3_0_topology_renders_endpoints_and_still_learning_state() -> None:
     result = _render(_api())
     text = result["text"]
     assert "No topology configured" not in text
-    assert "No confirmed edges yet" in text
+    assert "Topology is still being learned from events" in text
     # The endpoints are on screen: in the hierarchy and the endpoints card.
     for name in ("Main feed", "Sub panel", "Oven"):
         assert name in text
@@ -203,7 +205,7 @@ def test_empty_3_0_topology_renders_endpoints_and_no_confirmed_edges_state() -> 
 def test_no_topology_configured_only_when_engine_has_no_endpoints() -> None:
     result = _render(_api(endpoints=[], configured=False))
     assert "No topology configured" in result["text"]
-    assert "No confirmed edges yet" not in result["text"]
+    assert "Topology is still being learned from events" not in result["text"]
     _assert_only_3_0_reads(result["requests"])
 
 
@@ -216,16 +218,16 @@ def test_health_configured_wins_over_an_empty_endpoint_list() -> None:
     assert "Endpoints unavailable" in result["text"]
 
 
-def test_status_is_confirmed_when_an_edge_is_confirmed_or_pinned() -> None:
+def test_status_is_structural_when_an_edge_is_structural_or_pinned() -> None:
     _require_node()
     program = (
         "import { topologyStatusFromEdges } from './view-topology.js';\n"
-        f"const confirmed = {lit([_edge('a', 'ct_feed', 'ct_sub', 'confirmed')])};\n"
+        f"const structural = {lit([_edge('a', 'ct_feed', 'ct_sub', 'structural')])};\n"
         f"const pinned = {lit([_edge('b', 'ct_feed', 'ct_sub', 'candidate', pinned=True)])};\n"
         f"const soft = {lit([_edge('c', 'ct_feed', 'ct_sub', 'provisional'), _edge('d', 'ct_sub', 'ct_oven', 'candidate')])};\n"
         f"const rejected = {lit([dict(_edge('e', 'ct_feed', 'ct_sub', 'rejected'), valid_until=T0)])};\n"
         "console.log(JSON.stringify({\n"
-        "  confirmed: topologyStatusFromEdges(confirmed),\n"
+        "  structural: topologyStatusFromEdges(structural),\n"
         "  pinned: topologyStatusFromEdges(pinned),\n"
         "  soft: topologyStatusFromEdges(soft),\n"
         "  rejected: topologyStatusFromEdges(rejected),\n"
@@ -234,8 +236,8 @@ def test_status_is_confirmed_when_an_edge_is_confirmed_or_pinned() -> None:
     )
     out = run_esm(program, shim=EVENT_DOM_SHIM)
     assert out == {
-        "confirmed": "confirmed",
-        "pinned": "confirmed",
+        "structural": "structural",
+        "pinned": "structural",
         "soft": "candidate",
         "rejected": "candidate",
         "none": "candidate",
@@ -245,7 +247,7 @@ def test_status_is_confirmed_when_an_edge_is_confirmed_or_pinned() -> None:
 def test_topology_model_joins_endpoints_and_contains_edges() -> None:
     _require_node()
     edges = [
-        _edge("e-sub", "ct_feed", "ct_sub", "confirmed"),
+        _edge("e-sub", "ct_feed", "ct_sub", "structural"),
         _edge("e-oven", "ct_sub", "ct_oven", "provisional"),
     ]
     program = (
@@ -259,9 +261,9 @@ def test_topology_model_joins_endpoints_and_contains_edges() -> None:
     out = run_esm(program, shim=EVENT_DOM_SHIM)
     model = out["m"]
     assert model["configured"] is True
-    assert model["status"] == "confirmed"
+    assert model["status"] == "structural"
     assert model["version"] == 2 and model["version_id"] == "topo-2"
-    assert model["confirmed_edge_count"] == 1 and model["edge_count"] == 2
+    assert model["structural_edge_count"] == 1 and model["edge_count"] == 2
     channels = {c["ct_id"]: c for c in model["channels"]}
     assert channels["ct_feed"]["ct_type"] == "main"
     assert channels["ct_sub"]["ct_type"] == "branch"
@@ -280,14 +282,14 @@ def _discovery(candidate: int = 0, provisional: int = 0, top_pairs: list | None 
         "counts": {
             "candidate": candidate,
             "provisional": provisional,
-            "confirmed": 0,
+            "structural": 0,
             "conflicted": 0,
         },
         "top_pairs": top_pairs or [],
         "thresholds": {
             "MIN_SUPPORT_PROVISIONAL": 3,
             "MIN_INDEPENDENT_CAUSES": 2,
-            "MIN_SUPPORT_CONFIRMED": 8,
+            "MIN_SUPPORT_STRUCTURAL": 8,
         },
     }
 
@@ -296,7 +298,7 @@ def test_edges_card_renders_suggestions_with_in_version_flag() -> None:
     """Suggestions (in_version false) appear as rows with Accept/Pin/Reject."""
     suggestion = _edge("s1", "ct_feed", "ct_sub", "provisional")
     suggestion["in_version"] = False
-    version_edge = _edge("v1", "ct_feed", "ct_oven", "confirmed")
+    version_edge = _edge("v1", "ct_feed", "ct_oven", "structural")
     version_edge["in_version"] = True
     api = _api(edges=[version_edge, suggestion])
     api["/topology/v3"]["discovery"] = _discovery(provisional=1)
@@ -305,7 +307,7 @@ def test_edges_card_renders_suggestions_with_in_version_flag() -> None:
     assert "Typed topology edges (v3)" in text
     assert "ct_feed → ct_sub" in text
     assert "ct_feed → ct_oven" in text
-    assert "Accept" in text and "Reject" in text  # the provisional suggestion
+    assert "Pin" in text and "Reject" in text  # the provisional suggestion
     _assert_only_3_0_reads(result["requests"])
 
 
@@ -346,18 +348,18 @@ def test_discovery_summary_hidden_when_provisional_exists() -> None:
     assert "Discovery:" not in result["text"]
 
 
-def test_edges_card_offers_pin_and_accept_only_on_click() -> None:
-    """Accept (PROVISIONAL) and Pin (CANDIDATE) POST /pin, and only when clicked."""
+def test_edges_card_offers_pin_and_reject_only_on_click() -> None:
+    """ADR-0043: every actionable edge offers Pin and Reject, only on a click."""
     edges = [
         _edge("e-sub", "ct_feed", "ct_sub", "candidate"),
         _edge("e-oven", "ct_sub", "ct_oven", "provisional"),
-        _edge("e-done", "ct_feed", "ct_oven", "confirmed", pinned=True),
+        _edge("e-done", "ct_feed", "ct_oven", "structural", pinned=True),
     ]
     result = _render(_api(edges=edges))
     text = result["text"]
     assert "Typed topology edges (v3)" in text
-    assert "Accept" in text and "Pin" in text and "Reject" in text
+    assert "Pin" in text and "Reject" in text
     assert "Pinned" in text
     assert "ct_feed → ct_sub" in text
-    assert "Confirm topology edges" in text  # head action: navigation, not a write
+    assert "Review topology edges" in text  # head action: navigation, not a write
     _assert_only_3_0_reads(result["requests"])

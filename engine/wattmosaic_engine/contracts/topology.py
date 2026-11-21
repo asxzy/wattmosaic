@@ -186,12 +186,18 @@ class Observability(str, Enum):
 
 
 class EdgeEvidence(Model):
-    """Immutable-style counters of support/conflict for one edge (design §5).
+    """Counters and decaying weights of support/conflict for one edge (design §5).
 
-    ``parent_only`` events are neutral: they are recorded as residual evidence
-    and **never counted against an edge** (HB §4.3, AT-2).  The derived
-    :attr:`conflict_ratio` therefore uses only the decisive support/conflict
-    counts and returns ``0.0`` when there is no decisive evidence yet.
+    The integer ``support``, ``conflict``, ``parent_only`` and
+    ``independent_causes`` are lifetime audit counters.  The ``support_w`` /
+    ``conflict_w`` weights are the *recent* evidence the topology lifecycle is
+    computed from (ADR-0043): each decisive verdict multiplies the previous
+    weight by ``EVIDENCE_DECAY`` (0.95) and adds 1 for the verdict, so the pair
+    decays by verdict count -- never wall clock, which keeps replay
+    deterministic and quiet periods from eroding a true edge.  Their sum
+    converges to ``EVIDENCE_WINDOW`` (20).  ``parent_only`` events are neutral:
+    they only move that counter and neither decay nor add weight (HB §4.3,
+    AT-2).  Migration v029 seeds the weights from legacy lifetime counts.
     """
 
     support: int = 0
@@ -200,14 +206,30 @@ class EdgeEvidence(Model):
     independent_causes: int = 0
     last_support_at: datetime | None = None
     last_conflict_at: datetime | None = None
+    support_w: float = 0.0
+    conflict_w: float = 0.0
 
     @property
     def conflict_ratio(self) -> float:
-        """Share of decisive evidence that conflicts (parent-only is neutral)."""
+        """Share of recent decisive evidence that conflicts (parent-only is neutral).
+
+        Uses the decaying weights when any exist, so a long-ago conflict no
+        longer holds a recovered edge down; for an unmigrated row (or a caller
+        that only set the integer counters) it falls back to the lifetime
+        counts.  Returns ``0.0`` when there is no decisive evidence yet.
+        """
+        sw, cw = self.support_w, self.conflict_w
+        if sw + cw > 0:
+            return cw / (sw + cw)
         decisive = self.support + self.conflict
         if decisive <= 0:
             return 0.0
         return self.conflict / decisive
+
+    @property
+    def strength(self) -> float:
+        """Recent support weight; the API's read-only ``strength`` of the edge."""
+        return self.support_w
 
 
 # --------------------------------------------------------------------------- #

@@ -2,7 +2,7 @@
   "$defs": {
     "EdgeEvidence": {
       "additionalProperties": false,
-      "description": "Immutable-style counters of support/conflict for one edge (design \u00a75).\n\n``parent_only`` events are neutral: they are recorded as residual evidence\nand **never counted against an edge** (HB \u00a74.3, AT-2).  The derived\n:attr:`conflict_ratio` therefore uses only the decisive support/conflict\ncounts and returns ``0.0`` when there is no decisive evidence yet.",
+      "description": "Counters and decaying weights of support/conflict for one edge (design \u00a75).\n\nThe integer ``support``, ``conflict``, ``parent_only`` and\n``independent_causes`` are lifetime audit counters.  The ``support_w`` /\n``conflict_w`` weights are the *recent* evidence the topology lifecycle is\ncomputed from (ADR-0043): each decisive verdict multiplies the previous\nweight by ``EVIDENCE_DECAY`` (0.95) and adds 1 for the verdict, so the pair\ndecays by verdict count -- never wall clock, which keeps replay\ndeterministic and quiet periods from eroding a true edge.  Their sum\nconverges to ``EVIDENCE_WINDOW`` (20).  ``parent_only`` events are neutral:\nthey only move that counter and neither decay nor add weight (HB \u00a74.3,\nAT-2).  Migration v029 seeds the weights from legacy lifetime counts.",
       "properties": {
         "support": {
           "default": 0,
@@ -49,6 +49,16 @@
           ],
           "default": null,
           "title": "Last Conflict At"
+        },
+        "support_w": {
+          "default": 0.0,
+          "title": "Support W",
+          "type": "number"
+        },
+        "conflict_w": {
+          "default": 0.0,
+          "title": "Conflict W",
+          "type": "number"
         }
       },
       "title": "EdgeEvidence",

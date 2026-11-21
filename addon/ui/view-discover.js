@@ -1049,8 +1049,8 @@ function topologyLearningBanner(status, topology) {
     learning.topology_quality || detail.topology_quality || ''
   ).toLowerCase();
 
-  // A confirmed topology has no reduced-confidence note to show.
-  if (topology && topology.status === 'confirmed') return null;
+  // A structural topology has no reduced-confidence note to show (ADR-0043).
+  if (topology && topology.status === 'structural') return null;
 
   // The backend's informational note is the primary signal now.  Fall back
   // to a candidate quality when a payload predates the note field.
@@ -1082,8 +1082,8 @@ function topologyLearningBanner(status, topology) {
         class: 'btn btn-sm',
         type: 'button',
         onclick: () => slots.reviewTopologyEdges(),
-        title: 'Optional — pin edges one by one in the edges card; learning and results already use the active topology',
-      }, STRINGS.topology_confirm_optional),
+        title: 'Pin edges one by one in the edges card; learning and results already use the active topology',
+      }, 'Review edges'),
     ]),
   ]);
 }

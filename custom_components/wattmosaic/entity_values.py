@@ -21,6 +21,7 @@ from .util import (
     is_stale,
     model_validity,
     parse_datetime,
+    structural_edge_count,
 )
 
 
@@ -226,7 +227,7 @@ def global_values(
         ),
         "reconciliation_error": as_float(reconciliation.get("reconciliation_error_w")),
         "accounted_fraction": as_percentage(reconciliation.get("accounted_fraction")),
-        "topology_confirmed": bool(reconciliation.get("topology_confirmed", False)),
+        "topology_structural_edges": structural_edge_count(reconciliation),
         "quality_score": as_percentage(quality.get("overall_score")),
         "engine_status": engine_status,
         "last_update": timestamp,

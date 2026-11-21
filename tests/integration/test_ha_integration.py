@@ -840,44 +840,43 @@ class TestStaleness:
         assert values["available"] is True
         assert values["reconciliation_available"] is False
 
-    def test_topology_confirmed_is_coerced_and_surfaced(self) -> None:
-        """Contract 1.3.0's ``topology_confirmed`` must reach the summary sensor.
+    def test_topology_structural_edges_is_coerced_and_surfaced(self) -> None:
+        """ADR-0043: the STRUCTURAL edge count must reach the summary sensor.
 
-        The engine reports whether the balance came from a user-confirmed
-        topology or a ``candidate`` hypothesis.  If the integration drops the
-        field on coercion, a dashboard cannot distinguish a measured balance
-        from one computed over a guessed panel tree -- which is exactly the
-        failure that made a double-counted 2.14x total look trustworthy.
+        The engine reports how many edges H currently uses.  If the integration
+        drops the field on coercion, a dashboard cannot see how much of the
+        published topology is established -- which is exactly the failure that
+        made a double-counted 2.14x total look trustworthy.
         """
-        confirmed = _global_snapshot(
+        structural = _global_snapshot(
             {
                 "timestamp": NOW.isoformat(),
                 "reconciliation": {
                     "main_power_w": 1247.9,
                     "quality_status": "good",
-                    "topology_confirmed": True,
+                    "topology_structural_edges": 3,
                 },
             }
         )
-        assert confirmed["reconciliation"]["topology_confirmed"] is True
+        assert structural["reconciliation"]["topology_structural_edges"] == 3
         values = entity_values.global_values(
-            confirmed, {}, engine_available=True, now=NOW, stale_after=120
+            structural, {}, engine_available=True, now=NOW, stale_after=120
         )
-        assert values["topology_confirmed"] is True
+        assert values["topology_structural_edges"] == 3
 
-    def test_topology_confirmed_absent_reads_as_not_confirmed(self) -> None:
-        """An older engine omits the key; absence must never read as ``True``."""
+    def test_topology_structural_edges_absent_reads_as_zero(self) -> None:
+        """An older engine omits the key; absence must never read as a used edge."""
         snapshot = _global_snapshot(
             {
                 "timestamp": NOW.isoformat(),
                 "reconciliation": {"main_power_w": 10.0, "quality_status": "good"},
             }
         )
-        assert snapshot["reconciliation"]["topology_confirmed"] is False
+        assert snapshot["reconciliation"]["topology_structural_edges"] == 0
         values = entity_values.global_values(
             snapshot, {}, engine_available=True, now=NOW, stale_after=120
         )
-        assert values["topology_confirmed"] is False
+        assert values["topology_structural_edges"] == 0
 
     def test_integration_contract_version_matches_the_engine(self) -> None:
         """The consumer's expectation must not lag the engine's contract.

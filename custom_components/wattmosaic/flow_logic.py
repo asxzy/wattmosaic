@@ -412,7 +412,7 @@ def nesting_candidates(channel: Mapping[str, Any]) -> list[str]:
     Discovery writes them to ``metadata.nesting_candidates`` after measuring
     containment and closure between channels.  They are proposals only: a
     candidate never becomes a parent link until the user accepts it in the
-    wizard, which keeps an inferred wiring fact out of the confirmed topology.
+    wizard, which keeps an inferred wiring fact out of the published topology.
     """
     meta = channel.get("metadata")
     if not isinstance(meta, Mapping):

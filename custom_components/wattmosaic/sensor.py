@@ -229,12 +229,11 @@ class WattMosaicGlobalSensor(_WattMosaicBase):
             )
             attributes["last_error"] = data.last_error
             attributes["topology_version"] = data.reconciliation.get("topology_version")
-            # The balance is only verified when the topology is confirmed; a
-            # ``candidate`` topology is a hypothesis.  Exposing the flag on the
-            # home-level entities is what lets a dashboard or automation tell
-            # "measured 1247 W" from "guessed 1247 W".
-            attributes["topology_confirmed"] = data.reconciliation.get(
-                "topology_confirmed"
+            # ADR-0043: topology follows the evidence; there is no terminal
+            # confirmation.  Publish the count of STRUCTURAL edges so a
+            # dashboard can see how much of the tree H currently uses.
+            attributes["topology_structural_edges"] = data.reconciliation.get(
+                "topology_structural_edges"
             )
             # The residual decomposition (contract 1.4.0).  It belongs on the
             # entities that *report* the residual, so the "Unknown / unattributed

@@ -1,9 +1,9 @@
 """L4 — ordered learning quality gate v2 (design §9, HB §13.1).
 
-The gate is pure: inputs (including the relationship-confirmation callable and
-the clock-derived timestamp already on the observation) are injected, no DB and
-no wall clock.  T4's ``edges_confirmed_for`` is not merged yet, so tests inject a
-small callable as a fake; production code depends only on ``Callable[[str], bool]``.
+The gate is pure: inputs (including the clock-derived timestamp already on the
+observation) are injected, no DB and no wall clock.  ADR-0043 removes the
+topology-confirmation hook: a relationship is declared suspected or published
+as established, never gated on a ``confirmed`` callable.
 """
 
 from __future__ import annotations
@@ -64,7 +64,6 @@ def _inputs(**overrides: object) -> GateInputs:
         "relationship_suspected": False,
         "independent_event": True,
         "model_consistent": True,
-        "edges_confirmed_for": lambda _subject: True,
     }
     data.update(overrides)
     return GateInputs(**data)  # type: ignore[arg-type]
@@ -143,29 +142,22 @@ def test_provisional_group_is_held_provisional() -> None:
     assert decision.rejection_reason == GateRejection.GROUP_NOT_CONFIRMED
 
 
-def test_edges_confirmed_for_callable_is_used_not_an_aggregate_flag() -> None:
-    """The gate asks T4's per-subject callable, never Topology.status == CONFIRMED."""
-    seen: list[str] = []
-
-    def edges_confirmed_for(subject_id: str) -> bool:
-        seen.append(subject_id)
-        return False
-
+def test_an_unestablished_relationship_is_held_provisional() -> None:
+    """ADR-0043: no confirmation hook; a published false state holds provisional."""
     decision = evaluate_gate(
         _observation(),
-        _inputs(edges_confirmed_for=edges_confirmed_for, edges_confirmed=None),
+        _inputs(edges_confirmed=False),
         clock=lambda: T0,
     )
-    assert seen == ["dev-a"]
     assert decision.accepted is False
     assert decision.status == "provisional"
     assert decision.rejection_reason == GateRejection.RELATIONSHIP_SUSPECTED_CHANGE
 
 
-def test_edges_confirmed_callable_true_accepts() -> None:
+def test_an_established_relationship_accepts() -> None:
     decision = evaluate_gate(
         _observation(),
-        _inputs(edges_confirmed=None, edges_confirmed_for=lambda _subject: True),
+        _inputs(edges_confirmed=True),
         clock=lambda: T0,
     )
     assert decision.accepted is True

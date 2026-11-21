@@ -1,5 +1,17 @@
 # Release Notes
 
+## Unreleased — dynamic topology (contract 4.0.0, ADR-0043)
+
+Topology is now dynamic: an edge's state is recomputed from recent evidence at
+every settle and can move up or down. The topology `CONFIRMED` state is renamed
+`STRUCTURAL` and means only that H uses the edge right now; mapping confirmation
+is unchanged. Evidence decays by verdict count (never wall clock), the sticky
+structure-decision lock is gone, and inferred topology versions are debounced.
+The confirmation vocabulary is removed from the engine API, learning gate, HA
+integration and panel; edges now publish their state, strength and conflict
+ratio, and the pin is the only freeze. Migration v029 rewrites stored topology
+lifecycles and seeds decaying evidence weights; no mapping row is touched.
+
 ## v0.3.0-dev.5 — 2026-11-20 (development channel)
 
 Automatic development build.

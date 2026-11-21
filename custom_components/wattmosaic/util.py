@@ -134,6 +134,19 @@ def as_bool(value: Any, *, default: bool = True) -> bool:
     return default
 
 
+def structural_edge_count(value: Mapping[str, Any]) -> int:
+    """Number of STRUCTURAL topology edges from a reconciliation payload (ADR-0043).
+
+    Prefers the published ``topology_structural_edges`` count.  An older engine
+    only carries the legacy ``topology_confirmed`` boolean, which maps to 1 when
+    true and 0 otherwise; absent is never treated as a confirmed edge.
+    """
+    count = as_int(value.get("topology_structural_edges"))
+    if count is not None:
+        return max(0, count)
+    return 1 if as_bool(value.get("topology_confirmed"), default=False) else 0
+
+
 def as_percentage(value: Any) -> float | None:
     """Coerce a ``[0, 1]`` confidence/score into a ``[0, 100]`` percentage."""
     number = as_float(value)
@@ -422,11 +435,10 @@ def coerce_reconciliation(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         "present": present,
         "timestamp": parse_datetime(raw.get("timestamp")),
         "topology_version": as_int(raw.get("topology_version")) or 1,
-        #: Whether the balance came from a user-confirmed topology or a
-        #: ``candidate`` hypothesis (contract 1.3.0, additive).  Coerced through
-        #: ``as_bool`` because an older engine simply omits the key -- absent
-        #: must read as "not confirmed", never as ``True``.
-        "topology_confirmed": as_bool(raw.get("topology_confirmed"), default=False),
+        #: ADR-0043: topology has no terminal confirmation.  Publish the number
+        #: of STRUCTURAL edges instead.  An older engine may only carry the
+        #: legacy boolean, which maps to 1 when true and 0 when absent/false.
+        "topology_structural_edges": structural_edge_count(raw),
         "main_power_w": as_float(raw.get("main_power_w")),
         "l1_power_w": _opt("l1_power_w"),
         "l2_power_w": _opt("l2_power_w"),
@@ -632,7 +644,7 @@ def coerce_v3_snapshot(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         "inferred_w": as_float(recon_raw.get("identified_w")),
         "unknown_residual_w": as_float(recon_raw.get("unknown_w")),
         "quality_status": "good" if recon_raw else "missing",
-        "topology_confirmed": False,
+        "topology_structural_edges": 0,
     }
     timestamp = parse_datetime(raw.get("observed_at")) or parse_datetime(raw.get("computed_at"))
     versions = raw.get("versions") if isinstance(raw.get("versions"), Mapping) else {}

@@ -2240,3 +2240,50 @@ detector fix, previously missed events can only be re-detected within the record
 (10 days by default). On upgrade, legacy `ct_samples` rows drain in the background. SQLite
 reuses freed pages, so the database file stops growing but does not shrink without a
 manual `VACUUM` taken with the engine stopped; no automated shrink is performed.
+
+---
+
+## ADR-0043 — Topology is dynamic; there is no topology confirmation
+
+**Status:** Accepted · 2026-11-20 · Supersedes ADR-0008 · Amends ADR-0037
+
+**Context.** An edge used to reach `CONFIRMED` and stay there. Lifetime
+`EdgeEvidence` counters never decayed, a persisted structure decision kept a
+PROVISIONAL edge CONFIRMED across restarts, and "requires confirmation" was
+shown throughout the API, integration and panel. A 300-support edge needed
+about 100 conflicts before its ratio moved: a plug relocation left H using a
+stale parent indefinitely, while "confirmation" implied a terminal truth the
+engine could not actually guarantee.
+
+**Decision.** (HB §4.3, DEC-10)
+
+1. **No terminal topology state.** `TopologyEdgeState.STRUCTURAL` (contract
+   4.0.0, renamed from `CONFIRMED` on topology edges) means only that the
+   observation operator H uses the edge *right now*. Mapping confirmation is
+   a different concept and is unchanged.
+2. **Evidence decays by verdict count, never wall clock.** Each decisive
+   verdict folds `w = 0.95 * w + (verdict)` for both support and conflict
+   weights (`EVIDENCE_WINDOW = 20`). Parent-only verdicts are neutral. The
+   lifecycle is a pure function of those weights, the gates and the current
+   state: an edge moves up *and down*, a recovered CONFLICTED edge climbs
+   back, and a quiet period never erodes a true edge (replay stays
+   deterministic without a clock).
+3. **No sticky confirmation.** Remembered structure decisions may choose a
+   parent or demote a transitive grandparent, but never hold an edge
+   STRUCTURAL whose evidence is below PROVISIONAL, and never hold one without
+   series. The persisted `t5_structure_decisions` lock is removed.
+4. **User authority is explicit.** A declared edge keeps STRUCTURAL as a
+   *prior* (unless recent evidence makes it CONFLICTED) and a pin is the only
+   way to freeze an edge. A pinned edge still reports its conflict ratio.
+5. **Versions follow structural changes.** A version is proposed when an edge
+   enters or leaves STRUCTURAL (including STRUCTURAL→CONFLICTED), debounced to
+   at most one inferred version per 900 s unless a removal happens. Mapping
+   and model versions are independent.
+6. **The confirmation vocabulary is removed** from `NestingCandidate`, the
+   topology API, the learning gate, the HA integration and the panel.
+
+**Consequences.** A plug move now demotes an edge within a few dozen
+conflicting events and the same edge re-promotes once the evidence recovers.
+Users see an edge's state, strength and conflict ratio instead of a binary
+confirmed/candidate flag. One event still never moves an edge past CANDIDATE,
+parent-only changes stay neutral, and REJECTED/pinned overrides stay hard.

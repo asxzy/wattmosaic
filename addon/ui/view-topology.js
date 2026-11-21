@@ -62,16 +62,16 @@ const topologyHead = (topology) =>
         onclick: () => slots.runDiscovery(),
         disabled: state.discover.running ? true : null,
       }, state.discover.running ? 'Discovering…' : 'Discover devices & topology'),
-      // 3.0 has no blanket "confirm topology" write: confirmation is per edge
-      // (POST /topology/edges/{id}/pin), from the edges card, on a user click.
-      // This button only moves focus there; it never writes.
+      // ADR-0043: topology is dynamic, with no confirmation write.  Pinning an
+      // edge (POST /topology/edges/{id}/pin) is the only explicit freeze.  This
+      // button only moves focus to the edges card; it never writes.
       topology && (topology.edges || []).length
         ? el('button', {
           class: 'btn',
           type: 'button',
           onclick: reviewTopologyEdges,
-          title: 'Optional — pin edges one by one in the edges card; learning and results already use the active topology',
-        }, STRINGS.topology_confirm_optional)
+          title: 'Pin edges one by one in the edges card; the active topology already drives results',
+        }, 'Review topology edges')
         : null,
     ]),
   ]);
@@ -128,7 +128,7 @@ async function renderTopology(root, signal) {
   // "No topology configured" means the engine has no measurement endpoint at
   // all — exactly ``health.details.topology.configured === false``.  An
   // empty 3.0 topology (endpoints, no edges yet) is a real topology and is
-  // rendered below with an explicit "no confirmed edges yet" state.
+  // rendered below with an explicit "still being learned" state.
   if (topology.configured === false) {
     root.append(
       emptyState(
@@ -205,8 +205,8 @@ async function renderTopology(root, signal) {
 function topologyFallbackNotice(err) {
   const missing = Boolean(err && err.status === 404);
   const text = missing
-    ? 'This engine does not serve /api/v1/topology/tree (HTTP 404), so the engine-owned hierarchy cannot be drawn. The hierarchy card falls back to containment from confirmed CONTAINS edges only, and devices are not placed.'
-    : `The hierarchy could not be loaded (${describeError(err)}). The hierarchy card falls back to containment from confirmed CONTAINS edges only, and devices are not placed.`;
+    ? 'This engine does not serve /api/v1/topology/tree (HTTP 404), so the engine-owned hierarchy cannot be drawn. The hierarchy card falls back to containment from structural CONTAINS edges only, and devices are not placed.'
+    : `The hierarchy could not be loaded (${describeError(err)}). The hierarchy card falls back to containment from structural CONTAINS edges only, and devices are not placed.`;
   return notice('Hierarchy unavailable', text, 'warn');
 }
 
@@ -222,16 +222,16 @@ const edgeInForce = (edge) =>
   && !['rejected', 'retired'].includes(_lower(edge.lifecycle))
   && _absent(edge.valid_until);
 
-// The authority test the engine's ``_topology_health`` uses: an edge counts
-// as structural when its lifecycle is STRUCTURAL (legacy "confirmed") or a
-// user pinned it.  D1 accepts both spellings; D2 removes the legacy wording.
-const edgeConfirmed = (edge) =>
+// ADR-0043: there is no topology confirmation.  An edge is structural when
+// its published state is STRUCTURAL (legacy "confirmed" is accepted for old
+// payloads) or a user pinned it.  Pin is the only way to freeze an edge.
+const edgeStructural = (edge) =>
   edgeInForce(edge)
   && (['structural', 'confirmed'].includes(_lower(edge.lifecycle)) || edge.pinned === true);
 
-// "confirmed" when any active edge is CONFIRMED or pinned, else "candidate".
+// "structural" when any active edge is STRUCTURAL or pinned, else "candidate".
 const topologyStatusFromEdges = (edges) =>
-  ((Array.isArray(edges) ? edges : []).some(edgeConfirmed) ? 'confirmed' : 'candidate');
+  ((Array.isArray(edges) ? edges : []).some(edgeStructural) ? 'structural' : 'candidate');
 
 // GET /endpoints answers ``{endpoints: [...]}``; tolerate a bare list.
 const endpointList = (payload) => {
@@ -248,12 +248,12 @@ const latestRevision = (endpoint) => {
   );
 };
 
-// child endpoint -> parent endpoint, from confirmed CONTAINS edges only.  A
+// child endpoint -> parent endpoint, from structural CONTAINS edges only.  A
 // PROVISIONAL edge is a soft suggestion and never places a node (HB §16).
 function containsParents(edges) {
   const parents = new Map();
   for (const edge of Array.isArray(edges) ? edges : []) {
-    if (_lower(edge && edge.relation) !== 'contains' || !edgeConfirmed(edge)) continue;
+    if (_lower(edge && edge.relation) !== 'contains' || !edgeStructural(edge)) continue;
     const parent = _edgeText(edge.source_endpoint_id);
     const child = _edgeText(edge.target_endpoint_id);
     if (parent && child && parent !== child && !parents.has(child)) parents.set(child, parent);
@@ -262,7 +262,7 @@ function containsParents(edges) {
 }
 
 // One measurement endpoint as the channel row the cards render.  The CT role
-// is read from the declared scope and the confirmed CONTAINS edges; it is
+// is read from the declared scope and the structural CONTAINS edges; it is
 // never guessed from a name or an id.
 function endpointChannel(endpoint, parents, hasChildren) {
   const id = String(endpoint.endpoint_id);
@@ -324,7 +324,7 @@ function topologyModel({ v3 = null, endpoints = null, tree = null, health = null
     edges,
     edge_count: edges.length,
     active_edge_count: edges.filter(edgeInForce).length,
-    confirmed_edge_count: edges.filter(edgeConfirmed).length,
+    structural_edge_count: edges.filter(edgeStructural).length,
     device_count: !_absent(stats.devices) ? Number(stats.devices)
       : (!_absent(healthTopology.devices) ? Number(healthTopology.devices) : null),
     primary_display_tree: v3 && Array.isArray(v3.primary_display_tree) ? v3.primary_display_tree : [],
@@ -332,15 +332,16 @@ function topologyModel({ v3 = null, endpoints = null, tree = null, health = null
 }
 
 // An empty 3.0 topology is normal on a fresh install: the endpoints exist but
-// no containment edge has been confirmed yet.  Say exactly that.
+// no containment edge has become structural yet.  ADR-0043 replaces the old
+// "No confirmed edges yet" notice with the honest learning message.
 function noConfirmedEdgesNotice(topology) {
   if (!topology || topology.configured === false) return null;
-  if ((topology.confirmed_edge_count || 0) > 0) return null;
+  if ((topology.structural_edge_count || 0) > 0) return null;
   const endpoints = topology.endpoint_count || (topology.channels || []).length;
   const suggested = topology.active_edge_count || 0;
   return notice(
-    'No confirmed edges yet',
-    `${endpoints} measurement endpoint${endpoints === 1 ? '' : 's'} known, but no containment edge is confirmed, so the hierarchy lists them unplaced. `
+    'Topology is still being learned from events',
+    `${endpoints} measurement endpoint${endpoints === 1 ? '' : 's'} known, but no containment edge is structural yet, so the hierarchy lists them unplaced. `
       + (suggested
         ? `${suggested} suggested edge${suggested === 1 ? '' : 's'} can be pinned or rejected in the edges card below.`
         : 'Run discovery, or let the engine propose edges from events; suggestions appear in the edges card below.'),
@@ -387,11 +388,11 @@ function topologySummary(topology, tree) {
   // and learning — never a gate.  Show its published confidence as status,
   // not as a "confirm to proceed" warning.
   const configured =
-    topology.status === 'confirmed'
+    topology.status === 'structural'
       ? null
       : notice(
           STRINGS.topology_dynamic + ' — authoritative for inference and learning',
-          'The current topology drives results and learning now. Candidate wiring carries a reduced confidence score; samples are collected with topology confidence tracked. Pinning edges in the edges card is optional and raises that confidence.',
+          'The current topology is learned from events and follows the evidence in both directions. Each edge shows its state and strength; pin an edge in the card below to freeze it.',
           'info'
         );
 
@@ -783,7 +784,7 @@ function topologyHierarchyCard(topology, tree) {
     actions: [filter, expandAll, collapseAll],
     foot: tree
       ? `Computed by the engine${tree.version !== undefined ? ` (contract v${tree.version})` : ''} at ${ago(tree.generated_at)}. Each device appears once, under the circuit that measures it.`
-      : 'Fallback view: containment from confirmed CONTAINS edges only. Devices are not placed.',
+      : 'Fallback view: containment from structural CONTAINS edges only. Devices are not placed.',
   });
 
   // Paint in the same task as the card so the tree is never a frame late.
@@ -1104,6 +1105,12 @@ function v3EdgeView(edge) {
     reader_ids: readers,
     pinned: e.pinned === true,
     provisional: life === 'provisional',
+    // ADR-0043: show the edge's dynamic state and recent support weight.
+    state: life,
+    strength: Number(e.strength !== undefined && e.strength !== null ? e.strength
+      : (e.evidence && e.evidence.support_w) || 0),
+    conflict_ratio: Number(e.conflict_ratio !== undefined && e.conflict_ratio !== null
+      ? e.conflict_ratio : ((e.evidence && e.evidence.conflict_ratio) || 0)),
     // A stored inferred edge outside the active version.  Shown as a soft
     // suggestion; Accept/Pin/Reject still write only on a user click.
     in_version: e.in_version !== false,
@@ -1145,6 +1152,7 @@ function discoverySummary(payload) {
   const candidates = Number(counts.candidate) || 0;
   const provisionals =
     (Number(counts.provisional) || 0)
+    + (Number(counts.structural) || 0)
     + (Number(counts.confirmed) || 0)
     + (Number(counts.conflicted) || 0);
   // Only show the summary while there is nothing to act on in the edges card.
@@ -1203,21 +1211,20 @@ function v3EdgesCard(model) {
       },
     }, [
       badge(label(edge.edge_type), 'info'),
-      badge(label(edge.lifecycle), edge.provisional ? 'warn' : 'mute'),
+      badge(label(edge.state || edge.lifecycle), edge.provisional ? 'warn' : 'mute'),
       edge.in_version === false ? badge('suggestion', 'info') : null,
       edge.pinned ? badge('Pinned', 'ok') : null,
       el('span', {}, `${edge.parent_id || '—'} → ${edge.child_id || '—'}`),
+      el('span', { class: 'stat-hint' }, `state ${edge.state || edge.lifecycle} · strength ${edge.strength.toFixed(1)} · conflict ${Math.round((edge.conflict_ratio || 0) * 100)}%`),
       el('a', { class: 'v3-provenance', href: `#${edge.matrix_drill}` }, 'Matrix columns'),
       edge.provisional || edge.pinnable
         ? el('span', { class: 'topo-v3-actions' }, [
             edgeAction(
-              edge.provisional ? 'Accept' : 'Pin',
+              'Pin',
               'btn btn-sm',
               () => acceptProvisionalEdge(edge.edge_id),
-              edge.provisional
-                ? ['Edge accepted', 'The provisional edge was pinned.']
-                : ['Edge pinned', 'The edge is now under your authority and confirmed.'],
-              edge.provisional ? 'Could not accept edge' : 'Could not pin edge'
+              ['Edge pinned', 'The edge is now frozen under your authority.'],
+              'Could not pin edge'
             ),
             edgeAction(
               'Reject',
@@ -1236,7 +1243,7 @@ function v3EdgesCard(model) {
   if (m.discovery) body.unshift(m.discovery);
   return card('Typed topology edges (v3)', body, {
     id: 'topology-edges',
-    foot: 'Lifecycle comes from the topology service. Only an operator Accept, Pin or Reject writes; a single event never promotes an edge past candidate.',
+    foot: 'State and strength come from the topology service and follow recent evidence. Only an operator Pin or Reject writes; a single event never promotes an edge past candidate.',
   });
 }
 
@@ -1251,7 +1258,7 @@ export {
   V3_PATH,
   ENDPOINTS_PATH,
   edgeInForce,
-  edgeConfirmed,
+  edgeStructural,
   topologyStatusFromEdges,
   endpointList,
   containsParents,
