@@ -250,3 +250,23 @@ def test_soft_only_parent_is_judged_at_soft_level():
     item = _child_status(result, K1)
     assert item["level"] == "soft"
     assert item["status"] == "cross_leg"
+
+
+def test_score_placements_statuses():
+    placements = {
+        K1: {"parent": SUB1, "band": "high"},
+        K2: {"parent": M1, "band": "low"},  # ancestor of the GT parent SUB1
+        SUB1: {"parent": M2, "band": "medium"},  # wrong (cross-leg)
+        K3: {"parent": None, "both_legs": [SUB2, SUB1], "band": "medium"},
+        K6: {},
+    }
+    result = topology_score.score_placements(placements, GT)
+    status = {row["child"]: row["status"] for row in result["children"]}
+    assert status[K1] == "correct"
+    assert status[K2] == "ancestor"
+    assert status[SUB1] == "wrong"
+    assert status[K3] == "both_legs_ok"
+    assert status[K6] == "unplaced"
+    assert status[SUB2] == "unplaced"
+    assert result["counts"]["wrong"] == 1
+    assert result["precision"] == 3 / 4

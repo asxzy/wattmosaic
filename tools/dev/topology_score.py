@@ -520,3 +520,57 @@ def format_markdown(result: Mapping[str, Any], names: Mapping[str, str] | None =
         lines.append("")
         lines.append(", ".join(label(reader) for reader in result["unscorable"]))
     return "\n".join(lines) + "\n"
+
+
+def score_placements(placements: Mapping[str, Any], gt: Mapping[str, Any]) -> dict[str, Any]:
+    """Score E6 single placements (one parent per child) against the ground truth.
+
+    Per GT child: ``correct`` (placed under its GT parent), ``both_legs_ok``
+    (placed under both legs and the GT parent is one of them -- the honest
+    answer for a leg-unidentifiable 240 V load), ``ancestor`` (under an
+    ancestor of the GT parent), ``wrong``, or ``unplaced``.  Precision counts
+    only committed placements (correct / both_legs_ok / ancestor vs wrong).
+    """
+    parents = _gt_contains(gt)
+    ancestors = _ancestors(parents)
+    names = _gt_reader_names(gt)
+    rows: list[dict[str, Any]] = []
+    counts: dict[str, int] = defaultdict(int)
+    bands: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for child, true_parent in sorted(parents.items()):
+        placement = placements.get(child) or {}
+        parent = placement.get("parent")
+        both = list(placement.get("both_legs") or ())
+        band = str(placement.get("band") or "unplaced")
+        if both:
+            status = "both_legs_ok" if true_parent in both else "wrong"
+        elif not parent:
+            status = "unplaced"
+        elif parent == true_parent:
+            status = "correct"
+        elif parent in ancestors.get(child, set()):
+            status = "ancestor"
+        else:
+            status = "wrong"
+        counts[status] += 1
+        bands[band][status] += 1
+        rows.append(
+            {
+                "child": child,
+                "child_name": names.get(child, child),
+                "gt_parent": true_parent,
+                "parent": parent,
+                "both_legs": both,
+                "band": band,
+                "score": placement.get("score"),
+                "status": status,
+            }
+        )
+    committed = counts["correct"] + counts["both_legs_ok"] + counts["ancestor"] + counts["wrong"]
+    return {
+        "counts": dict(counts),
+        "by_band": {band: dict(v) for band, v in bands.items()},
+        "precision": (committed - counts["wrong"]) / committed if committed else None,
+        "coverage": committed / len(parents) if parents else None,
+        "children": rows,
+    }

@@ -669,6 +669,13 @@ def replay(
         harness.settle()
         harness.pump()
         final_score = score_now(core, gt, dict(activity), structural=structural, soft=soft)
+        # E6 §1: one placement per child at any confidence -- what the panel
+        # draws.  Absent on engines without placements.
+        report_obj = getattr(core.topology_inference, "placements", None)
+        try:
+            placements = report_obj.as_dict() if report_obj is not None else {}
+        except Exception:  # noqa: BLE001 - diagnostics must not fail the replay
+            placements = {}
         report = {
             "run": {
                 "history": str(history_dir),
@@ -700,6 +707,8 @@ def replay(
                 "records": len(records),
                 "score": final_score,
                 "edges": edge_dicts(core),
+                "placements": placements,
+                "placement_score": topology_score.score_placements(placements, gt),
             },
         }
     finally:
