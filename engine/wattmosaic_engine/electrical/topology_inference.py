@@ -77,6 +77,7 @@ from .nesting_math import (
     build_nodes,
     closure_fraction,
     containment,
+    containment_tolerant,
     duplicate_evidence,
 )
 from .topology_health import HealthBook, demotions
@@ -84,6 +85,8 @@ from .topology_resolve import StructureAnalysis, analyse, resolve, structure_ser
 
 __all__: list[str] = [
     "CONTAINMENT_MIN",
+    "CONTAINMENT_MIN_INSTANTS",
+    "CONTAINMENT_DECISIVE_INSTANTS",
     "NestingCandidate",
     "infer_nesting",
     "MIN_INDEPENDENT_CAUSES",
@@ -110,6 +113,14 @@ MIN_INDEPENDENT_CAUSES = 2
 CONFLICT_RATIO_PROVISIONAL = 0.10
 CONFLICT_RATIO_STRUCTURAL = 0.05
 CONFLICT_RATIO_CONFLICTED = 0.25
+#: A level-containment gate needs one hour of 30 s buckets before it is trusted;
+#: below that it is "not evaluated" and does not gate promotion (E3 §1).
+CONTAINMENT_MIN_INSTANTS = 120
+#: With a full day of comparable instants a failing gate is decisive: the child
+#: spends more than 0.5 % of a day above its candidate parent's level, which no
+#: containment allows, so the edge becomes CONFLICTED regardless of step support
+#: (E3 §1).
+CONTAINMENT_DECISIVE_INSTANTS = 2880
 MIN_EVENTS_CONFLICTED = 6
 MIN_CORRELATED_EVENTS = 5
 #: Decaying evidence (ADR-0043).  Each decisive verdict folds as
@@ -378,19 +389,167 @@ def _aligned_series(series: Mapping[str, Sequence[float | None]]) -> dict[str, l
     return {rid: [float(v) if _finite(v) else math.nan for v in values] for rid, values in series.items()}
 
 
+def _containment_fraction(
+    parent: Sequence[float] | None,
+    child: Sequence[float] | None,
+) -> tuple[float, int]:
+    """``(fraction, comparable)`` of skew-tolerant containment, or ``(1.0, 0)``.
+
+    ``comparable == 0`` means "not evaluated" -- absent, unequal-length or
+    all-incomparable series carry no evidence either way (E3 §1).  The fraction
+    is reported as 1.0 in that case so a caller can treat a not-evaluated gate
+    as passing without a second flag.
+    """
+    if parent is None or child is None or not parent or not child:
+        return 1.0, 0
+    if len(parent) != len(child):
+        return 1.0, 0
+    return containment_tolerant(list(parent), list(child))
+
+
 def _containment_gate(
     parent: Sequence[float] | None,
     child: Sequence[float] | None,
 ) -> bool:
-    """Absolute containment >= 0.995.  No data => gate not evaluated (allowed)."""
-    if parent is None or child is None or not parent or not child:
-        return True
-    if len(parent) != len(child):
-        return True
-    fraction, comparable = containment(list(parent), list(child))
-    if comparable == 0:
+    """Skew-tolerant absolute containment >= 0.995, once there is enough data.
+
+    Below :data:`CONTAINMENT_MIN_INSTANTS` comparable instants (one hour of 30 s
+    buckets) the gate is not evaluated and returns True, as before (E3 §1).
+    """
+    fraction, comparable = _containment_fraction(parent, child)
+    if comparable < CONTAINMENT_MIN_INSTANTS:
         return True
     return fraction >= CONTAINMENT_MIN
+
+
+def _level_conflict(
+    parent: str,
+    child: str,
+    absolute: Mapping[str, Sequence[float | None]],
+) -> bool:
+    """Decisive level evidence that ``child`` is not inside ``parent`` (E3 §1).
+
+    Requires a full day of comparable instants and a containment fraction below
+    the normative bound.  With less data the gate is merely "not evaluated",
+    which is never evidence against an edge.
+    """
+    fraction, comparable = _containment_fraction(absolute.get(parent), absolute.get(child))
+    return comparable >= CONTAINMENT_DECISIVE_INSTANTS and fraction < CONTAINMENT_MIN
+
+
+def _transition_text(edge: TopologyEdgeV3, new: TopologyEdgeState, why: str) -> str:
+    """A settle transition string (used by the ambiguity cap, E3 §2)."""
+    return f"{edge.edge_id} ({why}): {_value(edge.lifecycle)} -> {_value(new)}"
+
+
+def _contains_ancestry(edges: Sequence[TopologyEdgeV3]) -> dict[str, set[str]]:
+    """``child -> {ancestors}`` over non-CONFLICTED CONTAINS edges (E3 §2).
+
+    Only edges whose evidence state is PROVISIONAL or STRUCTURAL count: these
+    are the candidate parents an ambiguity is evaluated between.  The chain is
+    transitive, so a child whose candidates are a main -> sub -> child chain is
+    recognised as an ancestor chain and is *not* ambiguous.
+    """
+    parents: dict[str, set[str]] = {}
+    for edge in edges:
+        if (
+            _relation(edge.relation) == _CONTAINS
+            and edge.lifecycle in (TopologyEdgeState.PROVISIONAL, TopologyEdgeState.STRUCTURAL)
+        ):
+            parents.setdefault(edge.target_endpoint_id, set()).add(edge.source_endpoint_id)
+    ancestors: dict[str, frozenset[str]] = {}
+
+    def walk(node: str) -> frozenset[str]:
+        if node in ancestors:
+            return ancestors[node]
+        ancestors[node] = frozenset()  # cycle guard
+        seen: set[str] = set()
+        stack = list(parents.get(node, ()))
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            stack.extend(parents.get(current, ()))
+        ancestors[node] = frozenset(seen)
+        return ancestors[node]
+
+    return {node: set(walk(node)) for node in parents}
+
+
+def _ambiguous_children(
+    edges: Sequence[TopologyEdgeV3],
+    *,
+    absolute: Mapping[str, Sequence[float | None]] | None = None,
+    broken: frozenset[tuple[str, str]] = frozenset(),
+) -> frozenset[str]:
+    """Children with two indistinguishable candidate parents (E3 §2).
+
+    For each child, candidate parents are the sources of its CONTAINS edges in
+    PROVISIONAL/STRUCTURAL state.  Two parents ``P`` and ``Q`` are ambiguous
+    when neither is an ancestor of the other, both child edges have comparable
+    decaying support (``min >= 0.5 * max`` of ``support_w``), both have a recent
+    conflict ratio below :data:`CONFLICT_RATIO_PROVISIONAL`, and whose level
+    gate passed.  A candidate whose gate is evaluated and fails (E3 §1) is
+    positively excluded by the levels and cannot be an indistinguishable
+    alternative.  The child is then recorded as leg-unidentified, and every edge
+    in its ambiguous set is capped at PROVISIONAL (done by the caller).
+    """
+    ancestry = _contains_ancestry(edges)
+    by_child: dict[str, list[TopologyEdgeV3]] = {}
+    for edge in edges:
+        if (
+            _relation(edge.relation) == _CONTAINS
+            and edge.lifecycle in (TopologyEdgeState.PROVISIONAL, TopologyEdgeState.STRUCTURAL)
+            and not edge.pinned
+            and (edge.source_endpoint_id, edge.target_endpoint_id) not in broken
+        ):
+            by_child.setdefault(edge.target_endpoint_id, []).append(edge)
+    out: set[str] = set()
+    for child, candidates in by_child.items():
+        if len(candidates) < 2:
+            continue
+        child_levels = (absolute or {}).get(child)
+        # "Whose gate passed" (E3 §2): a candidate parent whose level gate is
+        # evaluated and fails is positively excluded, not indistinguishable.
+        viable = []
+        for e in candidates:
+            if absolute is None or child_levels is None:
+                viable.append(e)
+                continue
+            fraction, comparable = _containment_fraction(
+                absolute.get(e.source_endpoint_id), child_levels
+            )
+            # E3 §2 candidates are edges "whose gate passed".  A gate that is
+            # evaluated and fails is not a viable alternative; a not-evaluated
+            # gate (fewer than CONTAINMENT_MIN_INSTANTS) passes by definition.
+            if comparable >= CONTAINMENT_MIN_INSTANTS and fraction < CONTAINMENT_MIN:
+                continue
+            viable.append(e)
+        for i, a in enumerate(viable):
+            pa = a.source_endpoint_id
+            sw_a = a.evidence.support_w or float(a.evidence.support)
+            for b in viable[i + 1 :]:
+                pb = b.source_endpoint_id
+                if pa == pb:
+                    continue
+                # An ancestor chain is not an ambiguous sibling pair.
+                if pa in ancestry.get(pb, ()) or pb in ancestry.get(pa, ()):
+                    continue
+                sw_b = b.evidence.support_w or float(b.evidence.support)
+                if min(sw_a, sw_b) < 0.5 * max(sw_a, sw_b):
+                    continue
+                if (
+                    a.evidence.conflict_ratio >= CONFLICT_RATIO_PROVISIONAL
+                    or b.evidence.conflict_ratio >= CONFLICT_RATIO_PROVISIONAL
+                ):
+                    continue
+                out.add(child)
+                break
+            else:
+                continue
+            break
+    return frozenset(out)
 
 
 def _scaled_copy(
@@ -1050,9 +1209,13 @@ class TopologyInferenceView:
                 if da == 0.0 or db == 0.0 or (da > 0) != (db > 0):
                     continue
                 pair = frozenset((a, b))
-                contained = _containment_gate(absolute_now.get(a), absolute_now.get(b)) or _containment_gate(
-                    absolute_now.get(b), absolute_now.get(a)
-                )
+                # Co-response needs *raw* containment: it asks whether one
+                # reader's level covers the other's at all, on any length of
+                # series.  The new min-instant gate (E3 §1) would call a short
+                # crossing "not evaluated" and let it become CORRELATED.
+                contained = containment(list(absolute_now.get(a) or ()), list(absolute_now.get(b) or ()))[0] >= CONTAINMENT_MIN or containment(
+                    list(absolute_now.get(b) or ()), list(absolute_now.get(a) or ())
+                )[0] >= CONTAINMENT_MIN
                 if contained:
                     continue
                 co_response.setdefault(pair, set()).add(cause)
@@ -1201,6 +1364,11 @@ class TopologyInferenceView:
                 new_lifecycle = self._direction_cap(edge, edges, new_lifecycle, absolute_now)
             if new_lifecycle != edge.lifecycle:
                 labels[index] = edge.edge_id
+                if (
+                    new_lifecycle == TopologyEdgeState.CONFLICTED
+                    and _level_conflict(edge.source_endpoint_id, edge.target_endpoint_id, absolute_now)
+                ):
+                    labels[index] = f"{edge.edge_id} (containment)"
                 edges[index] = edge.model_copy(update={"lifecycle": new_lifecycle})
 
         # (2) Edge health (M3) BEFORE the structure: a confirmed inferred edge
@@ -1229,6 +1397,37 @@ class TopologyInferenceView:
             if decided.get(child) == parent:
                 del decided[child]
 
+        # (1b) Sibling-parent ambiguity (E3 §2): for a child with two
+        # indistinguishable candidate parents, no single crossing may become
+        # STRUCTURAL from evidence alone.  Cap every ambiguous edge at
+        # PROVISIONAL and record the child in ``leg_unidentified``.  Runs after
+        # the evidence lifecycles (stage 1) and health (stage 2) and before the
+        # structural pass: a BROKEN or conflicted rival is asymmetric evidence
+        # that breaks the tie, so it is never counted as an ambiguous candidate.
+        ambiguous = _ambiguous_children(
+            edges, absolute=absolute_now, broken=frozenset(broken)
+        )
+        if ambiguous:
+            before_amb = list(edges)
+            amb_texts: list[str] = []
+            for index, edge in enumerate(edges):
+                if edge.target_endpoint_id not in ambiguous or not (
+                    _relation(edge.relation) == _CONTAINS
+                    and edge.lifecycle == TopologyEdgeState.STRUCTURAL
+                    and not edge.pinned
+                    and edge.declared_by == "inference"
+                ):
+                    continue
+                amb_texts.append(
+                    _transition_text(
+                        edge,
+                        TopologyEdgeState.PROVISIONAL,
+                        f"leg_unidentified: true; {edge.source_endpoint_id} is ambiguous",
+                    )
+                )
+                edges[index] = edge.model_copy(update={"lifecycle": TopologyEdgeState.PROVISIONAL})
+            note(amb_texts, before_amb)
+
         # (3) One direct parent per child: a grandparent feed is transitive.
         # With adequate aligned series the structural pass decides (capacity,
         # paired legs, duplicates, regression); without them the remembered
@@ -1251,6 +1450,7 @@ class TopologyInferenceView:
                 trial = [
                     edge.model_copy(update={"lifecycle": TopologyEdgeState.STRUCTURAL})
                     if edge.edge_id in promoted
+                    and edge.target_endpoint_id not in ambiguous
                     else edge
                     for edge in before
                 ]
@@ -1264,6 +1464,7 @@ class TopologyInferenceView:
                     excluded=broken,
                     allow_confirm=self._confirm_gate(absolute_now),
                     declared_pairs=declared_pairs,
+                    leg_unidentified=ambiguous,
                 )
                 texts.extend(result.transitions)
                 fresh = {
@@ -1277,14 +1478,33 @@ class TopologyInferenceView:
                 promoted |= fresh
             assert result is not None
             edges[:] = result.edges
+            # E3 §2 final authority: an ambiguous crossing is capped at
+            # PROVISIONAL however the structural pass ranked it.  It only regains
+            # STRUCTURAL once asymmetric evidence breaks the tie in a later
+            # settle (the ambiguity set is then empty).
+            if ambiguous:
+                for index, edge in enumerate(edges):
+                    if (
+                        edge.target_endpoint_id in ambiguous
+                        and edge.lifecycle == TopologyEdgeState.STRUCTURAL
+                        and not edge.pinned
+                        and edge.declared_by == "inference"
+                    ):
+                        edges[index] = edge.model_copy(
+                            update={"lifecycle": TopologyEdgeState.PROVISIONAL}
+                        )
             note(texts, before)
             decided = result.decided
-            unidentified = result.leg_unidentified
+            unidentified = frozenset({*result.leg_unidentified, *ambiguous})
         else:
             stage = self._apply_decisions(edges, decided, broken)
             if levels:
                 stage += self._keep_direct_parents(edges, levels, skip=frozenset(decided))
             note(stage, before)
+            # Without a structural pass the ambiguous set is the freshest
+            # observation; keep it so the view always reports leg_unidentified.
+            if ambiguous:
+                unidentified = frozenset({*unidentified, *ambiguous})
         transitions = [
             f"{labels[index]}: {original[index]} -> {_value(edges[index].lifecycle)}"
             for index in sorted(labels)
@@ -1690,6 +1910,11 @@ class TopologyInferenceView:
             return TopologyEdgeState.CONFLICTED
 
         parent, child = edge.source_endpoint_id, edge.target_endpoint_id
+        # E3 §1: a full day of level evidence that the child spends above its
+        # candidate parent's level is decisive against containment, whatever the
+        # step counters say.  A user edge may become CONFLICTED (never deleted).
+        if _level_conflict(parent, child, absolute):
+            return TopologyEdgeState.CONFLICTED
         gates_ok = (
             (declared or n_causes >= MIN_INDEPENDENT_CAUSES)
             and _containment_gate(absolute.get(parent), absolute.get(child))

@@ -16,7 +16,7 @@ from collections import deque
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -370,6 +370,13 @@ class RuntimeMixin:
         # that move r / 2.  Engine-applied factors are absent (P1 removed them).
         self._factor_registry: Any | None = None
         self._factor_row_count: int | None = None
+        # E3 §1: level-containment series cached alongside the aligned series.
+        # Child buckets are divided by the monitor-applied factor in force at
+        # that bucket's time; parents are used as-is.  Rebuilt only when the
+        # aligned series object changes, so the per-view analysis stays cached.
+        self._t5_containment: Mapping[str, Any] | None = None
+        self._t5_containment_source: Mapping[str, Any] | None = None
+        self._t5_containment_registry: Any | None = None
         # Last sample per 30 s bucket per reader over a week, the input of T5's
         # aligned absolute series (topology linking v2, design §5 T5).  The P2
         # ring only covers minutes; this is O(1) per sample, bounded, compact
@@ -2662,6 +2669,71 @@ class RuntimeMixin:
         self._persist_structure_memory_throttled()
         return aligned
 
+    def _t5_containment_series(
+        self, aligned: Mapping[str, Any] | None, readers: Sequence[str]
+    ) -> Mapping[str, Any] | None:
+        """``aligned`` with each child divided by its monitor factor (E3 §1).
+
+        The live level-containment gate compares absolute series, so a x2 child
+        reports ``r`` while its parents move ``r / 2``; without scaling it looks
+        twice its parent and every true edge fails containment.  Each child's
+        buckets are divided by the ``multiplier`` of the monitor-applied factor
+        in force at that bucket's time (P3's registry, as-of lookup); parents are
+        left as-is.  A reader with one factor interval covering the whole window
+        is scaled by a scalar.  The result is cached on the aligned series object
+        -- which itself is rebuilt at most every ``_T5_ALIGN_EVERY_S`` -- so the
+        ledger's structural analysis keeps its cache and the fold stays cheap.
+        """
+        if aligned is None or not aligned:
+            return None
+        cached = self._t5_containment_source
+        cached_registry = getattr(self, "_t5_containment_registry", None)
+        registry = self._factor_registry_for_fold(readers)
+        if (
+            cached is aligned
+            and cached_registry is registry
+            and self._t5_containment is not None
+        ):
+            return self._t5_containment
+        if registry is None:
+            self._t5_containment_source = aligned
+            self._t5_containment_registry = None
+            self._t5_containment = aligned
+            return aligned
+        step_s = float(getattr(aligned, "step_s", 30.0))
+        start_ts = getattr(aligned, "start_ts", None)
+        out: dict[str, Any] = {}
+        for reader, values in aligned.items():
+            scales: dict[int, float] = {}
+            need_per_bucket = False
+            if start_ts is not None:
+                for index in range(len(values)):
+                    at = datetime.fromtimestamp(
+                        float(start_ts) + index * step_s, tz=UTC
+                    )
+                    resolution = registry.resolve(reader, at)
+                    if resolution.applied_by == "monitor" and resolution.factor is not None:
+                        multiplier = float(resolution.factor.multiplier)
+                        scale = 1.0 / multiplier if multiplier > 0 else 1.0
+                    else:
+                        scale = 1.0
+                    scales[index] = scale
+                    if index and scale != scales[0]:
+                        need_per_bucket = True
+            if not need_per_bucket:
+                scalar = scales.get(0, 1.0)
+                out[reader] = [None if v is None else float(v) * scalar for v in values]
+            else:
+                out[reader] = [
+                    None if v is None else float(v) * scales.get(i, 1.0)
+                    for i, v in enumerate(values)
+                ]
+        result: Mapping[str, Any] = out
+        self._t5_containment_source = aligned
+        self._t5_containment_registry = registry
+        self._t5_containment = result
+        return result
+
     def _load_structure_memory(self) -> None:
         """Restore the persisted structural memory (empty when absent or unreadable)."""
         from ..electrical.topology_memory import StructureMemory
@@ -2763,6 +2835,11 @@ class RuntimeMixin:
             }
             anchored, parent_spreads = self._step_anchored_changes(group, observed)
             readers = [str(r) for r in observed]
+            # E3 §1: the live absolute level gate needs the same aligned series
+            # the structural pass uses, with monitor factors divided out of each
+            # child.  Reuse the cached object between rebuilds (cheap).
+            aligned = self._t5_aligned_series()
+            absolute = self._t5_containment_series(aligned, readers)
             pairs, aliases = self._declared_topology_constraints()
             fresh = self._fresh_canonicals(aliases)
             updated = view.observe_group(
@@ -2771,7 +2848,8 @@ class RuntimeMixin:
                 levels=self._typical_levels(),
                 measured_by_child=anchored,
                 group_moves=self._group_level_changes(group, observed),
-                aligned=self._t5_aligned_series(),
+                aligned=aligned,
+                absolute=absolute,
                 scales=self._factor_scales(group, readers),
                 parent_spreads=parent_spreads,
                 declared_pairs=pairs,

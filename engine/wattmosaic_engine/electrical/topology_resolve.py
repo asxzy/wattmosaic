@@ -827,6 +827,7 @@ def resolve(
     excluded: Collection[tuple[str, str]] = (),
     allow_confirm: Callable[[TopologyEdgeV3, Sequence[TopologyEdgeV3]], bool] | None = None,
     declared_pairs: frozenset[frozenset[str]] = frozenset(),
+    leg_unidentified: frozenset[str] = frozenset(),
 ) -> StructureResolution:
     """One direct parent per child from evidence, capacity, legs and regression.
 
@@ -847,7 +848,9 @@ def resolve(
     structural confirmation (the ledger's direction cap).  ``declared_pairs``
     are user-declared PAIRED_LEG/SAME_CONDUCTOR reader sets (spec P4): a
     CONTAINS edge between them is never a structural candidate and the pair
-    rule applies from the first settle.
+    rule applies from the first settle.  ``leg_unidentified`` are children with
+    indistinguishable candidate parents (E3 §2): their crossings may never be
+    made STRUCTURAL by this pass.
     """
     out = list(edges)
     info = analysis if analysis is not None and analysis.source is series else analyse(series)
@@ -1023,6 +1026,7 @@ def resolve(
         return (
             lifecycle_of(index) == _PROVISIONAL
             and str(_value(before)) == _PROVISIONAL
+            and child not in leg_unidentified
             and acyclic(parent, child)
             and _structural_ok(info, parent, child, parents, [child])
             and (allow_confirm is None or allow_confirm(edge, out))
@@ -1158,6 +1162,7 @@ def resolve(
         elif (
             lifecycle_of(chosen_index) == _PROVISIONAL
             and str(_value(before)) == _PROVISIONAL
+            and child not in leg_unidentified
             and acyclic(parent, child)
             and _structural_ok(
                 info, parent, child, candidates[child], children_of.get(parent, [child])
@@ -1225,6 +1230,7 @@ def resolve(
             if (
                 lifecycle_of(q_index) == _PROVISIONAL
                 and str(_value(before)) == _PROVISIONAL
+                and other_leg not in leg_unidentified
                 and q_edge.evidence.conflict_ratio < PAIR_MAX_CONFLICT_RATIO
                 and acyclic(q, other_leg)
                 and info.fits_capacity(q, [other_leg])

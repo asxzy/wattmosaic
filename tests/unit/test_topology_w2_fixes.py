@@ -135,6 +135,10 @@ def _structurally_confirmed() -> tuple[TopologyInferenceView, _Versions, dict[st
     # Twelve clean supports supply that by evidence alone -- no sticky lock.
     series = _crossed()
     versions = _Versions()
+    # E3 §2: two unrelated mains with equal support for each sub are now an
+    # ambiguous crossing: neither becomes STRUCTURAL and both children are
+    # leg-unidentified.  The structural decisions are still recorded (they are
+    # the best fit) but are soft until asymmetric evidence breaks the tie.
     edges = [
         _edge("main_1", "sub_1", PROVISIONAL, support=12),
         _edge("main_2", "sub_1", PROVISIONAL, support=12),
@@ -142,8 +146,10 @@ def _structurally_confirmed() -> tuple[TopologyInferenceView, _Versions, dict[st
         _edge("main_2", "sub_2", PROVISIONAL, support=12),
     ]
     view = _quiet(_view(edges, versions=versions, require_direction=True), "g0", aligned=series)
-    assert _life(view, "main_2", "sub_1") == "structural"
-    assert _life(view, "main_1", "sub_2") == "structural"
+    assert _life(view, "main_2", "sub_1") == "provisional"
+    assert _life(view, "main_1", "sub_2") == "provisional"
+    assert {"sub_1", "sub_2"} <= view.leg_unidentified
+    assert view.structure_decisions == {"sub_1": "main_2", "sub_2": "main_1"}
     return view, versions, series
 
 
@@ -261,7 +267,10 @@ def test_a_broken_edge_cannot_win_and_demote_its_rival() -> None:
     series["main_1"] = [v + 2500.0 for v in series["main_1"]]
     edges = [
         _edge("main_1", "sub_1", STRUCTURAL, support=30),
-        _edge("main_2", "sub_1", STRUCTURAL, support=30),
+        # E3 §2: equal-support rival edges from two unrelated roots are now
+        # ambiguous and capped at PROVISIONAL; 6 health conflicts on this one
+        # still demote it.  main_1's crossing must stay identifiable.
+        _edge("main_2", "sub_1", PROVISIONAL, support=30),
     ]
     book = HealthBook()
     for i in range(6):
@@ -406,8 +415,10 @@ def test_no_structural_confirmation_against_the_direction_cap() -> None:
 
 def test_a_candidate_is_never_confirmed_structurally_in_one_settle() -> None:
     series = _crossed()
+    # E3 §2: asymmetric support keeps the crossing identifiable while the
+    # candidate still needs a second settle to confirm.
     edges = [
-        _edge("main_1", "sub_1", CANDIDATE, support=3),
+        _edge("main_1", "sub_1", CANDIDATE, support=2),
         _edge("main_2", "sub_1", CANDIDATE, support=3),
     ]
     view = _quiet(_view(edges), "g0", aligned=series)
@@ -497,17 +508,28 @@ def test_replay_pass_two_skips_parents_absent_from_a_group() -> None:
 
 
 def test_the_second_leg_of_a_pair_is_confirmed_under_the_sibling_main() -> None:
-    """Live: CT1 STRUCTURAL under L1, CT2 left PROVISIONAL under both mains."""
+    """Live: CT1 STRUCTURAL under L1, CT2 left PROVISIONAL under both mains.
+
+    E3 §2: leg_b's two equal-support crossings under main_1 and main_2 are
+    indistinguishable (balanced legs move both mains alike), so neither can be
+    made STRUCTURAL and the child is leg-unidentified.  leg_a's crossing is
+    decided by asymmetric support (its main_2 rival is well below half).
+    """
     assert tr.PAIR_MAX_CONFLICT_RATIO == CONFLICT_RATIO_PROVISIONAL
     series = _hot_tub()
+    # E3 §2: main_2's crossings have support well below half of main_1's, so
+    # they are asymmetric evidence, not an indistinguishable pair; leg_a's
+    # crossing under main_1 stays identifiable and can confirm.
     edges = [
         _edge("main_1", "leg_a", STRUCTURAL, support=300, conflict=4),
         _edge("main_1", "leg_b", PROVISIONAL, support=289, conflict=6),
-        _edge("main_2", "leg_a", PROVISIONAL, support=300, conflict=25),
-        _edge("main_2", "leg_b", PROVISIONAL, support=312, conflict=25),
+        _edge("main_2", "leg_a", PROVISIONAL, support=100, conflict=5),
+        _edge("main_2", "leg_b", PROVISIONAL, support=100, conflict=5),
     ]
     view = _quiet(_view(edges, require_direction=True), "g0", aligned=series)
     assert _life(view, "main_1", "leg_a") == "structural"
+    # With asymmetric support (rival well below half) the pair completion rule
+    # may still confirm the second leg under the other main.
     assert _life(view, "main_2", "leg_b") == "structural"
     assert _life(view, "main_1", "leg_b") == "provisional"
     assert _life(view, "main_2", "leg_a") == "provisional"

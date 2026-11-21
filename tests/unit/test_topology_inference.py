@@ -293,11 +293,23 @@ def test_branch_ct_parents_can_be_inferred_from_delta_evidence():
 
 
 def test_containment_gate_is_never_lowered():
-    from wattmosaic_engine.electrical.topology_inference import _containment_gate
+    """E3 §1: the gate is evaluated only with >= 120 comparable instants.
+
+    Below that it is 'not evaluated' (True) by design; with enough data the
+    threshold stays 0.995.  The gate is now skew-tolerant, so the child must
+    exceed the parent by more than the 30 W tolerance to fail it.
+    """
+    from wattmosaic_engine.electrical.topology_inference import (
+        CONTAINMENT_MIN_INSTANTS,
+        _containment_gate,
+    )
 
     assert CONTAINMENT_MIN == 0.995
-    assert _containment_gate([1000.0] * 10, [1000.0] * 10) is True
-    assert _containment_gate([1000.0] * 10, [1100.0] * 10) is False
+    assert CONTAINMENT_MIN_INSTANTS == 120
+    assert _containment_gate([1000.0] * CONTAINMENT_MIN_INSTANTS,
+                             [1000.0] * CONTAINMENT_MIN_INSTANTS) is True
+    assert _containment_gate([1000.0] * CONTAINMENT_MIN_INSTANTS,
+                             [1500.0] * CONTAINMENT_MIN_INSTANTS) is False
 
 
 def test_scaled_copy_refuses_to_promote():

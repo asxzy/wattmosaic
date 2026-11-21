@@ -252,8 +252,9 @@ def test_structural_confirmation_proposes_a_version_through_the_view() -> None:
             proposals[-1] = (proposals[-1][0], reason)
 
     series = _crossed()
+    # E3 §2: asymmetric support keeps the crossing identifiable.
     edges = [
-        _edge("main_1", "sub_1", PROVISIONAL, support=5),
+        _edge("main_1", "sub_1", PROVISIONAL, support=2),
         _edge("main_2", "sub_1", PROVISIONAL, support=5),
     ]
     view = _view(edges, versions=Versions())

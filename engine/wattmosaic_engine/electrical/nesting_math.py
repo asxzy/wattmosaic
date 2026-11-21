@@ -208,6 +208,51 @@ def containment(
     return ok / count, count
 
 
+def containment_tolerant(
+    outer: Sequence[float],
+    inner: Sequence[float],
+    *,
+    lag: int = 1,
+    tol_w: float = CONTAINMENT_TOL_W,
+    min_outer_w: float = CONTAINMENT_MIN_PARENT_W,
+) -> tuple[float, int]:
+    """Skew-tolerant :func:`containment`: ``inner`` may lead ``outer`` by ``lag``.
+
+    Instant ``i`` passes when ``inner[i] <= max(outer[i-lag : i+lag+1]) + tol_w``,
+    with the maximum taken over the finite values of that window only.  One grid
+    step of cross-device skew (30 s on the structural memory's grid) otherwise
+    makes a true child look above its parent exactly at its own step.
+
+    ``comparable`` keeps :func:`containment`'s rule (both values finite and the
+    outer carrying at least ``min_outer_w``); a window always includes ``i``
+    itself, so it always has at least one finite value at a comparable instant.
+    Returns ``(0.0, 0)`` for an empty comparison -- no evidence, never "contained".
+    """
+    if len(outer) != len(inner):
+        raise ValueError("series must have the same length")
+    if lag < 0:
+        raise ValueError("lag must be non-negative")
+    outer_array = _as_float_array(outer)
+    inner_array = _as_float_array(inner)
+    comparable = np.isfinite(outer_array) & np.isfinite(inner_array) & (outer_array >= min_outer_w)
+    count = int(np.count_nonzero(comparable))
+    if count == 0:
+        return 0.0, 0
+    # Pad with -inf (never a candidate for a maximum) so a sliding window at the
+    # ends needs no special case.  Non-finite samples are mapped to -inf too:
+    # the window's maximum is taken over finite values only.
+    padded = np.where(np.isfinite(outer_array), outer_array, -np.inf)
+    if lag:
+        padded = np.concatenate(
+            (np.full(lag, -np.inf, dtype=np.float64), padded, np.full(lag, -np.inf, dtype=np.float64))
+        )
+    width = 2 * lag + 1
+    windows = np.lib.stride_tricks.sliding_window_view(padded, width)
+    maxima = windows.max(axis=-1)
+    ok = int(np.count_nonzero(inner_array[comparable] <= maxima[comparable] + tol_w))
+    return ok / count, count
+
+
 def duplicate_evidence(
     a: Sequence[float],
     b: Sequence[float],

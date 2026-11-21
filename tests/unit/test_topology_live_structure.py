@@ -115,13 +115,18 @@ def test_the_lower_level_parent_is_the_direct_one_and_the_grandparent_is_demoted
         DeltaObservation(group_id="g", deltas={"other": (40.0, 2.0)}, at=T0, cause_id="c"),
         levels={"main_l2": 3100.0, "sub_l1": 820.0, "plug": 60.0},
     )
-    assert view.edge("sub_l1", "plug").lifecycle == TopologyEdgeState.STRUCTURAL
+    # E3 §2: these two unrelated roots have comparable support for the same
+    # child, so neither crossing is identifiable from steps alone -- both are
+    # capped at PROVISIONAL and the child is leg-unidentified, even though the
+    # levels differ (the one-direct-parent rule only applies to ancestor chains).
+    assert view.edge("sub_l1", "plug").lifecycle == TopologyEdgeState.PROVISIONAL
     assert view.edge("main_l2", "plug").lifecycle == TopologyEdgeState.PROVISIONAL
+    assert "plug" in view.leg_unidentified
     # Without levels nothing is decided.
     same = TopologyInferenceView(edges=edges, clock=lambda: T0, causes_by_edge=causes).observe_group(
         DeltaObservation(group_id="g2", deltas={"other": (40.0, 2.0)}, at=T0, cause_id="c2")
     )
-    assert same.edge("main_l2", "plug").lifecycle == TopologyEdgeState.STRUCTURAL
+    assert same.edge("main_l2", "plug").lifecycle == TopologyEdgeState.PROVISIONAL
 
 
 def test_a_confirmed_edge_does_not_flap_on_one_extra_conflict() -> None:

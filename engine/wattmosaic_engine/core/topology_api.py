@@ -114,8 +114,15 @@ class TopologyService:
     clock: Callable[[], datetime]
 
     # -- reads ------------------------------------------------------------- #
-    def topology(self, *, lifecycles: Sequence[str] | None = None) -> dict[str, Any]:
-        return self._call(topology_v3, lifecycles=lifecycles)
+    def topology(
+        self,
+        *,
+        lifecycles: Sequence[str] | None = None,
+        leg_unidentified: frozenset[str] = frozenset(),
+    ) -> dict[str, Any]:
+        return self._call(
+            topology_v3, lifecycles=lifecycles, leg_unidentified=leg_unidentified
+        )
 
     def versions_history(self, version_id: str | None = None) -> Any:
         return self._call(topology_versions, version_id)
@@ -186,7 +193,12 @@ class _ServiceAdapter:
         self.versions.promote_topology(version_id, reason)
 
 
-def _edge_dict(edge: TopologyEdgeV3, *, in_version: bool = True) -> dict[str, Any]:
+def _edge_dict(
+    edge: TopologyEdgeV3,
+    *,
+    in_version: bool = True,
+    leg_unidentified: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
     return {
         "edge_id": edge.edge_id,
         "relation": _value(edge.relation),
@@ -204,6 +216,9 @@ def _edge_dict(edge: TopologyEdgeV3, *, in_version: bool = True) -> dict[str, An
         # False for a stored inference suggestion surfaced alongside the
         # version.  A suggestion is never promoted by this read (T4/HB §4.3).
         "in_version": in_version,
+        # E3 §2: a child with indistinguishable candidate parents has no
+        # identifiable crossing; never present one parent as its fact.
+        "leg_unidentified": edge.target_endpoint_id in leg_unidentified,
     }
 
 
@@ -517,7 +532,12 @@ def _discovery_summary(stored_inferred: Sequence[TopologyEdgeV3]) -> dict[str, A
     }
 
 
-def topology_v3(service: Any, *, lifecycles: Sequence[str] | None = None) -> dict[str, Any]:
+def topology_v3(
+    service: Any,
+    *,
+    lifecycles: Sequence[str] | None = None,
+    leg_unidentified: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
     """The active version, its edges, inference suggestions and a discovery summary.
 
     The active version's edges are returned unchanged (each with
@@ -540,7 +560,10 @@ def topology_v3(service: Any, *, lifecycles: Sequence[str] | None = None) -> dic
     shown_version = version_edges
     if wanted is not None:
         shown_version = [e for e in shown_version if _value(e.lifecycle) in wanted]
-    output_edges = [_edge_dict(e, in_version=True) for e in shown_version]
+    output_edges = [
+        _edge_dict(e, in_version=True, leg_unidentified=leg_unidentified)
+        for e in shown_version
+    ]
 
     # Stored inferred edges outside the active version.  All of the repo read;
     # only PROVISIONAL+ pairs are suggestions by default, CANDIDATE only on
@@ -559,7 +582,9 @@ def topology_v3(service: Any, *, lifecycles: Sequence[str] | None = None) -> dic
             continue
         if wanted is not None and lifecycle not in wanted:
             continue
-        output_edges.append(_edge_dict(edge, in_version=False))
+        output_edges.append(
+            _edge_dict(edge, in_version=False, leg_unidentified=leg_unidentified)
+        )
 
     graph = _topology_graph(service, vid)
     return {
@@ -742,7 +767,12 @@ class TopologyApiMixin:
         CONTAINS rows with an edge-health record (topology linking v2, M3) gain
         ``health``: the rolling verdict window, its timestamps and status.
         """
-        result = self._v3_topology_service().topology(lifecycles=lifecycles)
+        result = self._v3_topology_service().topology(
+            lifecycles=lifecycles,
+            leg_unidentified=getattr(self.topology_inference, "leg_unidentified", frozenset())
+            if getattr(self, "topology_inference", None) is not None
+            else frozenset(),
+        )
         ledger = getattr(self, "topology_inference", None)
         book = getattr(ledger, "health", None)
         return with_edge_health(result, book)
@@ -797,6 +827,8 @@ class TopologyApiMixin:
             rows = []
         edges: list[dict[str, Any]] = []
         structural_edges = 0
+        ledger = getattr(self, "topology_inference", None)
+        leg_unidentified = getattr(ledger, "leg_unidentified", frozenset()) if ledger else frozenset()
         for edge in rows:
             lifecycle = str(_value(edge.get("lifecycle")))
             evidence = edge.get("evidence")
@@ -828,6 +860,7 @@ class TopologyApiMixin:
                     "strength": sw,
                     "conflict_ratio": ratio,
                     "pinned": bool(edge.get("pinned")),
+                    "leg_unidentified": str(edge.get("target_endpoint_id")) in leg_unidentified,
                 }
             )
         try:
