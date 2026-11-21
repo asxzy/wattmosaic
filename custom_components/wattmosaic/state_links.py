@@ -544,6 +544,38 @@ def companion_config_fields(
     return propose_companion_entities(power_entity_id, entities)
 
 
+def companion_config_changes(
+    current: Mapping[str, Any] | None,
+    proposed: Mapping[str, Any] | None,
+) -> dict[str, str]:
+    """Diff a CT endpoint's current companion ids against the HA proposal.
+
+    ``current`` is the endpoint's current (latest) config revision, ``proposed``
+    is the output of :func:`propose_companion_entities`.  The result is the
+    minimal ``PUT /topology/endpoints/{id}/config`` body: only companion fields
+    that were *proposed* and actually *differ* are included.
+
+    Two rules matter, and both are correctness rather than style:
+
+    * An empty/absent proposal never clears a value already set.  A user-declared
+      companion id (or one from an earlier sync) must survive a registry change
+      that removes the entity — absence is ``None``, never a write of ``None``
+      (HB §18).
+    * An unchanged proposal produces no write, so the engine does not append a
+      new config revision on every poll.
+    """
+    changes: dict[str, str] = {}
+    current = current or {}
+    proposed = proposed or {}
+    for field, _ in COMPANION_DEVICE_CLASSES:
+        candidate = _text(proposed.get(field))
+        if not candidate:
+            continue
+        if _text(current.get(field)) != candidate:
+            changes[field] = candidate
+    return changes
+
+
 __all__ = [
     "COMPANION_DEVICE_CLASSES",
     "LinkResolution",
@@ -552,6 +584,7 @@ __all__ = [
     "MEASUREMENT_UNITS",
     "STATE_DOMAINS",
     "build_ha_entity_link_bodies",
+    "companion_config_changes",
     "companion_config_fields",
     "is_device_registry_id",
     "propose_companion_entities",

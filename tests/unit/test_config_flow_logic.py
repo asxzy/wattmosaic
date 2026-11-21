@@ -398,6 +398,54 @@ def test_companion_entities_absent_are_none() -> None:
     }
 
 
+def test_companion_config_changes_only_writes_differences() -> None:
+    """The diff basing an endpoint PUT contains only changed proposed fields."""
+    sl = importlib.import_module(f"{PACKAGE_NAME}.state_links")
+    current = {
+        "voltage_entity_id": "sensor.old_voltage",
+        "current_entity_id": "sensor.ct_current",
+        "power_factor_entity_id": None,
+    }
+    proposed = {
+        "voltage_entity_id": "sensor.new_voltage",
+        "current_entity_id": "sensor.ct_current",  # unchanged
+        "power_factor_entity_id": "sensor.ct_pf",
+    }
+    assert sl.companion_config_changes(current, proposed) == {
+        "voltage_entity_id": "sensor.new_voltage",
+        "power_factor_entity_id": "sensor.ct_pf",
+    }
+
+
+def test_companion_config_changes_empty_proposal_never_clears() -> None:
+    """An empty/absent proposal must not clear a value the user set (HB §18)."""
+    sl = importlib.import_module(f"{PACKAGE_NAME}.state_links")
+    current = {
+        "voltage_entity_id": "sensor.user_voltage",
+        "current_entity_id": "sensor.user_current",
+        "power_factor_entity_id": "sensor.user_pf",
+    }
+    all_none = {
+        "voltage_entity_id": None,
+        "current_entity_id": None,
+        "power_factor_entity_id": None,
+    }
+    assert sl.companion_config_changes(current, all_none) == {}
+    assert sl.companion_config_changes(current, None) == {}
+    assert sl.companion_config_changes(None, all_none) == {}
+
+
+def test_companion_config_changes_identical_proposal_is_a_noop() -> None:
+    """A proposal identical to the current revision produces no write at all."""
+    sl = importlib.import_module(f"{PACKAGE_NAME}.state_links")
+    same = {
+        "voltage_entity_id": "sensor.ct_voltage",
+        "current_entity_id": "sensor.ct_current",
+        "power_factor_entity_id": "sensor.ct_pf",
+    }
+    assert sl.companion_config_changes(same, same) == {}
+
+
 def test_v3_entity_link_bodies_from_a_link_resolution() -> None:
     """DEC-08: device links produce many-to-many ha_entity_links bodies."""
     sl = importlib.import_module(f"{PACKAGE_NAME}.state_links")

@@ -209,6 +209,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # a failed replay must never block platform setup.
     await _async_replay_v3_endpoint_setup(client, entry)
 
+    # ADR-0044: once after setup, declare the monitor companion (V/I/PF) entity
+    # ids for CT endpoints.  Best-effort — a registry read or engine write
+    # failure is swallowed inside the coordinator and must never block setup.
+    await coordinator.sync_companion_entities(force=True)
+
     # The engine (hub) device must exist before any platform is forwarded: on
     # Home Assistant 2026.8+ child devices link to it by registry id, and an
     # unknown id is rejected.  Doing it here also means a later strict-frame

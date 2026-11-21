@@ -362,6 +362,31 @@ class EngineClient:
         """``GET /devices/{device_id}``."""
         return await self._request("GET", f"/devices/{_quote(device_id)}")
 
+    async def endpoints(self) -> dict[str, Any]:
+        """``GET /endpoints`` -> ``{"endpoints": [...]}``.
+
+        Each endpoint carries its ``endpoint_id``, ``kind``, ``entity_id`` and
+        the full revision history.  The integration uses the latest revision to
+        decide whether a companion-entity proposal is a change (ADR-0044).
+        """
+        return await self._request("GET", "/endpoints")
+
+    async def update_endpoint_config(
+        self, endpoint_id: str, changes: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """``PUT /topology/endpoints/{id}/config`` — append a config revision.
+
+        ``changes`` is the minimal set of fields to update; the engine applies
+        them onto the endpoint's current revision and records a new immutable
+        revision.  Only the companion entity ids are sent by the companion sync,
+        but the method stays generic for any of the engine's editable fields.
+        """
+        return await self._request(
+            "PUT",
+            f"/topology/endpoints/{_quote(endpoint_id)}/config",
+            json_body=dict(changes),
+        )
+
     async def topology(self) -> dict[str, Any]:
         """``GET /topology/v3``: v3 topology read (active version, edges, primary tree)."""
         return await self._request("GET", "/topology/v3")

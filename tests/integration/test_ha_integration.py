@@ -359,6 +359,46 @@ class TestApiClient:
         client, _ = self._client(json_response([{"device_id": "a"}]))
         assert run(client.devices()) == [{"device_id": "a"}]
 
+    def test_endpoints_get(self) -> None:
+        """ADR-0044: the client reads endpoints with their current revisions."""
+        payload = {
+            "endpoints": [
+                {
+                    "endpoint_id": "ct_kitchen",
+                    "kind": "ct",
+                    "entity_id": "sensor.ct_kitchen_power",
+                    "revisions": [{"revision": 1, "voltage_entity_id": None}],
+                }
+            ]
+        }
+        client, session = self._client(json_response(payload))
+        assert run(client.endpoints()) == payload
+        call = session.calls[0]
+        assert call["method"] == "GET"
+        assert call["url"].endswith("/api/v1/endpoints")
+        assert call["headers"][const.HEADER_API_TOKEN] == "token-abc"
+
+    def test_update_endpoint_config_put(self) -> None:
+        """ADR-0044: companion ids go through PUT .../config with the token."""
+        client, session = self._client(
+            json_response({"endpoint_id": "ct_kitchen", "revision": 2})
+        )
+        changes = {"voltage_entity_id": "sensor.ct_kitchen_voltage"}
+        result = run(client.update_endpoint_config("ct_kitchen", changes))
+        assert result["revision"] == 2
+        call = session.calls[0]
+        assert call["method"] == "PUT"
+        assert call["url"].endswith("/api/v1/topology/endpoints/ct_kitchen/config")
+        assert call["json"] == changes
+        assert call["headers"][const.HEADER_API_TOKEN] == "token-abc"
+
+    def test_update_endpoint_config_percent_encodes_id(self) -> None:
+        client, session = self._client(json_response({"endpoint_id": "x"}))
+        run(client.update_endpoint_config("a/b c", {"current_entity_id": "sensor.i"}))
+        assert session.calls[0]["url"].endswith(
+            "/api/v1/topology/endpoints/a%2Fb%20c/config"
+        )
+
     def test_retries_on_503_then_succeeds(self) -> None:
         responses = [
             StubResponse(503, json.dumps({"error": "starting"}), {}),

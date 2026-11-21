@@ -34,6 +34,8 @@ from .const import (
 from .entity_values import explicit_device_link, merge_energy_choice
 from .state_links import (
     LinkResolution,
+    companion_config_changes,
+    companion_config_fields,
     registry_device_ids,
     registry_rows,
     resolve_links,
@@ -126,6 +128,7 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
         self._device_meta: dict[str, dict[str, Any]] = {}
         self._group_last_seen: dict[str, datetime] = {}
         self._poll_count: int = 0
+        self._companion_last_sync: datetime | None = None
 
         super().__init__(
             hass,
@@ -270,6 +273,76 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
             ),
             registry_device_ids=known_registry,
         )
+
+    async def sync_companion_entities(self, *, force: bool = False) -> int:
+        """Declare same-device V/I/PF entity ids for CT endpoints (ADR-0044).
+
+        The engine never reads Home Assistant's registries (ADR-0028), so this
+        integration resolves the companion entity ids from the entity registry —
+        exactly as :meth:`resolve_state_links` does — and sends only plain entity
+        ids through the endpoint config API.  Registry access lives here, in the
+        integration; :func:`state_links.companion_config_changes` decides what is
+        a real change.
+
+        Runs at most once per hour from the update cycle; ``force`` is used for
+        the once-after-setup call.  Every failure is swallowed at debug level:
+        a registry hiccup, a missing route on an older engine, or a refused write
+        must never break a poll.  Returns the number of endpoints updated.
+        """
+        now = utcnow()
+        if not force and self._companion_last_sync is not None:
+            if (now - self._companion_last_sync) < timedelta(hours=1):
+                return 0
+        self._companion_last_sync = now
+
+        try:
+            from homeassistant.helpers import entity_registry as er
+
+            registry = er.async_get(self.hass)
+            rows = registry_rows(registry, entries_for_device=er.async_entries_for_device)
+        except Exception:  # noqa: BLE001 - a registry hiccup must not block a poll
+            _LOGGER.debug("WattMosaic companion entity registry read failed", exc_info=True)
+            return 0
+
+        try:
+            payload = await self.client.endpoints()
+        except Exception as err:  # noqa: BLE001 - older engines may lack the route
+            _LOGGER.debug("WattMosaic endpoints fetch for companions failed: %s", err)
+            return 0
+
+        endpoints = payload.get("endpoints") if isinstance(payload, Mapping) else None
+        if not isinstance(endpoints, list):
+            return 0
+
+        updated = 0
+        for endpoint in endpoints:
+            if not isinstance(endpoint, Mapping):
+                continue
+            kind = endpoint.get("kind")
+            entity_id = endpoint.get("entity_id")
+            endpoint_id = endpoint.get("endpoint_id")
+            if kind != "ct" or not isinstance(entity_id, str) or not isinstance(endpoint_id, str):
+                continue
+            try:
+                proposed = companion_config_fields(entity_id, rows)
+                revisions = endpoint.get("revisions")
+                current = max(
+                    (r for r in (revisions or []) if isinstance(r, Mapping)),
+                    key=lambda r: int(r.get("revision", 0)),
+                    default={},
+                )
+                changes = companion_config_changes(current, proposed)
+                if not changes:
+                    continue
+                await self.client.update_endpoint_config(endpoint_id, changes)
+                updated += 1
+            except Exception as err:  # noqa: BLE001 - one endpoint must not stop the rest
+                _LOGGER.debug(
+                    "WattMosaic companion sync for endpoint %s failed: %s",
+                    endpoint_id,
+                    err,
+                )
+        return updated
 
     @property
     def engine_topology(self) -> dict[str, Any] | None:
@@ -421,6 +494,11 @@ class WattMosaicCoordinator(DataUpdateCoordinator[WattMosaicData]):
             )
             _LOGGER.warning("WattMosaic snapshot poll failed (using cached data): %s", error_text)
             return self._last
+
+        # ADR-0044: declare same-device V/I/PF entity ids for CT readers, at most
+        # once an hour.  Best-effort: a registry/API failure is logged at debug
+        # inside the sync and never breaks this poll.
+        await self.sync_companion_entities()
 
         snapshot = coerce_v3_snapshot(snapshot_raw)
         groups = snapshot.get("groups", {})
