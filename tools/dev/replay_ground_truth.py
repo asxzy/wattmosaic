@@ -201,8 +201,12 @@ def seed_readers(db: Any, gt: dict[str, Any]) -> list[dict[str, Any]]:
                 "revision": 1,
                 "valid_from": datetime(2026, 1, 1, tzinfo=UTC),
                 "multiplier": 1.0,
-                "phase": "l1",
-                "polarity": "normal",
+                # Leg/phase is what the engine must infer; declaring every
+                # reader "l1" fed it a false installer fact.
+                "phase": "unknown",
+                # Installer polarity correction (e.g. a CT clamped backwards):
+                # P1 normalize inverts the reading once (``polarity`` in GT).
+                "polarity": str(reader.get("polarity") or "normal"),
                 "calibration_version": "replay@1",
                 "measurement_type": "instantaneous",
                 "declared_by": "import",
