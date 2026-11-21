@@ -20,9 +20,23 @@ memo. It is never computed per group.
   - Let `m0` be the fraction of `c`'s steps where `p`'s Δ over the buckets
     `[i-1, i+1]` (best of the three) is within `0.10*|Δc·s_c| + 15 W` of `Δc·s_c`
     with the same sign.
-  - Let `mk` be the same fraction with `c`'s step times shifted by
-    `k ∈ {±10, ±20, ±40}` buckets (5–20 min).
-  - Then `lift = m0 - mean(mk)` and `match = m0`. `n = number of c steps`.
+  - Let `mk` be the same fraction with `c`'s step times shifted by **16** offsets
+    `k ∈ {±7, ±11, ±17, ±23, ±31, ±41, ±53, ±67}` buckets (3.5–33 min). Use
+    primes so periodic loads do not alias. Then `match = m0`,
+    `n = number of c steps`, and the unweighted `lift = m0 - mean(mk)`.
+  - **Rarity weighting** (study 2: AUC 0.967 → 0.996; with level + KCL, 33/33
+    true and 0/560 false pairs):
+    - Each child step `j` has a chance probability `p_j` of the parent matching
+      it, estimated from the 16 shifted positions of that step:
+      `(hits + 0.5) / (16 + 1)`.
+    - Its weight is `w_j = -ln(p_j)`.
+    - Then `wlift = Σ_j w_j·(hit_j − p_j) / Σ_j w_j`.
+    - Report `lift`, `wlift` and `match`.
+  - **Skew window.** On the 30 s grid, the parent may match at bucket `i` or
+    across the boundary split `i-1..i` / `i..i+1`, but no wider. The two
+    monitors on the reference install are time-synchronous (0 s offset), and a
+    wider window only adds chance matches. The chance correction uses the same
+    window rule.
 - **Residual mirroring** `mirror(p, c)` (P6): the same lift computation, but
   against `residual_p = p − Σ_{k ∈ structural_children[p], k ≠ c} k·s_k`,
   ignoring NaN. It is defined only when `p` has at least one structural child
@@ -51,7 +65,7 @@ memo. It is never computed per group.
   settle as `pairs=`. Absent means behaviour as today.
 - **Promotion gate** (inferred CONTAINS only, in `_lifecycle` `gates_ok`). When
   `pairs` is present and `n ≥ STEP_LIFT_MIN_STEPS` (8):
-  - require `lift ≥ STEP_LIFT_MIN` (0.14) and `match ≥ STEP_MATCH_MIN` (0.5) for
+  - require `wlift ≥ STEP_WLIFT_MIN` (0.13) and `match ≥ STEP_MATCH_MIN` (0.5) for
     PROVISIONAL and STRUCTURAL.
   - With fewer steps the gate is not evaluated. The existing verdict thresholds
     still apply.
@@ -62,6 +76,15 @@ memo. It is never computed per group.
     (reason `containment`).
   This replaces the E3 fraction rule for edges where `pairs` is available. Keep
   E3 as the fallback.
+- **Zero-floor veto** (study 2). A candidate parent is a reader with no structural
+  or provisional children (a leaf so far). If such a parent reads at most 5 W in
+  buckets where the candidate child draws at least 30 W (`r/f`), and this happens
+  in at least 3 buckets over at least 120 informative buckets, the edge is capped
+  at CANDIDATE.
+  - On the reference install this rejected 429 of 454 false pairs whose parent
+    is a leaf, and no true pair.
+  - Compute `zero_floor(p, c)` in `PairAnalysis` alongside `contain`.
+  - Use only the absolute floor. A relative floor rejected true pairs.
 - **Set-KCL veto in the structural pass** (`topology_resolve` / `topology_capacity`):
   - `_structure_source` must pass **factor-scaled** child series. Fix the
     unscaled `aligned` preference.
