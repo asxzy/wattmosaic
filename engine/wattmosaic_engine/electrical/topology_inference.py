@@ -404,7 +404,26 @@ def _containment_fraction(
         return 1.0, 0
     if len(parent) != len(child):
         return 1.0, 0
-    return containment_tolerant(list(parent), list(child))
+    # The runtime hands the *same* series objects to every settle until the
+    # aligned series is rebuilt (at most every few minutes), while a settle asks
+    # for every ledger edge: memoise on object identity so a week of 30 s
+    # buckets is compared once per pair per rebuild, not once per edge per fold
+    # (a 4x slower replay before this cache).  The entry keeps both objects, so
+    # an id is never reused while it is cached; the cache is bounded.
+    key = (id(parent), id(child))
+    hit = _CONTAINMENT_MEMO.get(key)
+    if hit is not None and hit[0] is parent and hit[1] is child:
+        return hit[2]
+    result = containment_tolerant(list(parent), list(child))
+    if len(_CONTAINMENT_MEMO) >= _CONTAINMENT_MEMO_MAX:
+        _CONTAINMENT_MEMO.clear()
+    _CONTAINMENT_MEMO[key] = (parent, child, result)
+    return result
+
+
+#: Identity memo for :func:`_containment_fraction` (see there).
+_CONTAINMENT_MEMO: dict[tuple[int, int], tuple[Any, Any, tuple[float, int]]] = {}
+_CONTAINMENT_MEMO_MAX = 4096
 
 
 def _containment_gate(
