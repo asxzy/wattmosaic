@@ -340,12 +340,26 @@ def edge_dicts(core: Any, db: Any | None = None) -> list[dict[str, Any]]:
     view = core.topology_inference
     if db is None:
         db = getattr(core, "db", None)
+    # E4 §4: the pair analysis is computed once per aligned rebuild; its
+    # per-edge diagnostics are added to each edge when present.
+    pairs = getattr(view, "pairs", None)
+    details: dict[tuple[str, str], dict[str, Any]] = {}
+    contains_pairs: list[tuple[str, str]] = []
+    for edge in getattr(view, "edges", ()) or ():
+        if _value(edge.relation) == "contains":
+            contains_pairs.append(
+                (str(edge.source_endpoint_id), str(edge.target_endpoint_id))
+            )
+    if pairs is not None and hasattr(pairs, "edge_details"):
+        details = pairs.edge_details(contains_pairs)
+        pairs.with_kcl_details(details)
     merged: dict[tuple[str, str, str], dict[str, Any]] = {}
     for edge in getattr(view, "edges", ()) or ():
         evidence = edge.evidence
+        source, target = str(edge.source_endpoint_id), str(edge.target_endpoint_id)
         item = {
-            "source": str(edge.source_endpoint_id),
-            "target": str(edge.target_endpoint_id),
+            "source": source,
+            "target": target,
             "relation": _value(edge.relation),
             "lifecycle": _value(edge.lifecycle),
             "support": int(getattr(evidence, "support", 0) or 0),
@@ -353,7 +367,10 @@ def edge_dicts(core: Any, db: Any | None = None) -> list[dict[str, Any]]:
             "parent_only": int(getattr(evidence, "parent_only", 0) or 0),
             "declared_by": str(getattr(edge, "declared_by", "")),
         }
-        merged[(item["relation"], item["source"], item["target"])] = item
+        detail = details.get((source, target))
+        if detail is not None:
+            item["evidence_detail"] = detail
+        merged[(item["relation"], source, target)] = item
     repo = getattr(getattr(db, "repos", None), "topology_v3", None) if db is not None else None
     if repo is not None:
         for row in repo.edges():

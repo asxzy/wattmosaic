@@ -219,6 +219,10 @@ def _edge_dict(
         # E3 §2: a child with indistinguishable candidate parents has no
         # identifiable crossing; never present one parent as its fact.
         "leg_unidentified": edge.target_endpoint_id in leg_unidentified,
+        # E4 §2: per-edge pair statistics (lift/match/mirror/containment/KCL)
+        # for diagnostics.  Filled by the mixin from the cached pair analysis;
+        # lives in API payload dicts, never in a contract model.
+        "evidence_detail": None,
     }
 
 
@@ -597,6 +601,33 @@ def topology_v3(
     }
 
 
+def with_evidence_detail(result: dict[str, Any], ledger: Any) -> dict[str, Any]:
+    """E4 §2: attach cached pair statistics to each CONTAINS edge row.
+
+    ``evidence_detail`` is a diagnostics-only dict in the API payload: lift,
+    match, mirror, containment violations and set-KCL.  The values come from
+    the pair analysis computed once per aligned rebuild, so this read is a
+    cache lookup, never a fresh series computation.
+    """
+    pairs = getattr(ledger, "pairs", None)
+    if pairs is None or not hasattr(pairs, "edge_details"):
+        return result
+    pairs_on = [
+        (row.get("source_endpoint_id"), row.get("target_endpoint_id"))
+        for row in result.get("edges", ())
+        if row.get("relation") == RelationType.CONTAINS.value
+    ]
+    details: dict[tuple[str, str], dict[str, Any]] = pairs.edge_details(pairs_on)
+    pairs.with_kcl_details(details)
+    for row in result.get("edges", ()):
+        if row.get("relation") != RelationType.CONTAINS.value:
+            continue
+        detail = details.get((row.get("source_endpoint_id"), row.get("target_endpoint_id")))
+        if detail is not None:
+            row["evidence_detail"] = detail
+    return result
+
+
 def with_edge_health(result: dict[str, Any], book: Any) -> dict[str, Any]:
     """Add ``health`` (M3 ``as_dict`` minus parent/child) to CONTAINS edge rows.
 
@@ -775,7 +806,7 @@ class TopologyApiMixin:
         )
         ledger = getattr(self, "topology_inference", None)
         book = getattr(ledger, "health", None)
-        return with_edge_health(result, book)
+        return with_edge_health(with_evidence_detail(result, ledger), book)
 
     def topology_versions(self, version_id: str | None = None) -> Any:
         return self._v3_topology_service().versions_history(version_id)
@@ -829,6 +860,16 @@ class TopologyApiMixin:
         structural_edges = 0
         ledger = getattr(self, "topology_inference", None)
         leg_unidentified = getattr(ledger, "leg_unidentified", frozenset()) if ledger else frozenset()
+        pairs = getattr(ledger, "pairs", None)
+        details: dict[tuple[str, str], dict[str, Any]] = {}
+        if pairs is not None and hasattr(pairs, "edge_details"):
+            pairs_on = [
+                (row.get("source_endpoint_id"), row.get("target_endpoint_id"))
+                for row in rows
+                if str(row.get("relation")) == RelationType.CONTAINS.value
+            ]
+            details = pairs.edge_details(pairs_on)
+            pairs.with_kcl_details(details)
         for edge in rows:
             lifecycle = str(_value(edge.get("lifecycle")))
             evidence = edge.get("evidence")
@@ -861,6 +902,10 @@ class TopologyApiMixin:
                     "conflict_ratio": ratio,
                     "pinned": bool(edge.get("pinned")),
                     "leg_unidentified": str(edge.get("target_endpoint_id")) in leg_unidentified,
+                    # E4 §2 diagnostics; absent is None, never an invented 0.
+                    "evidence_detail": details.get(
+                        (edge.get("source_endpoint_id"), edge.get("target_endpoint_id"))
+                    ),
                 }
             )
         try:

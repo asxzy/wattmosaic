@@ -81,6 +81,15 @@ from .nesting_math import (
     duplicate_evidence,
 )
 from .topology_health import HealthBook, demotions
+from .topology_pairs import (
+    CONTAIN_DECISIVE_INFORMATIVE,
+    CONTAIN_MIN_INFORMATIVE,
+    MIRROR_MIN,
+    STEP_LIFT_MIN_STEPS,
+    STEP_MATCH_MIN,
+    STEP_WLIFT_MIN,
+    PairAnalysis,
+)
 from .topology_resolve import StructureAnalysis, analyse, resolve, structure_series
 
 __all__: list[str] = [
@@ -456,6 +465,55 @@ def _level_conflict(
     return comparable >= CONTAINMENT_DECISIVE_INSTANTS and fraction < CONTAINMENT_MIN
 
 
+def _e4_fraction(
+    parent: str,
+    child: str,
+    pairs: PairAnalysis | None,
+    absolute: Mapping[str, Sequence[float | None]],
+) -> tuple[float, int]:
+    """E3 containment fraction, served from the E4 cache when available.
+
+    The pair analysis computes the skew-tolerant fraction at the aligned rebuild
+    alongside its other quantities, so the gate never runs a containment kernel
+    in a fold (E4 §1/§2).  Without a cache it falls back to the memoised kernel.
+    """
+    if pairs is not None:
+        stats = pairs.stats_for(parent, child)
+        if stats is not None:
+            return stats.contain_fraction, stats.contain_comparable
+    return _containment_fraction(absolute.get(parent), absolute.get(child))
+
+
+def _e4_containment(
+    parent: str, child: str, pairs: PairAnalysis | None
+) -> TopologyEdgeState | None:
+    """E4 §2 containment / zero-floor veto, or ``None`` when not evaluated.
+
+    Replaces E3's fraction rule for edges where the pair analysis is available:
+    over informative buckets (child above the parent's 5th percentile) more than
+    zero violations per 1000 caps the edge at CANDIDATE, and at least five per
+    1000 over a day of informative buckets makes it CONFLICTED.  A leaf parent
+    that sits at the floor while the child draws is likewise capped.
+    """
+    if pairs is None:
+        return None
+    stats = pairs.stats_for(parent, child)
+    if stats is None:
+        return None
+    if stats.informative_n >= CONTAIN_MIN_INFORMATIVE:
+        per_1000 = stats.violations * 1000.0 / stats.informative_n
+        if (
+            stats.informative_n >= CONTAIN_DECISIVE_INFORMATIVE
+            and per_1000 >= 5.0
+        ):
+            return TopologyEdgeState.CONFLICTED
+        if per_1000 > 0.0:
+            return TopologyEdgeState.CANDIDATE
+    if stats.zero_floor:
+        return TopologyEdgeState.CANDIDATE
+    return None
+
+
 def _transition_text(edge: TopologyEdgeV3, new: TopologyEdgeState, why: str) -> str:
     """A settle transition string (used by the ambiguity cap, E3 §2)."""
     return f"{edge.edge_id} ({why}): {_value(edge.lifecycle)} -> {_value(new)}"
@@ -501,6 +559,7 @@ def _ambiguous_children(
     *,
     absolute: Mapping[str, Sequence[float | None]] | None = None,
     broken: frozenset[tuple[str, str]] = frozenset(),
+    pairs: PairAnalysis | None = None,
 ) -> frozenset[str]:
     """Children with two indistinguishable candidate parents (E3 §2).
 
@@ -536,8 +595,8 @@ def _ambiguous_children(
             if absolute is None or child_levels is None:
                 viable.append(e)
                 continue
-            fraction, comparable = _containment_fraction(
-                absolute.get(e.source_endpoint_id), child_levels
+            fraction, comparable = _e4_fraction(
+                e.source_endpoint_id, child, pairs, absolute
             )
             # E3 §2 candidates are edges "whose gate passed".  A gate that is
             # evaluated and fails is not a viable alternative; a not-evaluated
@@ -563,6 +622,21 @@ def _ambiguous_children(
                     or b.evidence.conflict_ratio >= CONFLICT_RATIO_PROVISIONAL
                 ):
                     continue
+                # E4 §2: mirroring is asymmetric evidence.  If exactly one of
+                # the two candidates mirrors its child (>= MIRROR_MIN while the
+                # other is below half that, or None), the tie is broken and the
+                # pair is not ambiguous.  A parent's mirror is never computed
+                # against itself (handled in PairAnalysis).
+                if pairs is not None:
+                    ma, mb = pairs.mirror(pa, child), pairs.mirror(pb, child)
+                    if ma is not None and ma >= MIRROR_MIN and (
+                        mb is None or mb < MIRROR_MIN / 2.0
+                    ):
+                        continue
+                    if mb is not None and mb >= MIRROR_MIN and (
+                        ma is None or ma < MIRROR_MIN / 2.0
+                    ):
+                        continue
                 out.add(child)
                 break
             else:
@@ -764,6 +838,11 @@ class TopologyInferenceView:
     structure_cache: _StructureCache = field(
         default_factory=lambda: _StructureCache(), compare=False, repr=False
     )
+    #: E4 §1-2: chance-corrected pair analysis, computed once per aligned
+    #: rebuild by the runtime and shared (not copied) by every derived view.
+    #: ``None`` means the caller has no aligned series: behaviour is as before
+    #: (E3 containment gate and no lift/KCL/mirror vetoes).
+    pairs: PairAnalysis | None = field(default=None, compare=False, repr=False)
 
     # -- reads -------------------------------------------------------------- #
     def edge(
@@ -834,6 +913,7 @@ class TopologyInferenceView:
         alias_canonical: Mapping[str, str] | None = None,
         canonical_fresh: frozenset[str] | None = None,
         local_sigmas: Mapping[str, float] | None = None,
+        pairs: PairAnalysis | None = None,
     ) -> TopologyInferenceView:
         """Fold one FINAL event group into every affected pair's ledger.
 
@@ -1036,6 +1116,10 @@ class TopologyInferenceView:
 
         anchored_by_child = measured_by_child or {}
         structure = self._structure_source(aligned_now, absolute_now)
+        # E4 §2: the runtime may pass a pair analysis built once at the aligned
+        # rebuild.  Keep the very same object so all derived views share the
+        # cached per-pair stats; absent means legacy (E3) behaviour.
+        pairs_now = pairs if pairs is not None else self.pairs
         multi = self._multi_child_verdicts(
             decisive,
             observed,
@@ -1272,6 +1356,7 @@ class TopologyInferenceView:
             health=health,
             declared_pairs=frozenset(blocked),
             declared_aliases=frozenset(canonical),
+            pairs=pairs_now,
         )
         health = _prune_health(health, edges)
 
@@ -1290,6 +1375,7 @@ class TopologyInferenceView:
             absolute=absolute_now,
             basis_by_reader=basis_now,
             channel_meta=meta_now,
+            pairs=pairs_now,
         )
         if version_transitions:
             view = view._propose_version(version_transitions)
@@ -1309,6 +1395,7 @@ class TopologyInferenceView:
         health: HealthBook | None = None,
         declared_pairs: frozenset[frozenset[str]] = frozenset(),
         declared_aliases: frozenset[str] = frozenset(),
+        pairs: PairAnalysis | None = None,
     ) -> tuple[list[str], dict[str, str], frozenset[str]]:
         """Apply lifecycle transitions in place; return the version-worthy ones.
 
@@ -1374,7 +1461,7 @@ class TopologyInferenceView:
         for index, edge in enumerate(edges):
             if _relation(edge.relation) != _CONTAINS or edge.pinned or edge.lifecycle in _DORMANT:
                 continue
-            new_lifecycle = self._lifecycle(edge, causes, absolute_now, basis_now, meta_now)
+            new_lifecycle = self._lifecycle(edge, causes, absolute_now, basis_now, meta_now, pairs=pairs)
             if (
                 self.require_direction
                 and new_lifecycle == TopologyEdgeState.STRUCTURAL
@@ -1383,9 +1470,10 @@ class TopologyInferenceView:
                 new_lifecycle = self._direction_cap(edge, edges, new_lifecycle, absolute_now)
             if new_lifecycle != edge.lifecycle:
                 labels[index] = edge.edge_id
-                if (
-                    new_lifecycle == TopologyEdgeState.CONFLICTED
-                    and _level_conflict(edge.source_endpoint_id, edge.target_endpoint_id, absolute_now)
+                if new_lifecycle == TopologyEdgeState.CONFLICTED and (
+                    _e4_containment(edge.source_endpoint_id, edge.target_endpoint_id, pairs)
+                    == TopologyEdgeState.CONFLICTED
+                    or _level_conflict(edge.source_endpoint_id, edge.target_endpoint_id, absolute_now)
                 ):
                     labels[index] = f"{edge.edge_id} (containment)"
                 edges[index] = edge.model_copy(update={"lifecycle": new_lifecycle})
@@ -1424,7 +1512,7 @@ class TopologyInferenceView:
         # structural pass: a BROKEN or conflicted rival is asymmetric evidence
         # that breaks the tie, so it is never counted as an ambiguous candidate.
         ambiguous = _ambiguous_children(
-            edges, absolute=absolute_now, broken=frozenset(broken)
+            edges, absolute=absolute_now, broken=frozenset(broken), pairs=pairs
         )
         if ambiguous:
             before_amb = list(edges)
@@ -1484,6 +1572,7 @@ class TopologyInferenceView:
                     allow_confirm=self._confirm_gate(absolute_now),
                     declared_pairs=declared_pairs,
                     leg_unidentified=ambiguous,
+                    pairs_analysis=pairs,
                 )
                 texts.extend(result.transitions)
                 fresh = {
@@ -1685,10 +1774,13 @@ class TopologyInferenceView:
     ) -> Mapping[str, Sequence[float | None]] | None:
         """The aligned series the structural pass runs on, or None.
 
-        ``aligned`` (fed by the runtime) wins; an ``absolute`` mapping that is
-        itself aligned and long enough (a history replay sets it) also counts.
+        The structural pass must compare factor-scaled children (E4 §2 / spec
+        P5): a ×2 child reported unscaled is double counted in every set-KCL
+        check.  The runtime's ``absolute`` series have each child divided by
+        its monitor factor, so they win when aligned and long enough; plain
+        ``aligned`` is the fallback for callers that pass no scaled series.
         """
-        return structure_series(aligned) or structure_series(absolute)
+        return structure_series(absolute) or structure_series(aligned)
 
     def _multi_child_verdicts(
         self,
@@ -1894,6 +1986,7 @@ class TopologyInferenceView:
         absolute: Mapping[str, Sequence[float | None]],
         basis: Mapping[str, MeasurementBasis | str],
         meta: Mapping[str, Mapping[str, Any]],
+        pairs: PairAnalysis | None = None,
     ) -> TopologyEdgeState:
         """Pure function of (recent evidence weights, gates, current state) (ADR-0043).
 
@@ -1932,11 +2025,38 @@ class TopologyInferenceView:
         # E3 §1: a full day of level evidence that the child spends above its
         # candidate parent's level is decisive against containment, whatever the
         # step counters say.  A user edge may become CONFLICTED (never deleted).
-        if _level_conflict(parent, child, absolute):
-            return TopologyEdgeState.CONFLICTED
+        # E4 §2 replaces this fraction rule with the informative-bucket veto
+        # (and the leaf zero-floor veto) wherever the pair analysis is available;
+        # E3 stays the fallback.
+        if pairs is None:
+            if _level_conflict(parent, child, absolute):
+                return TopologyEdgeState.CONFLICTED
+        else:
+            veto = _e4_containment(parent, child, pairs)
+            if veto == TopologyEdgeState.CONFLICTED:
+                return TopologyEdgeState.CONFLICTED
+
+        # E4 §2: lift gate on inferred CONTAINS promotions.  With enough child
+        # steps a pair must clear both the rarity-weighted lift and the raw
+        # match rate to reach PROVISIONAL or STRUCTURAL; with fewer steps the
+        # gate is not evaluated and the historical verdicts still apply.
+        lift_gate = True
+        if pairs is not None:
+            stats = pairs.stats_for(parent, child)
+            if stats is not None and stats.n >= STEP_LIFT_MIN_STEPS:
+                lift_gate = stats.wlift >= STEP_WLIFT_MIN and stats.match >= STEP_MATCH_MIN
+
+        # The containment gate reads its fraction from the E4 cache (same number
+        # as E3, computed once per rebuild) when available.
+        if pairs is not None:
+            fraction, comparable = _e4_fraction(parent, child, pairs, absolute)
+            containment_ok = comparable < CONTAINMENT_MIN_INSTANTS or fraction >= CONTAINMENT_MIN
+        else:
+            containment_ok = _containment_gate(absolute.get(parent), absolute.get(child))
         gates_ok = (
             (declared or n_causes >= MIN_INDEPENDENT_CAUSES)
-            and _containment_gate(absolute.get(parent), absolute.get(child))
+            and containment_ok
+            and lift_gate
             and not _scaled_copy(absolute.get(parent), absolute.get(child))
             and _value(basis.get(parent, MeasurementBasis.CT_MEASURED)) != MeasurementBasis.UNKNOWN
             and _value(basis.get(child, MeasurementBasis.CT_MEASURED)) != MeasurementBasis.UNKNOWN
@@ -1955,15 +2075,26 @@ class TopologyInferenceView:
             # structural pass may demote it as transitive in the same settle.
             return TopologyEdgeState.STRUCTURAL
         if gates_ok and sw >= MIN_SUPPORT_PROVISIONAL and ratio < CONFLICT_RATIO_PROVISIONAL:
-            return TopologyEdgeState.PROVISIONAL
-        if declared:
+            proposed = TopologyEdgeState.PROVISIONAL
+        elif declared:
             # A user declaration is a prior, not a terminal truth: with no
             # recent contradiction it stays STRUCTURAL even through quiet
             # periods; sustained conflict above moves it to CONFLICTED.
-            return TopologyEdgeState.STRUCTURAL
-        if evidence.support >= MIN_SUPPORT_CANDIDATE:
+            proposed = TopologyEdgeState.STRUCTURAL
+        elif evidence.support >= MIN_SUPPORT_CANDIDATE:
+            proposed = TopologyEdgeState.CANDIDATE
+        else:
+            proposed = edge.lifecycle
+        # E4 §2: the informative-containment and leaf zero-floor vetoes cap an
+        # inferred edge at CANDIDATE (a user declaration is never deleted).
+        cap = _e4_containment(parent, child, pairs) if pairs is not None else None
+        if (
+            cap == TopologyEdgeState.CANDIDATE
+            and proposed in (TopologyEdgeState.PROVISIONAL, TopologyEdgeState.STRUCTURAL)
+            and edge.declared_by != "user"
+        ):
             return TopologyEdgeState.CANDIDATE
-        return edge.lifecycle
+        return proposed
 
     @staticmethod
     def _direction_cap(

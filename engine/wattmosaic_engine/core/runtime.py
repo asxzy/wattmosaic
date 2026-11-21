@@ -377,6 +377,13 @@ class RuntimeMixin:
         self._t5_containment: Mapping[str, Any] | None = None
         self._t5_containment_source: Mapping[str, Any] | None = None
         self._t5_containment_registry: Any | None = None
+        # E4 §1-2: chance-corrected pair analysis, computed once per aligned
+        # rebuild and cached on the series object.  ``_t5_pairs_source`` is the
+        # exact series object the analysis was built from, so a different series
+        # (a new rebuild) triggers one fresh analysis; every fold between rebuilds
+        # reuses the very same PairAnalysis object and its cached per-pair stats.
+        self._t5_pairs: Any | None = None
+        self._t5_pairs_source: Mapping[str, Any] | None = None
         # Last sample per 30 s bucket per reader over a week, the input of T5's
         # aligned absolute series (topology linking v2, design §5 T5).  The P2
         # ring only covers minutes; this is O(1) per sample, bounded, compact
@@ -2734,6 +2741,68 @@ class RuntimeMixin:
         self._t5_containment = result
         return result
 
+    def _t5_pair_analysis(
+        self,
+        absolute: Mapping[str, Any] | None,
+        readers: Sequence[str],
+    ) -> Any | None:
+        """E4 §1: pair analysis for one aligned rebuild, cached on the series.
+
+        The analysis (per-reader step masks and per-pair lift/mirror/containment)
+        is a pure function of ``absolute`` and the current ledger edges.  Both
+        are stable between aligned rebuilds, so building it once here keeps it
+        entirely off the per-group fold path (the E3 level gate used to run a
+        containment kernel per edge per fold, ~4x replay slowdown).  Per-pair
+        stats are computed lazily on first lookup and cached on the shared
+        analysis, so only pairs with a ledger edge are ever evaluated, never
+        all ``n²`` pairs and never more than once per rebuild.
+        """
+        if absolute is None or not absolute:
+            return None
+        cached = self._t5_pairs
+        if cached is not None and self._t5_pairs_source is absolute:
+            return cached
+        from ..electrical.topology_pairs import analyse_pairs
+
+        view = getattr(self, "topology_inference", None)
+        edges = tuple(getattr(view, "edges", ()) or ())
+        children_by_parent: dict[str, frozenset[str]] = {}
+        non_leaf: set[str] = set()
+        pairs: set[tuple[str, str]] = set()
+        for edge in edges:
+            if str(getattr(edge.relation, "value", edge.relation)) != "contains":
+                continue
+            parent = str(edge.source_endpoint_id)
+            child = str(edge.target_endpoint_id)
+            pairs.add((parent, child))
+            pairs.add((child, parent))
+            # A leaf so far (zero-floor veto) has no structural OR provisional
+            # child (E4 §2).  Any CONTAINS edge with a live lifecycle disqualifies
+            # its parent; the mirror still only uses structural children.
+            if str(getattr(edge.lifecycle, "value", edge.lifecycle)) not in (
+                "rejected", "retired", "conflicted"
+            ):
+                non_leaf.add(parent)
+            if str(getattr(edge.lifecycle, "value", edge.lifecycle)) == "structural":
+                children_by_parent.setdefault(parent, set()).add(child)
+        # ``absolute`` is already factor-scaled (E3 §1); the child deltas in the
+        # analysis are read from it, so no extra per-child scale is needed here.
+        scale: dict[str, float] = {}
+        analysis = analyse_pairs(
+            absolute,
+            scale,
+            {parent: frozenset(kids) for parent, kids in children_by_parent.items()},
+            non_leaf=frozenset(non_leaf),
+        )
+        # Per-pair stats are computed lazily on first lookup and cached on this
+        # shared object, so a pair is analysed at most once per rebuild (never
+        # once per fold) and never for pairs with no ledger edge.  ``pairs`` is
+        # only needed to know which readers are candidates; the lazy lookups in
+        # _lifecycle cover exactly those pairs.
+        self._t5_pairs = analysis
+        self._t5_pairs_source = absolute
+        return analysis
+
     def _load_structure_memory(self) -> None:
         """Restore the persisted structural memory (empty when absent or unreadable)."""
         from ..electrical.topology_memory import StructureMemory
@@ -2840,6 +2909,10 @@ class RuntimeMixin:
             # child.  Reuse the cached object between rebuilds (cheap).
             aligned = self._t5_aligned_series()
             absolute = self._t5_containment_series(aligned, readers)
+            # E4 §1-2: the full series analysis is built once per aligned rebuild
+            # and reused (same object) by every fold until the rebuild; no pair
+            # statistic is ever computed inside observe_group/settle.
+            pair_analysis = self._t5_pair_analysis(absolute, readers)
             pairs, aliases = self._declared_topology_constraints()
             fresh = self._fresh_canonicals(aliases)
             updated = view.observe_group(
@@ -2856,6 +2929,7 @@ class RuntimeMixin:
                 alias_canonical=aliases,
                 canonical_fresh=fresh,
                 local_sigmas=self._local_step_sigmas(group),
+                pairs=pair_analysis,
             )
             self.topology_inference = updated
             self._persist_edge_health_throttled(

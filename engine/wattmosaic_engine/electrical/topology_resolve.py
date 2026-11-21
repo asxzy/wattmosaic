@@ -828,6 +828,7 @@ def resolve(
     allow_confirm: Callable[[TopologyEdgeV3, Sequence[TopologyEdgeV3]], bool] | None = None,
     declared_pairs: frozenset[frozenset[str]] = frozenset(),
     leg_unidentified: frozenset[str] = frozenset(),
+    pairs_analysis: Any | None = None,
 ) -> StructureResolution:
     """One direct parent per child from evidence, capacity, legs and regression.
 
@@ -1110,6 +1111,7 @@ def resolve(
             score=score,
             min_children_w=CAPACITY_ACTIVE_W,
             capacity_cache=info.capacity,
+            kcl_ok=(pairs_analysis.fits_kcl if pairs_analysis is not None else None),
         )
     assigned = {child: parent for child, parent in assigned.items() if child not in fixed}
     assigned.update({child: parent for child, parent in held.items() if child in candidates})

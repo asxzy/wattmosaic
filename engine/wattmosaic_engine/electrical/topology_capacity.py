@@ -218,6 +218,7 @@ class _Cost:
         candidate_sets: Mapping[str, frozenset[str]],
         min_children_w: float = 0.0,
         capacity_cache: dict[tuple[str, tuple[str, ...]], float] | None = None,
+        kcl_ok: Callable[[str, Sequence[str]], bool] | None = None,
     ) -> None:
         self._min_children_w = float(min_children_w)
         self._series = series
@@ -232,6 +233,10 @@ class _Cost:
         self._capacity: dict[tuple[str, tuple[str, ...]], float] = (
             capacity_cache if capacity_cache is not None else {}
         )
+        # E4 §2 set-KCL veto: an assignment placing a child under a parent whose
+        # factor-scaled children exceed the parent on >= 1440 minute means is
+        # rejected.  ``None`` keeps the legacy capacity-only behaviour.
+        self._kcl_ok = kcl_ok
 
     def _candidate_set(self, child: str) -> frozenset[str]:
         known = self._candidate_sets.get(child)
@@ -277,14 +282,20 @@ class _Cost:
             if parent_left == parent_right:
                 splits += 1
         grouped = self._children_by_parent(assigned)
-        capacity = sum(
-            self._capacity_violation(parent, children) for parent, children in grouped.items()
-        )
         evidence = sum(
             self._score.get((parent, child), 0.0) for child, parent in assigned.items()
         )
         depth = sum(self._levels.get(parent, inf) for parent in grouped)
         tie = tuple(assigned[child] for child in sorted(assigned))
+        if self._kcl_ok is not None:
+            for parent, children in grouped.items():
+                if not self._kcl_ok(parent, children):
+                    # Lexicographic first key: any set-KCL violation outranks
+                    # even a paired-leg split, so the assignment is rejected.
+                    return (1.0 + splits, 1.0, -evidence, depth, tie)
+        capacity = sum(
+            self._capacity_violation(parent, children) for parent, children in grouped.items()
+        )
         return (float(splits), capacity, -evidence, depth, tie)
 
 
@@ -313,6 +324,7 @@ def assign_parents(
     score: Mapping[tuple[str, str], float] | None = None,
     min_children_w: float = 0.0,
     capacity_cache: dict[tuple[str, tuple[str, ...]], float] | None = None,
+    kcl_ok: Callable[[str, Sequence[str]], bool] | None = None,
 ) -> dict[str, str]:
     """Choose one parent per child, honouring capacity and paired legs.
 
@@ -364,6 +376,7 @@ def assign_parents(
         declared,
         min_children_w,
         capacity_cache,
+        kcl_ok,
     )
     combinations = math.prod(len(options[child]) for child in ambiguous)
     if combinations <= _ASSIGNMENT_ENUMERATION_LIMIT:
