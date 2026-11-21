@@ -205,15 +205,17 @@ def analyse_legs(
     groups, _ = _reference_groups(voltage)
     labels, removed = _cluster_legs(groups, voltage)
     report = LegReport(references=labels, common_mode_removed=removed)
-    reference_readers = set(labels)
+    # E6 §5 guard: a reader's leg comes ONLY from its own ΔP against the
+    # reference voltages' ΔV (current-driven sag) -- never from which voltage
+    # group its own voltage entity belongs to.  A Refoss channel's voltage
+    # entity is a copy of its *configured* phase input, which disagreed with the
+    # physical leg on 8 of 28 readers.  So every reader, references included,
+    # is classified by its own step sags; the group labels stay diagnostic only
+    # in ``report.references``.
     for reader in sorted(power):
-        if reader in reference_readers:
-            report.leg[reader] = labels.get(reader, "unknown")
-            report.leg_n[reader] = 0
-        else:
-            leg, n = _leg_index(power[reader], voltage, labels)
-            report.leg[reader] = leg
-            report.leg_n[reader] = n
+        leg, n = _leg_index(power[reader], voltage, labels)
+        report.leg[reader] = leg
+        report.leg_n[reader] = n
     if current:
         report.branch_tag = _branch_tags(current)
     return report

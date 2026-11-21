@@ -59,6 +59,7 @@ from wattmosaic_engine.contracts import (
     TopologyEdgeV3,
 )
 
+from .current_rules import set_kcl_ok
 from .nesting_math import (
     ACTIVITY_MIN_W,
     CLOSURE_MIN,
@@ -85,9 +86,11 @@ from .topology_pairs import (
     CONTAIN_DECISIVE_INFORMATIVE,
     CONTAIN_MIN_INFORMATIVE,
     MIRROR_MIN,
+    STEP_MATCH_MIN,
     PairAnalysis,
     lift_gate_passes,
 )
+from .topology_placement import PlacementReport, compute_placements
 from .topology_resolve import StructureAnalysis, analyse, resolve, structure_series
 
 __all__: list[str] = [
@@ -99,12 +102,16 @@ __all__: list[str] = [
     "MIN_INDEPENDENT_CAUSES",
     "MIN_SUPPORT_STRUCTURAL",
     "MIN_SUPPORT_PROVISIONAL",
+    "WLIFT_MIN_PROVISIONAL",
+    "WLIFT_MIN_STRUCTURAL",
+    "LIFT_SUBSTITUTION_MIN_STEPS",
     "EVIDENCE_DECAY",
     "EVIDENCE_WINDOW",
     "TopologyEvidence",
     "DeltaObservation",
     "TopologyInferenceView",
     "detect_same_conductor",
+    "detect_inferred_duplicates",
     "infer_topology",
 ]
 
@@ -114,12 +121,29 @@ __all__: list[str] = [
 # --------------------------------------------------------------------------- #
 
 MIN_SUPPORT_CANDIDATE = 1
-MIN_SUPPORT_PROVISIONAL = 3
-MIN_SUPPORT_STRUCTURAL = 8
+# E6 §2 / ADR-0045: calibrated from the 10-day reference replay.  One event
+# still never passes CANDIDATE: PROVISIONAL needs two verdicts (or the >=8-step
+# lift substitution below), STRUCTURAL needs three plus the lift gate.
+MIN_SUPPORT_PROVISIONAL = 2
+MIN_SUPPORT_STRUCTURAL = 3
 MIN_INDEPENDENT_CAUSES = 2
-CONFLICT_RATIO_PROVISIONAL = 0.10
-CONFLICT_RATIO_STRUCTURAL = 0.05
+CONFLICT_RATIO_PROVISIONAL = 0.34
+CONFLICT_RATIO_STRUCTURAL = 0.10
 CONFLICT_RATIO_CONFLICTED = 0.25
+# E6 §2 / ADR-0045: the rarity-weighted lift a pair must reach before its
+# support weight alone may promote it (evaluated only when n >= 8).
+WLIFT_MIN_PROVISIONAL = 0.10
+WLIFT_MIN_STRUCTURAL = 0.13
+#: E6 §2 lift substitution: with many clean steps an edge may reach PROVISIONAL
+#: even below the support_w floor.  At least 8 steps are required, so the
+#: one-event invariant is preserved.
+LIFT_SUBSTITUTION_MIN_STEPS = 8
+LIFT_SUBSTITUTION_MAX_VIOLATIONS_PER_1000 = 2.0
+#: The reverse-edge contradiction bar for the direction cap.  This stays at the
+#: old, stricter 0.10: a reverse edge with a quarter of its verdicts conflicting
+#: is genuinely contradicted even after E6 raises the PROVISIONAL promotion bar
+#: to 0.34.  Decoupling it keeps direction identification honest (HB §4.3).
+DIRECTION_CAP_CONFLICT_MAX = 0.10
 #: A level-containment gate needs one hour of 30 s buckets before it is trusted;
 #: below that it is "not evaluated" and does not gate promotion (E3 §1).
 CONTAINMENT_MIN_INSTANTS = 120
@@ -141,8 +165,8 @@ EVIDENCE_WINDOW = 20  # round(1 / (1 - EVIDENCE_DECAY))
 #: stays above KEEP_SUPPORT_STRUCTURAL and its conflict ratio below
 #: KEEP_CONFLICT_RATIO_STRUCTURAL, even though it no longer meets the promotion
 #: bar.  A plug move still demotes it once the recent conflicts accumulate.
-KEEP_SUPPORT_STRUCTURAL = 6
-KEEP_CONFLICT_RATIO_STRUCTURAL = 0.10
+KEEP_SUPPORT_STRUCTURAL = 2
+KEEP_CONFLICT_RATIO_STRUCTURAL = 0.15
 #: Topology versions are debounced: at most one inferred version per window
 #: unless the change *removes* an edge from STRUCTURAL (which must publish now).
 TOPOLOGY_VERSION_DEBOUNCE_S = 900.0
@@ -505,7 +529,10 @@ def _e4_containment(
             and per_1000 >= 5.0
         ):
             return TopologyEdgeState.CONFLICTED
-        if per_1000 > 0.0:
+        # E6 §2 / ADR-0045: the cap needs >=10 violations per 1000 informative
+        # buckets (over >=120 buckets now, not the old day).  Drop the old
+        # ">0 caps at CANDIDATE" rule: the lift/KCL/level vetoes are stronger.
+        if per_1000 >= 10.0:
             return TopologyEdgeState.CANDIDATE
     if stats.zero_floor:
         return TopologyEdgeState.CANDIDATE
@@ -758,6 +785,180 @@ def detect_same_conductor(
     return out
 
 
+# E6 §4: inferred SAME_CONDUCTOR from an affine copy on 2-minute means.
+DUP_CORR_MIN = 0.985
+DUP_MIN_OVERLAP_H = 24.0
+DUP_SLOPE_MIN = 0.9
+DUP_SLOPE_MAX = 1.1
+DUP_OFFSET_MAX_W = 150.0
+#: E6 §4 / §6 (simple check for E6a): readers are co-sampled when >=90% of one
+#: reader's sample timestamps have a counterpart within 2 s on the other.
+COSAMPLE_WINDOW_S = 2.0
+COSAMPLE_MIN_RATIO = 0.90
+
+
+def co_sampled(
+    timestamps_a: Sequence[float],
+    timestamps_b: Sequence[float],
+    *,
+    window_s: float = COSAMPLE_WINDOW_S,
+    min_ratio: float = COSAMPLE_MIN_RATIO,
+) -> bool:
+    """E6 §4/§6: True when the two readers are co-sampled (one monitor batch).
+
+    Co-sampled channels publish in one batch, so their timestamps coincide.
+    E6a uses this simple timestamp check: for each reader, at least
+    ``min_ratio`` of its timestamps must have a counterpart within ``window_s``
+    on the other.  E6b refines this from the runtime's fast-path sample tracking.
+    """
+    a = sorted(float(t) for t in timestamps_a if _finite(t))
+    b = sorted(float(t) for t in timestamps_b if _finite(t))
+    if not a or not b:
+        return False
+
+    def matched(src: Sequence[float], other: Sequence[float]) -> float:
+        hits = 0
+        j = 0
+        for t in src:
+            while j < len(other) and other[j] < t - window_s:
+                j += 1
+            if j < len(other) and abs(other[j] - t) <= window_s:
+                hits += 1
+        return hits / len(src)
+
+    return matched(a, b) >= min_ratio and matched(b, a) >= min_ratio
+
+
+def detect_inferred_duplicates(
+    series: Mapping[str, Sequence[float | None]],
+    *,
+    timestamps: Mapping[str, Sequence[float]] | None = None,
+    at: datetime | None = None,
+) -> list[TopologyEdgeV3]:
+    """E6 §4: infer SAME_CONDUCTOR between affine copies that are not co-sampled.
+
+    Two readers are duplicates when the correlation of their 2-minute means is
+    >= 0.985 over >= 24 h of overlap, the fitted slope is within [0.9, 1.1] and
+    the offset is at most 150 W, each is the other's best match, and they are
+    **not co-sampled**.  A declaration always wins (callers filter out pairs
+    already declared).  Two co-sampled readers that pass are the legs of a
+    balanced 240 V pair, not duplicates.  The fitted slope and offset are
+    exposed as API ``evidence_detail`` diagnostics by
+    :func:`inferred_duplicate_details` (never in a contract model).
+    """
+    readers = sorted(series)
+    if len(readers) < 2:
+        return []
+    ts = timestamps or {}
+    need_buckets = int(DUP_MIN_OVERLAP_H * 3600.0 / 120.0)
+    aligned = _aligned_series(series)
+
+    def two_min_means(values: Sequence[float]) -> np.ndarray:
+        arr = np.asarray(values, dtype=np.float64)
+        if arr.size < 2:
+            return np.empty(0, dtype=np.float64)
+        trimmed = arr[: arr.size // 2 * 2]
+        means = trimmed.reshape(-1, 2).mean(axis=1)
+        return means
+
+    means = {reader: two_min_means(aligned[reader]) for reader in readers}
+    qualified: dict[str, np.ndarray] = {}
+    for reader in readers:
+        valid = means[reader][np.isfinite(means[reader])]
+        if valid.size >= need_buckets:
+            qualified[reader] = means[reader]
+
+    correlations: dict[tuple[str, str], float] = {}
+    fits: dict[tuple[str, str], tuple[float, float]] = {}
+    for i, a in enumerate(readers):
+        if a not in qualified:
+            continue
+        for b in readers[i + 1 :]:
+            if b not in qualified:
+                continue
+            x, y = qualified[a], qualified[b]
+            mask = np.isfinite(x) & np.isfinite(y)
+            if int(mask.sum()) < need_buckets:
+                continue
+            xs, ys = x[mask], y[mask]
+            if float(np.std(xs)) == 0 or float(np.std(ys)) == 0:
+                continue
+            corr = float(np.corrcoef(xs, ys)[0, 1])
+            if corr < DUP_CORR_MIN:
+                continue
+            slope, offset = np.polyfit(xs, ys, 1)
+            slope, offset = float(slope), float(offset)
+            if not (DUP_SLOPE_MIN <= slope <= DUP_SLOPE_MAX) or abs(offset) > DUP_OFFSET_MAX_W:
+                continue
+            if ts and co_sampled(ts.get(a, ()), ts.get(b, ())):
+                continue  # co-sampled legs of a balanced 240 V pair, not copies
+            correlations[(a, b)] = corr
+            fits[(a, b)] = (slope, offset)
+
+    best: dict[str, tuple[str, float]] = {}
+    for (a, b), corr in correlations.items():
+        if a not in best or corr > best[a][1]:
+            best[a] = (b, corr)
+        if b not in best or corr > best[b][1]:
+            best[b] = (a, corr)
+
+    out: list[TopologyEdgeV3] = []
+    for (a, b) in sorted(correlations):
+        if best.get(a, (None, 0))[0] != b or best.get(b, (None, 0))[0] != a:
+            continue
+        canonical, alias = sorted((a, b))
+        out.append(
+            TopologyEdgeV3(
+                edge_id=f"te-inf-same::{canonical}::{alias}",
+                relation=RelationType.SAME_CONDUCTOR,
+                source_endpoint_id=canonical,
+                target_endpoint_id=alias,
+                lifecycle=TopologyEdgeState.CANDIDATE,
+                declared_by="inference",
+                evidence=TopologyEvidence(),
+                valid_from=at or datetime(2026, 1, 1, tzinfo=UTC),
+                pinned=False,
+            )
+        )
+    return out
+
+
+def inferred_duplicate_details(
+    series: Mapping[str, Sequence[float | None]],
+    *,
+    timestamps: Mapping[str, Sequence[float]] | None = None,
+) -> dict[tuple[str, str], dict[str, float]]:
+    """E6 §4: fitted slope/offset/correlation for each inferred copy pair.
+
+    Keyed by ``(canonical, alias)``; lives in API ``evidence_detail`` payloads,
+    never in a contract model.  A caller may expose these alongside the edges
+    emitted by :func:`detect_inferred_duplicates`.
+    """
+    edges = detect_inferred_duplicates(series, timestamps=timestamps)
+    out: dict[tuple[str, str], dict[str, float]] = {}
+    readers = sorted(series)
+    aligned = _aligned_series(series)
+    need = int(DUP_MIN_OVERLAP_H * 3600.0 / 120.0)
+    means = {}
+    for reader in readers:
+        arr = np.asarray(aligned[reader], dtype=np.float64)
+        trimmed = arr[: arr.size // 2 * 2]
+        means[reader] = trimmed.reshape(-1, 2).mean(axis=1) if trimmed.size else arr
+    for edge in edges:
+        a, b = edge.source_endpoint_id, edge.target_endpoint_id
+        x, y = means[a], means[b]
+        mask = np.isfinite(x) & np.isfinite(y)
+        if int(mask.sum()) < need:
+            continue
+        slope, offset = np.polyfit(x[mask], y[mask], 1)
+        out[(a, b)] = {
+            "slope": round(float(slope), 4),
+            "offset": round(float(offset), 4),
+            "correlation": round(float(np.corrcoef(x[mask], y[mask])[0, 1]), 4),
+        }
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # The inference view: functional, immutable updates.
 # --------------------------------------------------------------------------- #
@@ -845,6 +1046,16 @@ class TopologyInferenceView:
     #: once at each aligned rebuild.  Vetoes/caps are applied in ``_settle``;
     #: ``None`` when no companion data (behaviour as before).
     leg_report: Any | None = field(default=None, compare=False, repr=False)
+    #: E6 §1: one display/diagnostic placement per reader.  Lazily computed on
+    #: first read from the ledger (pure function of edges and veto inputs);
+    #: never affects H (which still uses STRUCTURAL edges only).
+    _placements: PlacementReport | None = field(default=None, compare=False, repr=False)
+    #: Inputs to the lazy placement computation (set at each settle).
+    _placement_inputs: tuple[Any, Any, Any] = field(
+        default_factory=lambda: (frozenset(), {}, None), compare=False, repr=False
+    )
+    #: E6 §3: raw-current vetoes and rating classes from the companion ring.
+    current_report: Any | None = field(default=None, compare=False, repr=False)
 
     # -- reads -------------------------------------------------------------- #
     def edge(
@@ -867,6 +1078,25 @@ class TopologyInferenceView:
             for e in self.edges
             if _relation(e.relation) == _CONTAINS and (wanted is None or e.lifecycle in wanted)
         )
+
+    @property
+    def placements(self) -> PlacementReport:
+        """E6 §1: one placement per reader, computed once and cached (lazy).
+
+        Computing this at every settle cost a full edge scan in a busy replay;
+        the API reads it at most once per version, so derive it on first access.
+        The ledger is frozen-derived, so caching on this view is safe.
+        """
+        if self._placements is None:
+            declared, canonical, pairs = self._placement_inputs
+            object.__setattr__(
+                self,
+                "_placements",
+                self._compute_placements(
+                    self.edges, declared, canonical, self.leg_unidentified, pairs
+                ),
+            )
+        return self._placements  # type: ignore[return-value]
 
     # -- incremental observations ------------------------------------------- #
     def observe_parent_only(self, reader_id: str, *, delta_w: float) -> TopologyInferenceView:
@@ -894,7 +1124,7 @@ class TopologyInferenceView:
             changed = True
         if not changed:
             return self
-        return replace(self, edges=tuple(edges))
+        return replace(self, edges=tuple(edges), _placements=None)
 
     def observe_group(
         self,
@@ -917,6 +1147,7 @@ class TopologyInferenceView:
         local_sigmas: Mapping[str, float] | None = None,
         pairs: PairAnalysis | None = None,
         leg_report: Any | None = None,
+        current_report: Any | None = None,
     ) -> TopologyInferenceView:
         """Fold one FINAL event group into every affected pair's ledger.
 
@@ -1368,6 +1599,7 @@ class TopologyInferenceView:
             declared_aliases=frozenset(canonical),
             pairs=pairs_now,
             leg_report=leg_report if leg_report is not None else self.leg_report,
+            current_report=current_report if current_report is not None else self.current_report,
         )
         health = _prune_health(health, edges)
 
@@ -1377,6 +1609,8 @@ class TopologyInferenceView:
             health=health,
             structure_decisions=decisions,
             leg_unidentified=unidentified,
+            _placements=None,  # lazy: compute at first API read, not per fold
+            _placement_inputs=(frozenset(blocked), canonical, pairs_now),
             aligned=aligned_now,
             at=at,
             seen_groups=frozenset({*self.seen_groups, obs.group_id}),
@@ -1388,10 +1622,51 @@ class TopologyInferenceView:
             channel_meta=meta_now,
             pairs=pairs_now,
             leg_report=leg_report if leg_report is not None else self.leg_report,
+            current_report=current_report if current_report is not None else self.current_report,
         )
         if version_transitions:
             view = view._propose_version(version_transitions)
         return view
+
+    def _compute_placements(
+        self,
+        edges: Sequence[TopologyEdgeV3],
+        declared_pairs: frozenset[frozenset[str]],
+        alias_canonical: Mapping[str, str],
+        leg_unidentified: frozenset[str],
+        pairs: PairAnalysis | None,
+    ) -> PlacementReport:
+        """E6 §1: display placements from this settle's ledger (pure, no I/O).
+
+        The per-child lift is read from the cached pair analysis when available;
+        a pair with fewer than 8 steps falls back to the fixed low-plateau lift.
+        Nothing here writes an edge or changes H.
+        """
+        from .topology_placement import MIN_STEPS_FOR_WLIFT
+
+        wlift: dict[tuple[str, str], float] = {}
+        n_by_child: dict[str, int] = {}
+        readers = sorted({e.source_endpoint_id for e in edges} | {e.target_endpoint_id for e in edges})
+        if pairs is not None:
+            for edge in edges:
+                if _relation(edge.relation) != _CONTAINS:
+                    continue
+                parent, child = edge.source_endpoint_id, edge.target_endpoint_id
+                stats = pairs.stats_for(parent, child)
+                if stats is None:
+                    continue
+                n_by_child[child] = max(n_by_child.get(child, 0), int(stats.n))
+                if int(stats.n) >= MIN_STEPS_FOR_WLIFT:
+                    wlift[(parent, child)] = float(stats.wlift)
+        return compute_placements(
+            edges,
+            readers=readers,
+            wlift_by_pair=wlift,
+            n_by_child=n_by_child,
+            leg_unidentified=leg_unidentified,
+            declared_pairs=declared_pairs,
+            alias_canonical=alias_canonical,
+        )
 
     # -- lifecycle / versioning internals ----------------------------------- #
     def _settle(
@@ -1409,6 +1684,7 @@ class TopologyInferenceView:
         declared_aliases: frozenset[str] = frozenset(),
         pairs: PairAnalysis | None = None,
         leg_report: Any | None = None,
+        current_report: Any | None = None,
     ) -> tuple[list[str], dict[str, str], frozenset[str]]:
         """Apply lifecycle transitions in place; return the version-worthy ones.
 
@@ -1490,6 +1766,33 @@ class TopologyInferenceView:
                 ):
                     labels[index] = f"{edge.edge_id} (containment)"
                 edges[index] = edge.model_copy(update={"lifecycle": new_lifecycle})
+
+        # (1c) E6 §3: current-based vetoes.  Raw current (factor-free,
+        # polarity-free) on 1-minute means catches a reversed CT the power
+        # containment veto misses.  A veto caps an inferred edge at CANDIDATE
+        # (it never promotes or rejects); absent current is a silent skip.
+        if current_report is not None:
+            from .current_rules import child_above_parent, current_containment_veto
+
+            for index, edge in enumerate(edges):
+                if (
+                    _relation(edge.relation) != _CONTAINS
+                    or edge.pinned
+                    or _value(edge.lifecycle) in _DORMANT
+                ):
+                    continue
+                parent, child = edge.source_endpoint_id, edge.target_endpoint_id
+                if (
+                    current_containment_veto(current_report, parent, child)
+                    or child_above_parent(current_report, parent, child)
+                ) and _value(edge.lifecycle) in (
+                    TopologyEdgeState.STRUCTURAL,
+                    TopologyEdgeState.PROVISIONAL,
+                ):
+                    edges[index] = edge.model_copy(
+                        update={"lifecycle": TopologyEdgeState.CANDIDATE}
+                    )
+                    labels[index] = f"{edge.edge_id} (current_veto)"
 
         # (2) Edge health (M3) BEFORE the structure: a confirmed inferred edge
         # whose parent stopped following its child is no longer structural, and
@@ -1689,6 +1992,11 @@ class TopologyInferenceView:
                     declared_pairs=declared_pairs,
                     leg_unidentified=ambiguous,
                     pairs_analysis=pairs,
+                    current_kcl_ok=(
+                        (lambda p, kids: set_kcl_ok(current_report, p, kids))
+                        if current_report is not None
+                        else None
+                    ),
                 )
                 texts.extend(result.transitions)
                 fresh = {
@@ -1878,6 +2186,7 @@ class TopologyInferenceView:
             edges=tuple(edges),
             structure_decisions=decisions,
             causes_by_edge={key: frozenset(values) for key, values in causes.items()},
+            _placements=None,
         )
         if version_transitions:
             view = view._propose_version(version_transitions)
@@ -2152,13 +2461,38 @@ class TopologyInferenceView:
             if veto == TopologyEdgeState.CONFLICTED:
                 return TopologyEdgeState.CONFLICTED
 
-        # E4 §2: lift gate on inferred CONTAINS promotions.  With enough child
-        # steps a pair must clear both the rarity-weighted lift and the raw
-        # match rate to reach PROVISIONAL or STRUCTURAL; with fewer steps the
-        # gate is not evaluated and the historical verdicts still apply.
-        lift_gate = True
-        if pairs is not None:
-            lift_gate = lift_gate_passes(pairs.stats_for(parent, child))
+        # E6 §2 / ADR-0045: calibrated lift gates.  With >=8 child steps an
+        # inferred edge must clear a minimum rarity-weighted lift (0.10 for
+        # PROVISIONAL, 0.13 for STRUCTURAL) and the raw match floor; below 8
+        # steps the gate is not evaluated and the verdict thresholds alone apply.
+        stats = pairs.stats_for(parent, child) if pairs is not None else None
+        n_steps = int(getattr(stats, "n", 0)) if stats is not None else 0
+        wlift = float(getattr(stats, "wlift", 0.0)) if stats is not None else 0.0
+        match = float(getattr(stats, "match", 0.0)) if stats is not None else 0.0
+        provisional_lift_ok = (
+            n_steps < LIFT_SUBSTITUTION_MIN_STEPS
+            or (wlift >= WLIFT_MIN_PROVISIONAL and match >= STEP_MATCH_MIN)
+        )
+        structural_lift_ok = (
+            n_steps < LIFT_SUBSTITUTION_MIN_STEPS
+            or (
+                wlift >= WLIFT_MIN_STRUCTURAL
+                and match >= STEP_MATCH_MIN
+                and lift_gate_passes(stats)
+            )
+        )
+        # Lift substitution: many clean steps can reach PROVISIONAL even with
+        # support_w below the 2-verdict floor (>=8 steps preserves the
+        # one-event invariant).
+        informative = int(getattr(stats, "informative_n", 0)) if stats is not None else 0
+        violations = int(getattr(stats, "violations", 0)) if stats is not None else 0
+        violation_rate = violations * 1000.0 / informative if informative else 0.0
+        lift_substitution = (
+            n_steps >= LIFT_SUBSTITUTION_MIN_STEPS
+            and wlift >= WLIFT_MIN_STRUCTURAL
+            and match >= STEP_MATCH_MIN
+            and violation_rate < LIFT_SUBSTITUTION_MAX_VIOLATIONS_PER_1000
+        )
 
         # The containment gate reads its fraction from the E4 cache (same number
         # as E3, computed once per rebuild) when available.
@@ -2170,31 +2504,37 @@ class TopologyInferenceView:
         gates_ok = (
             (declared or n_causes >= MIN_INDEPENDENT_CAUSES)
             and containment_ok
-            and lift_gate
             and not _scaled_copy(absolute.get(parent), absolute.get(child))
             and _value(basis.get(parent, MeasurementBasis.CT_MEASURED)) != MeasurementBasis.UNKNOWN
             and _value(basis.get(child, MeasurementBasis.CT_MEASURED)) != MeasurementBasis.UNKNOWN
         )
-        if gates_ok and sw >= MIN_SUPPORT_STRUCTURAL and ratio < CONFLICT_RATIO_STRUCTURAL:
+        if gates_ok and structural_lift_ok and sw >= MIN_SUPPORT_STRUCTURAL and ratio < CONFLICT_RATIO_STRUCTURAL:
             return TopologyEdgeState.STRUCTURAL
         if (
             gates_ok
+            and structural_lift_ok
             and _value(edge.lifecycle) == _value(TopologyEdgeState.STRUCTURAL)
             and sw >= KEEP_SUPPORT_STRUCTURAL
             and lower < KEEP_CONFLICT_RATIO_STRUCTURAL
         ):
-            # Hysteresis band: promotion needs sw >= 8 with r < 0.05, but an
-            # already-STRUCTURAL edge holds while sw >= 6 and r < 0.10.  It
-            # still falls when the recent conflicts accumulate, and the
-            # structural pass may demote it as transitive in the same settle.
+            # E6 §2 hysteresis band, kept proportional: promotion needs
+            # sw >= 3 with r <= 0.10, but an already-STRUCTURAL edge holds while
+            # sw >= 2 and r <= 0.15.  It still falls when recent conflicts
+            # accumulate, and the structural pass may demote it as transitive.
             return TopologyEdgeState.STRUCTURAL
-        if gates_ok and sw >= MIN_SUPPORT_PROVISIONAL and ratio < CONFLICT_RATIO_PROVISIONAL:
-            proposed = TopologyEdgeState.PROVISIONAL
-        elif declared:
+        if declared:
             # A user declaration is a prior, not a terminal truth: with no
-            # recent contradiction it stays STRUCTURAL even through quiet
-            # periods; sustained conflict above moves it to CONFLICTED.
+            # decisive contradiction (handled by the CONFLICTED bound above) it
+            # stays STRUCTURAL even through quiet periods.  It must precede the
+            # PROVISIONAL branch: E6 §2 raises the provisional conflict bound to
+            # 0.34, so a recovering declared edge would otherwise be read as a
+            # soft suggestion instead of the declaration it is.
             proposed = TopologyEdgeState.STRUCTURAL
+        elif gates_ok and provisional_lift_ok and (
+            (sw >= MIN_SUPPORT_PROVISIONAL and ratio < CONFLICT_RATIO_PROVISIONAL)
+            or lift_substitution
+        ):
+            proposed = TopologyEdgeState.PROVISIONAL
         elif evidence.support >= MIN_SUPPORT_CANDIDATE:
             proposed = TopologyEdgeState.CANDIDATE
         else:
@@ -2235,7 +2575,7 @@ class TopologyInferenceView:
                 and other.lifecycle not in _DORMANT
                 and other.lifecycle != TopologyEdgeState.CONFLICTED
                 and other.evidence.support > 0
-                and other.evidence.conflict_ratio < CONFLICT_RATIO_PROVISIONAL
+                and other.evidence.conflict_ratio < DIRECTION_CAP_CONFLICT_MAX
                 and _containment_gate(
                     absolute.get(other.source_endpoint_id), absolute.get(other.target_endpoint_id)
                 )
@@ -2467,6 +2807,17 @@ def infer_topology(
             )
         )
     edges.extend(detect_same_conductor(aligned, at=now))
+    # E6 §4: also infer SAME_CONDUCTOR from non-co-sampled affine copies.
+    # A declaration always wins: refuse an inferred edge for an already declared
+    # pair in either direction.
+    declared_pairs = {
+        frozenset((e.source_endpoint_id, e.target_endpoint_id))
+        for e in edges
+        if _relation(e.relation) == _SAME_CONDUCTOR
+    }
+    for edge in detect_inferred_duplicates(aligned, at=now):
+        if frozenset((edge.source_endpoint_id, edge.target_endpoint_id)) not in declared_pairs:
+            edges.append(edge)
 
     view = TopologyInferenceView(
         edges=tuple(edges),

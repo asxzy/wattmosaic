@@ -890,7 +890,16 @@ function renderEntry(entry, depth, ctx) {
 
 function hierarchyRow(node, depth, expanded, key, ctx, childCount) {
   const kind = String(node.kind || 'node');
-  const row = el('div', { class: 'hier-row', dataset: { kind, depth: String(depth) } });
+  const band = placementBand(node);
+  const row = el('div', {
+    class: 'hier-row',
+    dataset: {
+      kind,
+      depth: String(depth),
+      ...(band ? { band } : {}),
+      ...(node.structural === true ? { structural: 'true' } : {}),
+    },
+  });
 
   if (expanded === null) {
     row.append(el('span', { class: 'hier-toggle-spacer', 'aria-hidden': 'true' }));
@@ -964,6 +973,7 @@ function hierarchyRow(node, depth, expanded, key, ctx, childCount) {
     if (node.enabled === false) row.append(badge('Disabled', 'bad'));
     if (node.alias_of_ct_id) row.append(badge(`alias of ${node.alias_of_ct_id}`, 'warn'));
     if (node.polarity === 'inverted') row.append(badge('Inverted', 'warn'));
+    for (const chip of nodeChips(node)) row.append(chip);
     for (const item of nodeBadges(node)) row.append(item);
   } else if (kind === 'device') {
     const name = node.label || node.device_id || 'Device';
@@ -1018,6 +1028,21 @@ function hierarchyRow(node, depth, expanded, key, ctx, childCount) {
 
   return row;
 }
+
+// E6 §1: placement confidence is a display style, never a change to H.  The
+// engine puts ``band`` and ``structural`` on each circuit node; the row records
+// them as dataset attributes so the stylesheet can draw high links solid,
+// medium dashed and low dotted.  Chips are text only (no inline style).
+const PLACEMENT_BANDS = new Set(['high', 'medium', 'low', 'unplaced']);
+const placementBand = (node) => {
+  const band = String((node && node.band) || '');
+  return PLACEMENT_BANDS.has(band) ? band : null;
+};
+
+const nodeChips = (node) =>
+  (Array.isArray(node.chips) ? node.chips : [])
+    .filter((chip) => chip && chip.text !== undefined && chip.text !== null)
+    .map((chip) => badge(String(chip.text), badgeTone(chip.tone)));
 
 const GLYPHS = { panel: '▤', group: '▫', circuit: '◉', device: '◆' };
 
@@ -1294,6 +1319,9 @@ export {
   isWiringStatusBadge,
   circuitChildSummary,
   prunedNodes,
+  PLACEMENT_BANDS,
+  placementBand,
+  nodeChips,
   hierarchyNodes,
   legacyRoots,
   defaultOpenSet,

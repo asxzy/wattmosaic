@@ -2331,3 +2331,56 @@ live from declared companions, with no registry reads in the engine and no
 per-fold cost: all series analysis runs once per aligned rebuild. Contract
 4.1.0 adds the optional endpoint fields; migration v030 adds the columns.
 Readers without declared companions behave exactly as before.
+
+---
+
+## ADR-0045 — Placement is display; lifecycle thresholds are calibrated from replay
+
+**Status:** Accepted · 2026-11-21 · Amends DEC-10
+
+**Context.** Ten days of reference replay plus two data studies produced a
+topology with no false placements at PROVISIONAL or STRUCTURAL: every error was a
+miss. That means the promotion thresholds were too conservative once the
+containment, zero-floor, level, mirror and health vetoes were in place. It also
+showed that the tree shown to a user should show one best-guess parent per
+child even when the crossing is only CANDIDATE or PROVISIONAL, without treating
+that guess as electrical fact.
+
+**Decision.**
+
+1. **Placement is not structure.** At every settle the engine computes one
+   placement per non-root reader from the scored, vetoed CONTAINS edges:
+   `score = max(wlift, 0) * (s + 0.5) / (s + k + 1)`, preferring the deeper
+   parent in a soft chain, with bands high / medium / low / unplaced and a
+   `both_legs` placement for a leg-unidentified child. It is API/panel display
+   and diagnostics only; the observation operator H still uses STRUCTURAL edges.
+2. **Calibrated lifecycle thresholds** (amending DEC-10): containment caps at
+   ≥10 informative violations per 1000 over ≥120 buckets (drop the former
+   ">0 caps" rule); PROVISIONAL needs `support_w ≥ 2, r ≤ 0.34, wlift ≥ 0.10`
+   when `n ≥ 8`; STRUCTURAL needs `support_w ≥ 3, r ≤ 0.10, wlift ≥ 0.13`.
+   A ≥8-step, high-lift, low-violation pair may substitute for the support floor.
+   Hysteresis stays proportional (`KEEP_SUPPORT_STRUCTURAL = 2`,
+   `KEEP_CONFLICT_RATIO_STRUCTURAL = 0.15`). One event never passes CANDIDATE:
+   two verdicts or at least eight steps are still required.
+3. **Current rules.** Raw current (factor-free, polarity-free) on 1-minute means
+   adds an informative containment veto, a set-current KCL alongside the power
+   KCL, and per-reader rating classes and role hints. A child whose 5-min max
+   exceeds its parent's 1.05× + 0.5 A is vetoed. Current analysis runs only at
+   aligned rebuilds; absent current is a silent skip.
+4. **Inferred SAME_CONDUCTOR.** An affine copy (2-min correlation ≥0.985 over
+   ≥24 h, slope 0.9–1.1, offset ≤150 W, mutual best match, not co-sampled) is an
+   inferred edge through the normal lifecycle. A declaration always wins; the
+   fitted slope and offset are diagnostics. Co-sampled readers are the legs of a
+   balanced 240 V pair, not duplicates. The E6a co-sampling check uses sample
+   timestamps coinciding within 2 s for ≥90% of samples; E6b will refine it.
+5. **Leg guard.** A reader's leg comes only from its own ΔP against the reference
+   ΔV (current-driven sag), never from which voltage group its own voltage entity
+   belongs to.
+
+**Consequences.** Direct recall rises from 0.57 to 0.74 at STRUCTURAL and 0.87
+at PROVISIONAL on the reference install, with no false placements. The panel can
+draw a useful hierarchy before any edge is STRUCTURAL, while keeping the source
+of each link visible. No contract change: placement and ratings live in API
+payload dicts. E6b will add synchronous differencing and pulses.
+
+---

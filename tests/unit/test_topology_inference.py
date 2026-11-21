@@ -138,8 +138,8 @@ def test_one_coincident_event_leaves_the_pair_candidate():
 
 
 def test_twelve_mirrored_child_steps_from_two_causes_make_it_structural():
-    # ADR-0043: evidence decays, so STRUCTURAL needs recent support_w >= 8,
-    # which twelve clean verdicts reach (eight is only PROVISIONAL now).
+    # ADR-0043: evidence decays, so a clean pair still reaches STRUCTURAL after
+    # twelve verdicts (E6 §2 / ADR-0045 lowers the bar to support_w >= 3).
     view = _chain_view()
     for i in range(12):
         # Two distinct causes (unknown profiles) alternate.
@@ -155,14 +155,15 @@ def test_twelve_mirrored_child_steps_from_two_causes_make_it_structural():
     assert edge.lifecycle == TopologyEdgeState.STRUCTURAL
 
 
-def test_four_support_from_two_causes_becomes_provisional():
-    # ADR-0043: three decaying supports give support_w ~= 2.7 < 3; four cross it.
+def test_four_support_from_two_causes_becomes_structural():
+    # E6 §2 / ADR-0045: STRUCTURAL now needs support_w >= 3 (was 8); four
+    # decaying supports from two causes cross it, with r <= 0.10.
     view = _chain_view()
     for i, cause in enumerate(("a", "a", "b", "b")):
         view = view.observe_group(_delta(f"g{i}", {"main": 10.0, "sub": 10.0}, cause=cause))
     edge = view.edge("main", "sub")
     assert edge is not None
-    assert edge.lifecycle == TopologyEdgeState.PROVISIONAL
+    assert edge.lifecycle == TopologyEdgeState.STRUCTURAL
 
 
 def test_eight_support_from_one_cause_never_confirms():

@@ -156,6 +156,26 @@ def _value(item: Any) -> Any:
     return getattr(item, "value", item) if item is not None else None
 
 
+def _compose_kcl(
+    power_kcl: Callable[[str, Sequence[str]], bool] | None,
+    current_kcl: Callable[[str, Sequence[str]], bool] | None,
+) -> Callable[[str, Sequence[str]], bool] | None:
+    """Both set-KCLs must pass; E6 §3 adds current KCL beside the power one.
+
+    A set that breaks either is rejected.  With no checkers the rule is not
+    evaluated (returns ``None``), as before.
+    """
+    if power_kcl is None:
+        return current_kcl
+    if current_kcl is None:
+        return power_kcl
+
+    def ok(parent: str, children: Sequence[str]) -> bool:
+        return bool(power_kcl(parent, children) and current_kcl(parent, children))
+
+    return ok
+
+
 class AlignedSeries(dict):  # type: ignore[type-arg]
     """Aligned series (reader -> values on one grid) that know their grid.
 
@@ -829,6 +849,7 @@ def resolve(
     declared_pairs: frozenset[frozenset[str]] = frozenset(),
     leg_unidentified: frozenset[str] = frozenset(),
     pairs_analysis: Any | None = None,
+    current_kcl_ok: Any | None = None,
 ) -> StructureResolution:
     """One direct parent per child from evidence, capacity, legs and regression.
 
@@ -1111,7 +1132,10 @@ def resolve(
             score=score,
             min_children_w=CAPACITY_ACTIVE_W,
             capacity_cache=info.capacity,
-            kcl_ok=(pairs_analysis.fits_kcl if pairs_analysis is not None else None),
+            kcl_ok=_compose_kcl(
+                pairs_analysis.fits_kcl if pairs_analysis is not None else None,
+                current_kcl_ok,
+            ),
         )
     assigned = {child: parent for child, parent in assigned.items() if child not in fixed}
     assigned.update({child: parent for child, parent in held.items() if child in candidates})

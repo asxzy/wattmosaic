@@ -133,18 +133,19 @@ def test_inferred_edges_outside_version_are_suggestions(core: EngineCore) -> Non
     assert discovery["counts"] == {
         "candidate": 1, "provisional": 1, "structural": 0, "conflicted": 0,
     }
-    assert discovery["thresholds"]["MIN_SUPPORT_PROVISIONAL"] == 3
+    # E6 §2 / ADR-0045: calibrated thresholds (3 and 2, down from 8 and 3).
+    assert discovery["thresholds"]["MIN_SUPPORT_PROVISIONAL"] == 2
     assert discovery["thresholds"]["MIN_INDEPENDENT_CAUSES"] == 2
-    assert discovery["thresholds"]["MIN_SUPPORT_STRUCTURAL"] == 8
+    assert discovery["thresholds"]["MIN_SUPPORT_STRUCTURAL"] == 3
     top_pairs = discovery["top_pairs"]
     assert len(top_pairs) == 2
     assert top_pairs[0]["edge_id"] == "inf-prov"
     assert top_pairs[0]["support"] == 4
     assert top_pairs[0]["conflict"] == 0
     assert top_pairs[0]["independent_causes"] == 2
-    assert top_pairs[0]["needed"]["structural"]["support"] == 4
+    assert top_pairs[0]["needed"]["structural"]["support"] == 0  # E6: 3, support 4
     cand = next(p for p in top_pairs if p["edge_id"] == "inf-cand")
-    assert cand["needed"]["provisional"]["support"] == 2
+    assert cand["needed"]["provisional"]["support"] == 1  # E6: 2, support 1
     assert cand["needed"]["provisional"]["independent_causes"] == 1
 
 

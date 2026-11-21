@@ -90,6 +90,28 @@ def test_branch_tag_fires_above_12_a() -> None:
     assert report.branch_tag["low"] is False
 
 
+def test_own_voltage_group_never_decides_the_readers_leg() -> None:
+    """E6 §5: a reader whose voltage entity sits in the L group but whose own
+    steps sag R must be classified R.  The group label is only a reference
+    anchor; the leg comes from the reader's own ΔP against the ΔV of the
+    references (current-driven sag), never from its voltage entity's group.
+    """
+    v_l, v_r = _references()
+    power = _steps_power(400)
+    # The reader's own voltage entity is a copy of the L reference (it sits in
+    # the L group), but its load sags R.
+    reader_voltage = list(v_l)
+    for a, b in [(20, 40), (60, 80), (100, 120), (140, 160), (180, 200), (220, 240)]:
+        for i in range(a, b):
+            v_r[i] -= 2.0  # the physical R reference sags
+    report = analyse_legs(
+        power={"load": power},
+        voltage={"ref_l": v_l, "ref_r": v_r, "load_copy_of_l": reader_voltage},
+    )
+    assert report.references["load_copy_of_l"] == "L"  # its voltage group is L
+    assert report.leg["load"] == "R"  # but its own ΔP sags R
+
+
 def test_same_leg_parent_and_branch_tie_break() -> None:
     assert same_leg_parent("L", {"a": "L", "b": "R"}) == "a"
     assert same_leg_parent("L", {"a": "L", "b": "L"}) is None

@@ -143,7 +143,11 @@ def test_a_decided_edge_whose_evidence_falls_to_provisional_stays_provisional() 
         declared_by="inference",
         beta=1.0,
         beta_basis="unity",
-        evidence=TopologyEvidence(support=4, support_w=4.0, independent_causes=3),
+        # E6 §2 / ADR-0045: hysteresis now needs support_w >= 2 and a Wilson
+        # conflict lower bound < 0.15.  With support_w 4 / conflict_w 2 the
+        # lower bound is 0.18, so the decided edge falls to PROVISIONAL (the
+        # point ratio 0.33 is still below the 0.34 PROVISIONAL bound).
+        evidence=TopologyEvidence(support=4, conflict=2, support_w=4.0, conflict_w=2.0, independent_causes=3),
         valid_from=T0,
         pinned=False,
     )

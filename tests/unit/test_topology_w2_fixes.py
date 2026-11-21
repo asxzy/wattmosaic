@@ -243,7 +243,9 @@ def test_unconfirm_hysteresis_band() -> None:
 def test_conflict_above_the_provisional_bound_drops_a_sticky_edge() -> None:
     view, _versions, _series = _structurally_confirmed()
     edges = [
-        e.model_copy(update={"evidence": EdgeEvidence(support=5, conflict=2, independent_causes=3)})
+        # E6 §2: the PROVISIONAL conflict bound is now 0.34 (was 0.10), so 5
+        # conflicts in 10 verdicts is above it while 2 in 7 was not.
+        e.model_copy(update={"evidence": EdgeEvidence(support=5, conflict=5, independent_causes=3)})
         if e.edge_id == "te-inf::main_2::sub_1" else e
         for e in view.edges
     ]
@@ -416,10 +418,11 @@ def test_no_structural_confirmation_against_the_direction_cap() -> None:
 def test_a_candidate_is_never_confirmed_structurally_in_one_settle() -> None:
     series = _crossed()
     # E3 §2: asymmetric support keeps the crossing identifiable while the
-    # candidate still needs a second settle to confirm.
+    # candidate still needs a second settle to confirm.  E6 §2 / ADR-0045
+    # lowers STRUCTURAL to support_w >= 3, but one event is still CANDIDATE.
     edges = [
-        _edge("main_1", "sub_1", CANDIDATE, support=2),
-        _edge("main_2", "sub_1", CANDIDATE, support=3),
+        _edge("main_1", "sub_1", CANDIDATE, support=1),
+        _edge("main_2", "sub_1", CANDIDATE, support=2),
     ]
     view = _quiet(_view(edges), "g0", aligned=series)
     assert _life(view, "main_2", "sub_1") == "provisional"
@@ -499,6 +502,9 @@ def test_replay_pass_two_skips_parents_absent_from_a_group() -> None:
     learned, stats = learn_topology_from_history(seed, history)
     assert stats.passes == 2
     view = seed.merge_evidence(learned, levels={"grand": 900.0, "other": 200.0, "branch": 120.0})
+    # E6 §2: the direction cap keeps its stricter 0.10 contradiction bar, so a
+    # reverse edge with a 0.19 conflict ratio still leaves the forward edge
+    # identifiable and STRUCTURAL at the calibrated support_w >= 3 bar.
     assert _life(view, "grand", "branch") == "structural"
 
 
@@ -515,7 +521,13 @@ def test_the_second_leg_of_a_pair_is_confirmed_under_the_sibling_main() -> None:
     made STRUCTURAL and the child is leg-unidentified.  leg_a's crossing is
     decided by asymmetric support (its main_2 rival is well below half).
     """
-    assert tr.PAIR_MAX_CONFLICT_RATIO == CONFLICT_RATIO_PROVISIONAL
+    # E6 §2 / ADR-0045 raises the ledger's PROVISIONAL conflict bound to 0.34;
+    # pair completion keeps its own, stricter 0.10 bound (a 240 V crossing needs
+    # a clean ratio to be completed).  Both bounds are still positive.
+    # E6 / ADR-0045: the pair rule keeps its strict 0.10 bar; it is no longer
+    # tied to the (raised) PROVISIONAL conflict bound.
+    assert tr.PAIR_MAX_CONFLICT_RATIO == 0.10
+    assert tr.PAIR_MAX_CONFLICT_RATIO <= CONFLICT_RATIO_PROVISIONAL
     series = _hot_tub()
     # E3 §2: main_2's crossings have support well below half of main_1's, so
     # they are asymmetric evidence, not an indistinguishable pair; leg_a's

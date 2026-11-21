@@ -134,7 +134,10 @@ def test_a_confirmed_edge_does_not_flap_on_one_extra_conflict() -> None:
 
     def _with(lifecycle: TopologyEdgeState) -> TopologyEdgeV3:
         edge = _edge("sub_l2", "hrv", lifecycle, support=30)
-        return edge.model_copy(update={"evidence": edge.evidence.model_copy(update={"conflict": 2})})
+        # E6 §2 / ADR-0045: STRUCTURAL now needs r <= 0.10; 4/34 = 0.118 is
+        # above it but below the 0.15 hysteresis band, so a decided edge holds
+        # while a fresh PROVISIONAL one does not promote.
+        return edge.model_copy(update={"evidence": edge.evidence.model_copy(update={"conflict": 4})})
 
     causes = {("sub_l2", "hrv", "contains"): frozenset({"a", "b", "c"})}
     group = DeltaObservation(group_id="g", deltas={"other": (40.0, 2.0)}, at=T0, cause_id="x")
@@ -142,7 +145,7 @@ def test_a_confirmed_edge_does_not_flap_on_one_extra_conflict() -> None:
         edges=(_with(TopologyEdgeState.STRUCTURAL),), clock=lambda: T0, causes_by_edge=causes
     ).observe_group(group)
     assert kept.edge("sub_l2", "hrv").lifecycle == TopologyEdgeState.STRUCTURAL
-    # The same 6.3 % conflict does not *promote* a new edge to CONFIRMED.
+    # The same ~11.8 % conflict does not *promote* a new edge to STRUCTURAL.
     fresh = TopologyInferenceView(
         edges=(_with(TopologyEdgeState.PROVISIONAL),), clock=lambda: T0, causes_by_edge=causes
     ).observe_group(group)

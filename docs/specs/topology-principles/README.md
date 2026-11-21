@@ -22,16 +22,16 @@ The labels in the "Use" column mean:
 | P4 | **Sparsity**: few devices change at once | subset-sum fallback | — | — | — | Not true at a 20 W floor: 40 % of step bins have ≥ 2 readers, which is chance level. It holds at ≥ 100 W (81 % single). Never use bare coincidence as evidence |
 | P5 | **KCL on levels**: parent ≥ Σ children (`r/f`), residual ≥ 0 | structural pass, **unscaled** series | 0.967 | 1.00 | 24–72 h | **set veto**. It is the only rule that rejects a 240 V pair's legs being placed under both mains (double count) |
 | P6 | **Residual mirroring**: a child's steps appear in P − Σ(known siblings) | no | **0.995** | 0.97 | 12 h | **positive**, and the best tie-break between candidate parents |
-| P7 | **Tree / exclusivity / deepest parent** | yes (structural pass) | — | — | — | structure |
-| P8 | **Leg consistency**: a 120 V child is on one root, a balanced 240 V load is on both equally, and a one-leg ×2 load is undecidable | partial (E3 ambiguity) | — | — | — | Which leg a one-leg 240 V CT is on cannot be decided from magnitudes or voltage. Model it as carried by both legs |
-| P9 | **Voltage sag**: a 120 V load sags its own leg and lifts the other through neutral shift; a 240 V load sags both equally | **not ingested** | 19/19 legs correct | — | 1 h (29 % of readers) to 24 h (70 %) | **leg** classifier and 240 V tag. It is the only rule that decides leg |
+| P7 | **Tree / exclusivity / deepest parent** | E6: exactly one placement per child at any confidence (display only); H still uses STRUCTURAL edges | — | — | — | structure, display |
+| P8 | **Leg consistency**: a 120 V child is on one root, a balanced 240 V load is on both equally, and a one-leg ×2 load is undecidable | E6: `both_legs` placement with `leg_unidentified` reason | — | — | — | Which leg a one-leg 240 V CT is on cannot be decided from magnitudes or voltage. Model it as carried by both legs |
+| P9 | **Voltage sag**: a 120 V load sags its own leg and lifts the other through neutral shift; a 240 V load sags both equally | E5 ingested; E6 §5 guard: leg from the reader's own ΔP vs reference ΔV only, never its voltage entity's group | 19/19 legs correct | — | 1 h (29 % of readers) to 24 h (70 %) | **leg** classifier and 240 V tag. It is the only rule that decides leg |
 | P10 | **Energy over intervals** (kWh): E_p ≥ Σ E_c | kWh ingested, unused | 0.72 single; 0.89 Σ (hourly proxy) | 1.00 | — | weak at hourly resolution; not worth adding |
 | P11 | **HA state events as labels** | counted only as independent causes | host lift 3–40× | — | — | hint for the *hosting reader*. Useless for ancestors, because panels step near any random time |
 | P12 | **Timing / causality** within cross-device skew | windows ≤ 30 s | — | — | — | Within a device, steps are simultaneous; across devices, up to one interval (~16 s) |
-| P13 | **Same conductor**: near-identical series | yes | — | — | — | structure |
+| P13 | **Same conductor**: near-identical series | yes; E6 §4 infers an affine copy (r ≥ 0.985, slope 0.9–1.1, offset ≤ 150 W, mutual best, not co-sampled) | — | — | ≥ 24 h | **inferred** SAME_CONDUCTOR (declaration wins) |
 | P14 | **Discrete device levels** (step-size fingerprints) | disaggregation only | — | — | — | future |
 | P15 | **Change points** for real rewiring | verdict-count decay | — | — | — | future: a two-segment test on an edge's verdict stream |
-| P16 | **Current containment** \|I_c\| ≤ \|I_p\| (raw current is immune to factor errors) | current is not ingested | 0.972–0.992 | 1.00 | 24–72 h | **veto**, the same strength as P1 |
+| P16 | **Current containment** \|I_c\| ≤ \|I_p\| (raw current is immune to factor errors) | E6 §3: 1-min veto ≥10/1000, set-current KCL, rating classes | 0.999 | 1.00 | 24–72 h | **veto**, catches a reversed CT the power veto misses |
 
 ## Findings that change the engine
 
@@ -55,4 +55,5 @@ The labels in the "Use" column mean:
    most of the remaining conflicts. Finer data, such as a shorter integration poll
    or direct device reads, would help most where step evidence is concerned.
 
-Implementation: `docs/specs/topology-evidence-fixes/E4-principles.md`.
+Implementation: `docs/specs/topology-evidence-fixes/E4-principles.md`,
+`E5-companion-quantities.md` and `E6-placement-current-sync.md` (ADR-0045).

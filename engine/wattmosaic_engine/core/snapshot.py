@@ -557,7 +557,135 @@ class SnapshotMixin:
         )
         tree["topology_version"] = versions["topology_version_id"]
         tree["mapping_version"] = versions["mapping_version_id"]
+        # E6 §1: the panel hierarchy is built from one placement per child at
+        # any confidence, not only from STRUCTURAL edges.  The engine owns the
+        # derivation; ``structural_links`` tells the panel which links are
+        # authoritative H edges (the legacy builder's roots are kept for
+        # compatibility and as the fallback).
+        ledger = getattr(self, "topology_inference", None)
+        report = getattr(ledger, "placements", None) if ledger is not None else None
+        if report is not None:
+            tree["placements"] = report.as_dict()
+            active = [
+                (str(e.source_endpoint_id), str(e.target_endpoint_id))
+                for e in graph.edges_all
+                if str(getattr(e.relation, "value", e.relation)) == "contains"
+                and str(getattr(e.lifecycle, "value", e.lifecycle)) == "structural"
+            ]
+            tree["structural_links"] = active
+            tree["roots"] = self._placement_roots(graph, report, active)
         return tree
+
+    def _placement_roots(
+        self,
+        graph: Any,
+        report: Any,
+        structural_links: Sequence[tuple[str, str]],
+    ) -> list[dict[str, Any]]:
+        """Build the panel hierarchy from placements (E6 §1).
+
+        Every placed child appears under its single parent; a ``both_legs``
+        child appears under both parents with a chip; unplaced readers are
+        listed separately under an "Unplaced measurements" group.  Structural
+        links are passed through so the panel can style them differently.
+        """
+        labels = {str(e.endpoint_id): str(e.display_name or e.endpoint_id) for e in graph.endpoints}
+        structural = set(structural_links)
+        by_child = getattr(report, "by_child", {}) or {}
+        children: dict[str, list[str]] = {}
+        roots: list[str] = []
+        unplaced: list[str] = []
+        for reader in sorted(labels):
+            placement = by_child.get(reader)
+            if placement is None or getattr(placement, "parent", None) is None:
+                if getattr(placement, "both_legs", ()):
+                    continue  # drawn under both parents below
+                roots.append(reader)
+                unplaced.append(reader)
+                continue
+            children.setdefault(str(placement.parent), []).append(reader)
+
+        def node(reader: str, depth: int) -> dict[str, Any]:
+            kids = sorted(children.get(reader, ()))
+            placement = by_child.get(reader)
+            chips: list[dict[str, str]] = []
+            if placement is not None and getattr(placement, "band", None) == "low":
+                chips.append({"text": "low confidence", "tone": "warn"})
+            return {
+                "id": f"reader:{reader}",
+                "kind": "circuit",
+                "label": labels.get(reader, reader),
+                "reader_id": reader,
+                "depth_hint": depth,
+                "band": getattr(placement, "band", None) if placement is not None else None,
+                "structural": False,  # a root has no parent link
+                "chips": chips,
+                "children": [_child(c, depth + 1) for c in kids],
+            }
+
+        def _child(reader: str, depth: int) -> dict[str, Any]:
+            placement = by_child.get(reader)
+            chips: list[dict[str, str]] = []
+            if placement is not None and getattr(placement, "both_legs", ()):
+                chips.append({"text": "240 V, leg not identifiable", "tone": "warn"})
+            if placement is not None and getattr(placement, "band", None) == "low":
+                chips.append({"text": "low confidence", "tone": "warn"})
+            parent = getattr(placement, "parent", None) if placement is not None else None
+            is_structural = bool(parent and (parent, reader) in structural)
+            kids = sorted(children.get(reader, ()))
+            return {
+                "id": f"reader:{reader}",
+                "kind": "circuit",
+                "label": labels.get(reader, reader),
+                "reader_id": reader,
+                "depth_hint": depth,
+                "band": getattr(placement, "band", None) if placement is not None else None,
+                "structural": is_structural,
+                "chips": chips,
+                "children": [_child(c, depth + 1) for c in kids],
+            }
+
+        out: list[dict[str, Any]] = []
+        for reader in roots:
+            if reader in unplaced and not children.get(reader):
+                continue  # listed under "Unplaced measurements" instead
+            out.append(node(reader, 1))
+        # A ``both_legs`` child is drawn under each of its two parents.
+        for reader, placement in sorted(by_child.items()):
+            both = getattr(placement, "both_legs", ()) or ()
+            if not both:
+                continue
+            for parent in both:
+                out.append(
+                    {
+                        "id": f"group:{labels.get(parent, parent)}:1",
+                        "kind": "group",
+                        "label": labels.get(parent, parent),
+                        "depth_hint": 1,
+                        "children": [_child(reader, 2)],
+                    }
+                )
+        if unplaced:
+            out.append(
+                {
+                    "id": "group:Unplaced measurements:1",
+                    "kind": "group",
+                    "label": "Unplaced measurements",
+                    "depth_hint": 1,
+                    "children": [
+                        {
+                            "id": f"reader:{r}",
+                            "kind": "circuit",
+                            "label": labels.get(r, r),
+                            "reader_id": r,
+                            "depth_hint": 2,
+                            "children": [],
+                        }
+                        for r in sorted(unplaced)
+                    ],
+                }
+            )
+        return out
 
     def _mapped_devices_by_reader(self, mapping_version_id: str) -> dict[str, list[dict[str, Any]]]:
         """reader -> the devices/components the active mapping places on it.

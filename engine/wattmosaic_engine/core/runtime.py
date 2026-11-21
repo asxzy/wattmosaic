@@ -401,6 +401,9 @@ class RuntimeMixin:
         self._t5_memory_saved_at: datetime | None = None
         self._t5_aligned: Mapping[str, Any] | None = None
         self._t5_aligned_at: datetime | None = None
+        # E6 §3: cached current report per aligned rebuild (no companion, no report).
+        self._t5_current_aligned: Any | None = None
+        self._t5_current_cached: Any | None = None
         # Edge-health writes are throttled (at most one per _T5_HEALTH_EVERY_S).
         self._t5_health_saved_at: datetime | None = None
         self._t5_health_dirty = False
@@ -2837,6 +2840,39 @@ class RuntimeMixin:
         self._t5_leg_cached = report
         return report
 
+    def _t5_current_report(self, aligned: Mapping[str, Any] | None) -> Any | None:
+        """E6 §3: raw-current vetoes, set-KCL and rating classes at a rebuild.
+
+        Only readers with a declared current companion are analysed; the ring's
+        I values are factor-free and polarity-free.  Cached on the aligned series
+        object, so no per-fold cost and no series recomputation.  Absent current
+        returns ``None`` and every current rule is skipped silently.
+        """
+        if aligned is None or not aligned or getattr(self, "companion_store", None) is None:
+            return None
+        cached = getattr(self, "_t5_current_aligned", None)
+        if cached is aligned:
+            return getattr(self, "_t5_current_cached", None)
+        from ..electrical.current_rules import analyse_current
+
+        current: dict[str, list[float]] = {}
+        for reader in aligned:
+            ring = self.companion_store.ring(reader)
+            if not ring:
+                continue
+            values: list[float] = [float("nan")] * len(aligned[reader])
+            offset = len(values) - len(ring)
+            for position, (_ts, _v, amps, _pf) in enumerate(ring):
+                idx = offset + position
+                if 0 <= idx < len(values) and amps is not None:
+                    values[idx] = float(amps)
+            if any(v == v for v in values):
+                current[reader] = values
+        report = analyse_current(current) if current else None
+        self._t5_current_aligned = aligned
+        self._t5_current_cached = report
+        return report
+
     def _t5_containment_series(
         self, aligned: Mapping[str, Any] | None, readers: Sequence[str]
     ) -> Mapping[str, Any] | None:
@@ -3092,6 +3128,7 @@ class RuntimeMixin:
                 local_sigmas=self._local_step_sigmas(group),
                 pairs=pair_analysis,
                 leg_report=self._t5_leg_report(aligned),
+                current_report=self._t5_current_report(aligned),
             )
             self.topology_inference = updated
             self._persist_edge_health_throttled(

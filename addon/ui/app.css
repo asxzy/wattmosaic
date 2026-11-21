@@ -598,6 +598,16 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
   border-top: 1px solid var(--line-strong);
   pointer-events: none;
 }
+/* E6 §1: the connector line follows the placement band.  High is solid (the
+   default above), medium dashed, low dotted; STRUCTURAL links stay solid even
+   when the placement band is soft, because H uses structure. */
+.hier ul.hier-list:not(.hier-root) > li.hier-node:has(.hier-row[data-band="medium"]):not(:has(.hier-row[data-structural="true"]))::before {
+  border-top-style: dashed;
+}
+.hier ul.hier-list:not(.hier-root) > li.hier-node:has(.hier-row[data-band="low"]):not(:has(.hier-row[data-structural="true"]))::before {
+  border-top-style: dotted;
+}
+.hier .hier-row[data-band="low"] .hier-label { color: var(--text-mute); }
 .hier ul.hier-list:not(.hier-root) > li.hier-node:last-child::after {
   content: "";
   position: absolute;

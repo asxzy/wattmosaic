@@ -1,5 +1,22 @@
 # Release Notes
 
+## Unreleased — placement and calibrated thresholds (E6a, ADR-0045)
+
+Topology now computes exactly one **placement** per reader at every settle, at
+any confidence, for display and diagnostics only: scored by chance-corrected
+lift and evidence, preferring the deeper parent in a chain, with high / medium /
+low / unplaced bands and a `both_legs` placement for a leg-unidentified child.
+The panel hierarchy is drawn from these placements (solid / dashed / dotted
+links and explicit confidence chips); the observation operator H is unchanged.
+Lifecycle thresholds are calibrated from the reference replay (ADR-0045 amends
+DEC-10): PROVISIONAL needs support_w ≥ 2 with r ≤ 0.34, STRUCTURAL support_w ≥ 3
+with r ≤ 0.10, and the containment veto needs ≥10 per 1000 informative buckets.
+Raw current from the companion ring adds an informative containment veto, a
+set-current KCL alongside the power KCL, and per-reader rating classes and role
+hints; absent current is a silent skip. SAME_CONDUCTOR can now be inferred from
+a non-co-sampled affine copy, and the leg classifier never uses a reader's own
+voltage group. No contract change; all new fields live in API payload dicts.
+
 ## Unreleased — dynamic topology (contract 4.0.0, ADR-0043)
 
 Topology is now dynamic: an edge's state is recomputed from recent evidence at

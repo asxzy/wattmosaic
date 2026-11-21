@@ -442,6 +442,21 @@ def _display_node_dict(node: DisplayNode) -> dict[str, Any]:
     }
 
 
+def with_placements(result: dict[str, Any], ledger: Any) -> dict[str, Any]:
+    """E6 §1: add each reader's placement to the v3 payload.
+
+    Placement is display/diagnostic only; the active version's edges and the
+    primary display tree are unchanged.  A caller can build the panel hierarchy
+    from ``placements`` while still seeing which links are structural (the
+    version edges' ``in_version`` / ``lifecycle`` fields).
+    """
+    report = getattr(ledger, "placements", None) if ledger is not None else None
+    if report is None:
+        return result
+    result["placements"] = report.as_dict()
+    return result
+
+
 # Lifecycles that are surfaced as inference suggestions when they are stored
 # but not yet part of the active version.  CANDIDATE is deliberately excluded:
 # one event never promotes an edge past CANDIDATE (HB §4.2/§4.3, DEC-10), so a
@@ -815,7 +830,9 @@ class TopologyApiMixin:
         )
         ledger = getattr(self, "topology_inference", None)
         book = getattr(ledger, "health", None)
-        return with_edge_health(with_evidence_detail(result, ledger), book)
+        return with_placements(
+            with_edge_health(with_evidence_detail(result, ledger), book), ledger
+        )
 
     def topology_versions(self, version_id: str | None = None) -> Any:
         return self._v3_topology_service().versions_history(version_id)
@@ -935,13 +952,19 @@ class TopologyApiMixin:
         }
 
     def _reader_leg_payload(self) -> dict[str, Any]:
-        """E5 §4: expose leg/leg_n and the branch tag for each classified reader."""
+        """E5 §4 + E6 §3: leg, branch tag and current rating class per reader."""
         ledger = getattr(self, "topology_inference", None)
         report = getattr(ledger, "leg_report", None) if ledger is not None else None
-        if report is None:
-            return {}
-        as_dict = getattr(report, "as_reader_dict", None)
-        readers = sorted(set(getattr(report, "leg", {})) | set(getattr(report, "branch_tag", {})))
-        if as_dict is None:
-            return {}
-        return {reader: as_dict(reader) for reader in readers}
+        current_report = getattr(ledger, "current_report", None) if ledger is not None else None
+        out: dict[str, Any] = {}
+        if report is not None:
+            as_dict = getattr(report, "as_reader_dict", None)
+            readers = sorted(set(getattr(report, "leg", {})) | set(getattr(report, "branch_tag", {})))
+            if as_dict is not None:
+                out = {reader: as_dict(reader) for reader in readers}
+        if current_report is not None:
+            as_current = getattr(current_report, "as_reader_dict", None)
+            if as_current is not None:
+                for reader in sorted(getattr(current_report, "rating_class", {})):
+                    out.setdefault(reader, {}).update(as_current(reader))
+        return out

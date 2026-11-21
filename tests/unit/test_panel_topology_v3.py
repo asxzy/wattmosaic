@@ -348,6 +348,63 @@ def test_discovery_summary_hidden_when_provisional_exists() -> None:
     assert "Discovery:" not in result["text"]
 
 
+def test_hierarchy_renders_placement_bands_and_chips() -> None:
+    """E6 §1: the panel draws one placed child per parent, styles the link by
+    band and shows the low-confidence / leg-unidentified chips.
+    """
+    _require_node()
+    tree = {
+        "version": 2,
+        "status": "confirmed",
+        "generated_at": T0,
+        "topology_version": "topo-1",
+        "stats": {"devices": 0},
+        "roots": [
+            {
+                "id": "reader:ct_feed", "kind": "circuit", "label": "Main feed",
+                "reader_id": "ct_feed", "band": "high", "structural": True,
+                "children": [
+                    {"id": "reader:ct_sub", "kind": "circuit", "label": "Sub panel",
+                     "reader_id": "ct_sub", "band": "medium", "structural": False,
+                     "chips": [], "children": []},
+                    {"id": "reader:ct_oven", "kind": "circuit", "label": "Oven",
+                     "reader_id": "ct_oven", "band": "low", "structural": False,
+                     "chips": [{"text": "low confidence", "tone": "warn"}], "children": []},
+                ],
+            },
+            {
+                "id": "group:Unplaced measurements:1", "kind": "group",
+                "label": "Unplaced measurements", "children": [],
+            },
+        ],
+        "placements": {
+            "ct_feed": {"parent": None, "band": "unplaced"},
+            "ct_sub": {"parent": "ct_feed", "band": "medium"},
+            "ct_oven": {"parent": "ct_feed", "band": "low", "reason": "low_confidence"},
+        },
+        "flat": {"panels": [], "circuits": [], "devices": []},
+        "notes": [],
+    }
+    program = (
+        "import { placementBand, nodeChips } from './view-topology.js';\n"
+        f"const tree = {lit(tree)};\n"
+        "const rows = [];\n"
+        "const walk = (nodes) => nodes.forEach((n) => { rows.push([n.label, placementBand(n), (nodeChips(n) || []).length]); walk(n.children || []); });\n"
+        "walk(tree.roots);\n"
+        "console.log(JSON.stringify({ rows }));\n"
+    )
+    out = run_esm(program, shim=EVENT_DOM_SHIM)
+    rows = out["rows"]
+    assert rows[0][1] == "high"
+    assert rows[1][1] == "medium"
+    assert ["Oven", "low", 1] in rows
+    result = _render(_api(tree=tree))
+    text = result["text"]
+    assert "low confidence" in text
+    assert "Main feed" in text and "Sub panel" in text and "Oven" in text
+    _assert_only_3_0_reads(result["requests"])
+
+
 def test_edges_card_offers_pin_and_reject_only_on_click() -> None:
     """ADR-0043: every actionable edge offers Pin and Reject, only on a click."""
     edges = [

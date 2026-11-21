@@ -231,19 +231,21 @@ def test_discovery_and_disaggregation_run_on_live_shaped_stream() -> None:
         assert snapshot is not None
         assert len(snapshot.reader_measurements) == N_CT
 
-        # T5: correlated co-steps propose PROVISIONAL CONTAINS edges with an
-        # empty topology (design §5: >= 3 support from >= 2 causes).
+        # E6 §2 / ADR-0045: clean co-steps from >=2 causes now reach STRUCTURAL
+        # at support_w >= 3 (was PROVISIONAL at the old bar of 8).  One event
+        # still never promotes past CANDIDATE.
         view = core.topology_inference
         edge = view.edge(PARENT, CHILD_A)
         assert edge is not None, "T5 never saw the parent/child co-steps"
-        assert edge.lifecycle == TopologyEdgeState.PROVISIONAL, edge.evidence
+        assert edge.lifecycle == TopologyEdgeState.STRUCTURAL, edge.evidence
         assert view.edge(PARENT, CHILD_B) is not None
+        # CHILD_B has fewer clean co-steps: it stays soft.
         assert view.edge(PARENT, CHILD_B).lifecycle == TopologyEdgeState.PROVISIONAL
         persisted = {
             (str(row["source_endpoint_id"]), str(row["target_endpoint_id"])): str(row["lifecycle"])
             for row in core.db.repos.topology_v3.edges()
         }
-        assert persisted.get((PARENT, CHILD_A)) == TopologyEdgeState.PROVISIONAL.value
+        assert persisted.get((PARENT, CHILD_A)) == TopologyEdgeState.STRUCTURAL.value
         # One event never promotes past CANDIDATE: the noise readers never
         # stepped and have no edge at all.
         assert all("ct_1" not in pair[0] for pair in persisted)
