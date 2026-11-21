@@ -2287,3 +2287,47 @@ conflicting events and the same edge re-promotes once the evidence recovers.
 Users see an edge's state, strength and conflict ratio instead of a binary
 confirmed/candidate flag. One event still never moves an edge past CANDIDATE,
 parent-only changes stay neutral, and REJECTED/pinned overrides stay hard.
+
+---
+
+## ADR-0044 — The engine ingests monitor companion quantities of declared readers
+
+**Status:** Accepted · 2026-11-21
+
+**Context.** A Refoss-style monitor publishes voltage, current and power-factor
+entities beside its power sensor, but no factor entity. A monitor-applied ×2 is
+therefore invisible to the engine, yet `f = |P| / (V·|I|·|PF|)` snapped recovers
+it exactly. Voltage sags decide a reader's mains leg (19/19 correct on full
+history); a sustained high current distinguishes a feeder from a branch circuit.
+HA's registries are available only inside Home Assistant, and ADR-0028 forbids
+the engine from reading them.
+
+**Decision.**
+
+1. The integration resolves, on the monitor's HA device, the entities whose
+   `device_class` is `voltage`, `current` or `power_factor` and declares their
+   entity ids with the endpoint config revision (a new optional payload field).
+   The engine never reads HA's registries; ADR-0028 is unchanged.
+2. The engine subscribes to those declared companion entities and keeps a latest
+   record and a bounded 30 s-bucket ring per reader. Companion entities are
+   **never readers** and never emit a power reading. A power sample's companion
+   fields are filled only from a value at most 30 s old; absent stays `None`.
+3. An hourly background job derives monitor-applied factors from the aligned
+   companion series and appends `MeasurementFactor(applied_by="monitor",
+   declared_by="inferred")` intervals when the factor changes. It never
+   overwrites a user-declared factor and leaves readers with no qualifying data
+   unknown, without a row. The T5 fold already invalidates on factor row count.
+4. An aligned-rebuild-only classifier groups voltage references by correlation,
+   removes the common mode, clusters references into two legs by residual
+   correlation, and reduces per-reader step sags to `L`/`R`/`both`/`unknown`.
+   `both` keeps E3's `leg_unidentified`; a definite leg breaks E3 ambiguity in
+   favour of the one parent on the same leg; L-vs-R caps a CONTAINS edge at
+   CANDIDATE once both readers have enough steps (a veto only). A 5-min mean |I|
+   above 12 A tags `not_branch_circuit`, used only as an equal-standing parent
+   tie-break.
+
+**Consequences.** Monitor factors, leg indices and branch tags become available
+live from declared companions, with no registry reads in the engine and no
+per-fold cost: all series analysis runs once per aligned rebuild. Contract
+4.1.0 adds the optional endpoint fields; migration v030 adds the columns.
+Readers without declared companions behave exactly as before.

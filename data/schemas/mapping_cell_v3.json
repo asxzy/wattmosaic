@@ -674,5 +674,5 @@
   "title": "MappingCell",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/mapping_cell_v3.json",
-  "x-contract-version": "4.0.0"
+  "x-contract-version": "4.1.0"
 }

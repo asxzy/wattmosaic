@@ -30,7 +30,7 @@ import math
 import os
 import sys
 import time
-from collections import Counter, defaultdict
+from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -42,10 +42,11 @@ if str(ROOT) not in sys.path:
 if str(ROOT / "engine") not in sys.path:
     sys.path.insert(0, str(ROOT / "engine"))
 
+from wattmosaic_engine.electrical.factor_inference import derive_factors  # noqa: E402
+
 from tools.audit.ha_client import HAClient, connection_settings, load_env  # noqa: E402
 
 SCHEMA_HISTORY = "wattmosaic.ha_history/1"
-SCHEMA_FACTORS = "wattmosaic.measurement_factors/1"
 
 #: HA domains considered load drivers for ``--events auto``.  ``is_event_domain``
 #: admits a wider set (enum sensors, vacuum, ...); the spec narrows it here.
@@ -64,15 +65,9 @@ EVENT_DOMAINS = frozenset(
 )
 MAX_EVENT_ENTITIES = 400
 MAX_BATCH = 50
-FACTOR_SNAP_CANDIDATES = (1.0, 2.0)
-FACTOR_SNAP_TOLERANCE = 0.15
-FACTOR_MAX_AGE_S = 30.0
-FACTOR_MIN_CURRENT_A = 0.5
-FACTOR_MIN_PF = 0.3
-FACTOR_MIN_POWER_W = 50.0
-FACTOR_BUCKET_SECONDS = 3600
-FACTOR_MIN_INSTANTS_PER_BUCKET = 5
-FACTOR_CHANGE_BUCKETS = 2
+# Factor-derivation constants and algorithm live in the engine
+# (electrical/factor_inference.py) so the pull tool and the live job share one
+# implementation.  ``derive_factors`` and ``SCHEMA_FACTORS`` are imported above.
 
 
 # --------------------------------------------------------------------------- #
@@ -332,190 +327,6 @@ def factor_inputs(reader: Mapping[str, Any]) -> dict[str, str]:
     if len(inputs) < 3:
         return {}
     return {"v": inputs[0], "i": inputs[1], "pf": inputs[2]}
-
-
-# --------------------------------------------------------------------------- #
-# Factor derivation (section 2.3, pure)
-# --------------------------------------------------------------------------- #
-def _snap_factor(value: float) -> float | None:
-    """Snap ``value`` to the nearest candidate within the tolerance, else None."""
-    best = min(FACTOR_SNAP_CANDIDATES, key=lambda candidate: abs(value - candidate))
-    if abs(value - best) <= FACTOR_SNAP_TOLERANCE * best:
-        return best
-    return None
-
-
-def derive_factors(
-    rows_by_entity: Mapping[str, Sequence[Mapping[str, Any]]],
-    readers: Sequence[Mapping[str, Any]],
-) -> dict[str, Any]:
-    """Derive measurement factors from aligned P/V/I/PF samples.
-
-    For every reader with all three factor inputs, align P, V, I and PF by
-    holding the last value, keep only instants where all four are at most 30 s
-    old and strong enough, snap the ratio to {1.0, 2.0}, take the per-hour mode
-    and merge consecutive equal hours with a two-bucket hysteresis.  Readers
-    with no qualifying bucket go to ``unknown`` (never guessed).
-    """
-    factors: dict[str, Any] = {}
-    unknown: list[str] = []
-
-    def series(entity_id: str) -> list[tuple[datetime, float]]:
-        out: list[tuple[datetime, float]] = []
-        for raw in rows_by_entity.get(entity_id) or ():
-            ts = parse_ts(raw.get("t"))
-            value = parse_numeric(raw.get("v"))
-            if ts is not None and value is not None:
-                out.append((ts, value))
-        out.sort(key=lambda pair: pair[0])
-        return out
-
-    for reader in readers:
-        power_entity = reader.get("power_entity")
-        inputs = factor_inputs(reader)
-        if not isinstance(power_entity, str) or not power_entity or not inputs:
-            continue
-
-        p_series = series(power_entity)
-        v_series = series(inputs["v"])
-        i_series = series(inputs["i"])
-        pf_series = series(inputs["pf"])
-        if not p_series or not v_series or not i_series or not pf_series:
-            unknown.append(power_entity)
-            continue
-
-        # Merge all instants, aligning each channel by holding its last value.
-        instants = sorted(
-            {ts for ts, _ in p_series}
-            | {ts for ts, _ in v_series}
-            | {ts for ts, _ in i_series}
-            | {ts for ts, _ in pf_series}
-        )
-        last: dict[str, tuple[datetime, float] | None] = {
-            "p": None,
-            "v": None,
-            "i": None,
-            "pf": None,
-        }
-        channel_series = {
-            "p": p_series,
-            "v": v_series,
-            "i": i_series,
-            "pf": pf_series,
-        }
-        cursors = {name: 0 for name in channel_series}
-        bucket_counts: dict[int, Counter[float]] = defaultdict(Counter)
-        for ts in instants:
-            for name, rows in channel_series.items():
-                cursor = cursors[name]
-                while cursor < len(rows) and rows[cursor][0] <= ts:
-                    last[name] = rows[cursor]
-                    cursor += 1
-                cursors[name] = cursor
-            held = [last[name] for name in ("p", "v", "i", "pf")]
-            if any(value is None for value in held):
-                continue
-            p, v, i, pf = (value[1] for value in held if value is not None)
-            if any((ts - value[0]).total_seconds() > FACTOR_MAX_AGE_S for value in held if value is not None):
-                continue
-            if abs(i) < FACTOR_MIN_CURRENT_A or abs(pf) < FACTOR_MIN_PF or abs(p) < FACTOR_MIN_POWER_W:
-                continue
-            if v <= 0:
-                continue
-            snapped = _snap_factor(abs(p) / (v * abs(i) * abs(pf)))
-            if snapped is None:
-                continue
-            bucket = int(ts.timestamp()) // FACTOR_BUCKET_SECONDS
-            bucket_counts[bucket][snapped] += 1
-
-        bucket_factor: dict[int, float] = {}
-        for bucket, counts in bucket_counts.items():
-            if sum(counts.values()) < FACTOR_MIN_INSTANTS_PER_BUCKET:
-                continue
-            # Ties resolve to the smaller factor deterministically.
-            bucket_factor[bucket] = min(counts, key=lambda value: (-counts[value], value))
-
-        if not bucket_factor:
-            unknown.append(power_entity)
-            continue
-
-        factors[power_entity] = _merge_buckets(bucket_factor)
-
-    return {
-        "schema": SCHEMA_FACTORS,
-        "method": "P/(V*I*PF) snapped",
-        "factors": factors,
-        "unknown": sorted(set(unknown)),
-    }
-
-
-def _merge_buckets(bucket_factor: Mapping[int, float]) -> list[dict[str, Any]]:
-    """Merge hourly factors into ``factors.json`` intervals with hysteresis.
-
-    A change is adopted only after ``FACTOR_CHANGE_BUCKETS`` consecutive buckets
-    with the new value; a single stray bucket never splits an interval.  Missing
-    (no-value) buckets also do not split an interval.  Bucket indices are
-    consecutive one-hour slots.  ``to`` is ``None`` for the final (open) interval.
-    """
-    if not bucket_factor:
-        return []
-    lo, hi = min(bucket_factor), max(bucket_factor)
-    adopted: dict[int, float] = {}
-    current: float | None = None
-    pending: float | None = None
-    pending_run = 0
-    for bucket in range(lo, hi + 1):
-        value = bucket_factor.get(bucket)
-        if value is None:
-            continue  # gap: hold the current value, do not split
-        if current is None:
-            current = value
-            adopted[bucket] = current
-            continue
-        if value == current:
-            pending, pending_run = None, 0
-            adopted[bucket] = current
-            continue
-        if value == pending:
-            pending_run += 1
-        else:
-            pending, pending_run = value, 1
-        if pending_run >= FACTOR_CHANGE_BUCKETS:
-            current = pending
-            adopted[bucket] = current
-            pending, pending_run = None, 0
-
-    def bucket_start(bucket: int) -> datetime:
-        return datetime.fromtimestamp(bucket * FACTOR_BUCKET_SECONDS, UTC)
-
-    # Build runs of consecutive adopted buckets with an unchanged factor.  The
-    # (small) gap buckets between runs are absorbed into the preceding interval,
-    # since missing buckets do not split an interval.
-    runs: list[tuple[int, int, float]] = []  # (first bucket, last bucket, factor)
-    for bucket in sorted(adopted):
-        factor = adopted[bucket]
-        if runs and runs[-1][2] == factor and bucket == runs[-1][1] + 1:
-            first, _, _ = runs[-1]
-            runs[-1] = (first, bucket, factor)
-        elif runs and runs[-1][2] == factor:
-            # Gap without a value: extend the run, do not split.
-            first, _, _ = runs[-1]
-            runs[-1] = (first, bucket, factor)
-        else:
-            runs.append((bucket, bucket, factor))
-
-    intervals: list[dict[str, Any]] = []
-    for index, (first, last, factor) in enumerate(runs):
-        end = bucket_start(runs[index + 1][0]) if index + 1 < len(runs) else None
-        intervals.append(
-            {
-                "from": iso(bucket_start(first)),
-                "to": iso(end) if end is not None else None,
-                "factor": factor,
-                "samples": sum(bucket_factor[b] for b in bucket_factor if first <= b <= last),
-            }
-        )
-    return intervals
 
 
 # --------------------------------------------------------------------------- #

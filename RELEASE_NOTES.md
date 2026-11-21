@@ -12,6 +12,19 @@ integration and panel; edges now publish their state, strength and conflict
 ratio, and the pin is the only freeze. Migration v029 rewrites stored topology
 lifecycles and seeds decaying evidence weights; no mapping row is touched.
 
+### Companion quantities, live factors and voltage-sag legs (contract 4.1.0, ADR-0044)
+
+A CT reader can now declare the monitor's voltage, current and power-factor
+entities. The integration resolves them on the same HA device and sends the
+entity ids with the endpoint declaration; the engine never reads HA's
+registries. Companion samples update a per-reader record and a bounded ring,
+are never readers, and annotate a power sample only when at most 30 s old.
+An hourly background job derives monitor-applied factors from the aligned
+series (never overwriting a user factor), and an aligned-rebuild-only classifier
+assigns each reader a mains leg (`L`/`R`/`both`/`unknown`) and a branch-current
+tag used as T5 tie-breaks and vetoes. Migration v030 adds the optional endpoint
+columns; the schemas are regenerated for contract 4.1.0.
+
 ## v0.3.0-dev.5 — 2026-11-20 (development channel)
 
 Automatic development build.

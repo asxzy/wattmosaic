@@ -843,6 +843,10 @@ class TopologyInferenceView:
     #: ``None`` means the caller has no aligned series: behaviour is as before
     #: (E3 containment gate and no lift/KCL/mirror vetoes).
     pairs: PairAnalysis | None = field(default=None, compare=False, repr=False)
+    #: E5 §4: per-reader voltage-sag leg indices and branch-current tags, built
+    #: once at each aligned rebuild.  Vetoes/caps are applied in ``_settle``;
+    #: ``None`` when no companion data (behaviour as before).
+    leg_report: Any | None = field(default=None, compare=False, repr=False)
 
     # -- reads -------------------------------------------------------------- #
     def edge(
@@ -914,6 +918,7 @@ class TopologyInferenceView:
         canonical_fresh: frozenset[str] | None = None,
         local_sigmas: Mapping[str, float] | None = None,
         pairs: PairAnalysis | None = None,
+        leg_report: Any | None = None,
     ) -> TopologyInferenceView:
         """Fold one FINAL event group into every affected pair's ledger.
 
@@ -970,6 +975,13 @@ class TopologyInferenceView:
         stale canonical is renamed to the canonical, so a declared alias is
         never itself a CONTAINS endpoint.  ``None`` keeps the legacy rule
         (suppressed only while the canonical steps in the same group).
+
+        ``leg_report`` is the E5 §4 aligned companion analysis (per-reader
+        ``leg``/``leg_n`` and branch-current tags).  It caps a cross-leg
+        CONTAINS edge at CANDIDATE once both readers have enough steps, keeps
+        E3's ``leg_unidentified`` for a ``both`` child with ambiguous parents,
+        lets a definite leg break that tie, and prefers a not-branch-circuit
+        parent at equal standing.  ``None`` leaves all of this inactive.
         """
         obs = _coerce_group(group, self.sigma_floor_w)
         if obs.group_id in self.seen_groups:
@@ -1357,6 +1369,7 @@ class TopologyInferenceView:
             declared_pairs=frozenset(blocked),
             declared_aliases=frozenset(canonical),
             pairs=pairs_now,
+            leg_report=leg_report if leg_report is not None else self.leg_report,
         )
         health = _prune_health(health, edges)
 
@@ -1376,6 +1389,7 @@ class TopologyInferenceView:
             basis_by_reader=basis_now,
             channel_meta=meta_now,
             pairs=pairs_now,
+            leg_report=leg_report if leg_report is not None else self.leg_report,
         )
         if version_transitions:
             view = view._propose_version(version_transitions)
@@ -1396,6 +1410,7 @@ class TopologyInferenceView:
         declared_pairs: frozenset[frozenset[str]] = frozenset(),
         declared_aliases: frozenset[str] = frozenset(),
         pairs: PairAnalysis | None = None,
+        leg_report: Any | None = None,
     ) -> tuple[list[str], dict[str, str], frozenset[str]]:
         """Apply lifecycle transitions in place; return the version-worthy ones.
 
@@ -1514,6 +1529,109 @@ class TopologyInferenceView:
         ambiguous = _ambiguous_children(
             edges, absolute=absolute_now, broken=frozenset(broken), pairs=pairs
         )
+        # E5 §4.3: leg evidence refines the ambiguity set and caps cross-leg
+        # crossings.  All calls are pure functions of the aligned companion
+        # analysis; no per-fold cost and no scenario knowledge.
+        if leg_report is not None:
+            from .leg_classifier import cross_leg_veto, same_leg_parent
+
+            legs = getattr(leg_report, "leg", {}) or {}
+            leg_ns = getattr(leg_report, "leg_n", {}) or {}
+            tags = getattr(leg_report, "branch_tag", {}) or {}
+            # (a) Cross-leg veto: a CONTAINS edge between L and R readers is
+            # capped at CANDIDATE once both have enough steps.  A veto never
+            # promotes or rejects; it only removes a too-strong edge.
+            for index, edge in enumerate(edges):
+                if _relation(edge.relation) != _CONTAINS or edge.pinned:
+                    continue
+                if edge.lifecycle in (TopologyEdgeState.REJECTED, TopologyEdgeState.RETIRED):
+                    continue
+                if cross_leg_veto(
+                    str(legs.get(edge.source_endpoint_id, "unknown")),
+                    str(legs.get(edge.target_endpoint_id, "unknown")),
+                    int(leg_ns.get(edge.source_endpoint_id, 0)),
+                    int(leg_ns.get(edge.target_endpoint_id, 0)),
+                ):
+                    before = edges[index]
+                    if before.lifecycle in (
+                        TopologyEdgeState.STRUCTURAL,
+                        TopologyEdgeState.PROVISIONAL,
+                    ):
+                        edges[index] = before.model_copy(
+                            update={"lifecycle": TopologyEdgeState.CANDIDATE}
+                        )
+                        labels[index] = f"{before.edge_id} (cross_leg_veto)"
+            # (b) A child classified 'both' with two ambiguous parents keeps
+            # E3's leg_unidentified, with the reason 240v in the text.
+            # (c) A child with a definite leg breaks the tie in favour of the
+            # single candidate parent on that leg (asymmetric evidence).
+            for child in list(ambiguous):
+                child_leg = str(legs.get(child, "unknown"))
+                candidates = {
+                    str(edge.source_endpoint_id): edge
+                    for edge in edges
+                    if _relation(edge.relation) == _CONTAINS
+                    and edge.target_endpoint_id == child
+                    and edge.lifecycle
+                    in (TopologyEdgeState.PROVISIONAL, TopologyEdgeState.STRUCTURAL)
+                }
+                parent_legs = {p: str(legs.get(p, "unknown")) for p in candidates}
+                winner = same_leg_parent(child_leg, parent_legs)
+                if winner is not None:
+                    # Keep only the same-leg parent structural; demote the
+                    # cross-leg rival.  This is asymmetric, so not ambiguous.
+                    for index, edge in enumerate(edges):
+                        if edge.target_endpoint_id != child or _relation(edge.relation) != _CONTAINS:
+                            continue
+                        if edge.source_endpoint_id == winner:
+                            continue
+                        if edge.lifecycle == TopologyEdgeState.STRUCTURAL and not edge.pinned:
+                            edges[index] = edge.model_copy(
+                                update={"lifecycle": TopologyEdgeState.PROVISIONAL}
+                            )
+                            labels[index] = f"{edge.edge_id} (same_leg_parent)"
+                    ambiguous = frozenset(p for p in ambiguous if p != child)
+                elif child_leg == "both":
+                    for index, edge in enumerate(edges):
+                        if (
+                            edge.target_endpoint_id == child
+                            and _relation(edge.relation) == _CONTAINS
+                            and edge.lifecycle == TopologyEdgeState.STRUCTURAL
+                            and not edge.pinned
+                        ):
+                            labels[index] = f"{edge.edge_id} (leg_unidentified: 240v)"
+            # (d) Branch-current tag is a tie-break only: when two candidate
+            # parents of a child have equal standing, prefer one tagged
+            # not_branch_circuit.  Implemented as a demotion of an untagged
+            # rival when the other is tagged and neither is otherwise stronger.
+            from .leg_classifier import prefer_branch_tag
+
+            for child in {str(e.target_endpoint_id) for e in edges}:
+                candidate_list = [
+                    str(e.source_endpoint_id)
+                    for e in edges
+                    if _relation(e.relation) == _CONTAINS
+                    and e.target_endpoint_id == child
+                    and e.lifecycle == TopologyEdgeState.STRUCTURAL
+                    and not e.pinned
+                    and str(e.declared_by) == "inference"
+                ]
+                if len(candidate_list) != 2:
+                    continue
+                ordered = prefer_branch_tag(candidate_list, tags)
+                if not tags.get(ordered[0], False) or tags.get(ordered[1], False):
+                    continue
+                for index, edge in enumerate(edges):
+                    if (
+                        edge.target_endpoint_id == child
+                        and edge.source_endpoint_id == ordered[1]
+                        and _relation(edge.relation) == _CONTAINS
+                        and edge.lifecycle == TopologyEdgeState.STRUCTURAL
+                    ):
+                        edges[index] = edge.model_copy(
+                            update={"lifecycle": TopologyEdgeState.PROVISIONAL}
+                        )
+                        labels[index] = f"{edge.edge_id} (branch_tie_break)"
         if ambiguous:
             before_amb = list(edges)
             amb_texts: list[str] = []

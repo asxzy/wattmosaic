@@ -73,6 +73,9 @@ def _revision_from_row(row: dict[str, Any]) -> EndpointConfigRevision:
         measurement_window_ms=row.get("measurement_window_ms"),
         expected_interval_s=row.get("expected_interval_s"),
         resolution_w=row.get("resolution_w"),
+        voltage_entity_id=row.get("voltage_entity_id"),
+        current_entity_id=row.get("current_entity_id"),
+        power_factor_entity_id=row.get("power_factor_entity_id"),
         declared_by=row.get("declared_by") or "migration",
     )
 

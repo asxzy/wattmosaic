@@ -674,19 +674,23 @@ def edit_endpoint_config(
 ) -> dict[str, Any]:
     """Append an EndpointConfigRevision and record a DECLARED configuration event.
 
-    Only phase, polarity and multiplier may be edited here.  The old revision's
+    Phase, polarity, multiplier and the optional companion entity ids
+    (ADR-0044) may be edited here.  The old revision's
     ``valid_until`` is closed at the injected clock, a new revision with the next
     number is appended, and a DECLARED ``calibration_change`` event is recorded.
     Nothing rewrites an existing revision or an old sample: the revision stores
     its own ``calibration_version`` and time range, so historical readings keep
     resolving with the factor that was true when they were taken (DEF-06).
     """
-    allowed = {"phase", "polarity", "multiplier"}
+    allowed = {
+        "phase", "polarity", "multiplier",
+        "voltage_entity_id", "current_entity_id", "power_factor_entity_id",
+    }
     unknown = set(changes) - allowed
     if unknown:
         raise InvalidRequest(f"unsupported endpoint config fields: {sorted(unknown)}")
     if not changes:
-        raise InvalidRequest("at least one of phase, polarity, multiplier is required")
+        raise InvalidRequest("at least one endpoint config field is required")
 
     at = _now(service)
     repo = service._endpoints
@@ -730,6 +734,11 @@ def edit_endpoint_config(
         measurement_window_ms=previous.get("measurement_window_ms"),
         expected_interval_s=previous.get("expected_interval_s"),
         resolution_w=previous.get("resolution_w"),
+        voltage_entity_id=changes.get("voltage_entity_id", previous.get("voltage_entity_id")),
+        current_entity_id=changes.get("current_entity_id", previous.get("current_entity_id")),
+        power_factor_entity_id=changes.get(
+            "power_factor_entity_id", previous.get("power_factor_entity_id")
+        ),
         declared_by="user",
     )
     repo.append_endpoint_revision(revision)
@@ -921,4 +930,18 @@ class TopologyApiMixin:
             "edges": len(edges),
             "devices": devices,
             "edge_states": edges,
+            # E5 §4: per-reader leg index, step count and branch-current tag.
+            "legs": self._reader_leg_payload(),
         }
+
+    def _reader_leg_payload(self) -> dict[str, Any]:
+        """E5 §4: expose leg/leg_n and the branch tag for each classified reader."""
+        ledger = getattr(self, "topology_inference", None)
+        report = getattr(ledger, "leg_report", None) if ledger is not None else None
+        if report is None:
+            return {}
+        as_dict = getattr(report, "as_reader_dict", None)
+        readers = sorted(set(getattr(report, "leg", {})) | set(getattr(report, "branch_tag", {})))
+        if as_dict is None:
+            return {}
+        return {reader: as_dict(reader) for reader in readers}

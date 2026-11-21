@@ -353,6 +353,51 @@ def _endpoints_payload() -> list[dict]:
     ]
 
 
+def test_companion_entities_proposed_from_same_device() -> None:
+    """ADR-0044: V/I/PF ids are resolved from the power sensor's HA device.
+
+    This is pure logic on registry-shaped rows: the integration resolves the
+    ids and sends them to the engine, which never reads HA's registry.
+    """
+    sl = importlib.import_module(f"{PACKAGE_NAME}.state_links")
+    rows = [
+        {"entity_id": "sensor.ct_kitchen_power", "device_id": "dev_monitor", "device_class": "power"},
+        {"entity_id": "sensor.ct_kitchen_voltage", "device_id": "dev_monitor", "device_class": "voltage"},
+        {"entity_id": "sensor.ct_kitchen_current", "device_id": "dev_monitor", "device_class": "current"},
+        {"entity_id": "sensor.ct_kitchen_pf", "device_id": "dev_monitor", "device_class": "power_factor"},
+        # Same classes, different device: must never be proposed.
+        {"entity_id": "sensor.other_voltage", "device_id": "dev_other", "device_class": "voltage"},
+        # Disabled entity of the right class: must never be proposed.
+        {"entity_id": "sensor.ct_kitchen_v2", "device_id": "dev_monitor", "device_class": "voltage", "disabled": True},
+    ]
+    assert sl.propose_companion_entities("sensor.ct_kitchen_power", rows) == {
+        "voltage_entity_id": "sensor.ct_kitchen_voltage",
+        "current_entity_id": "sensor.ct_kitchen_current",
+        "power_factor_entity_id": "sensor.ct_kitchen_pf",
+    }
+    assert sl.companion_config_fields("sensor.ct_kitchen_power", rows) == {
+        "voltage_entity_id": "sensor.ct_kitchen_voltage",
+        "current_entity_id": "sensor.ct_kitchen_current",
+        "power_factor_entity_id": "sensor.ct_kitchen_pf",
+    }
+
+
+def test_companion_entities_absent_are_none() -> None:
+    """Absent companions are ``None`` (HB §18), never a guessed entity id."""
+    sl = importlib.import_module(f"{PACKAGE_NAME}.state_links")
+    rows = [{"entity_id": "sensor.ct_power", "device_id": "dev", "device_class": "power"}]
+    assert sl.propose_companion_entities("sensor.ct_power", rows) == {
+        "voltage_entity_id": None,
+        "current_entity_id": None,
+        "power_factor_entity_id": None,
+    }
+    assert sl.propose_companion_entities("sensor.unknown", rows) == {
+        "voltage_entity_id": None,
+        "current_entity_id": None,
+        "power_factor_entity_id": None,
+    }
+
+
 def test_v3_entity_link_bodies_from_a_link_resolution() -> None:
     """DEC-08: device links produce many-to-many ha_entity_links bodies."""
     sl = importlib.import_module(f"{PACKAGE_NAME}.state_links")

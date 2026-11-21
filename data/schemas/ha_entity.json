@@ -42,5 +42,5 @@
   "title": "HaEntity",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/ha_entity.json",
-  "x-contract-version": "4.0.0"
+  "x-contract-version": "4.1.0"
 }

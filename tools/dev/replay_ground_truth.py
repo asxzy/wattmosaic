@@ -172,11 +172,30 @@ def load_history(
 # --------------------------------------------------------------------------- #
 
 
+def _companion_fields(reader: Mapping[str, Any]) -> dict[str, str]:
+    """Optional companion entity ids from GT ``readers[].factor_inputs``.
+
+    factor_inputs are positional: voltage, current, power-factor, in that
+    order (the same contract the pull tool uses).  Fewer than three inputs
+    means no declaration (absent is not a guessed entity id, HB §18).
+    """
+    inputs = list(reader.get("factor_inputs") or ())
+    if len(inputs) < 3 or not all(isinstance(v, str) and v for v in inputs[:3]):
+        return {}
+    return {
+        "voltage_entity_id": inputs[0],
+        "current_entity_id": inputs[1],
+        "power_factor_entity_id": inputs[2],
+    }
+
+
 def seed_readers(db: Any, gt: dict[str, Any]) -> list[dict[str, Any]]:
     """Create one CT endpoint per GT reader plus its multiplier=1.0 revision.
 
-    No CONTAINS edges are declared: the topology must be inferred from the
-    replayed observations.
+    A reader's GT ``factor_inputs`` (voltage, current, power-factor entity ids)
+    are declared as companion entities on the revision (ADR-0044).  They are
+    *never* readers and never emit a power reading.  No CONTAINS edges are
+    declared: the topology must be inferred from the replayed observations.
     """
     entities = db.repos.entities
     readers: list[dict[str, Any]] = []
@@ -209,6 +228,7 @@ def seed_readers(db: Any, gt: dict[str, Any]) -> list[dict[str, Any]]:
                 "polarity": str(reader.get("polarity") or "normal"),
                 "calibration_version": "replay@1",
                 "measurement_type": "instantaneous",
+                **_companion_fields(reader),
                 "declared_by": "import",
             }
         )
@@ -444,16 +464,34 @@ def replay(
         for reader in gt["readers"]
         if reader.get("power_entity")
     }
-    # Only reader power entities are replayed; skipping factor inputs (V/I/PF)
-    # at load keeps a 10-day history to about a quarter of the memory.
+    # ADR-0044: companion entities (V/I/PF) are declared from GT factor_inputs
+    # and replayed through the companion store, never as readings.  Power
+    # entities and companion entities are disjoint sets.
+    companion_entities: dict[str, tuple[str, str]] = {}  # entity -> (reader, field)
+    for reader in gt["readers"]:
+        fields = _companion_fields(reader)
+        if not fields:
+            continue
+        rid = str(reader["reader_id"])
+        for field, entity in fields.items():
+            companion_entities[str(entity)] = (rid, field)
+    replay_entities = set(reader_by_entity) | set(companion_entities)
     samples, events = load_history(
-        history_dir, since=since, until=until, entities=set(reader_by_entity)
+        history_dir, since=since, until=until, entities=replay_entities
     )
     # Merge samples of GT power entities with events, in time order.  Samples
-    # for factor inputs (V/I/PF) are deliberately not fed as readings.
+    # of declared companion entities become "companion" records routed through
+    # the store; they are never fed as readings (ADR-0044).
     records: list[tuple[datetime, str, dict[str, Any]]] = []
     for t, row in samples:
-        rid = reader_by_entity.get(row["entity_id"])
+        entity = row["entity_id"]
+        if entity in companion_entities:
+            rid, field = companion_entities[entity]
+            records.append(
+                (t, "companion", {"reader_id": rid, "field": field, "value": row["v"]})
+            )
+            continue
+        rid = reader_by_entity.get(entity)
         if rid is None:
             continue
         records.append(
@@ -506,6 +544,35 @@ def replay(
     declared = declare_installer_knowledge(core, gt, declare)
     factor_report = store_factors(history_dir, db, gt, factors)
 
+    # ADR-0044: bind a fresh companion store and the declarations seeded above.
+    # The replay drives it directly with a dedicated hook, never through the
+    # reading path, so a companion sample can never become a power reading.
+    from wattmosaic_engine.ingestion.companions import CompanionStore
+
+    core.companion_store = CompanionStore()
+    core._refresh_companion_declarations()
+    companions_seen = 0
+
+    def on_companion(reader_id: str, field: str, value: float, at: datetime) -> None:
+        nonlocal companions_seen
+        companions_seen += 1
+        kwargs: dict[str, Any] = {"observed_at": at}
+        kwargs[{"voltage_entity_id": "voltage_v", "current_entity_id": "current_a", "power_factor_entity_id": "power_factor"}[field]] = value
+        core.companion_store.observe(reader_id, **kwargs)
+
+    def on_reading_with_companions(payload: dict[str, Any]) -> None:
+        # Fill the canonical reading's companion fields from the latest store
+        # values before it enters the fast path (no more than 30 s old).
+        rid = str(payload["reader_id"])
+        v, i, pf = core.companion_store.values_at(rid, payload["observed_at"])
+        core.companion_store.record_power(rid, float(payload["value_w"]), payload["observed_at"])
+        if v is not None or i is not None or pf is not None:
+            payload = dict(payload)
+            payload["voltage_rms_v"] = v
+            payload["current_rms_a"] = i
+            payload["power_factor"] = pf
+        return on_sample(payload)
+
     harness = EngineHarness(core, db, now, origin)
     consumer = harness._consumer  # noqa: SLF001 - production reader/event bridge
     original_sample = consumer.on_sample
@@ -545,14 +612,21 @@ def replay(
     try:
         for index, (observed, kind, payload) in enumerate(records, start=1):
             harness._advance(observed)  # noqa: SLF001 - harness clock seam
-            if kind == "reading":
+            if kind == "companion":
+                on_companion(
+                    str(payload["reader_id"]),
+                    str(payload["field"]),
+                    float(payload["value"]),
+                    observed,
+                )
+            elif kind == "reading":
                 rid = str(payload["reader_id"])
                 value = payload["value_w"]
                 previous = last_value.get(rid)
                 if previous is not None and abs(value - previous) >= ACTIVITY_DELTA_W:
                     activity[rid] += 1
                 last_value[rid] = value
-                on_sample(payload)
+                on_reading_with_companions(payload)
             else:
                 entity_id = str(payload["entity_id"])
                 if entity_id in entity_sources:
@@ -611,8 +685,10 @@ def replay(
             "records": {
                 "total": len(records),
                 "samples": sum(1 for _, kind, _ in records if kind == "reading"),
+                "companions": sum(1 for _, kind, _ in records if kind == "companion"),
                 "events": sum(1 for _, kind, _ in records if kind == "ha_event"),
                 "readings_fed": readings_fed,
+                "companions_seen": companions_seen,
                 "events_seen": events_seen,
             },
             "declarations": declared,

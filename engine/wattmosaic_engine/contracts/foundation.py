@@ -29,7 +29,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 #: integration mirrors this value in ``custom_components/wattmosaic/const.py``;
 #: a major mismatch is refused by the integration's ``_check_contract``.
 #: 4.0.0 splits the topology state enum from the mapping lifecycle enum.
-CONTRACT_VERSION = "4.0.0"
+#: 4.1.0 adds optional companion-quantity entity ids to endpoint config revisions
+#: (ADR-0044): voltage, current and power-factor entities declared by the
+#: integration, never read from HA's registries by the engine.  Additive change.
+CONTRACT_VERSION = "4.1.0"
 
 __all__: list[str] = [
     # Base, clock and version

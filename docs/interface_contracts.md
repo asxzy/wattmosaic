@@ -1,6 +1,6 @@
 # Interface Contracts (authoritative)
 
-**Contract version: `4.0.0`** — mirrors `engine/wattmosaic_engine/contracts/foundation.py` (re-exported by `engine/wattmosaic_engine/contracts/__init__.py`).
+**Contract version: `4.1.0`** — mirrors `engine/wattmosaic_engine/contracts/foundation.py` (re-exported by `engine/wattmosaic_engine/contracts/__init__.py`).
 
 The `contracts/` package is the single source of truth. JSON schemas are exported
 from it to `data/schemas/` by `tools/dev/export_schemas.py`. No component may
@@ -46,7 +46,7 @@ migration v025 and are read-only for one release; no down-migration exists.
 
 ### 2.2 Integration → engine (HTTP, `X-API-Token` when configured)
 
-Base path `/api/v1`. Every response carries `X-WattMosaic-Contract-Version: 4.0.0`.
+Base path `/api/v1`. Every response carries `X-WattMosaic-Contract-Version: 4.1.0`.
 Error shape: `ErrorResponse` with HTTP 4xx/5xx.
 
 | Method | Path | Purpose |

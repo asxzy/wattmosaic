@@ -356,15 +356,15 @@ def test_legacy_table_names_appear_only_in_migrations() -> None:
 
 
 def test_contract_version_is_cut_over_to_3_0_0() -> None:
-    """Contract 4.0.0 (topology state split) across engine and integration."""
+    """Contract 4.1.0 (companion entities) across engine and integration."""
     import importlib.util
     import sys
 
     from wattmosaic_engine import contracts
     from wattmosaic_engine.contracts import foundation
 
-    assert contracts.CONTRACT_VERSION == "4.0.0"
-    assert foundation.CONTRACT_VERSION == "4.0.0"
+    assert contracts.CONTRACT_VERSION == "4.1.0"
+    assert foundation.CONTRACT_VERSION == "4.1.0"
 
     const_path = INTEGRATION / "const.py"
     spec = importlib.util.spec_from_file_location("wm_z1_const", const_path)

@@ -7,6 +7,7 @@ site changes."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import statistics
@@ -393,6 +394,10 @@ class RuntimeMixin:
         from ..electrical.topology_memory import StructureMemory
 
         self._t5_memory = StructureMemory()
+        # ADR-0044: declared companion quantities (V/I/PF) live in their own
+        # bounded store, never in the power-reading path.  Bound to the HA
+        # source in ``_bind_ha_ingestion``; filled by the replay tool directly.
+        self.companion_store: Any | None = None
         self._t5_memory_saved_at: datetime | None = None
         self._t5_aligned: Mapping[str, Any] | None = None
         self._t5_aligned_at: datetime | None = None
@@ -831,6 +836,13 @@ class RuntimeMixin:
             )
             self.reader_state.add(reading)
             self._t5_record(reading.reader_id, at, reading.active_power_w, reading.received_at)
+            # ADR-0044: keep power beside companions for the hourly factor job.
+            # Only readers with declared companions are tracked (O(1) check), so
+            # the fast path is unchanged for every other reader.
+            store = getattr(self, "companion_store", None)
+            if store is not None and reading.active_power_w is not None:
+                with contextlib.suppress(Exception):  # bookkeeping never breaks ingestion
+                    store.record_power(reading.reader_id, reading.active_power_w, at)
             # ADR-0042: persistence is a debug option.  With capture off (the
             # default) the HA recorder is the production history, so skip the
             # write entirely -- one cheap attribute read on the O(1) fast path.
@@ -1768,6 +1780,49 @@ class RuntimeMixin:
             candidate_ring=self.candidate_ring,
             reader_resolver=_EndpointResolver(entities, clock=self._clock),
         )
+        # ADR-0044: bind the companion store and the declared V/I/PF entity ids
+        # so the source routes companion state changes to their owning reader.
+        from ..ingestion.companions import CompanionStore
+
+        if getattr(self, "companion_store", None) is None:
+            self.companion_store = CompanionStore()
+        self.hasource.companion_store = self.companion_store
+        self._factor_job_enabled = True
+        self._refresh_companion_declarations()
+
+    def _endpoint_companion_declarations(self) -> dict[str, dict[str, str | None]]:
+        """Latest revision's companion entity ids per endpoint (ADR-0044)."""
+        entities = getattr(getattr(self.db, "repos", None), "entities", None)
+        if entities is None:
+            return {}
+        declarations: dict[str, dict[str, str | None]] = {}
+        try:
+            for endpoint in entities.endpoints(enabled_only=True):
+                reader = str(endpoint["endpoint_id"])
+                revisions = entities.revisions(reader)
+                if not revisions:
+                    continue
+                latest = max(revisions, key=lambda r: int(r["revision"]))
+                declaration = {
+                    field: latest.get(field)
+                    for field in ("voltage_entity_id", "current_entity_id", "power_factor_entity_id")
+                    if latest.get(field)
+                }
+                if declaration:
+                    declarations[reader] = declaration
+        except Exception:  # noqa: BLE001 - declarations are best effort (never crash ingestion)
+            log.debug("companion declaration read failed", exc_info=True)
+        return declarations
+
+    def _refresh_companion_declarations(self) -> None:
+        """Re-publish declared companion routing to the HA source."""
+        setter = getattr(self.hasource, "set_companion_declarations", None)
+        if setter is None:
+            return
+        try:
+            setter(self._endpoint_companion_declarations())
+        except Exception:  # noqa: BLE001 - a rebind must never break ingestion
+            log.debug("companion declaration bind failed", exc_info=True)
 
     def _declared_single_subject_pairs(self) -> frozenset[tuple[str, str]]:
         """``{(reader_id, subject_id)}`` for declared single-subject endpoints.
@@ -2055,6 +2110,68 @@ class RuntimeMixin:
         now = self._clock()
         self.tick_groups(now)
         self._steady_solve(now)
+        self._schedule_factor_inference(now)
+
+    #: Live factor inference (E5 §3) runs at most hourly on the background
+    #: executor, off the steady/asyncio path.
+    _FACTOR_INFERENCE_EVERY_S = 3600.0
+
+    def _schedule_factor_inference(self, now: datetime | None = None) -> None:
+        """Submit the hourly companion-based factor-inference job (E5 §3)."""
+        if getattr(self, "companion_store", None) is None:
+            return
+        # Replay drives companions deterministically through its own factor
+        # source (factors.json); the live job only runs for production wiring.
+        if not getattr(self, "_factor_job_enabled", False):
+            return
+        now = now or self._clock()
+        last = getattr(self, "_last_factor_inference_at", None)
+        if last is not None and 0.0 <= (now - last).total_seconds() < self._FACTOR_INFERENCE_EVERY_S:
+            return
+        self._last_factor_inference_at = now
+        self.submit_background(self._run_factor_inference, now)
+
+    def _run_factor_inference(self, now: datetime, *, budget: Any = None) -> dict[str, Any]:
+        """The real factor-inference job body (BackgroundExecutor, DEC-37)."""
+        from ..electrical.factor_inference import infer_factors_job
+
+        reader_rows = self._factor_inference_reader_rows()
+        return infer_factors_job(
+            self.companion_store,
+            reader_rows,
+            factors_repo=getattr(getattr(self.db, "repos", None), "factors", None),
+            now=now,
+            last_run=getattr(self, "_last_factor_inference_done", None),
+            budget=budget,
+        )
+
+    def _factor_inference_reader_rows(self) -> list[dict[str, Any]]:
+        """Endpoints with companions plus their held power samples for inference.
+
+        The companion ring holds V/I/PF; the power series comes from the
+        reader's recent held values (the structure memory's aligned series is
+        the aligned source, but a plain sample list is enough for the hourly
+        ratio).  No per-fold work is done here -- it is only called by the
+        hourly background job.
+        """
+        entities = getattr(getattr(self.db, "repos", None), "entities", None)
+        if entities is None:
+            return []
+        declarations = self._endpoint_companion_declarations()
+        rows: list[dict[str, Any]] = []
+        store = getattr(self, "companion_store", None)
+        for endpoint in entities.endpoints(enabled_only=True):
+            reader = str(endpoint["endpoint_id"])
+            if reader not in declarations:
+                continue
+            power_rows: list[dict[str, Any]] = []
+            if store is not None:
+                for stamp, watts in store.power_ring(reader):
+                    power_rows.append(
+                        {"t": datetime.fromtimestamp(stamp, UTC).isoformat(), "v": watts}
+                    )
+            rows.append({"endpoint_id": reader, "power_rows": power_rows})
+        return rows
 
     def _steady_solve(self, now: datetime | None = None) -> None:
         """The solving half of a steady pass (off the asyncio loop in production).
@@ -2676,6 +2793,50 @@ class RuntimeMixin:
         self._persist_structure_memory_throttled()
         return aligned
 
+    def _t5_leg_report(self, aligned: Mapping[str, Any] | None) -> Any | None:
+        """E5 §4: leg classification + branch tags at an aligned rebuild.
+
+        Pure numpy work on the aligned 30 s companion series, cached on the
+        aligned series object so it is computed once per rebuild, never per
+        group fold.  Companions absent means no report.
+        """
+        if aligned is None or not aligned or getattr(self, "companion_store", None) is None:
+            return None
+        cached = getattr(self, "_t5_leg_aligned", None)
+        if cached is aligned:
+            return getattr(self, "_t5_leg_cached", None)
+        from ..electrical.leg_classifier import analyse_legs
+
+        power: dict[str, Any] = {}
+        voltage: dict[str, Any] = {}
+        current: dict[str, Any] = {}
+        for reader, values in aligned.items():
+            power[reader] = values
+            ring = self.companion_store.ring(reader)
+            if not ring:
+                continue
+            # The companion ring holds (ts, V, I, PF) on the same 30 s grid.
+            # Re-index the tail onto the aligned length (absent stays NaN).
+            length = len(values)
+            v_series: list[float] = [float("nan")] * length
+            i_series: list[float] = [float("nan")] * length
+            offset = length - len(ring)
+            for position, (_ts, v, i, _pf) in enumerate(ring):
+                idx = offset + position
+                if 0 <= idx < length:
+                    if v is not None:
+                        v_series[idx] = float(v)
+                    if i is not None:
+                        i_series[idx] = float(i)
+            if any(v == v for v in v_series):
+                voltage[reader] = v_series
+            if any(i == i for i in i_series):
+                current[reader] = i_series
+        report = analyse_legs(power=power, voltage=voltage, current=current) if voltage else None
+        self._t5_leg_aligned = aligned
+        self._t5_leg_cached = report
+        return report
+
     def _t5_containment_series(
         self, aligned: Mapping[str, Any] | None, readers: Sequence[str]
     ) -> Mapping[str, Any] | None:
@@ -2930,6 +3091,7 @@ class RuntimeMixin:
                 canonical_fresh=fresh,
                 local_sigmas=self._local_step_sigmas(group),
                 pairs=pair_analysis,
+                leg_report=self._t5_leg_report(aligned),
             )
             self.topology_inference = updated
             self._persist_edge_health_throttled(

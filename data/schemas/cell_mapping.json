@@ -105,5 +105,5 @@
   "title": "CellMapping",
   "type": "object",
   "$id": "https://wattmosaic.local/schemas/cell_mapping.json",
-  "x-contract-version": "4.0.0"
+  "x-contract-version": "4.1.0"
 }

@@ -217,6 +217,32 @@ There is no private-measurement level. A power sensor is never a state entity:
 availability blips would manufacture false transitions. A confirmed controller
 label with `role=load` is the one declaration that may supply watts on its own.
 
+## Monitor companion quantities (ADR-0044)
+
+An endpoint config revision accepts three optional companion entity ids for a
+CT monitor. The Home Assistant integration resolves them from the power
+sensor's own device (`device_class` `voltage`, `current`, `power_factor`) and
+sends them with the endpoint declaration; the engine never reads HA's
+registries (ADR-0028 is unchanged).
+
+```jsonc
+// PUT /api/v1/topology/endpoints/{id}/config
+{
+  "voltage_entity_id": "sensor.ct_kitchen_voltage",       // or null
+  "current_entity_id": "sensor.ct_kitchen_current",      // or null
+  "power_factor_entity_id": "sensor.ct_kitchen_pf"       // or null
+}
+```
+
+All three default to `null` (absent). Companion entities are never readers and
+never emit a power reading. A power sample is annotated with V/I/PF only when
+the companion value is at most 30 s older than the sample; otherwise those
+fields stay `null`. An hourly background job derives monitor-applied factors
+from the aligned companion series (never overwriting a user-declared factor),
+and the per-aligned-rebuild leg classifier publishes each reader's `leg`,
+`leg_n` and `not_branch_circuit` tag in the topology health payload. Readers
+without declared companions are unaffected.
+
 ## Read endpoints and confidence
 
 | Endpoint | Returns |

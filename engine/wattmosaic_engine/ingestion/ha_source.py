@@ -504,6 +504,12 @@ class HASource:
         #: endpoints independently of the entity id, so the id must be looked up.
         self._reader_resolver: Callable[[str], str | None] | None = None
         self._normalizer = None
+        # ADR-0044: companion V/I/PF entities declared on an endpoint revision,
+        # routed to their owning reader (never readers themselves).  The store
+        # is injected by the composition layer; absent means no companions.
+        self._companion_reader: dict[str, str] = {}
+        self._companion_declarations: dict[str, Mapping[str, str | None]] = {}
+        self.companion_store: Any | None = None
         if revision_lookup is not None:
             # Local import breaks the ingestion → realtime → ingestion.normalize
             # package cycle at import time; ingestion.normalize itself is leaf.
@@ -603,6 +609,43 @@ class HASource:
         except Exception:  # noqa: BLE001 - a lookup failure must not drop the stream
             log.debug("reader lookup failed for %s", entity_id, exc_info=True)
             return None
+
+    def set_companion_declarations(self, declarations: Mapping[str, Mapping[str, str | None]]) -> None:
+        """Bind the declared companion entities of each reader (ADR-0044).
+
+        ``declarations`` maps ``reader_id`` to its optional voltage/current/PF
+        entity ids, as declared on the endpoint config revision.  Only the
+        entity-id → reader inversion is kept here; the values themselves live in
+        the injected :class:`~.companions.CompanionStore`.  Calling this again
+        (e.g. after a config revision) replaces the routing table atomically.
+        """
+        from .companions import entity_to_reader
+
+        self._companion_declarations = {str(r): dict(e) for r, e in declarations.items()}
+        self._companion_reader = entity_to_reader(self._companion_declarations)
+        if self._companion_reader:
+            self.stats["companion_entities_declared"] = len(self._companion_reader)
+
+    def companion_reader_for(self, entity_id: str) -> str | None:
+        """The owning reader of a declared companion entity, if any."""
+        return self._companion_reader.get(entity_id)
+
+    @staticmethod
+    def companion_quantity(entity_id: str, declarations: Mapping[str, Mapping[str, str | None]]) -> str | None:
+        """Which companion quantity ``entity_id`` is for any declaration."""
+        for entities in declarations.values():
+            for field, candidate in entities.items():
+                if candidate == entity_id:
+                    return field
+        return None
+
+    def _companion_quantity_of(self, entity_id: str) -> str | None:
+        """Config field name of a companion entity, from the declaration table.
+
+        The declared field is authoritative because it is what the integration
+        resolved from the HA registry; the engine never reads the registry.
+        """
+        return self.companion_quantity(entity_id, self._companion_declarations)
 
     @classmethod
     def from_config(cls, config: Any) -> HASource:
@@ -1258,6 +1301,25 @@ class HASource:
         device_class = attributes.get("device_class")
         numeric = parse_float(raw_value)
 
+        # ADR-0044: a declared companion entity (V/I/PF) is routed to its owning
+        # reader's companion store.  It is never a reader and never emits a power
+        # reading or an HA event; state changes here are O(1) bookkeeping only.
+        companion_reader = self.companion_reader_for(entity_id)
+        if companion_reader is not None:
+            if self.companion_store is not None and numeric is not None:
+                quantity = self._companion_quantity_of(entity_id)
+                try:
+                    self.companion_store.observe(
+                        companion_reader,
+                        voltage_v=numeric if quantity == "voltage_entity_id" else None,
+                        current_a=numeric if quantity == "current_entity_id" else None,
+                        power_factor=numeric if quantity == "power_factor_entity_id" else None,
+                        observed_at=observed_at,
+                    )
+                except Exception:  # noqa: BLE001 - companion bookkeeping never breaks ingestion
+                    log.debug("companion observation failed", exc_info=True)
+            return
+
         is_power = unit in ("W", "kW") or device_class == "power"
         is_energy = unit in ("kWh", "Wh") or device_class == "energy"
         if numeric is not None and (is_power or (is_energy and self.include_energy)):
@@ -1309,6 +1371,17 @@ class HASource:
         )
         # Quarantined values are counted by the normalizer and never delivered.
         if result.deliverable:
+            # ADR-0044: fill companion fields from the latest declared values
+            # no more than 30 s older than the power sample; otherwise None.
+            if self.companion_store is not None:
+                v, i, pf = self.companion_store.values_at(reader_id, observed_at)
+                reading = result.measurement
+                if v is not None:
+                    reading.voltage_rms_v = v
+                if i is not None:
+                    reading.current_rms_a = i
+                if pf is not None:
+                    reading.power_factor = pf
             self.stats["canonical_samples_emitted"] = (
                 self.stats.get("canonical_samples_emitted", 0) + 1
             )

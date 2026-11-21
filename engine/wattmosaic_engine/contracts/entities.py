@@ -174,6 +174,12 @@ class EndpointConfigRevision(Model):
     measurement_window_ms: int | None = None
     expected_interval_s: float | None = None
     resolution_w: float | None = None
+    #: Companion quantities of the same physical monitor (ADR-0044).  The
+    #: integration resolves these to same-device HA entities and declares them;
+    #: the engine never reads HA's registries.  Absent is ``None``.
+    voltage_entity_id: str | None = None
+    current_entity_id: str | None = None
+    power_factor_entity_id: str | None = None
     declared_by: Literal["user", "discovery", "migration"]
 
     @model_validator(mode="after")

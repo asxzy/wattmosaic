@@ -31,7 +31,8 @@ _REVISION_COLUMNS = (
     "endpoint_id", "revision", "valid_from", "valid_until", "phase", "leg",
     "voltage_reference_v", "polarity", "multiplier", "calibration_version",
     "measurement_type", "measurement_window_ms", "expected_interval_s",
-    "resolution_w", "declared_by",
+    "resolution_w", "voltage_entity_id", "current_entity_id",
+    "power_factor_entity_id", "declared_by",
 )
 _DEVICE_COLUMNS = (
     "device_id", "name", "device_type", "load_shape", "sign_class",
@@ -134,8 +135,9 @@ class EntitiesRepository(Repository):
                         endpoint_id, revision, valid_from, valid_until, phase, leg,
                         voltage_reference_v, polarity, multiplier, calibration_version,
                         measurement_type, measurement_window_ms, expected_interval_s,
-                        resolution_w, declared_by)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        resolution_w, voltage_entity_id, current_entity_id,
+                        power_factor_entity_id, declared_by)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         data["endpoint_id"], int(data["revision"]), valid_from,
                         iso(_coerce_time(valid_until)) if valid_until is not None else None,
@@ -145,7 +147,9 @@ class EntitiesRepository(Repository):
                         float(data["multiplier"]), data["calibration_version"],
                         _enum(data.get("measurement_type"), "instantaneous"),
                         data.get("measurement_window_ms"), data.get("expected_interval_s"),
-                        data.get("resolution_w"), _enum(data.get("declared_by"), "migration"),
+                        data.get("resolution_w"), data.get("voltage_entity_id"),
+                        data.get("current_entity_id"), data.get("power_factor_entity_id"),
+                        _enum(data.get("declared_by"), "migration"),
                     ),
                 )
                 self._conn.execute("COMMIT")

@@ -479,14 +479,82 @@ def build_ha_entity_link_bodies(
     return bodies
 
 
+# --------------------------------------------------------------------------- #
+# Companion quantity proposals (ADR-0044)
+# --------------------------------------------------------------------------- #
+
+#: The three companion quantities of a CT reader, in declaration order.  A
+#: monitor publishes voltage/current/power-factor entities on the same HA device
+#: as its power sensor; the integration resolves them here and declares their
+#: entity ids, because the engine never reads HA's registries (ADR-0028).
+COMPANION_DEVICE_CLASSES: tuple[tuple[str, str], ...] = (
+    ("voltage_entity_id", "voltage"),
+    ("current_entity_id", "current"),
+    ("power_factor_entity_id", "power_factor"),
+)
+
+
+def propose_companion_entities(
+    power_entity_id: str,
+    entities: Iterable[Mapping[str, Any]],
+) -> dict[str, str | None]:
+    """Same-device V/I/PF entity ids for one CT reader's power entity.
+
+    ``entities`` is a registry-shaped iterable as consumed by
+    :func:`registry_rows` (``entity_id``, ``device_id``, ``device_class``, ...).
+    The power entity's ``device_id`` is looked up; among the rows on that same
+    device, the first usable (enabled, visible, matching device class) entity
+    for each companion quantity is proposed.  Every value is a plain entity id
+    (``None`` when absent), so the integration can send the ids to the engine
+    without the engine ever seeing the registry.  No name heuristic is used.
+    """
+    wanted = _text(power_entity_id)
+    all_rows = list(entities)
+    power_rows = [row for row in all_rows if _text(row.get("entity_id")) == wanted]
+    device_id = _text(power_rows[0].get("device_id")) if power_rows else ""
+    result: dict[str, str | None] = {
+        field: None for field, _ in COMPANION_DEVICE_CLASSES
+    }
+    if not device_id:
+        return result
+    for row in all_rows:
+        if _text(row.get("device_id")) != device_id:
+            continue
+        entity_id = _text(row.get("entity_id"))
+        if not _usable(row):
+            continue
+        device_class = _text(row.get("device_class")).lower()
+        for field, companion_class in COMPANION_DEVICE_CLASSES:
+            if result[field] is None and device_class == companion_class:
+                result[field] = entity_id
+    return result
+
+
+def companion_config_fields(
+    power_entity_id: str,
+    entities: Iterable[Mapping[str, Any]],
+) -> dict[str, str | None]:
+    """Optional endpoint-config payload fields from same-device companions.
+
+    Convenience wrapper around :func:`propose_companion_entities` that returns
+    the dictionary ready to merge into an endpoint declaration body.  This is
+    the only shape the engine accepts (ADR-0044); there is no registry data in
+    it, only entity ids.
+    """
+    return propose_companion_entities(power_entity_id, entities)
+
+
 __all__ = [
+    "COMPANION_DEVICE_CLASSES",
     "LinkResolution",
     "MEASUREMENT_DEVICE_CLASSES",
     "MEASUREMENT_DOMAINS",
     "MEASUREMENT_UNITS",
     "STATE_DOMAINS",
     "build_ha_entity_link_bodies",
+    "companion_config_fields",
     "is_device_registry_id",
+    "propose_companion_entities",
     "registry_rows",
     "registry_device_ids",
     "resolve_links",

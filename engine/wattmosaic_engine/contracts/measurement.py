@@ -129,7 +129,7 @@ class MeasurementFactor(Model):
     """Who applied the factor.  ``monitor`` means the reported power already
     includes it and must never be multiplied again."""
 
-    declared_by: Literal["user", "import", "default"] = "user"
+    declared_by: Literal["user", "import", "default", "inferred"] = "user"
     """Where the declaration came from, for audit."""
 
     note: str | None = None
