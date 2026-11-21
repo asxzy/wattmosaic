@@ -1,5 +1,22 @@
 # Release Notes
 
+## Unreleased — synchronous topology evidence (E6b, ADR-0045)
+
+Co-sampling is now tracked cheaply in the runtime from sample timestamps: two
+readers are co-sampled when at least 90 % of their samples coincide within 2 s.
+For co-sampled pairs the T5 ledger uses a **synchronous verdict** measured
+across exactly the child's sample pair — no anchored window and no P6 spread
+veto — with calibrated support/conflict tolerances. Non-co-sampled pairs keep
+the anchored-window verdict. A bounded per-reader pulse ring lets a confirmed
+single-sample pulse (a step reversed at the next sample) produce two synchronous
+verdicts instead of being dropped as a transient; P3's detector behaviour is
+unchanged. Placement applies contrast ranking, discounting a co-sampled parent's
+score by its synchronous conflict ratio. The inferred SAME_CONDUCTOR detector is
+now wired into the live runtime at aligned rebuilds: an inferred affine copy
+enters the T5 ledger through the normal lifecycle (declarations win), and an
+inferred alias that reaches STRUCTURAL is suppressed like a declared one.
+No contract change; all new fields live in API payload dicts.
+
 ## Unreleased — placement and calibrated thresholds (E6a, ADR-0045)
 
 Topology now computes exactly one **placement** per reader at every settle, at

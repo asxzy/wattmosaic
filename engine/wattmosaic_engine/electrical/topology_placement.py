@@ -154,6 +154,7 @@ def compute_placements(
     leg_unidentified: frozenset[str] = frozenset(),
     declared_pairs: frozenset[frozenset[str]] = frozenset(),
     alias_canonical: Mapping[str, str] | None = None,
+    cosampled: frozenset[frozenset[str]] = frozenset(),
 ) -> PlacementReport:
     """Compute one placement per non-root reader from the current ledger.
 
@@ -162,7 +163,9 @@ def compute_placements(
     :data:`MIN_STEPS_FOR_WLIFT` steps (or absent from the mapping) uses
     :data:`LOW_WLIFT`.  ``n_by_child`` carries the step counts.  The other
     arguments mirror the ledger's veto inputs so an alias or a declared paired
-    leg is never presented as a candidate parent.
+    leg is never presented as a candidate parent.  E6 §6 contrast ranking
+    multiplies each co-sampled candidate's score by ``(1 - sync_conflict_ratio)``
+    (the edge's conflict fraction), preferring the lower-conflict parent.
 
     A child in ``leg_unidentified`` with two soft candidates is reported as
     ``both_legs`` (band medium, reason ``leg_unidentified``) instead of picking
@@ -277,7 +280,22 @@ def compute_placements(
         def wlift_of(p: str, child: str = child, n: int = n) -> float:
             return wlift_by_pair.get((p, child), LOW_WLIFT if n < MIN_STEPS_FOR_WLIFT else 0.0)
 
-        scored = {p: _score(edge, wlift_of(p)) for p, edge in candidates.items()}
+        scored: dict[str, float] = {}
+        for parent, edge in candidates.items():
+            score = _score(edge, wlift_of(parent))
+            # E6 §6 contrast ranking: a co-sampled parent with many synchronous
+            # conflicts is a worse explanation than a quieter rival.  A ratio of
+            # 0 (no conflict) leaves the score unchanged; 1 zeroes it.
+            if frozenset((parent, child)) in cosampled:
+                ev = edge.evidence
+                decisive = float(ev.support_w + ev.conflict_w) or float(ev.support + ev.conflict)
+                conflict_ratio = (
+                    float(ev.conflict_w) / float(ev.support_w + ev.conflict_w)
+                    if float(ev.support_w + ev.conflict_w) > 0
+                    else (float(ev.conflict) / decisive if decisive > 0 else 0.0)
+                )
+                score *= 1.0 - min(1.0, max(0.0, conflict_ratio))
+            scored[parent] = score
         best = max(scored, key=lambda p: (scored[p], p))
 
         # Prefer the deeper parent in a soft chain; its score is the same edge's

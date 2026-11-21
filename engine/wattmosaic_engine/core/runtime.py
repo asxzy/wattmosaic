@@ -401,6 +401,14 @@ class RuntimeMixin:
         self._t5_memory_saved_at: datetime | None = None
         self._t5_aligned: Mapping[str, Any] | None = None
         self._t5_aligned_at: datetime | None = None
+        # E6 §6: co-sampling is tracked cheaply from sample timestamps in the
+        # fast path (a bounded ring per reader) and refreshed only at aligned
+        # rebuilds.  ``_t5_cosampled`` holds unordered reader pairs.
+        from ..electrical.sync_evidence import PulseRing, SampleStampRing
+
+        self._sample_stamps: dict[str, SampleStampRing] = {}
+        self._pulse_rings: dict[str, PulseRing] = {}
+        self._t5_cosampled: frozenset[frozenset[str]] = frozenset()
         # E6 §3: cached current report per aligned rebuild (no companion, no report).
         self._t5_current_aligned: Any | None = None
         self._t5_current_cached: Any | None = None
@@ -839,6 +847,9 @@ class RuntimeMixin:
             )
             self.reader_state.add(reading)
             self._t5_record(reading.reader_id, at, reading.active_power_w, reading.received_at)
+            # E6 §6: O(1) fast-path bookkeeping for co-sampling and pulses.  Both
+            # rings are bounded and never raise; the fold consumes them later.
+            self._track_sync_sample(reading.reader_id, at, reading.active_power_w)
             # ADR-0044: keep power beside companions for the hourly factor job.
             # Only readers with declared companions are tracked (O(1) check), so
             # the fast path is unchanged for every other reader.
@@ -2547,6 +2558,139 @@ class RuntimeMixin:
                 best = (distance, lo, hi)
         return None if best is None else (best[1], best[2])
 
+    def _child_sample_pair(
+        self, child: str, lo: datetime, hi: datetime, delta: float | None = None
+    ) -> tuple[float, float] | None:
+        """The child's own pre/post sample stamps around its P3 step (E6 §6).
+
+        Identify the pair from the child's own sample ring: the adjacent sample
+        values whose difference matches the step delta best.  That is the exact
+        sample pair across which a co-sampled parent's change is measured (no
+        window, no P6 spread veto).
+        """
+        import math
+
+        ring = self._sample_stamps.get(child)
+        if ring is None:
+            return None
+        stamps, values = ring.snapshot()
+        if len(stamps) < 2:
+            return None
+        import bisect
+
+        lo_t = lo.timestamp() - 60.0
+        hi_t = hi.timestamp() + 60.0
+        start = max(1, bisect.bisect_left(stamps, lo_t))
+        stop = min(len(stamps), bisect.bisect_right(stamps, hi_t) + 1)
+        best: tuple[float, int] | None = None
+        for i in range(start, stop):
+            if not (math.isfinite(values[i]) and math.isfinite(values[i - 1])):
+                continue
+            change = values[i] - values[i - 1]
+            quality = abs(change - float(delta)) if delta is not None else abs(change)
+            if best is None or quality < best[0]:
+                best = (quality, i)
+        if best is None:
+            return stamps[-2], stamps[-1]
+        index = best[1]
+        return stamps[index - 1], stamps[index]
+
+    def _synchronous_parent_change(
+        self, parent: str, pre_t: float, post_t: float
+    ) -> float | None:
+        """The parent's change across exactly the child's sample pair (E6 §6)."""
+        import bisect
+        import math
+
+        ring = self._sample_stamps.get(parent)
+        if ring is None:
+            return None
+        stamps, values = ring.snapshot()
+        if len(stamps) < 2:
+            return None
+        before = bisect.bisect_right(stamps, pre_t) - 1
+        after = bisect.bisect_left(stamps, post_t)
+        if before < 0 or after >= len(stamps) or before > after:
+            return None
+        if not (math.isfinite(values[before]) and math.isfinite(values[after])):
+            return None
+        return float(values[after] - values[before])
+
+    def _sync_changes_for_group(
+        self, group: EventGroup, cosampled: frozenset[frozenset[str]]
+    ) -> dict[str, dict[str, float]]:
+        """child -> {co-sampled parent: change across the child's sample pair}."""
+        out: dict[str, dict[str, float]] = {}
+        if not cosampled:
+            return out
+        for delta in group.reader_deltas:
+            interval = self._member_step(group, delta)
+            if interval is None:
+                continue
+            child = str(delta.reader_id)
+            pair = self._child_sample_pair(child, interval[0], interval[1], delta.delta_w)
+            if pair is None:
+                continue
+            pre_t, post_t = pair
+            for other in self._sample_stamps:
+                if other == child or frozenset((other, child)) not in cosampled:
+                    continue
+                change = self._synchronous_parent_change(other, pre_t, post_t)
+                if change is not None:
+                    out.setdefault(child, {})[other] = change
+        return out
+
+    def _pulse_evidence_for_group(
+        self, group: EventGroup, cosampled: frozenset[frozenset[str]]
+    ) -> dict[str, dict[str, list[tuple[str, float, float]]]]:
+        """child -> {co-sampled parent: [(verdict, parent_change, child_delta)]}.
+
+        A confirmed single-sample pulse produces two synchronous verdicts (E6 §6).
+        Pulses are drained from the per-reader ring so each is consumed once.
+        """
+        out: dict[str, dict[str, list[tuple[str, float, float]]]] = {}
+        if not cosampled:
+            return out
+        from ..electrical.sync_evidence import pulse_verdicts
+
+        readers = {str(delta.reader_id) for delta in group.reader_deltas}
+        stamps = []
+        for delta in group.reader_deltas:
+            interval = self._member_step(group, delta)
+            if interval is not None:
+                stamps.append(interval[1].timestamp())
+        if not stamps:
+            stamps = [group.closed_at.timestamp()] if group.closed_at else []
+        if not stamps:
+            return out
+        since = min(stamps) - 120.0
+        until = max(stamps) + 120.0
+        for child in readers:
+            pring = self._pulse_rings.get(child)
+            if pring is None:
+                continue
+            pulses = [p for p in pring.peek(since=since) if p.post_t <= until]
+            if not pulses:
+                continue
+            for other in self._sample_stamps:
+                if other == child or frozenset((other, child)) not in cosampled:
+                    continue
+                pring_other = self._sample_stamps[other]
+                pstamps, pvalues = pring_other.snapshot()
+                sigma = self.reader_state.sigma(other)
+                sigma_p = float(sigma) if sigma is not None and sigma > 0 else 1.0
+                for pulse in pulses:
+                    for verdict, change, child_delta in pulse_verdicts(
+                        pulse, pstamps, pvalues, sigma_p=sigma_p
+                    ):
+                        if verdict == "neutral":
+                            continue
+                        out.setdefault(child, {}).setdefault(other, []).append(
+                            (verdict, change or 0.0, child_delta)
+                        )
+            pring.drain(since=since)
+        return out
+
     #: Cross-device lag: a parent on another physical device may report the step
     #: one sample later.  Start its post window one parent sample interval after
     #: the child's step ``hi`` (capped), so a late step is still measured (P6).
@@ -2745,6 +2889,9 @@ class RuntimeMixin:
     #: How often T5's aligned series are rebuilt from the structural memory
     #: (design §5 T5, topology linking v2 W2), and how often the memory is saved.
     _T5_ALIGN_EVERY_S = 300.0
+    #: E6 §4/§6: inferred SAME_CONDUCTOR analysis at an aligned rebuild, at most
+    #: hourly (off the fast path and off every fold).
+    _DUP_INFER_EVERY_S = 3600.0
     _T5_HEALTH_KEY = "t5_edge_health"
     _T5_HEALTH_EVERY_S = 30.0
     _T5_MEMORY_KEY = "t5_structure_memory"
@@ -2772,6 +2919,134 @@ class RuntimeMixin:
         except Exception:  # noqa: BLE001 - bookkeeping must not break ingestion
             return
 
+    def _track_sync_sample(self, reader: str, at: datetime, value: float | None) -> None:
+        """E6 §6: record one sample stamp and test for a single-sample pulse (O(1)).
+
+        Pulses are recorded from the raw power samples *before* P3 decides
+        whether to emit an event: the detector keeps its own behaviour for
+        everything else, but a confirmed pre -> peak -> pre pattern makes two
+        synchronous verdicts available to a T5 fold for co-sampled pairs.
+        """
+        try:
+            ring = self._sample_stamps.get(reader)
+            if ring is None:
+                from ..electrical.sync_evidence import PulseRing, SampleStampRing
+
+                ring = self._sample_stamps[reader] = SampleStampRing()
+                self._pulse_rings[reader] = PulseRing()
+            stamp = at.timestamp()
+            ring.record(stamp, value)
+            sigma = self.reader_state.sigma(reader)
+            self._pulse_rings[reader].record(
+                stamp,
+                value,
+                sigma=sigma,
+                tolerance_w=max(15.0, 3.0 * float(sigma) if sigma is not None else 15.0),
+            )
+        except Exception:  # noqa: BLE001 - bookkeeping must not break ingestion
+            return
+
+    def _maybe_cache_inferred_duplicates(self, aligned: Mapping[str, Any] | None) -> None:
+        """E6 §4/§6: infer SAME_CONDUCTOR once per aligned rebuild (off the fold).
+
+        E6a only wired :func:`detect_inferred_duplicates` into the legacy
+        ``infer_topology`` path, which has no live caller.  The live runtime runs
+        it here, at an aligned rebuild, and adds the resulting edges to the T5
+        ledger through the normal lifecycle.  A declaration always wins: pairs
+        already declared by the installer are skipped.  Cached on the aligned
+        series object so no per-fold cost is added.
+        """
+        if aligned is None or not aligned:
+            return
+        if getattr(self, "_t5_dups_source", None) is aligned:
+            return
+        # The affine-copy analysis is O(n_readers² × samples); run it at most
+        # hourly (still at an aligned rebuild), not at every 300 s rebuild.
+        now = self._clock()
+        last = getattr(self, "_last_inferred_duplicates_at", None)
+        if last is not None and 0.0 <= (now - last).total_seconds() < self._DUP_INFER_EVERY_S:
+            return
+        self._last_inferred_duplicates_at = now
+        from ..electrical.topology_inference import detect_inferred_duplicates
+
+        stamps = {reader: ring.stamps() for reader, ring in self._sample_stamps.items()}
+        try:
+            series = {reader: list(values) for reader, values in aligned.items()}
+            edges = detect_inferred_duplicates(series, timestamps=stamps, at=self._clock())
+        except Exception:  # noqa: BLE001 - a detector failure must not abort the fold
+            edges = []
+        declared = self._declared_topology_constraints()[0]
+        self._t5_inferred_duplicates = tuple(
+            edge
+            for edge in edges
+            if frozenset((edge.source_endpoint_id, edge.target_endpoint_id)) not in declared
+        )
+        self._t5_dups_source = aligned
+
+    def _merge_inferred_duplicate_edges(self, view: Any) -> Any:
+        """Add cached inferred SAME_CONDUCTOR edges to the ledger if absent."""
+        cached = getattr(self, "_t5_inferred_duplicates", ()) or ()
+        if not cached:
+            return view
+        existing = {
+            (edge.source_endpoint_id, edge.target_endpoint_id, str(getattr(edge.relation, "value", edge.relation)))
+            for edge in view.edges
+        }
+        fresh = [
+            edge
+            for edge in cached
+            if (edge.source_endpoint_id, edge.target_endpoint_id, "same_conductor") not in existing
+        ]
+        if not fresh:
+            return view
+        from dataclasses import replace as _replace
+
+        return _replace(view, edges=(*view.edges, *fresh))
+
+    def _inferred_alias_constraints(
+        self, view: Any
+    ) -> tuple[frozenset[frozenset[str]], dict[str, str]]:
+        """E6b: inferred STRUCTURAL SAME_CONDUCTOR aliases behave like declared ones.
+
+        Returns ``(pairs, alias_canonical)`` for inferred aliases whose edge has
+        reached STRUCTURAL through the normal lifecycle.  :func:`detect_inferred_duplicates`
+        emits ``canonical -> alias`` (sorted ids), so the alias is the *target*
+        and the canonical the *source* -- the reverse of a user declaration.
+        """
+        pairs: set[frozenset[str]] = set()
+        aliases: dict[str, str] = {}
+        for edge in getattr(view, "edges", ()):
+            if str(getattr(edge.relation, "value", edge.relation)) != "same_conductor":
+                continue
+            if str(getattr(edge, "declared_by", "")) != "inference":
+                continue
+            if str(getattr(edge.lifecycle, "value", edge.lifecycle)) != "structural":
+                continue
+            canonical = str(edge.source_endpoint_id)
+            alias = str(edge.target_endpoint_id)
+            if canonical == alias:
+                continue
+            pairs.add(frozenset((canonical, alias)))
+            aliases[alias] = canonical
+        return frozenset(pairs), aliases
+
+    def _refresh_cosampled(self) -> frozenset[frozenset[str]]:
+        """E6 §6: recompute the co-sampled reader pairs from recent sample stamps.
+
+        Called only at aligned rebuilds (off the fast path).  Cached on the
+        aligned series object so every fold between rebuilds reuses the set.
+        """
+        marker = getattr(self, "_t5_aligned_at", None)
+        if marker is not None and getattr(self, "_t5_cosampled_marker", None) == marker:
+            return self._t5_cosampled
+        from ..electrical.sync_evidence import co_sampled_readers
+
+        stamps = {reader: ring.stamps() for reader, ring in self._sample_stamps.items()}
+        pairs = co_sampled_readers(stamps)
+        self._t5_cosampled = pairs
+        self._t5_cosampled_marker = marker
+        return pairs
+
     def _t5_aligned_series(self) -> Mapping[str, Any] | None:
         """The aligned absolute series (30 s grid, up to a week), rebuilt every 300 s.
 
@@ -2793,6 +3068,9 @@ class RuntimeMixin:
             return self._t5_aligned
         self._t5_aligned = aligned
         self._t5_aligned_at = now
+        # E6 §6: co-sampling is a property of sample timestamps, refreshed at
+        # aligned rebuilds only (never per group, never on the fast path).
+        self._refresh_cosampled()
         self._persist_structure_memory_throttled()
         return aligned
 
@@ -3105,12 +3383,27 @@ class RuntimeMixin:
             # the structural pass uses, with monitor factors divided out of each
             # child.  Reuse the cached object between rebuilds (cheap).
             aligned = self._t5_aligned_series()
+            # E6 §4/§6: infer SAME_CONDUCTOR at the aligned rebuild and add the
+            # edges to the live ledger.  Cached per rebuild; never per group.
+            self._maybe_cache_inferred_duplicates(aligned)
+            view = self._merge_inferred_duplicate_edges(view)
+            # E6 §6: co-sampled pairs get a synchronous verdict measured across
+            # exactly the child's sample pair (no window, no P6 spread veto).
+            # Non-co-sampled pairs keep the anchored-window verdict above.
+            cosampled = self._refresh_cosampled()
+            sync_changes = self._sync_changes_for_group(group, cosampled)
+            pulse_evidence = self._pulse_evidence_for_group(group, cosampled)
             absolute = self._t5_containment_series(aligned, readers)
             # E4 §1-2: the full series analysis is built once per aligned rebuild
             # and reused (same object) by every fold until the rebuild; no pair
             # statistic is ever computed inside observe_group/settle.
             pair_analysis = self._t5_pair_analysis(absolute, readers)
             pairs, aliases = self._declared_topology_constraints()
+            # E6b: inferred aliases that have reached STRUCTURAL behave like
+            # declared ones for T5 suppression (P4 / alias freshness).
+            inferred_pairs, inferred_aliases = self._inferred_alias_constraints(view)
+            pairs = pairs | inferred_pairs
+            aliases = {**inferred_aliases, **aliases}  # declarations win on conflict
             fresh = self._fresh_canonicals(aliases)
             updated = view.observe_group(
                 obs,
@@ -3129,6 +3422,9 @@ class RuntimeMixin:
                 pairs=pair_analysis,
                 leg_report=self._t5_leg_report(aligned),
                 current_report=self._t5_current_report(aligned),
+                cosampled=cosampled,
+                sync_changes=sync_changes,
+                pulse_evidence=pulse_evidence,
             )
             self.topology_inference = updated
             self._persist_edge_health_throttled(

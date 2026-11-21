@@ -81,6 +81,7 @@ from .nesting_math import (
     containment_tolerant,
     duplicate_evidence,
 )
+from .sync_evidence import sync_verdict
 from .topology_health import HealthBook, demotions
 from .topology_pairs import (
     CONTAIN_DECISIVE_INFORMATIVE,
@@ -1051,11 +1052,13 @@ class TopologyInferenceView:
     #: never affects H (which still uses STRUCTURAL edges only).
     _placements: PlacementReport | None = field(default=None, compare=False, repr=False)
     #: Inputs to the lazy placement computation (set at each settle).
-    _placement_inputs: tuple[Any, Any, Any] = field(
-        default_factory=lambda: (frozenset(), {}, None), compare=False, repr=False
+    _placement_inputs: tuple[Any, Any, Any, Any] = field(
+        default_factory=lambda: (frozenset(), {}, None, frozenset()), compare=False, repr=False
     )
     #: E6 §3: raw-current vetoes and rating classes from the companion ring.
     current_report: Any | None = field(default=None, compare=False, repr=False)
+    #: E6 §6: co-sampled reader pairs, measured from sample timestamps.
+    cosampled: frozenset[frozenset[str]] = field(default=frozenset(), compare=False, repr=False)
 
     # -- reads -------------------------------------------------------------- #
     def edge(
@@ -1088,12 +1091,12 @@ class TopologyInferenceView:
         The ledger is frozen-derived, so caching on this view is safe.
         """
         if self._placements is None:
-            declared, canonical, pairs = self._placement_inputs
+            declared, canonical, pairs, cosampled = self._placement_inputs
             object.__setattr__(
                 self,
                 "_placements",
                 self._compute_placements(
-                    self.edges, declared, canonical, self.leg_unidentified, pairs
+                    self.edges, declared, canonical, self.leg_unidentified, pairs, cosampled
                 ),
             )
         return self._placements  # type: ignore[return-value]
@@ -1148,6 +1151,9 @@ class TopologyInferenceView:
         pairs: PairAnalysis | None = None,
         leg_report: Any | None = None,
         current_report: Any | None = None,
+        cosampled: frozenset[frozenset[str]] = frozenset(),
+        sync_changes: Mapping[str, Mapping[str, float]] | None = None,
+        pulse_evidence: Mapping[str, Mapping[str, Sequence[tuple[str, float, float]]]] | None = None,
     ) -> TopologyInferenceView:
         """Fold one FINAL event group into every affected pair's ledger.
 
@@ -1211,6 +1217,13 @@ class TopologyInferenceView:
         E3's ``leg_unidentified`` for a ``both`` child with ambiguous parents,
         lets a definite leg break that tie, and prefers a not-branch-circuit
         parent at equal standing.  ``None`` leaves all of this inactive.
+
+        E6 §6: ``cosampled`` holds unordered reader pairs whose samples land in
+        one monitor batch.  For those pairs ``sync_changes`` gives the parent's
+        change across exactly the child's sample pair; the verdict is the
+        synchronous one (no anchored window, no P6 spread veto).  Pairs not in
+        ``cosampled`` keep today's anchored-window verdict.  ``pulse_evidence``
+        carries two synchronous verdicts for a confirmed single-sample pulse.
         """
         obs = _coerce_group(group, self.sigma_floor_w)
         if obs.group_id in self.seen_groups:
@@ -1380,6 +1393,11 @@ class TopologyInferenceView:
             if (parent, child) in confirmed_now or (parent, child) in health.entries:
                 health = health.record(parent, child, verdict, at)
 
+        # E6 §6: pairs already folded by a co-step/observed pass this group;
+        # the synchronous pass below folds only the remaining ones (no double
+        # counting of the same event).
+        folded_this_group: set[tuple[str, str]] = set()
+
         # -- child steps against every candidate parent --------------------- #
         for child, (child_delta, child_sigma) in decisive.items():
             if _suppressed(child):
@@ -1427,7 +1445,18 @@ class TopologyInferenceView:
                 # exists: the multi-child explanation uses the parent's net move
                 # over the whole group, where unrelated steps cancel, so it is
                 # only a fallback (real-history replay, 2026-11-20).
-                if key[:2] in multi and anchored.get(parent) is None:
+                if frozenset((parent, child)) in cosampled:
+                    # E6 §6: the parent's change across exactly the child's
+                    # sample pair, with no anchored window and no P6 spread veto.
+                    sync = (sync_changes or {}).get(child, {}).get(parent)
+                    verdict = sync_verdict(
+                        sync,
+                        child_delta,
+                        sigma_p=sigma_p,
+                        beta=beta,
+                        sync_scale=float((scales or {}).get(child, 1.0)),
+                    )
+                elif key[:2] in multi and anchored.get(parent) is None:
                     verdict = multi[key[:2]]
                 else:
                     verdict = _classify_step(
@@ -1436,6 +1465,7 @@ class TopologyInferenceView:
                     )
                 if verdict is None:
                     continue
+                folded_this_group.add((parent, child))
                 _track(parent, child, verdict)
                 causes.setdefault(key, set()).add(cause)
                 evidence = edge.evidence.model_copy(
@@ -1466,7 +1496,16 @@ class TopologyInferenceView:
                 # No measurement: P3 saw no step on an observed parent, i.e. it
                 # did not move.  A measured level (P3 may simply not have flagged
                 # a small step on a busy feed) is classified like a co-step.
-                if (parent, child) in multi and anchored.get(parent) is None:
+                if frozenset((parent, child)) in cosampled:
+                    sync = (sync_changes or {}).get(child, {}).get(parent)
+                    verdict = sync_verdict(
+                        sync,
+                        child_delta,
+                        sigma_p=sigma_p,
+                        beta=beta,
+                        sync_scale=float((scales or {}).get(child, 1.0)),
+                    )
+                elif (parent, child) in multi and anchored.get(parent) is None:
                     verdict = multi[(parent, child)]
                 else:
                     verdict = _classify_step(
@@ -1479,6 +1518,7 @@ class TopologyInferenceView:
                     )
                 if verdict is None:
                     continue
+                folded_this_group.add((parent, child))
                 _track(parent, child, verdict)
                 key = (parent, child, _CONTAINS)
                 causes.setdefault(key, set()).add(cause)
@@ -1522,6 +1562,7 @@ class TopologyInferenceView:
                         )
                     if verdict != "support":
                         continue
+                    folded_this_group.add((parent, child))
                     causes.setdefault(key, set()).add(cause)
                     edges.append(
                         TopologyEdgeV3(
@@ -1544,6 +1585,125 @@ class TopologyInferenceView:
                         )
                     )
                     by_index[key] = len(edges) - 1
+
+        # -- E6 §6: synchronous verdicts for co-sampled pairs ---------------- #
+        # A co-sampled parent whose P3 step was not flagged (a flat wrong parent,
+        # or a parent measured only by its paired channel) still gets a
+        # synchronous verdict measured across the child's sample pair.  Pulses
+        # produce two such verdicts each (ON and OFF) instead of being dropped.
+        for child, by_parent in (sync_changes or {}).items():
+            if _suppressed(child) or child not in decisive:
+                continue
+            child_delta, child_sigma = decisive[child]
+            for parent, change in by_parent.items():
+                if parent == child or _suppressed(parent) or _pair_blocked(parent, child):
+                    continue
+                if (parent, child) in folded_this_group:
+                    continue
+                sigma_p = max(
+                    float((observed or {}).get(parent, (self.sigma_floor_w, None))[0] or self.sigma_floor_w),
+                    self.sigma_floor_w,
+                )
+                verdict = sync_verdict(
+                    change,
+                    child_delta,
+                    sigma_p=sigma_p,
+                    sync_scale=float((scales or {}).get(child, 1.0)),
+                )
+                if verdict is None:
+                    continue
+                key = (parent, child, _CONTAINS)
+                position = by_index.get(key)
+                cause_here = f"{cause}::sync::{parent}::{child}"
+                if position is None:
+                    if verdict != "support":
+                        # A conflict-only pair with no edge is ledger noise; the
+                        # legacy fold never creates one either.
+                        continue
+                    causes.setdefault(key, set()).add(cause_here)
+                    edges.append(
+                        TopologyEdgeV3(
+                            edge_id=f"te-inf::{parent}::{child}",
+                            relation=RelationType.CONTAINS,
+                            source_endpoint_id=parent,
+                            target_endpoint_id=child,
+                            lifecycle=TopologyEdgeState.CANDIDATE,
+                            declared_by="inference",
+                            beta=1.0,
+                            beta_basis="unity",
+                            evidence=TopologyEvidence(
+                                support=1,
+                                support_w=1.0,
+                                last_support_at=at,
+                                independent_causes=len(causes[key]),
+                            ),
+                            valid_from=at,
+                            pinned=False,
+                        )
+                    )
+                    by_index[key] = len(edges) - 1
+                else:
+                    edge = edges[position]
+                    if edge.pinned or edge.lifecycle in _DORMANT:
+                        continue
+                    causes.setdefault(key, set()).add(cause_here)
+                    evidence = edge.evidence.model_copy(
+                        update={
+                            **_fold_verdict(edge.evidence, verdict, at=at),
+                            "independent_causes": len(causes[key]),
+                        }
+                    )
+                    edges[position] = edge.model_copy(update={"evidence": evidence})
+
+        # A confirmed single-sample pulse yields two synchronous verdicts, one
+        # on the ON step and one on the OFF step, with distinct causes.
+        for child, by_parent in (pulse_evidence or {}).items():
+            if _suppressed(child):
+                continue
+            for parent, verdicts in by_parent.items():
+                if _suppressed(parent) or _pair_blocked(parent, child):
+                    continue
+                key = (parent, child, _CONTAINS)
+                position = by_index.get(key)
+                for index, (verdict, _change, _child_delta) in enumerate(verdicts):
+                    cause_here = f"{cause}::pulse::{parent}::{child}::{index}"
+                    if position is None:
+                        if verdict != "support":
+                            continue
+                        causes.setdefault(key, set()).add(cause_here)
+                        edges.append(
+                            TopologyEdgeV3(
+                                edge_id=f"te-inf::{parent}::{child}",
+                                relation=RelationType.CONTAINS,
+                                source_endpoint_id=parent,
+                                target_endpoint_id=child,
+                                lifecycle=TopologyEdgeState.CANDIDATE,
+                                declared_by="inference",
+                                beta=1.0,
+                                beta_basis="unity",
+                                evidence=TopologyEvidence(
+                                    support=1,
+                                    support_w=1.0,
+                                    last_support_at=at,
+                                    independent_causes=len(causes[key]),
+                                ),
+                                valid_from=at,
+                                pinned=False,
+                            )
+                        )
+                        position = by_index[key] = len(edges) - 1
+                    else:
+                        edge = edges[position]
+                        if edge.pinned or edge.lifecycle in _DORMANT:
+                            continue
+                        causes.setdefault(key, set()).add(cause_here)
+                        evidence = edge.evidence.model_copy(
+                            update={
+                                **_fold_verdict(edge.evidence, verdict, at=at),
+                                "independent_causes": len(causes[key]),
+                            }
+                        )
+                        edges[position] = edge.model_copy(update={"evidence": evidence})
 
         # -- co-response without containment -> CORRELATED ------------------- #
         readers = sorted(decisive)
@@ -1610,7 +1770,8 @@ class TopologyInferenceView:
             structure_decisions=decisions,
             leg_unidentified=unidentified,
             _placements=None,  # lazy: compute at first API read, not per fold
-            _placement_inputs=(frozenset(blocked), canonical, pairs_now),
+            _placement_inputs=(frozenset(blocked), canonical, pairs_now, cosampled),
+            cosampled=cosampled if cosampled else self.cosampled,
             aligned=aligned_now,
             at=at,
             seen_groups=frozenset({*self.seen_groups, obs.group_id}),
@@ -1635,6 +1796,7 @@ class TopologyInferenceView:
         alias_canonical: Mapping[str, str],
         leg_unidentified: frozenset[str],
         pairs: PairAnalysis | None,
+        cosampled: frozenset[frozenset[str]] = frozenset(),
     ) -> PlacementReport:
         """E6 §1: display placements from this settle's ledger (pure, no I/O).
 
@@ -1666,6 +1828,7 @@ class TopologyInferenceView:
             leg_unidentified=leg_unidentified,
             declared_pairs=declared_pairs,
             alias_canonical=alias_canonical,
+            cosampled=cosampled,
         )
 
     # -- lifecycle / versioning internals ----------------------------------- #

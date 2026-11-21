@@ -2383,4 +2383,23 @@ draw a useful hierarchy before any edge is STRUCTURAL, while keeping the source
 of each link visible. No contract change: placement and ratings live in API
 payload dicts. E6b will add synchronous differencing and pulses.
 
+### E6b amendment — synchronous evidence (2026-11-21)
+
+E6b completes the topology-evidence work with synchronous differencing. The
+runtime tracks co-sampling cheaply from sample timestamps (a bounded ring per
+reader, refreshed at aligned rebuilds): two readers are co-sampled when at
+least 90 % of each one's samples have a counterpart within 2 s. For a
+co-sampled parent/child pair the T5 fold measures the parent's change across
+exactly the child's sample pair, with no anchored window and no P6 spread veto;
+support requires a same-sign match within 10 % + 15 W, conflict requires a flat
+parent (±3 σ) with a resolvable child step. Pairs that are not co-sampled keep
+the anchored-window verdict unchanged. A bounded per-reader pulse ring turns a
+confirmed single-sample pulse into two synchronous verdicts (ON and OFF),
+without changing P3's detector. Placement discounts a co-sampled candidate by
+its conflict ratio (contrast ranking). The inferred SAME_CONDUCTOR detector is
+wired into the live runtime at aligned rebuilds: an inferred edge goes through
+the normal lifecycle (declarations win), and an inferred alias that reaches
+STRUCTURAL is suppressed like a declared one for T5. All new data lives in API
+payload dicts; there is still no contract change.
+
 ---
