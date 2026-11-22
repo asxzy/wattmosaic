@@ -28,7 +28,7 @@ import math
 import threading
 import zlib
 from array import array
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -172,6 +172,19 @@ class StructureMemory:
     def readers(self) -> tuple[str, ...]:
         with self._lock:
             return tuple(sorted(self._tracks))
+
+    def forget(self, readers: Iterable[str]) -> int:
+        """Drop every stored bucket of ``readers``; returns how many were held.
+
+        Used when a sensor is disabled by configuration: its past week must not
+        keep feeding pair analysis or the duplicate detector.
+        """
+        dropped = 0
+        with self._lock:
+            for reader in readers:
+                if self._tracks.pop(str(reader), None) is not None:
+                    dropped += 1
+        return dropped
 
     def series(self, now_ts: float, *, window_s: float | None = None) -> AlignedSeries:
         """Every reader on one grid ending at ``now_ts`` (absent = ``nan``).

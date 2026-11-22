@@ -34,7 +34,7 @@ from ..contracts import (
     TopologyEdgeV3,
     VersionTriple,
 )
-from ..electrical.topology_placement import apply_user_placements
+from ..electrical.topology_placement import apply_user_placements, exclude_readers
 from ..mapping.display_tree import build_display_tree_v3, device_node
 
 log = logging.getLogger("wattmosaic.main")
@@ -581,6 +581,8 @@ class SnapshotMixin:
                 )
             except Exception:  # noqa: BLE001 - degraded tree, never a 500
                 log.debug("user placement override unavailable for the panel tree", exc_info=True)
+            disabled = getattr(getattr(self, "disabled_sensors", None), "endpoint_ids", frozenset())
+            report = exclude_readers(report, disabled)
             tree["placements"] = report.as_dict()
             active = [
                 (str(e.source_endpoint_id), str(e.target_endpoint_id))
@@ -590,6 +592,15 @@ class SnapshotMixin:
             ]
             tree["structural_links"] = active
             tree["roots"] = self._placement_roots(graph, report, active, devices_by_reader)
+        disabled = sorted(
+            getattr(getattr(self, "disabled_sensors", None), "endpoint_ids", frozenset())
+        )
+        if disabled:
+            tree.setdefault("notes", []).append(
+                f"{len(disabled)} sensor{'s' if len(disabled) != 1 else ''} disabled in "
+                f"configuration (WM_DISABLED_SENSORS) and hidden: {', '.join(disabled)}"
+            )
+        tree["disabled_sensors"] = disabled
         return tree
 
     def _placement_roots(

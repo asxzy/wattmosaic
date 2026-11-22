@@ -24,7 +24,7 @@ from ..contracts import (
 )
 from ..devices.service import endpoints_from_repo
 from ..electrical.topology_graph import DisplayNode, TopologyGraph
-from ..electrical.topology_placement import apply_user_placements
+from ..electrical.topology_placement import apply_user_placements, exclude_readers
 
 log = logging.getLogger("wattmosaic.main")
 
@@ -641,7 +641,10 @@ def _display_node_dict(node: DisplayNode) -> dict[str, Any]:
 
 
 def with_placements(
-    result: dict[str, Any], ledger: Any, db: Any = None
+    result: dict[str, Any],
+    ledger: Any,
+    db: Any = None,
+    disabled: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """E6 §1: add each reader's placement to the v3 payload.
 
@@ -661,6 +664,7 @@ def with_placements(
         )
     except Exception:  # noqa: BLE001 - degraded read, never a 500
         log.debug("user placement overlay unavailable for /topology/v3", exc_info=True)
+    report = exclude_readers(report, disabled)
     result["placements"] = report.as_dict()
     return result
 
@@ -1042,6 +1046,7 @@ class TopologyApiMixin:
             with_edge_health(with_evidence_detail(result, ledger), book),
             ledger,
             self.db,
+            getattr(getattr(self, "disabled_sensors", None), "endpoint_ids", frozenset()),
         )
 
     def topology_versions(self, version_id: str | None = None) -> Any:

@@ -117,6 +117,22 @@ def load_dotenv(path: str | Path = ".env") -> dict[str, str]:
     return out
 
 
+def parse_sensor_patterns(value: str | None) -> tuple[str, ...]:
+    """Split a ``WM_DISABLED_SENSORS``-style list (commas, newlines or spaces).
+
+    Order is kept, duplicates and blanks are dropped.  ``None`` or an empty
+    string means "nothing disabled".
+    """
+    if not value:
+        return ()
+    seen: dict[str, None] = {}
+    for part in value.replace("\n", ",").replace(" ", ",").split(","):
+        item = part.strip()
+        if item:
+            seen.setdefault(item, None)
+    return tuple(seen)
+
+
 def _bool(value: str | None, default: bool = False) -> bool:
     if value is None:
         return default
@@ -276,6 +292,13 @@ class EngineConfig:
     #: observed co-movement (ADR-0024).  Off by default: it writes device
     #: configurations, and a write must be something the user asked for.
     auto_placement: bool = False
+    #: Sensors the engine must ignore (``WM_DISABLED_SENSORS``): a comma-separated
+    #: list of endpoint ids or HA entity ids, ``fnmatch`` globs allowed, matched
+    #: case-insensitively.  A match is disabled at startup and kept out of
+    #: ingestion, discovery, topology inference, the panel tree and the matrix;
+    #: removing it from the list re-enables it.  Use it for a duplicate meter on
+    #: a feed another meter already measures, or a sensor that is not a CT.
+    disabled_sensors: tuple[str, ...] = ()
     log_level: str = "INFO"
     log_json: bool = True
 
@@ -464,6 +487,7 @@ class EngineConfig:
             get("WM_TOPOLOGY_BOOTSTRAP", default="true"), True
         )
         cfg.auto_placement = _bool(get("WM_AUTO_PLACEMENT", default="false"), False)
+        cfg.disabled_sensors = parse_sensor_patterns(get("WM_DISABLED_SENSORS"))
         cfg.history_lookback_s = float(
             get("WM_HISTORY_LOOKBACK_S", default=str(cfg.history_lookback_s))
             or cfg.history_lookback_s
@@ -688,6 +712,7 @@ class EngineConfig:
             "retention_days_versions": self.retention_days_versions,
             "learning_enabled": self.learning_enabled,
             "auto_placement": self.auto_placement,
+            "disabled_sensors": list(self.disabled_sensors),
             "stale_after_s": self.stale_after_s,
             "default_sample_interval_s": self.default_sample_interval_s,
             "inference_interval_s": self.quality_interval_s,

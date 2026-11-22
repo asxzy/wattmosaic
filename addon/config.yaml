@@ -21,6 +21,7 @@
 #   raw_capture_days       -> WM_RAW_CAPTURE_DAYS (0 = off; HA recorder is the history)
 #   queue_max_size         -> WM_QUEUE_MAX_SIZE
 #   auto_placement         -> WM_AUTO_PLACEMENT
+#   disabled_sensors       -> WM_DISABLED_SENSORS (comma-separated)
 
 name: "WattMosaic Engine"
 version: "0.3.0-dev.5"
@@ -134,6 +135,11 @@ options:
   # Apply button additionally requires apply=true in the request: two
   # independent consents before anything is written.
   auto_placement: false
+  # Sensors to ignore, comma-separated: endpoint ids or HA entity ids, globs
+  # allowed (e.g. "vec_1_l1, vec_1_l2, sensor.*charger_power"). Use it for a
+  # second meter on a feed another meter already measures, or a power sensor
+  # that is not a CT. Removing an entry re-enables that sensor on restart.
+  disabled_sensors: ""
 
 schema:
   ha_url: url
@@ -156,3 +162,4 @@ schema:
   raw_capture_days: "int(0,90)"
   queue_max_size: "int(100,1000000)"
   auto_placement: bool
+  disabled_sensors: "str?"

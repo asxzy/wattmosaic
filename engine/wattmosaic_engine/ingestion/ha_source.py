@@ -655,6 +655,9 @@ class HASource:
             verify_ssl=config.ha_verify_ssl,
             stale_after_s=config.stale_after_s,
             ha_event_domains=getattr(config, "ha_event_domains", None),
+            # WM_DISABLED_SENSORS globs; the runtime adds the matched
+            # endpoints' entity ids after it reconciles the stored endpoints.
+            deny_entities=getattr(config, "disabled_sensors", None),
         )
 
     # -- properties ------------------------------------------------------- #

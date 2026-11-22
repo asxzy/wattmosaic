@@ -43,6 +43,7 @@ __all__ = [
     "Placement",
     "PlacementReport",
     "apply_user_placements",
+    "exclude_readers",
     "compute_placements",
 ]
 
@@ -457,5 +458,59 @@ def apply_user_placements(
             result.by_child[child] = Placement(child=child, parent=None, reason="user_root")
             continue
 
+        result.by_child[child] = placement
+    return result
+
+
+def exclude_readers(report: PlacementReport, readers: frozenset[str] | set[str]) -> PlacementReport:
+    """Remove ``readers`` from a placement report and re-home their children.
+
+    A disabled sensor (``WM_DISABLED_SENSORS``) must vanish from the hierarchy.
+    Its own placement is dropped; a child placed under it moves to its best
+    remaining alternative parent, or becomes unplaced when none is left.  A
+    ``both_legs`` pair that loses a leg keeps only the remaining one as parent.
+    Pure; the input is never mutated.
+    """
+    gone = {str(r) for r in readers}
+    if not gone:
+        return report
+    result = PlacementReport()
+    for child, placement in report.by_child.items():
+        if child in gone:
+            continue
+        alternatives = tuple(item for item in placement.alternatives if str(item[0]) not in gone)
+        both = tuple(p for p in placement.both_legs if str(p) not in gone)
+        if placement.both_legs and len(both) < len(placement.both_legs):
+            if both:
+                result.by_child[child] = Placement(
+                    child=child, parent=both[0], band=BAND_MEDIUM,
+                    score=placement.score, reason=placement.reason,
+                    alternatives=alternatives, both_legs=(),
+                )
+            else:
+                result.by_child[child] = Placement(child=child)
+            continue
+        if placement.parent is not None and str(placement.parent) in gone:
+            if alternatives:
+                parent, score = alternatives[0]
+                band = (
+                    BAND_HIGH if score >= SCORE_HIGH
+                    else BAND_MEDIUM if score >= SCORE_MEDIUM
+                    else BAND_LOW
+                )
+                result.by_child[child] = Placement(
+                    child=child, parent=parent, band=band, score=score,
+                    reason=None, alternatives=alternatives[1:], both_legs=(),
+                )
+            else:
+                result.by_child[child] = Placement(child=child)
+            continue
+        if alternatives != placement.alternatives:
+            result.by_child[child] = Placement(
+                child=child, parent=placement.parent, band=placement.band,
+                score=placement.score, reason=placement.reason,
+                alternatives=alternatives, both_legs=placement.both_legs,
+            )
+            continue
         result.by_child[child] = placement
     return result

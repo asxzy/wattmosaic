@@ -152,7 +152,12 @@ class DiscoveryApiMixin:
             states = await self.hasource.state_snapshot()
             registries = await self.hasource.registries()
             clock = getattr(self, "_clock", None)
-            endpoints = discover_candidate_endpoints(states, registries, clock=clock)
+            endpoints = discover_candidate_endpoints(
+                states,
+                registries,
+                clock=clock,
+                deny_entities=getattr(self.config, "disabled_sensors", ()) or (),
+            )
             devices = devices_for_candidate_endpoints(
                 endpoints, registries, clock=clock
             )
