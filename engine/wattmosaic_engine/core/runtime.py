@@ -34,6 +34,7 @@ from ..contracts import (
     ReaderResidualPoint,
     VersionTriple,
 )
+from ..devices.disabled import DisabledSensors, reconcile_disabled_endpoints
 from ..electrical.operator import build_observation_operator
 from ..electrical.topology_change import ENDPOINT_SUBJECT_PREFIX
 from ..electrical.topology_graph import topology_root_readers
@@ -172,6 +173,9 @@ class RuntimeMixin:
         # fast-loop callbacks and the event loop have typed providers, even when
         # the supervisor (not ``start``) owns the loop tasks.
         self._wire_v3_services()
+        # Before warm start and the HA source: a configured-off sensor must
+        # never be warm-started, ingested or remembered.
+        self._apply_disabled_sensors()
         self._warm_start_readers()
         await self.hasource.start(
             on_reading=self.on_reading,
@@ -181,6 +185,8 @@ class RuntimeMixin:
         # waiting a bounded time here is what makes discovery see real entities
         # instead of an empty cache on a genuine fresh install.
         await self.bootstrap_topology(wait_connected_s=TOPOLOGY_BOOTSTRAP_WAIT_S)
+        # Discovery may have created endpoints the list also matches.
+        self._apply_disabled_sensors()
         if start_loops:
             self._tasks = [
                 asyncio.create_task(self._writer_loop(), name="wm-writer"),
@@ -394,6 +400,8 @@ class RuntimeMixin:
         from ..electrical.topology_memory import StructureMemory
 
         self._t5_memory = StructureMemory()
+        # WM_DISABLED_SENSORS: reconciled at startup (_apply_disabled_sensors).
+        self.disabled_sensors = DisabledSensors()
         # ADR-0044: declared companion quantities (V/I/PF) live in their own
         # bounded store, never in the power-reading path.  Bound to the HA
         # source in ``_bind_ha_ingestion``; filled by the replay tool directly.
@@ -1069,7 +1077,7 @@ class RuntimeMixin:
         operator = build_observation_operator(
             topo_view, map_view, None, reader_ids, tuple(sorted(subjects)), at
         )
-        excluded = set(excluded_readers(self.latest_quality))
+        excluded = set(self._excluded_readers())
         usable = {
             str(reader): reading
             for reader, reading in held.items()
@@ -1280,7 +1288,7 @@ class RuntimeMixin:
         # D3 quality gate: a bad/stale/missing reader never reaches inference.
         # The reason is already surfaced in ``stale_sources``; here the reader
         # is removed from the operator's rows so it contributes no estimate.
-        excluded = excluded_readers(self.latest_quality)
+        excluded = self._excluded_readers()
         if excluded:
             reader_ids = tuple(r for r in reader_ids if r not in excluded)
         subject_set: set[tuple[str, str]] = set()
@@ -2198,7 +2206,7 @@ class RuntimeMixin:
         views = self._steady_views()
         if views is None:
             return
-        excluded = excluded_readers(self.latest_quality)
+        excluded = self._excluded_readers()
         for reader in self.reader_state.readers():
             reading = self.reader_state.held(reader, now)
             sigma = self.reader_state.sigma(reader)
@@ -2327,7 +2335,7 @@ class RuntimeMixin:
         parent as "did not move" only when it was measured flat.
         """
         now = self._clock()
-        excluded = set(excluded_readers(self.latest_quality))
+        excluded = set(self._excluded_readers())
         onset = getattr(group, "opened_at", None) if group is not None else None
         out: dict[str, Any] = {}
         for reader in self.reader_state.readers():
@@ -3046,6 +3054,55 @@ class RuntimeMixin:
         self._t5_cosampled = pairs
         self._t5_cosampled_marker = marker
         return pairs
+
+    def _excluded_readers(self) -> dict[str, str]:
+        """D3 quality exclusions plus sensors disabled by configuration."""
+        excluded = dict(excluded_readers(self.latest_quality))
+        for reader in getattr(self, "disabled_sensors", DisabledSensors()).endpoint_ids:
+            excluded.setdefault(reader, "disabled_by_config")
+        return excluded
+
+    def _apply_disabled_sensors(self) -> DisabledSensors:
+        """Reconcile WM_DISABLED_SENSORS with the stored endpoints (idempotent).
+
+        Disables matches, re-enables endpoints the list no longer names, purges
+        the matches from the T5 structure memory, and extends the HA source's
+        deny list with their entity ids so their readings are dropped at the
+        door instead of being quarantined.  A failure degrades to "nothing
+        disabled" and is logged; it never stops startup.
+        """
+        from ..devices.service import DeviceService
+
+        patterns = tuple(getattr(self.config, "disabled_sensors", ()) or ())
+        current = getattr(self, "disabled_sensors", DisabledSensors())
+        # Runs even with an empty list: that re-enables endpoints a previous
+        # configuration disabled.
+        try:
+            service = DeviceService(self.db, clock=self._clock)
+
+            def record(endpoint_id: str, action: str) -> None:
+                endpoint = service.get_endpoint(endpoint_id)
+                if endpoint is not None:
+                    service._record_event(endpoint, action=action)
+
+            result = reconcile_disabled_endpoints(
+                self.db.repos.entities, patterns, record_event=record
+            )
+        except Exception:  # noqa: BLE001 - degraded, never a crash
+            log.warning("could not apply WM_DISABLED_SENSORS", exc_info=True)
+            return current
+        self.disabled_sensors = result
+        if result.endpoint_ids and self._t5_memory.forget(result.endpoint_ids):
+            self._t5_aligned = None
+        hasource = getattr(self, "hasource", None)
+        if hasource is not None and hasattr(hasource, "deny_entities"):
+            hasource.deny_entities = tuple(
+                dict.fromkeys((*patterns, *sorted(result.entity_ids)))
+            )
+        cache = getattr(self, "_matrix_tree_cache", None)
+        if isinstance(cache, dict):
+            cache.clear()
+        return result
 
     def _t5_aligned_series(self) -> Mapping[str, Any] | None:
         """The aligned absolute series (30 s grid, up to a week), rebuilt every 300 s.

@@ -594,6 +594,7 @@ class MatrixUpdater(Protocol):                         # M2
 | `GET /topology` | T4 | active `TopologyVersion` + `TopologyEdge[]` + derived primary tree |
 | `POST /topology/edges` | T4 | declare a user edge → `ConfigurationEvent` + candidate version |
 | `POST /topology/edges/{id}/pin`, `/reject` | T4 | per-edge user authority (DEC-10) |
+| `POST /topology/circuits/{reader_id}/parent` | T4 | move a circuit to a new parent or the top level (ADR-0046): body `{"parent": "<endpoint_id>"\|null}`; `200` returns `{version_id, event_id, child, parent, edge_id, closed_edge_ids}`; `400` invalid body/cycle, `404` unknown reader/parent. Requires `X-API-Token` when configured. Closes/rejects every other in-force parent CONTAINS edge, declares one pinned user CONTAINS edge (or none for `null`), and promotes one version; no power model or mapping edge is touched. |
 | `GET /topology/versions`, `GET /topology/versions/{id}` | T4 | history |
 | `GET /configuration-events` | T7 | `ConfigurationEvent[]` |
 | `GET /matrix?at=&filter...` | M3 | `MatrixPayload` (ETag = mapping_version_id) |

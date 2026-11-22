@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from ..contracts import TopologyEdgeState, TopologyEdgeV3
@@ -41,6 +42,8 @@ __all__ = [
     "SCORE_MEDIUM",
     "Placement",
     "PlacementReport",
+    "apply_user_placements",
+    "exclude_readers",
     "compute_placements",
 ]
 
@@ -334,3 +337,180 @@ def compute_placements(
     for reader in all_readers:
         report.by_child.setdefault(reader, Placement(child=reader))
     return report
+
+
+def _is_contains(edge: TopologyEdgeV3) -> bool:
+    return _value(edge.relation) == "contains"
+
+
+def _in_force(edge: TopologyEdgeV3) -> bool:
+    """A still-valid, non-dormant edge (the definition used by T1)."""
+    return (
+        edge.valid_until is None
+        and _value(edge.lifecycle) not in _DORMANT
+    )
+
+
+def apply_user_placements(
+    report: PlacementReport,
+    edges: Sequence[TopologyEdgeV3],
+) -> PlacementReport:
+    """Apply persisted user declarations as a read-time override on placements.
+
+    ``edges`` is *every* persisted CONTAINS row (all lifecycles, including closed
+    and rejected history).  The live inference ledger is never mutated: this is
+    a pure overlay computed from the event-sourced edge rows, so a user move wins
+    over a higher-scoring inferred parent and survives later inference runs.
+
+    Rules, per child:
+
+    1. An in-force user/pinned CONTAINS edge declaring a parent wins outright
+       (latest ``valid_from``, then largest ``edge_id`` on a tie).
+    2. Otherwise, if the current parent pair was rejected, fall back to the
+       first alternative whose pair was not rejected; none left means an
+       explicit top-level placement (``reason="user_root"``).
+    3. Any child not covered is copied unchanged.
+
+    A new :class:`PlacementReport` is returned; the input is never mutated.
+    """
+    # Index in-force user declarations and rejected pairs by child, once.
+    by_child_user: dict[str, list[TopologyEdgeV3]] = {}
+    rejected_pairs: set[tuple[str, str]] = set()
+    rejected_children: set[str] = set()
+    for edge in edges:
+        if not _is_contains(edge):
+            continue
+        child = str(edge.target_endpoint_id)
+        parent = str(edge.source_endpoint_id)
+        lifecycle = _value(edge.lifecycle)
+        if lifecycle == TopologyEdgeState.REJECTED:
+            rejected_pairs.add((parent, child))
+            rejected_children.add(child)
+        if (
+            _in_force(edge)
+            and lifecycle == TopologyEdgeState.STRUCTURAL
+            and (edge.declared_by == "user" or edge.pinned)
+        ):
+            by_child_user.setdefault(child, []).append(edge)
+
+    def key(edge: TopologyEdgeV3) -> tuple[datetime, str]:
+        return (edge.valid_from, str(edge.edge_id))
+
+    result = PlacementReport()
+    for child, placement in report.by_child.items():
+        declarations = by_child_user.get(child)
+        if declarations:
+            chosen = max(declarations, key=key)
+            parent = str(chosen.source_endpoint_id)
+            result.by_child[child] = Placement(
+                child=child,
+                parent=parent,
+                band=BAND_HIGH,
+                score=1.0,
+                reason="user",
+                alternatives=tuple(
+                    (alt_parent, score)
+                    for alt_parent, score in placement.alternatives
+                    if alt_parent != parent
+                ),
+                both_legs=(),
+            )
+            continue
+
+        current = placement.parent
+        if current is not None and (str(current), child) in rejected_pairs:
+            fallback = next(
+                (
+                    (alt_parent, score)
+                    for alt_parent, score in placement.alternatives
+                    if (str(alt_parent), child) not in rejected_pairs
+                ),
+                None,
+            )
+            if fallback is None:
+                result.by_child[child] = Placement(
+                    child=child, parent=None, reason="user_root"
+                )
+            else:
+                alt_parent, score = fallback
+                band = (
+                    BAND_HIGH if score >= SCORE_HIGH
+                    else BAND_MEDIUM if score >= SCORE_MEDIUM
+                    else BAND_LOW
+                )
+                result.by_child[child] = Placement(
+                    child=child,
+                    parent=alt_parent,
+                    band=band,
+                    score=score,
+                    reason=None,
+                    alternatives=tuple(
+                        item for item in placement.alternatives if item[0] != alt_parent
+                    ),
+                    both_legs=(),
+                )
+            continue
+
+        # The live ledger adopts user rejections too (ADR-0046), so a child the
+        # user moved to the top level arrives here already unplaced.  It is
+        # still an explicit top-level decision, not a missing measurement.
+        if current is None and not placement.both_legs and child in rejected_children:
+            result.by_child[child] = Placement(child=child, parent=None, reason="user_root")
+            continue
+
+        result.by_child[child] = placement
+    return result
+
+
+def exclude_readers(report: PlacementReport, readers: frozenset[str] | set[str]) -> PlacementReport:
+    """Remove ``readers`` from a placement report and re-home their children.
+
+    A disabled sensor (``WM_DISABLED_SENSORS``) must vanish from the hierarchy.
+    Its own placement is dropped; a child placed under it moves to its best
+    remaining alternative parent, or becomes unplaced when none is left.  A
+    ``both_legs`` pair that loses a leg keeps only the remaining one as parent.
+    Pure; the input is never mutated.
+    """
+    gone = {str(r) for r in readers}
+    if not gone:
+        return report
+    result = PlacementReport()
+    for child, placement in report.by_child.items():
+        if child in gone:
+            continue
+        alternatives = tuple(item for item in placement.alternatives if str(item[0]) not in gone)
+        both = tuple(p for p in placement.both_legs if str(p) not in gone)
+        if placement.both_legs and len(both) < len(placement.both_legs):
+            if both:
+                result.by_child[child] = Placement(
+                    child=child, parent=both[0], band=BAND_MEDIUM,
+                    score=placement.score, reason=placement.reason,
+                    alternatives=alternatives, both_legs=(),
+                )
+            else:
+                result.by_child[child] = Placement(child=child)
+            continue
+        if placement.parent is not None and str(placement.parent) in gone:
+            if alternatives:
+                parent, score = alternatives[0]
+                band = (
+                    BAND_HIGH if score >= SCORE_HIGH
+                    else BAND_MEDIUM if score >= SCORE_MEDIUM
+                    else BAND_LOW
+                )
+                result.by_child[child] = Placement(
+                    child=child, parent=parent, band=band, score=score,
+                    reason=None, alternatives=alternatives[1:], both_legs=(),
+                )
+            else:
+                result.by_child[child] = Placement(child=child)
+            continue
+        if alternatives != placement.alternatives:
+            result.by_child[child] = Placement(
+                child=child, parent=placement.parent, band=placement.band,
+                score=placement.score, reason=placement.reason,
+                alternatives=alternatives, both_legs=placement.both_legs,
+            )
+            continue
+        result.by_child[child] = placement
+    return result

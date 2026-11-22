@@ -120,9 +120,13 @@ class MappingApiMixin:
         # The shared builder drops the storage-only ``metadata_json`` column,
         # loads each endpoint's revisions and skips a row that does not validate.
         try:
-            return list(endpoints_from_repo(self.db.repos.entities))
+            endpoints = list(endpoints_from_repo(self.db.repos.entities))
         except Exception:  # noqa: BLE001 - no S13 source -> no endpoints
             return []
+        # WM_DISABLED_SENSORS: a configured-off sensor is not a column and not a
+        # node in the panel tree (it measures nothing the engine should use).
+        gone = getattr(getattr(self, "disabled_sensors", None), "endpoint_ids", frozenset())
+        return [e for e in endpoints if str(e.endpoint_id) not in gone] if gone else endpoints
 
     def _matrix_topology_graph(self, endpoints: Sequence[Any], version_id: str) -> Any:
         """T1 graph over the active topology version's edges and the endpoints."""

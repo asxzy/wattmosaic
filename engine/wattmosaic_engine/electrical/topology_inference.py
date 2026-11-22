@@ -1101,6 +1101,22 @@ class TopologyInferenceView:
             )
         return self._placements  # type: ignore[return-value]
 
+    def with_user_authority(self, updates: Sequence[TopologyEdgeV3]) -> TopologyInferenceView:
+        """Adopt user-authority rewrites of ledger edges (ADR-0046, DEC-10).
+
+        A user reject or circuit move rewrites a persisted inferred row as
+        REJECTED/closed.  The ledger still holds its own in-memory copy under the
+        same ``edge_id``; the next fold or proposal would upsert that copy and
+        silently undo the user's decision.  Swapping in the rewritten rows makes
+        them dormant here too, and every fold leaves dormant edges alone.  Only
+        edges the ledger already holds are replaced; nothing is added.
+        """
+        by_id = {edge.edge_id: edge for edge in updates}
+        if not any(edge.edge_id in by_id for edge in self.edges):
+            return self
+        edges = tuple(by_id.get(edge.edge_id, edge) for edge in self.edges)
+        return replace(self, edges=edges, _placements=None)
+
     # -- incremental observations ------------------------------------------- #
     def observe_parent_only(self, reader_id: str, *, delta_w: float) -> TopologyInferenceView:
         """Record a parent-only step as neutral residual evidence (AT-02).

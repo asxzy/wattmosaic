@@ -627,6 +627,21 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 }
 .hier .hier-row:hover { background: var(--bg-elev-2); }
 
+/* ADR-0046: circuit drag-and-drop.  Only circuit rows are draggable; device
+   rows are leaves and never accept a drop.  All styling is class-based so the
+   ingress CSP never sees an inline style attribute. */
+.hier .hier-row[draggable="true"] { cursor: grab; }
+.hier .hier-row.is-dragging { opacity: .5; }
+.hier .hier-row.drop-ok { outline: 2px dashed var(--accent); outline-offset: 2px; }
+/* The drop zone is a sibling of the .hier body (not inside it), so it is styled
+   on its own class and shown by toggling .is-visible while a drag is live. */
+.hier-dropzone {
+  display: none; border: 2px dashed var(--line); padding: 8px; margin-bottom: 8px;
+  text-align: center; color: var(--text-mute);
+}
+.hier-dropzone.is-visible { display: block; }
+.hier-dropzone.drop-ok { border-color: var(--accent); color: var(--text); }
+
 .hier .hier-toggle,
 .hier .hier-toggle-spacer {
   flex: none; width: 20px; height: 20px; padding: 0;

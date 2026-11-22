@@ -31,6 +31,11 @@ import { suspectedChangesCard, versionHistoryCard } from './view-devices.js';
 const TREE_PATH = '/topology/tree';
 const V3_PATH = '/topology/v3';
 const ENDPOINTS_PATH = '/endpoints';
+
+// ADR-0046: the reader currently being dragged.  Set on dragstart, cleared on
+// dragend; module-level so the drop handlers on every row can read it without
+// threading it through the renderer.
+let draggedReader = null;
 const CT_TONES = { main: 'accent', branch: 'info' };
 // ADR-0029 retired the third CT role.  A payload from an older engine can
 // still carry it; ``STRINGS`` above aliases it to "Branch CT" so the badge
@@ -690,6 +695,89 @@ const toEntry = (node) => ({
   kids: (node.children || []).map(toEntry),
 });
 
+/* --- Circuit moves: pure helpers (ADR-0046, node-testable) -------------- *
+ * The engine owns topology.  These helpers only answer "may the user move
+ * this circuit there?" from the tree the engine sent; they never derive a
+ * parent or mutate the tree.  Devices are leaves and never move or accept a
+ * drop.  ``both_legs`` readers appear more than once, so reader ids are
+ * deduplicated everywhere.
+ * ---------------------------------------------------------------------- */
+
+// Every reader_id below ``readerId``, across all occurrences.  Device nodes
+// are ignored: they are not circuits and cannot be move targets.
+function descendantReaders(nodes, readerId) {
+  const out = new Set();
+  const walk = (list, ancestorMatched) => {
+    for (const node of list || []) {
+      if (!node || typeof node !== 'object') continue;
+      const matches = node.kind === 'circuit'
+        && String(node.reader_id || '') === String(readerId);
+      const under = ancestorMatched || matches;
+      if (under && !matches && node.kind === 'circuit' && node.reader_id) {
+        out.add(String(node.reader_id));
+      }
+      walk(node.children, under);
+    }
+  };
+  walk(nodes, false);
+  return out;
+}
+
+// The reader's current parent, if the tree places it under a circuit.  A
+// circuit may occur more than once (both_legs), so collect every parent.
+function parentReaders(nodes, readerId) {
+  const parents = new Set();
+  const walk = (list, parent) => {
+    for (const node of list || []) {
+      if (!node || typeof node !== 'object') continue;
+      const isCircuit = node.kind === 'circuit' && node.reader_id;
+      const next = isCircuit ? String(node.reader_id) : parent;
+      if (isCircuit && String(node.reader_id) === String(readerId) && parent) {
+        parents.add(parent);
+      }
+      walk(node.children, next);
+    }
+  };
+  walk(nodes, null);
+  return parents;
+}
+
+// Every circuit reader in the tree, deduped, excluding itself, its descendants
+// and its current parent(s).  Returns [{reader_id, label}] sorted by label.
+function validMoveTargets(nodes, readerId) {
+  const descendants = descendantReaders(nodes, readerId);
+  const parents = parentReaders(nodes, readerId);
+  const seen = new Map();
+  const walk = (list) => {
+    for (const node of list || []) {
+      if (!node || typeof node !== 'object') continue;
+      if (node.kind === 'circuit' && node.reader_id) {
+        const id = String(node.reader_id);
+        if (id !== String(readerId) && !descendants.has(id) && !parents.has(id) && !seen.has(id)) {
+          seen.set(id, { reader_id: id, label: String(node.label || id) });
+        }
+      }
+      walk(node.children);
+    }
+  };
+  walk(nodes);
+  return [...seen.values()].sort((a, b) => a.label.localeCompare(b.label));
+}
+
+// True when ``targetReaderId`` is null (top level) or an allowed parent.
+function canDropOn(nodes, readerId, targetReaderId) {
+  if (targetReaderId === null || targetReaderId === undefined || targetReaderId === '') return true;
+  return validMoveTargets(nodes, readerId).some((t) => t.reader_id === String(targetReaderId));
+}
+
+// The only write in the move flow: POST /topology/circuits/{id}/parent.  A
+// null parent sends {parent: null} and means "make this a top-level circuit".
+async function moveCircuit(readerId, parentId, http = post) {
+  return http(`/topology/circuits/${encodeURIComponent(String(readerId))}/parent`, {
+    parent: parentId === undefined ? null : parentId,
+  });
+}
+
 function topologyHierarchyCard(topology, tree) {
   const body = el('div', {
     id: 'topology-hierarchy-body',
@@ -709,9 +797,101 @@ function topologyHierarchyCard(topology, tree) {
   // change while the card is on screen.
   const nodes = hierarchyNodes(topology, tree);
 
+  // ADR-0046: drag-and-drop is only available when the
+  // hierarchy came from the engine.  The legacy fallback stays read-only.
+  const canMove = Boolean(tree);
+  const labelOf = (readerId) => {
+    let found = String(readerId);
+    const walk = (list) => {
+      for (const node of list || []) {
+        if (!node || typeof node !== 'object') continue;
+        if (node.kind === 'circuit' && String(node.reader_id) === String(readerId)) {
+          // A shared name ("l1") is ambiguous in a confirm dialog: add the id.
+          const name = String(node.label || node.reader_id);
+          found = node.subtitle && String(node.subtitle) !== name ? `${name} (${node.subtitle})` : name;
+          return;
+        }
+        walk(node.children);
+      }
+    };
+    walk(nodes);
+    return found;
+  };
+
+  const clearHighlights = () => {
+    body.classList?.remove?.('is-dragging');
+    for (const row of body.querySelectorAll?.('.hier-row') || []) {
+      row.classList?.remove?.('drop-ok');
+      row.classList?.remove?.('is-dragging');
+    }
+    dropzone?.classList?.remove?.('drop-ok');
+    dropzone?.classList?.remove?.('is-visible');
+  };
+
+  const endDrag = () => {
+    draggedReader = null;
+    clearHighlights();
+  };
+
+  const confirmAndMove = (readerId, parentId) => {
+    const childLabel = labelOf(readerId);
+    const parentLabel = parentId === null || parentId === undefined || parentId === ''
+      ? ''
+      : labelOf(parentId);
+    const question = `Move ${childLabel} under ${parentLabel || 'the top level'}? `
+      + 'This overrides what the engine inferred.';
+    if (!window.confirm(question)) return;
+    moveCircuit(readerId, parentId || null).then(
+      () => {
+        endDrag();
+        notify('Circuit moved', 'The topology was updated; inference will not undo this.');
+        render();
+      },
+      (err) => notify('Could not move circuit', describeError(err), 'bad')
+    );
+  };
+
+  const moveCtx = canMove ? {
+    nodes,
+    confirmAndMove,
+    endDrag,
+    clearHighlights,
+    setDragged: (readerId) => {
+      draggedReader = readerId;
+      body.classList?.add?.('is-dragging');
+      // Reveal the top-level zone on the next tick: changing layout inside
+      // dragstart itself makes Chrome cancel the drag.
+      setTimeout(() => {
+        if (draggedReader) dropzone?.classList?.add?.('is-visible');
+      }, 0);
+    },
+    dragged: () => draggedReader,
+  } : null;
+
+  const dropzone = canMove
+    ? el('div', {
+      class: 'hier-dropzone',
+      dataset: { target: 'root' },
+      ondragover: (event) => {
+        if (!draggedReader) return;
+        if (canDropOn(nodes, draggedReader, null)) {
+          event.preventDefault?.();
+          dropzone.classList?.add?.('drop-ok');
+        }
+      },
+      ondragleave: () => dropzone.classList?.remove?.('drop-ok'),
+      ondrop: (event) => {
+        event.preventDefault?.();
+        const child = draggedReader;
+        endDrag();
+        if (child) confirmAndMove(child, null);
+      },
+    }, 'Drop here to make it a top-level circuit')
+    : null;
+
   const repaint = (options) => {
     const focusKey = options && options.focusKey;
-    const count = paintHierarchy(body, nodes, repaint);
+    const count = paintHierarchy(body, nodes, repaint, moveCtx);
     if (focusKey) {
       // The button that was clicked no longer exists: the whole list was
       // rebuilt.  Put focus back on its equivalent so keyboard use does not
@@ -779,16 +959,16 @@ function topologyHierarchyCard(topology, tree) {
     },
   }, 'Collapse all');
 
-  const node = card('Hierarchy', [status, body], {
+  const node = card('Hierarchy', [status, dropzone, body].filter(Boolean), {
     id: 'topology-hierarchy',
     actions: [filter, expandAll, collapseAll],
     foot: tree
-      ? `Computed by the engine${tree.version !== undefined ? ` (contract v${tree.version})` : ''} at ${ago(tree.generated_at)}. Each device appears once, under the circuit that measures it.`
+      ? `Computed by the engine${tree.version !== undefined ? ` (contract v${tree.version})` : ''} at ${ago(tree.generated_at)}. Each device appears under the circuit it is mapped to. Drag a circuit onto another circuit (or the top-level zone) to correct its parent; your choice overrides inference.`
       : 'Fallback view: containment from structural CONTAINS edges only. Devices are not placed.',
   });
 
   // Paint in the same task as the card so the tree is never a frame late.
-  const shown = paintHierarchy(body, nodes, repaint);
+  const shown = paintHierarchy(body, nodes, repaint, moveCtx);
   // The layout actually used, recorded on the card so a bug report can name
   // it without re-deriving it from the markup.
   node.dataset.layout = tree ? 'tree' : 'legacy';
@@ -817,7 +997,7 @@ function setAllExpanded(nodes, open) {
 // the focus-restoring repaint lives in one place.  ``nodes`` is computed once
 // by the caller; nothing here re-clones the engine's tree.  Returns the row
 // count so the caller can announce it without another DOM query.
-function paintHierarchy(body, nodes, onToggle) {
+function paintHierarchy(body, nodes, onToggle, moveCtx = null) {
   if (!body) return 0;
   clear(body);
 
@@ -851,6 +1031,7 @@ function paintHierarchy(body, nodes, onToggle) {
     defaults: defaultOpenSet(nodes),
     forcedOpen,
     repaint: onToggle,
+    moveCtx,
     // Incremented by ``renderEntry`` for every row actually appended, so the
     // row count costs nothing extra: no second DOM query, no second walk.
     count: 0,
@@ -891,14 +1072,45 @@ function renderEntry(entry, depth, ctx) {
 function hierarchyRow(node, depth, expanded, key, ctx, childCount) {
   const kind = String(node.kind || 'node');
   const band = placementBand(node);
+  const moveCtx = ctx.moveCtx;
+  const readerId = node.reader_id === undefined || node.reader_id === null
+    ? null
+    : String(node.reader_id);
+  const movable = Boolean(moveCtx && kind === 'circuit' && readerId);
   const row = el('div', {
     class: 'hier-row',
+    ...(movable ? { draggable: 'true', 'data-reader-id': readerId } : {}),
     dataset: {
       kind,
       depth: String(depth),
       ...(band ? { band } : {}),
       ...(node.structural === true ? { structural: 'true' } : {}),
     },
+    ...(movable ? {
+      ondragstart: (event) => {
+        moveCtx.setDragged(readerId);
+        event.dataTransfer?.setData?.('text/plain', readerId);
+        if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+        row.classList?.add?.('is-dragging');
+      },
+      ondragend: () => moveCtx.endDrag(),
+      ondragover: (event) => {
+        const dragged = moveCtx.dragged();
+        if (!dragged || !canDropOn(moveCtx.nodes, dragged, readerId)) return;
+        event.preventDefault?.();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+        row.classList?.add?.('drop-ok');
+      },
+      ondragleave: () => {
+        row.classList?.remove?.('drop-ok');
+      },
+      ondrop: (event) => {
+        event.preventDefault?.();
+        const dragged = moveCtx.dragged();
+        moveCtx.endDrag();
+        if (dragged) moveCtx.confirmAndMove(dragged, readerId);
+      },
+    } : {}),
   });
 
   if (expanded === null) {
@@ -960,7 +1172,9 @@ function hierarchyRow(node, depth, expanded, key, ctx, childCount) {
     if (node.subtitle && String(node.subtitle) !== String(name)) {
       row.append(el('span', { class: 'hier-sub' }, node.subtitle));
     }
-    row.append(badge(label(node.ct_type || 'unknown'), ctTone(node.ct_type)));
+    // The engine's placement tree carries no CT role; a badge reading
+    // "Unknown" on every row is noise, so only a declared role is shown.
+    if (node.ct_type) row.append(badge(label(node.ct_type), ctTone(node.ct_type)));
     if (node.phase && node.phase !== 'unknown') row.append(badge(label(node.phase), 'mute'));
     // Direct-child summary: how many fixtures sit here, and how many of them
     // the engine actually measured.  A circuit with no device children keeps
@@ -1278,6 +1492,10 @@ export {
   discoverySummary,
   acceptProvisionalEdge,
   rejectProvisionalEdge,
+  moveCircuit,
+  descendantReaders,
+  validMoveTargets,
+  canDropOn,
   v3EdgesCard,
   TREE_PATH,
   V3_PATH,

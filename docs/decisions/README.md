@@ -2403,3 +2403,46 @@ STRUCTURAL is suppressed like a declared one for T5. All new data lives in API
 payload dicts; there is still no contract change.
 
 ---
+
+## ADR-0046 — Circuit moves are user declarations applied over placements
+
+**Status:** Accepted · 2026-11-22 · Cites DEC-10, ADR-0043, ADR-0045
+
+**Context.** The panel hierarchy is built from one placement per child at any
+confidence (ADR-0045), but a placement is only a display guess: when inference
+gets a parent wrong there was no way for a user to correct it from the Topology
+tab. The live inference ledger is seeded from the active version only at
+startup, so a new user edge does not change `report.by_child` until restart.
+Devices were also missing from the placement tree: it rebuilt circuit rows only
+and discarded the device nodes `build_display_tree_v3` had attached.
+
+**Decision.**
+
+1. **Atomic move endpoint.** `POST /topology/circuits/{reader_id}/parent` takes
+   `{"parent": "<endpoint_id>"}` or `{"parent": null}` (top level). It closes
+   in-force user parent edges and rejects in-force inferred parent edges for the
+   child, declares one pinned `CONTAINS` edge for a non-null new parent, records
+   one `ConfigurationEvent` and promotes one topology version. A cycle is
+   refused before any write; an unchanged move is a no-op that returns 200.
+   Power models and mapping edges are never touched.
+2. **Read-time override.** A pure `apply_user_placements(report, edges)` overlays
+   the persisted CONTAINS history on the ledger's `PlacementReport` for both
+   `/topology/tree` and `/topology/v3`: an in-force user/pinned edge wins over a
+   higher-scoring inferred parent, a rejected current pair falls back to the
+   first non-rejected alternative, and no alternative yields an explicit
+   `user_root` placement. New `reason` values `"user"` and `"user_root"` are
+   API-payload strings; there is no contract change.
+3. **Devices follow the mapping.** Each circuit node in the placement tree gets
+   the device rows its reader maps to, after its sub-circuits; readers unknown
+   to topology get an "Unplaced devices" group. The panel lets the user drag a
+   circuit onto another circuit (or a top-level drop zone), behind a
+   confirmation. Drag-and-drop is the only move gesture; the earlier "Move…"
+   button was dropped as redundant.
+
+**Consequences.** The live ledger is never mutated; user authority wins in
+display through the read-time overlay and in H through T1's existing
+user pin/reject override rule, and survives later inference runs. The panel
+still computes no power (ADR-0001) and reads no HA registry (ADR-0028). A broken
+placement-history read degrades to the unmodified tree, never a 500.
+
+---

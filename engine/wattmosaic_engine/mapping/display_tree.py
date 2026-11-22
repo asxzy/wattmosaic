@@ -27,6 +27,33 @@ def _walk(nodes: Iterable[Mapping[str, Any]]) -> Iterable[Mapping[str, Any]]:
         stack.extend(reversed(node.get("children") or ()))
 
 
+def device_node(
+    subject: Mapping[str, Any], reader_id: str, depth: int
+) -> dict[str, Any]:
+    """Build one ``kind: "device"`` display node for a mapped subject.
+
+    Public so read-time tree builders (``SnapshotMixin._placement_roots``) can
+    attach the same device rows the classic display tree uses.  The shape is
+    deliberately identical to the one ``build_display_tree_v3`` has always
+    emitted; this function never appends to a caller's bookkeeping list.
+    """
+    lifecycle = subject.get("lifecycle")
+    return {
+        "id": f"device:{subject['device_id']}@{reader_id}",
+        "kind": "device",
+        "label": subject.get("label") or subject["device_id"],
+        "device_id": subject["device_id"],
+        "depth_hint": depth,
+        "reader_id": reader_id,
+        "latest_power_w": None,
+        "measurement": None,
+        "mapping_lifecycle": lifecycle,
+        "declared_by": subject.get("declared_by"),
+        "subtitle": f"mapped to this circuit ({lifecycle})" if lifecycle else None,
+        "children": [],
+    }
+
+
 def build_display_tree_v3(
     graph: TopologyGraph,
     *,
@@ -57,21 +84,7 @@ def build_display_tree_v3(
     placed_devices: list[dict[str, Any]] = []
 
     def _device(subject: Mapping[str, Any], reader_id: str, depth: int) -> dict[str, Any]:
-        lifecycle = subject.get("lifecycle")
-        node = {
-            "id": f"device:{subject['device_id']}@{reader_id}",
-            "kind": "device",
-            "label": subject.get("label") or subject["device_id"],
-            "device_id": subject["device_id"],
-            "depth_hint": depth,
-            "reader_id": reader_id,
-            "latest_power_w": None,
-            "measurement": None,
-            "mapping_lifecycle": lifecycle,
-            "declared_by": subject.get("declared_by"),
-            "subtitle": f"mapped to this circuit ({lifecycle})" if lifecycle else None,
-            "children": [],
-        }
+        node = device_node(subject, reader_id, depth)
         placed_devices.append(node)
         return node
 
@@ -135,4 +148,4 @@ def build_display_tree_v3(
     }
 
 
-__all__ = ["TREE_VERSION", "build_display_tree_v3"]
+__all__ = ["TREE_VERSION", "build_display_tree_v3", "device_node"]

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -23,6 +24,9 @@ from ..contracts import (
 )
 from ..devices.service import endpoints_from_repo
 from ..electrical.topology_graph import DisplayNode, TopologyGraph
+from ..electrical.topology_placement import apply_user_placements, exclude_readers
+
+log = logging.getLogger("wattmosaic.main")
 
 # --------------------------------------------------------------------------- #
 # T4 — event-sourced v3 topology service.
@@ -139,6 +143,9 @@ class TopologyService:
 
     def reject(self, edge_id: str) -> dict[str, Any]:
         return self._call(reject_edge, edge_id)
+
+    def move(self, child: str, parent: str | None) -> dict[str, Any]:
+        return self._call(move_circuit, child, parent)
 
     def edit_config(self, endpoint_id: str, changes: Mapping[str, Any]) -> dict[str, Any]:
         return self._call(edit_endpoint_config, endpoint_id, changes)
@@ -261,6 +268,24 @@ def _active_edges(service: Any) -> list[TopologyEdgeV3]:
     """Every edge referenced by the active version, as contract models."""
     vid = service.current().topology_version_id
     return [TopologyEdgeV3(**_edge_row(row)) for row in service._topo.edges(vid)]
+
+
+def _contains_rows(db: Any) -> list[dict[str, Any]]:
+    """Every persisted CONTAINS row (all lifecycles, closed/rejected included).
+
+    Shared by ``with_placements`` and the panel tree so user authority reads the
+    same event-sourced history.  A broken read degrades to an empty list — a
+    read overlay never turns into a 500 (ADR-0046).
+    """
+    try:
+        rows = db.repos.topology_v3.edges()
+    except Exception:  # noqa: BLE001 - degraded read, never a 500
+        log.debug("contains rows unavailable for placement overlay", exc_info=True)
+        return []
+    return [
+        row for row in rows
+        if _value(row.get("relation")) == RelationType.CONTAINS.value
+    ]
 
 
 def _propose_and_promote(
@@ -432,6 +457,179 @@ def reject_edge(service: Any, edge_id: str) -> dict[str, Any]:
     return _set_edge_authority(service, edge_id, pin=False)
 
 
+def _effective_parents(rows: Sequence[dict[str, Any]]) -> dict[str, tuple[str, dict[str, Any]]]:
+    """One effective parent per child: user authority first, then STRUCTURAL.
+
+    Only in-force CONTAINS rows participate.  A user/pinned row outranks an
+    inferred one for the same child; ties break on the latest ``valid_from``
+    then the edge id.  Used for the cycle guard in :func:`move_circuit`.
+    """
+    by_child: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        if _value(row.get("relation")) != RelationType.CONTAINS.value:
+            continue
+        if row.get("valid_until") is not None:
+            continue
+        if _value(row.get("lifecycle")) in ("rejected", "retired"):
+            continue
+        child = str(row["target_endpoint_id"])
+        by_child.setdefault(child, []).append(row)
+
+    def rank(row: dict[str, Any]) -> tuple[int, str, str]:
+        user = 0 if row.get("declared_by") == "user" or row.get("pinned") else 1
+        valid_from = str(row.get("valid_from") or "")
+        return (user, valid_from, str(row["edge_id"]))
+
+    return {
+        child: (str(best["source_endpoint_id"]), best)
+        for child, options in by_child.items()
+        for best in [max(options, key=rank)]
+    }
+
+
+def move_circuit(service: Any, child: str, parent: str | None) -> dict[str, Any]:
+    """Move a circuit under ``parent`` (or to the top level when ``None``).
+
+    A user declaration is authoritative (DEC-10, ADR-0046): other in-force
+    parent edges are closed (user) or rejected (inferred) so inference cannot
+    re-promote them, and a pinned user CONTAINS edge is declared for the new
+    parent.  One ``ConfigurationEvent`` is recorded and one version promoted.
+    Nothing touches power models or mapping edges, and the live inference ledger
+    is never mutated — the display overlay reads the persisted rows.
+    """
+    endpoints = {str(e["endpoint_id"]) for e in service._endpoints.endpoints()}
+    if child not in endpoints:
+        raise NotFound(f"no endpoint {child!r}")
+    if parent is not None:
+        if parent not in endpoints:
+            raise NotFound(f"no endpoint {parent!r}")
+        if parent == child:
+            raise InvalidRequest("a circuit cannot be its own parent")
+
+    at = _now(service)
+    repo = service._topo
+    all_rows = repo.edges()
+
+    # Cycle guard first: walk the would-be parent chain of ``parent`` over the
+    # effective structure.  Refuse before any write when it reaches ``child``.
+    if parent is not None:
+        effective = _effective_parents(all_rows)
+        # The new edge replaces child's own parent; exclude it from the chain.
+        effective.pop(child, None)
+        effective[child] = (parent, {})
+        seen: set[str] = set()
+        cursor: str | None = parent
+        while cursor is not None and cursor not in seen:
+            if cursor == child:
+                raise InvalidRequest(f"moving {child} under {parent} would create a cycle")
+            seen.add(cursor)
+            cursor = effective.get(cursor, (None, {}))[0]
+
+    # Close or reject every other in-force CONTAINS edge targeting the child.
+    closed_edge_ids: list[str] = []
+    to_write: list[TopologyEdgeV3] = []
+    for row in all_rows:
+        if _value(row.get("relation")) != RelationType.CONTAINS.value:
+            continue
+        if str(row.get("target_endpoint_id")) != child:
+            continue
+        if row.get("valid_until") is not None:
+            continue
+        if _value(row.get("lifecycle")) in ("rejected", "retired"):
+            continue
+        if str(row.get("source_endpoint_id")) == parent:
+            continue
+        updated = _edge_row(row)
+        if row.get("declared_by") == "user":
+            updated["valid_until"] = at
+        else:
+            updated["valid_until"] = at
+            updated["lifecycle"] = TopologyEdgeState.REJECTED.value
+        to_write.append(TopologyEdgeV3(**updated))
+        closed_edge_ids.append(str(row["edge_id"]))
+
+    # Declare a pinned user edge for a new parent unless one is already in force.
+    edge_id: str | None = None
+    new_edge: TopologyEdgeV3 | None = None
+    if parent is not None:
+        existing = _in_force_row(
+            all_rows, relation=RelationType.CONTAINS.value, source=parent, target=child
+        )
+        if existing is not None and existing.get("declared_by") == "user":
+            edge_id = str(existing["edge_id"])
+        else:
+            base_id = _edge_id(RelationType.CONTAINS.value, parent, child)
+            family = [
+                r for r in all_rows
+                if str(r["edge_id"]) == base_id or str(r["edge_id"]).startswith(base_id + "-r")
+            ]
+            edge_id = base_id if not family else f"{base_id}-r{len(family) + 1}"
+            new_edge = TopologyEdgeV3(
+                edge_id=edge_id,
+                relation=RelationType.CONTAINS,
+                source_endpoint_id=parent,
+                target_endpoint_id=child,
+                lifecycle=TopologyEdgeState.STRUCTURAL,
+                declared_by="user",
+                evidence=EdgeEvidence(),
+                valid_from=at,
+                pinned=True,
+                beta=1.0,
+                beta_basis="unity",
+            )
+            to_write.append(new_edge)
+
+    # No-op: the child already has exactly the requested user parent and there
+    # is nothing else to close or reject.  Return 200 without a new version.
+    if not to_write:
+        return {
+            "version_id": str(service.current().topology_version_id),
+            "event_id": None,
+            "child": child,
+            "parent": parent,
+            "edge_id": edge_id,
+            "closed_edge_ids": [],
+        }
+
+    # T1 validation before the event-sourced writes.  Cycle problems are already
+    # rejected explicitly above; any other inconsistency is a 400 too.
+    active = [e for e in _active_edges(service) if e.edge_id not in closed_edge_ids]
+    if new_edge is not None:
+        active.append(new_edge)
+    graph = TopologyGraph.from_edges(active, at=at)
+    if not graph.is_consistent():
+        raise InvalidRequest("; ".join(graph.validate()))
+
+    for edge in to_write:
+        repo.upsert_edge(edge)
+
+    version = service.current().topology_version_id
+    event = ConfigurationEvent(
+        event_id=f"evt-move-{child}-{int(at.timestamp())}",
+        kind="circuit_reconfiguration",
+        detection="declared",
+        status="confirmed",
+        affected_endpoint_ids=[child] + ([parent] if parent else []) + [
+            str(r.get("source_endpoint_id")) for r in all_rows
+            if str(r.get("edge_id")) in closed_edge_ids
+        ],
+        affected_edge_ids=closed_edge_ids + ([edge_id] if edge_id else []),
+        created_at=at,
+    )
+    proposed = [e for e in _active_edges(service) if e.edge_id not in closed_edge_ids]
+    if new_edge is not None:
+        proposed.append(new_edge)
+    version = _propose_and_promote(service, proposed, event, "user move")
+    return {
+        "version_id": version,
+        "event_id": event.event_id,
+        "child": child,
+        "parent": parent,
+        "edge_id": edge_id,
+        "closed_edge_ids": closed_edge_ids,
+    }
+
+
 def _display_node_dict(node: DisplayNode) -> dict[str, Any]:
     return {
         "label": node.label,
@@ -442,17 +640,31 @@ def _display_node_dict(node: DisplayNode) -> dict[str, Any]:
     }
 
 
-def with_placements(result: dict[str, Any], ledger: Any) -> dict[str, Any]:
+def with_placements(
+    result: dict[str, Any],
+    ledger: Any,
+    db: Any = None,
+    disabled: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
     """E6 §1: add each reader's placement to the v3 payload.
 
     Placement is display/diagnostic only; the active version's edges and the
     primary display tree are unchanged.  A caller can build the panel hierarchy
     from ``placements`` while still seeing which links are structural (the
-    version edges' ``in_version`` / ``lifecycle`` fields).
+    version edges' ``in_version`` / ``lifecycle`` fields).  Persisted user
+    declarations are overlaid so ``/topology/v3`` agrees with ``/topology/tree``
+    (ADR-0046).
     """
     report = getattr(ledger, "placements", None) if ledger is not None else None
     if report is None:
         return result
+    try:
+        report = apply_user_placements(
+            report, [TopologyEdgeV3(**_edge_row(row)) for row in _contains_rows(db)]
+        )
+    except Exception:  # noqa: BLE001 - degraded read, never a 500
+        log.debug("user placement overlay unavailable for /topology/v3", exc_info=True)
+    report = exclude_readers(report, disabled)
     result["placements"] = report.as_dict()
     return result
 
@@ -831,7 +1043,10 @@ class TopologyApiMixin:
         ledger = getattr(self, "topology_inference", None)
         book = getattr(ledger, "health", None)
         return with_placements(
-            with_edge_health(with_evidence_detail(result, ledger), book), ledger
+            with_edge_health(with_evidence_detail(result, ledger), book),
+            ledger,
+            self.db,
+            getattr(getattr(self, "disabled_sensors", None), "endpoint_ids", frozenset()),
         )
 
     def topology_versions(self, version_id: str | None = None) -> Any:
@@ -848,7 +1063,36 @@ class TopologyApiMixin:
         return self._v3_topology_service().pin(edge_id)
 
     def reject_topology_edge(self, edge_id: str) -> dict[str, Any]:
-        return self._v3_topology_service().reject(edge_id)
+        result = self._v3_topology_service().reject(edge_id)
+        self._sync_ledger_authority([edge_id])
+        return result
+
+    def move_circuit(self, reader_id: str, parent: str | None) -> dict[str, Any]:
+        """Move a circuit under a new parent (or to the top level)."""
+        result = self._v3_topology_service().move(reader_id, parent)
+        self._sync_ledger_authority(result.get("closed_edge_ids") or ())
+        return result
+
+    def _sync_ledger_authority(self, edge_ids: Sequence[str]) -> None:
+        """Push user-rejected/closed rows into the live ledger (ADR-0046).
+
+        Without this the ledger's in-memory copy of a rejected inferred edge is
+        re-persisted by the next fold and the user's correction reverts.  Best
+        effort: a failure leaves the persisted decision in place and is logged.
+        """
+        ledger = getattr(self, "topology_inference", None)
+        if ledger is None or not edge_ids:
+            return
+        try:
+            repo = self.db.repos.topology_v3
+            updates = []
+            for edge_id in edge_ids:
+                history = repo.edge_history(edge_id)
+                if history:
+                    updates.append(TopologyEdgeV3(**_edge_row(history[-1])))
+            self.topology_inference = ledger.with_user_authority(updates)
+        except Exception:  # noqa: BLE001 - degraded, never a crash
+            log.warning("live topology ledger not updated after user decision", exc_info=True)
 
     def edit_endpoint_config(self, endpoint_id: str, changes: Mapping[str, Any]) -> dict[str, Any]:
         return self._v3_topology_service().edit_config(endpoint_id, changes)

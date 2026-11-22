@@ -803,6 +803,11 @@ async function render() {
     }
     state.lastError = null;
     hideBanner();
+    // A view that just rendered from the engine proves it is reachable.  On a
+    // cold load straight onto a non-overview view there is no poll, so a single
+    // failed boot probe (engine still starting) left "Engine unreachable" up
+    // for good; re-probe once instead.
+    if (document.getElementById('conn')?.dataset.state === 'offline') pollTick();
   } catch (err) {
     if (err && err.name === 'AbortError') return;
     state.lastError = err;

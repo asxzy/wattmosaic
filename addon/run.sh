@@ -55,6 +55,7 @@ retention_days_versions|WM_RETENTION_DAYS_VERSIONS|
 raw_capture_days|WM_RAW_CAPTURE_DAYS|0
 queue_max_size|WM_QUEUE_MAX_SIZE|5000
 auto_placement|WM_AUTO_PLACEMENT|false
+disabled_sensors|WM_DISABLED_SENSORS|
 "
 
 OPTIONS_FILE="${WM_OPTIONS_FILE:-/data/options.json}"

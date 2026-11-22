@@ -56,6 +56,7 @@ ROUTE_SNAPSHOT: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/v1/topology/versions"),
         ("GET", "/api/v1/topology/versions/{version_id}"),
         ("POST", "/api/v1/topology/edges"),
+        ("POST", "/api/v1/topology/circuits/{reader_id}/parent"),
         ("POST", "/api/v1/topology/edges/{edge_id}/pin"),
         ("POST", "/api/v1/topology/edges/{edge_id}/reject"),
         ("PUT", "/api/v1/topology/endpoints/{endpoint_id}/config"),

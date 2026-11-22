@@ -1,0 +1,27 @@
+# Dev auto-reload overlay: run the engine and panel from this checkout's
+# source and restart the engine whenever a source file changes.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+#                  -f docker-compose.reload.yml up -d --build
+#   docker compose logs -f engine        # look for component=reload lines
+#
+# * engine/wattmosaic_engine is bind-mounted over the installed package; edits
+#   restart the engine in place (tools/dev/reload_engine.py, polling 1 s).
+# * addon/ui is bind-mounted over /app/ui; the gateway reads panel files per
+#   request, so panel edits only need a browser reload — no engine restart.
+# * Rebuild (--build) after changing dependencies, Dockerfile, run.sh or
+#   gateway.py: those are baked into the image and are not watched.
+#
+# Dev only: never use this overlay for a real install.
+
+services:
+  engine:
+    environment:
+      WM_AUTO_PLACEMENT: ${WM_AUTO_PLACEMENT:-true}
+      WM_RELOAD_PATHS: /opt/venv/lib/python3.12/site-packages/wattmosaic_engine
+    volumes:
+      - ./engine/wattmosaic_engine:/opt/venv/lib/python3.12/site-packages/wattmosaic_engine:ro
+      - ./addon/ui:/app/ui:ro
+      # run.sh execs /opt/venv/bin/wattmosaic-engine; replace it with the
+      # reload supervisor, which runs `python -m wattmosaic_engine.main`.
+      - ./tools/dev/reload_engine.py:/opt/venv/bin/wattmosaic-engine:ro

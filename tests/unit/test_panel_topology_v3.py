@@ -405,6 +405,157 @@ def test_hierarchy_renders_placement_bands_and_chips() -> None:
     _assert_only_3_0_reads(result["requests"])
 
 
+def test_hierarchy_shows_devices_and_move_controls() -> None:
+    """ADR-0046: device rows appear under circuits; circuits are draggable."""
+    _require_node()
+    tree = {
+        "version": 2,
+        "generated_at": T0,
+        "stats": {"devices": 2},
+        "roots": [
+            {
+                "id": "reader:ct_feed", "kind": "circuit", "label": "Main feed",
+                "reader_id": "ct_feed", "children": [
+                    {
+                        "id": "reader:ct_oven", "kind": "circuit", "label": "Oven",
+                        "reader_id": "ct_oven", "children": [
+                            {"id": "device:dev_oven@ct_oven", "kind": "device",
+                             "label": "Oven fixture", "device_id": "dev_oven",
+                             "reader_id": "ct_oven", "children": []},
+                            {"id": "device:dev_lamp@ct_oven", "kind": "device",
+                             "label": "Lamp", "device_id": "dev_lamp",
+                             "reader_id": "ct_oven", "children": []},
+                        ],
+                    },
+                ],
+            },
+        ],
+        "flat": {"panels": [], "circuits": [], "devices": []},
+        "notes": [],
+    }
+    program = (
+        "import { renderTopology } from './view-topology.js';\n"
+        "import { slots } from './slots.js';\n"
+        "import { topologyLearningBanner, topologyDiscoverSlot, discoverWindowSelect } from './view-discover.js';\n"
+        "Object.assign(slots, { topologyLearningBanner, topologyDiscoverSlot, discoverWindowSelect,\n"
+        "  runDiscovery: () => {}, reviewTopologyEdges: () => {} });\n"
+        f"globalThis.__api = {lit(_api(tree=tree))};\n"
+        "const root = document.createElement('div');\n"
+        "document.body.append(root);\n"
+        "const ctl = new AbortController();\n"
+        "await renderTopology(root, ctl.signal);\n"
+        "const rows = [];\n"
+        "const walk = (n) => { for (const c of n.children || []) { if (String(c.className || '').includes('hier-row')) { rows.push({ kind: c.dataset.kind, draggable: c.attrs.draggable || null, reader: c.attrs['data-reader-id'] || null, text: c.textContent }); } walk(c); } };\n"
+        "walk(root);\n"
+        "const moves = [];\n"
+        "const walk2 = (n) => { for (const c of n.children || []) { if (c.className && String(c.className).includes('hier-move')) moves.push(c.getAttribute('aria-label')); walk2(c); } };\n"
+        "walk2(root);\n"
+        "const text = root.textContent;\n"
+        "console.log(JSON.stringify({ text, rows, moves, requests: __requests, dropzone: text.includes('Drop here to make it a top-level circuit'), dragHint: text.includes('Drag a circuit onto another circuit (or the top-level zone) to correct its parent') }));\n"
+    )
+    result = run_esm(program, shim=EVENT_DOM_SHIM + _FETCH_STUB)
+    text = result["text"]
+    assert "Oven fixture" in text and "Lamp" in text
+    assert "2 devices" in text
+    rows = result["rows"]
+    circuits = [r for r in rows if r["kind"] == "circuit"]
+    devices = [r for r in rows if r["kind"] == "device"]
+    assert circuits and devices
+    assert all(r["draggable"] == "true" and r["reader"] for r in circuits)
+    assert all(r["draggable"] is None for r in devices)
+    # Drag-and-drop is the only way to move a circuit: no Move… button.
+    assert result["moves"] == []
+    assert "Move…" not in text
+    assert result["dropzone"] is True
+    assert result["dragHint"] is True
+    # The engine tree carries no CT role: no "Unknown" badge on every row.
+    assert all("Unknown" not in r["text"] for r in circuits)
+    _assert_only_3_0_reads(result["requests"])
+
+
+def test_top_level_drop_zone_is_hidden_until_a_drag_starts() -> None:
+    """Regression: the zone sits beside the .hier body, so the old
+    ``.hier .hier-dropzone`` rules never matched and it was always shown."""
+    from pathlib import Path
+
+    css = (Path(__file__).resolve().parents[2] / "addon" / "ui" / "app.css").read_text(encoding="utf-8")
+    rule = css.split(".hier-dropzone {", 1)[1].split("}", 1)[0]
+    assert "display: none" in rule
+    assert ".hier-dropzone.is-visible { display: block; }" in css
+    assert ".hier .hier-dropzone" not in css, "must not be scoped under .hier"
+    js = (Path(__file__).resolve().parents[2] / "addon" / "ui" / "view-topology.js").read_text(encoding="utf-8")
+    assert "classList?.add?.('is-visible')" in js
+
+
+def test_move_helpers_exclude_self_descendants_and_parent() -> None:
+    """ADR-0046: pure move-target helpers use the full tree, not filtered rows."""
+    _require_node()
+    nodes = [
+        {"id": "reader:ct_feed", "kind": "circuit", "label": "Feed", "reader_id": "ct_feed",
+         "children": [
+             {"id": "reader:ct_sub", "kind": "circuit", "label": "Sub", "reader_id": "ct_sub",
+              "children": [
+                  {"id": "reader:ct_oven", "kind": "circuit", "label": "Oven", "reader_id": "ct_oven",
+                   "children": [
+                       {"id": "device:dev_oven", "kind": "device", "label": "Oven fixture",
+                        "reader_id": "ct_oven", "device_id": "dev_oven", "children": []},
+                   ]},
+              ]},
+         ]},
+        {"id": "reader:ct_lights", "kind": "circuit", "label": "Lights", "reader_id": "ct_lights",
+         "children": []},
+        # A both_legs duplicate of ct_oven under another parent.
+        {"id": "group:B:1", "kind": "group", "label": "B", "children": [
+            {"id": "reader:ct_oven", "kind": "circuit", "label": "Oven", "reader_id": "ct_oven",
+             "children": []},
+        ]},
+    ]
+    program = (
+        "import { descendantReaders, validMoveTargets, canDropOn } from './view-topology.js';\n"
+        f"const nodes = {lit(nodes)};\n"
+        "const out = {\n"
+        "  descendants: [...descendantReaders(nodes, 'ct_feed')].sort(),\n"
+        "  targets: validMoveTargets(nodes, 'ct_oven').map((t) => t.reader_id).sort(),\n"
+        "  labels: validMoveTargets(nodes, 'ct_oven').map((t) => t.label).sort(),\n"
+        "  nullOk: canDropOn(nodes, 'ct_oven', null),\n"
+        "  selfOk: canDropOn(nodes, 'ct_oven', 'ct_oven'),\n"
+        "  parentOk: canDropOn(nodes, 'ct_oven', 'ct_sub'),\n"
+        "  descendantOk: canDropOn(nodes, 'ct_feed', 'ct_sub'),\n"
+        "  deviceOk: canDropOn(nodes, 'ct_oven', 'dev_oven'),\n"
+        "};\n"
+        "console.log(JSON.stringify(out));\n"
+    )
+    out = run_esm(program, shim=EVENT_DOM_SHIM)
+    assert out["descendants"] == ["ct_oven", "ct_sub"]
+    # Self, its parent (ct_sub, including the both_legs copy), and descendants
+    # are excluded; devices never appear.
+    assert out["targets"] == ["ct_feed", "ct_lights"]
+    assert out["labels"] == ["Feed", "Lights"]
+    assert out["nullOk"] is True
+    assert out["selfOk"] is False
+    assert out["parentOk"] is False
+    assert out["descendantOk"] is False
+    assert out["deviceOk"] is False
+
+
+def test_move_circuit_posts_to_the_parent_route() -> None:
+    """ADR-0046: moveCircuit sends {parent: id} or {parent: null}."""
+    _require_node()
+    program = (
+        "import { moveCircuit } from './view-topology.js';\n"
+        "const calls = [];\n"
+        "const fakePost = async (path, body) => { calls.push([path, body]); return {}; };\n"
+        "await moveCircuit('ct_oven', 'ct_sub', fakePost);\n"
+        "await moveCircuit('ct_oven', null, fakePost);\n"
+        "console.log(JSON.stringify({ calls }));\n"
+    )
+    out = run_esm(program, shim=EVENT_DOM_SHIM)
+    assert out["calls"] == [
+        ["/topology/circuits/ct_oven/parent", {"parent": "ct_sub"}],
+        ["/topology/circuits/ct_oven/parent", {"parent": None}],
+    ]
+
+
 def test_edges_card_offers_pin_and_reject_only_on_click() -> None:
     """ADR-0043: every actionable edge offers Pin and Reject, only on a click."""
     edges = [
