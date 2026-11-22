@@ -806,7 +806,9 @@ function topologyHierarchyCard(topology, tree) {
       for (const node of list || []) {
         if (!node || typeof node !== 'object') continue;
         if (node.kind === 'circuit' && String(node.reader_id) === String(readerId)) {
-          found = String(node.label || node.reader_id);
+          // A shared name ("l1") is ambiguous in a confirm dialog: add the id.
+          const name = String(node.label || node.reader_id);
+          found = node.subtitle && String(node.subtitle) !== name ? `${name} (${node.subtitle})` : name;
           return;
         }
         walk(node.children);
@@ -822,7 +824,8 @@ function topologyHierarchyCard(topology, tree) {
       row.classList?.remove?.('drop-ok');
       row.classList?.remove?.('is-dragging');
     }
-    dropzone.classList?.remove?.('drop-ok');
+    dropzone?.classList?.remove?.('drop-ok');
+    dropzone?.classList?.remove?.('is-visible');
   };
 
   const endDrag = () => {
@@ -856,6 +859,11 @@ function topologyHierarchyCard(topology, tree) {
     setDragged: (readerId) => {
       draggedReader = readerId;
       body.classList?.add?.('is-dragging');
+      // Reveal the top-level zone on the next tick: changing layout inside
+      // dragstart itself makes Chrome cancel the drag.
+      setTimeout(() => {
+        if (draggedReader) dropzone?.classList?.add?.('is-visible');
+      }, 0);
     },
     dragged: () => draggedReader,
   } : null;
@@ -1164,7 +1172,9 @@ function hierarchyRow(node, depth, expanded, key, ctx, childCount) {
     if (node.subtitle && String(node.subtitle) !== String(name)) {
       row.append(el('span', { class: 'hier-sub' }, node.subtitle));
     }
-    row.append(badge(label(node.ct_type || 'unknown'), ctTone(node.ct_type)));
+    // The engine's placement tree carries no CT role; a badge reading
+    // "Unknown" on every row is noise, so only a declared role is shown.
+    if (node.ct_type) row.append(badge(label(node.ct_type), ctTone(node.ct_type)));
     if (node.phase && node.phase !== 'unknown') row.append(badge(label(node.phase), 'mute'));
     // Direct-child summary: how many fixtures sit here, and how many of them
     // the engine actually measured.  A circuit with no device children keeps

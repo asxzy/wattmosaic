@@ -622,6 +622,16 @@ class SnapshotMixin:
         be exercised unbound with simple stubs.
         """
         labels = {str(e.endpoint_id): str(e.display_name or e.endpoint_id) for e in graph.endpoints}
+        # Several monitors name their feed legs "l1"/"l2": a shared name alone
+        # cannot tell the user which meter a row is, so it gets the id too.
+        name_counts: dict[str, int] = {}
+        for name in labels.values():
+            name_counts[name.lower()] = name_counts.get(name.lower(), 0) + 1
+
+        def _subtitle(reader: str) -> str | None:
+            name = labels.get(reader, reader)
+            return reader if name != reader and name_counts.get(name.lower(), 0) > 1 else None
+
         devices = devices_by_reader or {}
         structural = set(structural_links)
         by_child = getattr(report, "by_child", {}) or {}
@@ -631,9 +641,15 @@ class SnapshotMixin:
         for reader in sorted(labels):
             placement = by_child.get(reader)
             reason = getattr(placement, "reason", None) if placement is not None else None
+            both = tuple(getattr(placement, "both_legs", ()) or ()) if placement is not None else ()
+            if both and getattr(placement, "parent", None) is None:
+                # A 240 V child whose leg is not identifiable lives under both
+                # candidate parents, drawn twice with a chip (E6 §1 step 6).
+                for parent in both:
+                    if str(parent) in labels:
+                        children.setdefault(str(parent), []).append(reader)
+                continue
             if placement is None or getattr(placement, "parent", None) is None:
-                if getattr(placement, "both_legs", ()):
-                    continue  # drawn under both parents below
                 roots.append(reader)
                 if reason != "user_root":
                     unplaced.append(reader)
@@ -666,6 +682,7 @@ class SnapshotMixin:
                 "id": f"reader:{reader}",
                 "kind": "circuit",
                 "label": labels.get(reader, reader),
+                "subtitle": _subtitle(reader),
                 "reader_id": reader,
                 "depth_hint": depth,
                 "band": getattr(placement, "band", None) if placement is not None else None,
@@ -674,27 +691,35 @@ class SnapshotMixin:
                 "structural": reason == "user",
                 "placement_reason": reason,
                 "chips": _chips(placement),
-                "children": [_child(c, depth + 1) for c in kids]
+                "children": [_child(c, depth + 1, reader, frozenset({reader})) for c in kids]
                 + _devices(reader, depth + 1),
             }
 
-        def _child(reader: str, depth: int) -> dict[str, Any]:
+        def _child(
+            reader: str, depth: int, under: str, path: frozenset[str]
+        ) -> dict[str, Any]:
             placement = by_child.get(reader)
             reason = getattr(placement, "reason", None) if placement is not None else None
             parent = getattr(placement, "parent", None) if placement is not None else None
+            both = bool(getattr(placement, "both_legs", ())) if placement is not None else False
             is_structural = reason == "user" or bool(parent and (str(parent), reader) in structural)
-            kids = sorted(children.get(reader, ()))
+            # Never recurse into a reader already on this branch (defensive: two
+            # leg parents could otherwise form a loop through each other).
+            kids = [c for c in sorted(children.get(reader, ())) if c not in path]
             return {
-                "id": f"reader:{reader}",
+                # A leg-ambiguous child is drawn under each parent; the parent
+                # in the id keeps the two rows' keys distinct.
+                "id": f"reader:{reader}@{under}" if both else f"reader:{reader}",
                 "kind": "circuit",
                 "label": labels.get(reader, reader),
+                "subtitle": _subtitle(reader),
                 "reader_id": reader,
                 "depth_hint": depth,
                 "band": getattr(placement, "band", None) if placement is not None else None,
                 "structural": is_structural,
                 "placement_reason": reason,
                 "chips": _chips(placement),
-                "children": [_child(c, depth + 1) for c in kids]
+                "children": [_child(c, depth + 1, reader, path | {reader}) for c in kids]
                 + _devices(reader, depth + 1),
             }
 
@@ -703,21 +728,9 @@ class SnapshotMixin:
             if reader in unplaced and not children.get(reader):
                 continue  # listed under "Unplaced measurements" instead
             out.append(node(reader, 1))
-        # A ``both_legs`` child is drawn under each of its two parents.
-        for reader, placement in sorted(by_child.items()):
-            both = getattr(placement, "both_legs", ()) or ()
-            if not both:
-                continue
-            for parent in both:
-                out.append(
-                    {
-                        "id": f"group:{labels.get(parent, parent)}:1",
-                        "kind": "group",
-                        "label": labels.get(parent, parent),
-                        "depth_hint": 1,
-                        "children": [_child(reader, 2)],
-                    }
-                )
+        # Only readers not already drawn as a top-level parent: a root with
+        # children is in the tree above and must not appear twice.
+        unplaced = [r for r in unplaced if not children.get(r)]
         if unplaced:
             out.append(
                 {
@@ -730,6 +743,7 @@ class SnapshotMixin:
                             "id": f"reader:{r}",
                             "kind": "circuit",
                             "label": labels.get(r, r),
+                            "subtitle": _subtitle(r),
                             "reader_id": r,
                             "depth_hint": 2,
                             "placement_reason": getattr(by_child.get(r), "reason", None),

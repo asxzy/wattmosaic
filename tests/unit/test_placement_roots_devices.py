@@ -135,3 +135,62 @@ def test_every_circuit_node_carries_placement_reason() -> None:
     for node in _walk(roots):
         if node["kind"] == "circuit":
             assert "placement_reason" in node
+
+
+def _named_graph(names: dict[str, str]) -> Any:
+    return SimpleNamespace(
+        endpoints=[SimpleNamespace(endpoint_id=rid, display_name=name) for rid, name in names.items()]
+    )
+
+
+def test_leg_ambiguous_child_is_drawn_under_both_parents_not_as_top_level_groups() -> None:
+    """Regression: each both_legs child used to spawn one top-level group per
+    parent, named after the parent (a run of identical "l1"/"l2" groups with
+    duplicate ids) instead of sitting under the parents themselves."""
+    graph = _named_graph({"meter_a_l1": "l1", "meter_a_l2": "l2", "dryer": "dryer"})
+    report = _report({
+        "meter_a_l1": Placement(child="meter_a_l1"),
+        "meter_a_l2": Placement(child="meter_a_l2"),
+        "dryer": Placement(child="dryer", band="medium", reason="leg_unidentified",
+                           both_legs=("meter_a_l1", "meter_a_l2")),
+    })
+
+    roots = _placement_roots(None, graph, report, [], {})
+
+    assert [n["kind"] for n in roots] == ["circuit", "circuit"], "no stray groups"
+    for parent in ("meter_a_l1", "meter_a_l2"):
+        kids = _circuit(roots, parent)["children"]
+        assert [k["reader_id"] for k in kids] == ["dryer"]
+        assert any(c["text"] == "240 V, leg not identifiable" for c in kids[0]["chips"])
+    ids = [n["id"] for n in _walk(roots)]
+    assert len(ids) == len(set(ids)), "both copies need distinct keys"
+
+
+def test_a_root_with_children_is_not_repeated_under_unplaced() -> None:
+    graph = _named_graph({"feed": "Feed", "sub": "Sub", "lonely": "Lonely"})
+    report = _report({
+        "feed": Placement(child="feed"),
+        "sub": Placement(child="sub", parent="feed"),
+        "lonely": Placement(child="lonely"),
+    })
+
+    roots = _placement_roots(None, graph, report, [], {})
+
+    group = next(n for n in roots if n["kind"] == "group")
+    assert [c["reader_id"] for c in group["children"]] == ["lonely"]
+    assert [n["reader_id"] for n in _walk(roots) if n.get("reader_id") == "feed"] == ["feed"]
+
+
+def test_shared_display_names_carry_the_endpoint_id_as_subtitle() -> None:
+    graph = _named_graph({"meter_a_l1": "l1", "meter_b_l1": "l1", "sauna": "sauna"})
+    report = _report({
+        "meter_a_l1": Placement(child="meter_a_l1"),
+        "meter_b_l1": Placement(child="meter_b_l1"),
+        "sauna": Placement(child="sauna", parent="meter_a_l1"),
+    })
+
+    roots = _placement_roots(None, graph, report, [], {})
+
+    assert _circuit(roots, "meter_a_l1")["subtitle"] == "meter_a_l1"
+    assert _circuit(roots, "meter_b_l1")["subtitle"] == "meter_b_l1"
+    assert _circuit(roots, "sauna")["subtitle"] is None

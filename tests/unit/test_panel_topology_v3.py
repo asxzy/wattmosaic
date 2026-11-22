@@ -468,7 +468,23 @@ def test_hierarchy_shows_devices_and_move_controls() -> None:
     assert "Move…" not in text
     assert result["dropzone"] is True
     assert result["dragHint"] is True
+    # The engine tree carries no CT role: no "Unknown" badge on every row.
+    assert all("Unknown" not in r["text"] for r in circuits)
     _assert_only_3_0_reads(result["requests"])
+
+
+def test_top_level_drop_zone_is_hidden_until_a_drag_starts() -> None:
+    """Regression: the zone sits beside the .hier body, so the old
+    ``.hier .hier-dropzone`` rules never matched and it was always shown."""
+    from pathlib import Path
+
+    css = (Path(__file__).resolve().parents[2] / "addon" / "ui" / "app.css").read_text(encoding="utf-8")
+    rule = css.split(".hier-dropzone {", 1)[1].split("}", 1)[0]
+    assert "display: none" in rule
+    assert ".hier-dropzone.is-visible { display: block; }" in css
+    assert ".hier .hier-dropzone" not in css, "must not be scoped under .hier"
+    js = (Path(__file__).resolve().parents[2] / "addon" / "ui" / "view-topology.js").read_text(encoding="utf-8")
+    assert "classList?.add?.('is-visible')" in js
 
 
 def test_move_helpers_exclude_self_descendants_and_parent() -> None:
