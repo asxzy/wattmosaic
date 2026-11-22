@@ -797,7 +797,7 @@ function topologyHierarchyCard(topology, tree) {
   // change while the card is on screen.
   const nodes = hierarchyNodes(topology, tree);
 
-  // ADR-0046: drag-and-drop and the Move… button are only available when the
+  // ADR-0046: drag-and-drop is only available when the
   // hierarchy came from the engine.  The legacy fallback stays read-only.
   const canMove = Boolean(tree);
   const labelOf = (readerId) => {
@@ -955,7 +955,7 @@ function topologyHierarchyCard(topology, tree) {
     id: 'topology-hierarchy',
     actions: [filter, expandAll, collapseAll],
     foot: tree
-      ? `Computed by the engine${tree.version !== undefined ? ` (contract v${tree.version})` : ''} at ${ago(tree.generated_at)}. Each device appears under the circuit it is mapped to. Drag a circuit (or use Move…) to correct its parent; your choice overrides inference.`
+      ? `Computed by the engine${tree.version !== undefined ? ` (contract v${tree.version})` : ''} at ${ago(tree.generated_at)}. Each device appears under the circuit it is mapped to. Drag a circuit onto another circuit (or the top-level zone) to correct its parent; your choice overrides inference.`
       : 'Fallback view: containment from structural CONTAINS edges only. Devices are not placed.',
   });
 
@@ -1059,40 +1059,6 @@ function renderEntry(entry, depth, ctx) {
   }
 
   return item;
-}
-
-// The keyboard fallback for moving a circuit.  Clicking replaces the button
-// with a select of every legal parent plus "Top level (no parent)"; confirming
-// goes through the same window.confirm gate as a drag-and-drop drop.
-function moveButton(node, readerId, moveCtx) {
-  const button = el('button', {
-    class: 'btn btn-sm hier-move',
-    type: 'button',
-    'aria-label': `Move ${node.label || readerId} to a different parent`,
-  }, 'Move…');
-  button.addEventListener('click', () => {
-    const select = el('select', { class: 'hier-move-select', 'aria-label': 'New parent' }, [
-      el('option', { value: '' }, 'Top level (no parent)'),
-      ...validMoveTargets(moveCtx.nodes, readerId).map((target) =>
-        el('option', { value: target.reader_id }, target.label)),
-    ]);
-    const form = el('span', { class: 'hier-move-form' }, [
-      select,
-      el('button', {
-        class: 'btn btn-sm',
-        type: 'button',
-        onclick: () => moveCtx.confirmAndMove(readerId, select.value || null),
-      }, 'Move'),
-      el('button', {
-        class: 'btn btn-sm btn-ghost',
-        type: 'button',
-        onclick: () => form.replaceWith(button),
-      }, 'Cancel'),
-    ]);
-    button.replaceWith(form);
-    select.focus?.();
-  });
-  return button;
 }
 
 function hierarchyRow(node, depth, expanded, key, ctx, childCount) {
@@ -1213,11 +1179,6 @@ function hierarchyRow(node, depth, expanded, key, ctx, childCount) {
     if (node.polarity === 'inverted') row.append(badge('Inverted', 'warn'));
     for (const chip of nodeChips(node)) row.append(chip);
     for (const item of nodeBadges(node)) row.append(item);
-    // ADR-0046: the keyboard/accessibility path.  Replaces itself with an
-    // inline form (select + Move/Cancel); never writes without confirmation.
-    if (movable) {
-      row.append(moveButton(node, readerId, moveCtx));
-    }
   } else if (kind === 'device') {
     const name = node.label || node.device_id || 'Device';
     const measurement = measurementOf(node);

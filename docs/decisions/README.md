@@ -2435,8 +2435,9 @@ and discarded the device nodes `build_display_tree_v3` had attached.
 3. **Devices follow the mapping.** Each circuit node in the placement tree gets
    the device rows its reader maps to, after its sub-circuits; readers unknown
    to topology get an "Unplaced devices" group. The panel lets the user drag a
-   circuit onto another circuit (or a top-level drop zone) or use the
-   keyboard-accessible "Move…" form, behind a confirmation.
+   circuit onto another circuit (or a top-level drop zone), behind a
+   confirmation. Drag-and-drop is the only move gesture; the earlier "Move…"
+   button was dropped as redundant.
 
 **Consequences.** The live ledger is never mutated; user authority wins in
 display through the read-time overlay and in H through T1's existing

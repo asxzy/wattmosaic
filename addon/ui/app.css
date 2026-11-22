@@ -639,7 +639,6 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
 }
 .hier.is-dragging .hier-dropzone { display: block; }
 .hier .hier-dropzone.drop-ok { border-color: var(--accent); color: var(--text); }
-.hier .hier-move-form { display: inline-flex; gap: 6px; align-items: center; }
 
 .hier .hier-toggle,
 .hier .hier-toggle-spacer {

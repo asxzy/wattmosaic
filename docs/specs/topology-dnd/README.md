@@ -241,10 +241,10 @@ Device rows already render once the engine sends them. Changes:
   toggle (they do via `entry.kids.length`); verify with a test.
 * Device rows are **never draggable** and are never drop targets.
 * Update the hierarchy card foot text to: "Computed by the engine … Each device
-  appears under the circuit it is mapped to. Drag a circuit (or use Move…) to
+  appears under the circuit it is mapped to. Drag a circuit to
   correct its parent; your choice overrides inference."
 
-### B2. Drag-and-drop + keyboard fallback
+### B2. Drag-and-drop
 
 Add these **pure, exported** helpers to `view-topology.js` (node-testable):
 
@@ -282,11 +282,8 @@ came from the engine (`tree` non-null) — the legacy fallback stays read-only:
 * A **top-level drop zone** element above the tree, shown only while a drag is
   in progress (toggle a class on the card body, e.g. `hier.is-dragging`):
   `el('div', { class: 'hier-dropzone', dataset: { target: 'root' } }, 'Drop here to make it a top-level circuit')`.
-* A **"Move…" button** (`class: 'btn btn-sm hier-move'`, `aria-label: 'Move <label> to a different parent'`)
-  on each draggable circuit row — the keyboard / accessibility path. Clicking
-  it replaces the button with an inline form: a `<select>` whose first option
-  is "Top level (no parent)" (value `""`) followed by `validMoveTargets(...)`,
-  plus "Move" and "Cancel" buttons. "Move" calls `confirmAndMove(reader, value || null)`.
+* (Amended: the "Move…" button originally specified here was removed at
+  the user's request; drag-and-drop is the only move gesture.)
 * `confirmAndMove(child, parent)`: `window.confirm(\`Move ${childLabel} under ${parentLabel || 'the top level'}? This overrides what the engine inferred.\`)`;
   on OK → `moveCircuit(...)` then `notify('Circuit moved', 'The topology was updated; inference will not undo this.')`
   and `render()`; on error → `notify('Could not move circuit', describeError(err), 'bad')`.
@@ -303,7 +300,6 @@ CSS in `addon/ui/app.css` (classes only):
 .hier .hier-dropzone { display: none; border: 2px dashed var(--border); padding: 8px; margin-bottom: 8px; text-align: center; color: var(--text-mute); }
 .hier.is-dragging .hier-dropzone { display: block; }
 .hier .hier-dropzone.drop-ok { border-color: var(--accent); color: var(--text); }
-.hier .hier-move-form { display: inline-flex; gap: 6px; align-items: center; }
 ```
 
 (Use whatever CSS variables already exist in `app.css`; grep for `--accent`,
@@ -323,7 +319,7 @@ skip without node via `_require_node()`):
   sends `{parent: null}`.
 * Rendering a tree whose circuit has device children shows the device labels
   and the "N devices" chip, circuit rows carry `draggable="true"`, device rows
-  do not, and a "Move…" button exists per circuit.
+  do not, and no "Move…" button is rendered.
 * Rendering performs no POST (only the existing 3.0 GET reads —
   `_assert_only_3_0_reads`). If that helper whitelists paths, do not add the
   POST path to the read whitelist.

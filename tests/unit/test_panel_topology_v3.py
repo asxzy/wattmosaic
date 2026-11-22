@@ -451,7 +451,7 @@ def test_hierarchy_shows_devices_and_move_controls() -> None:
         "const walk2 = (n) => { for (const c of n.children || []) { if (c.className && String(c.className).includes('hier-move')) moves.push(c.getAttribute('aria-label')); walk2(c); } };\n"
         "walk2(root);\n"
         "const text = root.textContent;\n"
-        "console.log(JSON.stringify({ text, rows, moves, requests: __requests, dropzone: text.includes('Drop here to make it a top-level circuit'), dragHint: text.includes('Drag a circuit (or use Move…) to correct its parent') }));\n"
+        "console.log(JSON.stringify({ text, rows, moves, requests: __requests, dropzone: text.includes('Drop here to make it a top-level circuit'), dragHint: text.includes('Drag a circuit onto another circuit (or the top-level zone) to correct its parent') }));\n"
     )
     result = run_esm(program, shim=EVENT_DOM_SHIM + _FETCH_STUB)
     text = result["text"]
@@ -463,7 +463,9 @@ def test_hierarchy_shows_devices_and_move_controls() -> None:
     assert circuits and devices
     assert all(r["draggable"] == "true" and r["reader"] for r in circuits)
     assert all(r["draggable"] is None for r in devices)
-    assert len(result["moves"]) == len(circuits)
+    # Drag-and-drop is the only way to move a circuit: no Move… button.
+    assert result["moves"] == []
+    assert "Move…" not in text
     assert result["dropzone"] is True
     assert result["dragHint"] is True
     _assert_only_3_0_reads(result["requests"])
