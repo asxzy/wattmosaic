@@ -375,6 +375,7 @@ def apply_user_placements(
     # Index in-force user declarations and rejected pairs by child, once.
     by_child_user: dict[str, list[TopologyEdgeV3]] = {}
     rejected_pairs: set[tuple[str, str]] = set()
+    rejected_children: set[str] = set()
     for edge in edges:
         if not _is_contains(edge):
             continue
@@ -383,6 +384,7 @@ def apply_user_placements(
         lifecycle = _value(edge.lifecycle)
         if lifecycle == TopologyEdgeState.REJECTED:
             rejected_pairs.add((parent, child))
+            rejected_children.add(child)
         if (
             _in_force(edge)
             and lifecycle == TopologyEdgeState.STRUCTURAL
@@ -446,6 +448,13 @@ def apply_user_placements(
                     ),
                     both_legs=(),
                 )
+            continue
+
+        # The live ledger adopts user rejections too (ADR-0046), so a child the
+        # user moved to the top level arrives here already unplaced.  It is
+        # still an explicit top-level decision, not a missing measurement.
+        if current is None and not placement.both_legs and child in rejected_children:
+            result.by_child[child] = Placement(child=child, parent=None, reason="user_root")
             continue
 
         result.by_child[child] = placement

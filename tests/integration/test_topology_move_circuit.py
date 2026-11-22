@@ -304,3 +304,44 @@ def test_route_is_registered_and_token_protected() -> None:
     app = create_app(api_token="secret")
     routes = {(r.method, r.resource.canonical) for r in app.router.routes() if r.resource and r.method}
     assert ("POST", "/api/v1/topology/circuits/{reader_id}/parent") in routes
+
+
+def _held_lifecycle(core: Any, edge_id: str) -> str:
+    held = {e.edge_id: e for e in core.topology_inference.edges}[edge_id]
+    return str(getattr(held.lifecycle, "value", held.lifecycle))
+
+
+def test_move_to_top_level_survives_ledger_repersistence(core: Any) -> None:
+    """Regression: the live ledger must adopt the user's rejection.
+
+    Before the fix the ledger kept its own STRUCTURAL copy of ``e-a``; the next
+    fold upserts ledger edges by id, which overwrote the REJECTED row and put
+    ``a`` straight back under ``feed``.
+    """
+    _seed_feed_a(core)
+
+    async def fn(session: aiohttp.ClientSession, base: str) -> None:
+        status, body = await _post(session, f"{base}/topology/circuits/a/parent", {"parent": None})
+        assert status == 200, body
+        assert _held_lifecycle(core, "e-a") == "rejected"
+
+        # What a fold / discovery merge does: persist every ledger edge by id.
+        for edge in core.topology_inference.edges:
+            core.db.repos.topology_v3.upsert_edge(edge)
+        assert core.db.repos.topology_v3.edge_history("e-a")[-1]["lifecycle"] == "rejected"
+
+        _, tree = await _get(session, f"{base}/topology/tree")
+        assert tree["placements"]["a"]["reason"] == "user_root"
+
+    asyncio.run(_with_server(core, fn))
+
+
+def test_reject_button_also_updates_the_live_ledger(core: Any) -> None:
+    _seed_feed_a(core)
+
+    async def fn(session: aiohttp.ClientSession, base: str) -> None:
+        status, body = await _post(session, f"{base}/topology/edges/e-a/reject", {})
+        assert status == 200, body
+        assert _held_lifecycle(core, "e-a") == "rejected"
+
+    asyncio.run(_with_server(core, fn))

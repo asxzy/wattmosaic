@@ -1058,11 +1058,36 @@ class TopologyApiMixin:
         return self._v3_topology_service().pin(edge_id)
 
     def reject_topology_edge(self, edge_id: str) -> dict[str, Any]:
-        return self._v3_topology_service().reject(edge_id)
+        result = self._v3_topology_service().reject(edge_id)
+        self._sync_ledger_authority([edge_id])
+        return result
 
     def move_circuit(self, reader_id: str, parent: str | None) -> dict[str, Any]:
         """Move a circuit under a new parent (or to the top level)."""
-        return self._v3_topology_service().move(reader_id, parent)
+        result = self._v3_topology_service().move(reader_id, parent)
+        self._sync_ledger_authority(result.get("closed_edge_ids") or ())
+        return result
+
+    def _sync_ledger_authority(self, edge_ids: Sequence[str]) -> None:
+        """Push user-rejected/closed rows into the live ledger (ADR-0046).
+
+        Without this the ledger's in-memory copy of a rejected inferred edge is
+        re-persisted by the next fold and the user's correction reverts.  Best
+        effort: a failure leaves the persisted decision in place and is logged.
+        """
+        ledger = getattr(self, "topology_inference", None)
+        if ledger is None or not edge_ids:
+            return
+        try:
+            repo = self.db.repos.topology_v3
+            updates = []
+            for edge_id in edge_ids:
+                history = repo.edge_history(edge_id)
+                if history:
+                    updates.append(TopologyEdgeV3(**_edge_row(history[-1])))
+            self.topology_inference = ledger.with_user_authority(updates)
+        except Exception:  # noqa: BLE001 - degraded, never a crash
+            log.warning("live topology ledger not updated after user decision", exc_info=True)
 
     def edit_endpoint_config(self, endpoint_id: str, changes: Mapping[str, Any]) -> dict[str, Any]:
         return self._v3_topology_service().edit_config(endpoint_id, changes)
