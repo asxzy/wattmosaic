@@ -65,6 +65,26 @@ async def topology_edge_reject(request: web.Request) -> web.Response:
     return _ok(await maybe_await(method(request.match_info["edge_id"])))
 
 
+async def topology_circuit_parent(request: web.Request) -> web.Response:
+    """POST /topology/circuits/{reader_id}/parent — move a circuit.
+
+    The body must be a JSON object with a ``parent`` key whose value is a
+    non-empty string or ``null`` (top level).  The move is a user declaration:
+    it closes/rejects other parent edges and promotes one version.
+    """
+    payload = await _read_json(request)
+    if not isinstance(payload, dict) or "parent" not in payload:
+        raise InvalidRequest("body must be a JSON object with a 'parent' key")
+    parent = payload["parent"]
+    if parent is not None and (
+        not isinstance(parent, str) or not parent.strip()
+    ):
+        raise InvalidRequest("'parent' must be a non-empty string or null")
+    method = _require(_facade(request), "move_circuit")
+    result = await maybe_await(method(request.match_info["reader_id"], parent))
+    return _ok(result)
+
+
 async def topology_versions(request: web.Request) -> web.Response:
     """GET /topology/versions — the version history."""
     method = _require(_facade(request), "topology_versions")
@@ -111,6 +131,9 @@ def register(router: web.UrlDispatcher, base: str, deps: object) -> None:
     router.add_post(f"{base}/topology/edges", topology_edges_post)
     router.add_post(f"{base}/topology/edges/{{edge_id}}/pin", topology_edge_pin)
     router.add_post(f"{base}/topology/edges/{{edge_id}}/reject", topology_edge_reject)
+    router.add_post(
+        f"{base}/topology/circuits/{{reader_id}}/parent", topology_circuit_parent
+    )
     router.add_get(f"{base}/topology/versions", topology_versions)
     router.add_get(f"{base}/topology/versions/{{version_id}}", topology_version)
     router.add_put(f"{base}/topology/endpoints/{{endpoint_id}}/config", topology_endpoint_config)
@@ -121,6 +144,7 @@ __all__ = [
     "topology_edge_pin",
     "topology_edge_reject",
     "topology_edges_post",
+    "topology_circuit_parent",
     "topology_endpoint_config",
     "topology_tree",
     "topology_v3_get",

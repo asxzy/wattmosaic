@@ -31,9 +31,11 @@ from ..contracts import (
     ReaderResidualPoint,
     ReconciliationV3,
     SnapshotId,
+    TopologyEdgeV3,
     VersionTriple,
 )
-from ..mapping.display_tree import build_display_tree_v3
+from ..electrical.topology_placement import apply_user_placements
+from ..mapping.display_tree import build_display_tree_v3, device_node
 
 log = logging.getLogger("wattmosaic.main")
 
@@ -550,10 +552,11 @@ class SnapshotMixin:
         endpoints = self._matrix_endpoints()
         versions = self._matrix_versions()
         graph = self._matrix_topology_graph(endpoints, versions["topology_version_id"])
+        devices_by_reader = self._mapped_devices_by_reader(versions["mapping_version_id"])
         tree = build_display_tree_v3(
             graph,
             generated_at=self._clock().isoformat().replace("+00:00", "Z"),
-            devices_by_reader=self._mapped_devices_by_reader(versions["mapping_version_id"]),
+            devices_by_reader=devices_by_reader,
         )
         tree["topology_version"] = versions["topology_version_id"]
         tree["mapping_version"] = versions["mapping_version_id"]
@@ -565,6 +568,19 @@ class SnapshotMixin:
         ledger = getattr(self, "topology_inference", None)
         report = getattr(ledger, "placements", None) if ledger is not None else None
         if report is not None:
+            # User declarations are authoritative (DEC-10).  The live ledger is
+            # seeded from the active version only at startup, so overlay the
+            # persisted CONTAINS history at read time; a broken read degrades to
+            # the unmodified report, never a 500.
+            try:
+                from .topology_api import _contains_rows, _edge_row
+
+                report = apply_user_placements(
+                    report,
+                    [TopologyEdgeV3(**_edge_row(row)) for row in _contains_rows(self.db)],
+                )
+            except Exception:  # noqa: BLE001 - degraded tree, never a 500
+                log.debug("user placement override unavailable for the panel tree", exc_info=True)
             tree["placements"] = report.as_dict()
             active = [
                 (str(e.source_endpoint_id), str(e.target_endpoint_id))
@@ -573,7 +589,7 @@ class SnapshotMixin:
                 and str(getattr(e.lifecycle, "value", e.lifecycle)) == "structural"
             ]
             tree["structural_links"] = active
-            tree["roots"] = self._placement_roots(graph, report, active)
+            tree["roots"] = self._placement_roots(graph, report, active, devices_by_reader)
         return tree
 
     def _placement_roots(
@@ -581,15 +597,21 @@ class SnapshotMixin:
         graph: Any,
         report: Any,
         structural_links: Sequence[tuple[str, str]],
+        devices_by_reader: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     ) -> list[dict[str, Any]]:
-        """Build the panel hierarchy from placements (E6 §1).
+        """Build the panel hierarchy from placements (E6 §1, ADR-0046).
 
         Every placed child appears under its single parent; a ``both_legs``
         child appears under both parents with a chip; unplaced readers are
-        listed separately under an "Unplaced measurements" group.  Structural
-        links are passed through so the panel can style them differently.
+        listed separately under an "Unplaced measurements" group.  Devices the
+        active mapping places on a reader are appended under that reader (after
+        its sub-circuit children) wherever it sits in the tree.  A ``user_root``
+        placement is drawn at the top level; a ``user`` placement carries a chip
+        and is marked structural.  This method uses no engine state, so it can
+        be exercised unbound with simple stubs.
         """
         labels = {str(e.endpoint_id): str(e.display_name or e.endpoint_id) for e in graph.endpoints}
+        devices = devices_by_reader or {}
         structural = set(structural_links)
         by_child = getattr(report, "by_child", {}) or {}
         children: dict[str, list[str]] = {}
@@ -597,20 +619,38 @@ class SnapshotMixin:
         unplaced: list[str] = []
         for reader in sorted(labels):
             placement = by_child.get(reader)
+            reason = getattr(placement, "reason", None) if placement is not None else None
             if placement is None or getattr(placement, "parent", None) is None:
                 if getattr(placement, "both_legs", ()):
                     continue  # drawn under both parents below
                 roots.append(reader)
-                unplaced.append(reader)
+                if reason != "user_root":
+                    unplaced.append(reader)
                 continue
             children.setdefault(str(placement.parent), []).append(reader)
+
+        def _devices(reader: str, depth: int) -> list[dict[str, Any]]:
+            return [
+                device_node(subject, reader, depth)
+                for subject in devices.get(reader, ())
+            ]
+
+        def _chips(placement: Any) -> list[dict[str, str]]:
+            chips: list[dict[str, str]] = []
+            if placement is None:
+                return chips
+            if getattr(placement, "both_legs", ()):
+                chips.append({"text": "240 V, leg not identifiable", "tone": "warn"})
+            if getattr(placement, "band", None) == "low":
+                chips.append({"text": "low confidence", "tone": "warn"})
+            if getattr(placement, "reason", None) == "user":
+                chips.append({"text": "set by you", "tone": "info"})
+            return chips
 
         def node(reader: str, depth: int) -> dict[str, Any]:
             kids = sorted(children.get(reader, ()))
             placement = by_child.get(reader)
-            chips: list[dict[str, str]] = []
-            if placement is not None and getattr(placement, "band", None) == "low":
-                chips.append({"text": "low confidence", "tone": "warn"})
+            reason = getattr(placement, "reason", None) if placement is not None else None
             return {
                 "id": f"reader:{reader}",
                 "kind": "circuit",
@@ -618,20 +658,20 @@ class SnapshotMixin:
                 "reader_id": reader,
                 "depth_hint": depth,
                 "band": getattr(placement, "band", None) if placement is not None else None,
-                "structural": False,  # a root has no parent link
-                "chips": chips,
-                "children": [_child(c, depth + 1) for c in kids],
+                # A root normally has no parent link; an explicit user move to
+                # the top level is still a user declaration (ADR-0046).
+                "structural": reason == "user",
+                "placement_reason": reason,
+                "chips": _chips(placement),
+                "children": [_child(c, depth + 1) for c in kids]
+                + _devices(reader, depth + 1),
             }
 
         def _child(reader: str, depth: int) -> dict[str, Any]:
             placement = by_child.get(reader)
-            chips: list[dict[str, str]] = []
-            if placement is not None and getattr(placement, "both_legs", ()):
-                chips.append({"text": "240 V, leg not identifiable", "tone": "warn"})
-            if placement is not None and getattr(placement, "band", None) == "low":
-                chips.append({"text": "low confidence", "tone": "warn"})
+            reason = getattr(placement, "reason", None) if placement is not None else None
             parent = getattr(placement, "parent", None) if placement is not None else None
-            is_structural = bool(parent and (parent, reader) in structural)
+            is_structural = reason == "user" or bool(parent and (str(parent), reader) in structural)
             kids = sorted(children.get(reader, ()))
             return {
                 "id": f"reader:{reader}",
@@ -641,8 +681,10 @@ class SnapshotMixin:
                 "depth_hint": depth,
                 "band": getattr(placement, "band", None) if placement is not None else None,
                 "structural": is_structural,
-                "chips": chips,
-                "children": [_child(c, depth + 1) for c in kids],
+                "placement_reason": reason,
+                "chips": _chips(placement),
+                "children": [_child(c, depth + 1) for c in kids]
+                + _devices(reader, depth + 1),
             }
 
         out: list[dict[str, Any]] = []
@@ -679,9 +721,27 @@ class SnapshotMixin:
                             "label": labels.get(r, r),
                             "reader_id": r,
                             "depth_hint": 2,
-                            "children": [],
+                            "placement_reason": getattr(by_child.get(r), "reason", None),
+                            "children": _devices(r, 3),
                         }
                         for r in sorted(unplaced)
+                    ],
+                }
+            )
+        # Devices mapped onto a reader the topology does not know are never
+        # dropped silently: they get their own final group (ADR-0046).
+        stray = [reader for reader in sorted(devices) if reader not in labels]
+        if stray:
+            out.append(
+                {
+                    "id": "group:Unplaced devices:1",
+                    "kind": "group",
+                    "label": "Unplaced devices",
+                    "depth_hint": 1,
+                    "children": [
+                        device
+                        for reader in stray
+                        for device in _devices(reader, 2)
                     ],
                 }
             )
