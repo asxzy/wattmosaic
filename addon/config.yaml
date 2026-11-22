@@ -136,7 +136,7 @@ options:
   # independent consents before anything is written.
   auto_placement: false
   # Sensors to ignore, comma-separated: endpoint ids or HA entity ids, globs
-  # allowed (e.g. "vec_1_l1, vec_1_l2, sensor.*charger_power"). Use it for a
+  # allowed (e.g. "meter_b_l1, meter_b_l2, sensor.*charger_power"). Use it for a
   # second meter on a feed another meter already measures, or a power sensor
   # that is not a CT. Removing an entry re-enables that sensor on restart.
   disabled_sensors: ""
