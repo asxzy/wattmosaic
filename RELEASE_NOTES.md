@@ -68,6 +68,37 @@ Automatic development build.
 - ci(release): release on demand via workflow_dispatch, never on push
 - fix(packaging): ship inference/evidence_weights.json in the wheel
 
+### Fix — boot crash on legacy edge evidence
+
+The engine could fail to start on any install whose stored topology edges carry
+the `evidence.source` key that migrations 14 and 15 wrote during backfill.
+`EdgeEvidence` has no such field and every contract model forbids unknown keys,
+so rebuilding an edge raised `ValidationError: evidence.source  Extra inputs are
+not permitted` inside `topology_view`, and the engine died at startup instead of
+degrading. Migration 29 made it worse by copying the whole evidence dict forward
+when it seeded the decay weights, so the key survived into the current schema.
+One affected row was enough to take the install down; the reporter's topology had
+16 channels with `paired_ct_id`.
+
+Two changes, either of which alone restores the boot:
+
+- **Read side:** stored evidence is now sanitised against
+  `EdgeEvidence.model_fields` before it is splatted into a contract, on every
+  stored-row edge path (`_edge_contract`, `_map_edge_contract`, and the core
+  `_edge_row` / `_matrix_edge_row` helpers). Valid keys and their values are
+  preserved; `extra="forbid"` is untouched, so a genuine contract violation
+  elsewhere still raises. The allow-list is read from the model, so a future
+  evidence field is accepted immediately.
+- **Data side:** migration 31 strips non-contract keys from
+  `topology_edges.evidence_json` and `mapping_edges.evidence_json`. It rewrites a
+  row only when a key was dropped, so clean rows stay byte-identical, leaves
+  unparseable JSON untouched, and is a no-op on re-run.
+
+The legacy `source` value is dropped rather than preserved: it never was a
+contract field, and what it recorded is already durable in `declared_by`,
+`valid_from`, the deterministic edge id and the derived `relation`. Per-table
+counts and the dropped key names are logged at INFO.
+
 ## v0.3.0-dev.4 — 2026-11-20 (development channel)
 
 Automatic development build.
