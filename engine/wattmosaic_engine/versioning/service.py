@@ -38,6 +38,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from wattmosaic_engine.contracts import (
     ConfigurationEvent,
+    EdgeEvidence,
     EdgeLifecycleV3,
     MappingEdge,
     TopologyEdgeState,
@@ -210,12 +211,54 @@ class _FrozenMappingView:
 # --------------------------------------------------------------------------- #
 
 
-def _decode_evidence(value: Any) -> dict[str, Any]:
+#: Field names of the one evidence model both edge contracts carry.  Read from
+#: the model itself (never a hand-maintained list) so a new evidence field is
+#: accepted at the deserialisation boundary the moment it is declared.
+_EVIDENCE_FIELDS = frozenset(EdgeEvidence.model_fields)
+
+
+def edge_evidence_payload(value: Any) -> dict[str, Any]:
+    """Decode a stored evidence blob, dropping keys that are not evidence fields.
+
+    Stored rows can carry keys no contract version ever accepted: migration 14
+    backfilled edges with ``{"source": "ct_channels.parent_ct_id"}`` (and the
+    paired/alias/``topology_relations`` variants), migration 15 did the same for
+    mapping edges, and migration 29 copied the whole dict forward when it seeded
+    the decay weights.  ``Model`` forbids extra keys, so splatting such a row
+    into a contract made the engine die at startup -- one legacy row was enough
+    to take the whole install down (production outage, 16 paired CT channels).
+
+    Legacy data is therefore sanitised *on read*: only keys that are fields of
+    the target evidence model survive, with their values untouched.  The
+    ``extra="forbid"`` policy itself is untouched, so a genuine contract
+    violation anywhere else still raises.  Cheap by construction: one set
+    membership test per key, and a clean dict (the common case) is returned after
+    the single shallow copy with no rebuild.
+
+    Every stored-row read path that rebuilds an edge goes through this
+    (``_edge_contract``, ``_map_edge_contract`` and the core read helpers), so
+    migration 31 is a repair, never a boot prerequisite.
+    """
+    evidence: dict[str, Any]
     if isinstance(value, str):
-        return dict(json.loads(value or "{}"))
-    if isinstance(value, dict):
-        return dict(value)
-    return {}
+        try:
+            decoded = json.loads(value or "{}")
+        except (TypeError, ValueError):
+            return {}
+        evidence = dict(decoded) if isinstance(decoded, dict) else {}
+    elif isinstance(value, dict):
+        evidence = dict(value)
+    elif isinstance(value, EdgeEvidence):
+        # A caller may already hold the contract object; its own fields are the
+        # allowed set by definition, so nothing is lost.  Only the fields the
+        # caller actually set are carried over, so no defaults are materialised
+        # that the stored blob did not have.
+        evidence = value.model_dump(mode="python", exclude_unset=True)
+    else:
+        return {}
+    if all(key in _EVIDENCE_FIELDS for key in evidence):
+        return evidence
+    return {key: item for key, item in evidence.items() if key in _EVIDENCE_FIELDS}
 
 
 def _edge_contract(row: dict[str, Any]) -> TopologyEdgeV3:
@@ -229,7 +272,7 @@ def _edge_contract(row: dict[str, Any]) -> TopologyEdgeV3:
         declared_by=row["declared_by"],
         beta=row.get("beta"),
         beta_basis=row.get("beta_basis"),
-        evidence=_decode_evidence(row.get("evidence", row.get("evidence_json", {}))),
+        evidence=EdgeEvidence(**edge_evidence_payload(row.get("evidence", row.get("evidence_json", {})))),
         valid_from=row["valid_from"],
         valid_until=row.get("valid_until"),
         pinned=bool(row.get("pinned", False)),
@@ -237,6 +280,12 @@ def _edge_contract(row: dict[str, Any]) -> TopologyEdgeV3:
 
 
 def _map_edge_contract(row: dict[str, Any]) -> MappingEdge:
+    """Rebuild a :class:`MappingEdge`; ``evidence`` is sanitised like a topology edge.
+
+    Mapping edges carry the same :class:`EdgeEvidence` model and were backfilled
+    with the same legacy ``{"source": ...}`` blob by migration 15, so they had
+    exactly the same crash exposure.
+    """
     return MappingEdge(
         mapping_edge_id=str(row["mapping_edge_id"]),
         subject_kind=row["subject_kind"],
@@ -245,7 +294,7 @@ def _map_edge_contract(row: dict[str, Any]) -> MappingEdge:
         observability=row["observability"],
         lifecycle=row["lifecycle"],
         declared_by=row["declared_by"],
-        evidence=_decode_evidence(row.get("evidence", row.get("evidence_json", {}))),
+        evidence=EdgeEvidence(**edge_evidence_payload(row.get("evidence", row.get("evidence_json", {})))),
         valid_from=row["valid_from"],
         valid_until=row.get("valid_until"),
     )

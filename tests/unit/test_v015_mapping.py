@@ -293,7 +293,12 @@ def test_backfill_from_three_sources_is_deduplicated(tmp_path: Path) -> None:
         # User declaration -> CONFIRMED, auto -> PROVISIONAL.
         assert by_pair[("dev-a", "ct-1")]["lifecycle"] == "confirmed"
         assert by_pair[("dev-c", "ct-4")]["lifecycle"] == "provisional"
-        assert json.loads(by_pair[("dev-c", "ct-4")]["evidence_json"])["source"] == "auto_placement"
+        # v015 records its provenance in an ``evidence.source`` key that is not
+        # an ``EdgeEvidence`` field; v031 strips it from every stored row.  On a
+        # database at LATEST the evidence is therefore empty -- the lifecycle
+        # above, not the legacy key, is what the backfill means.  The provenance
+        # itself is pinned by ``test_backfill_writes_a_legacy_source_key_v031_removes``.
+        assert json.loads(by_pair[("dev-c", "ct-4")]["evidence_json"]) == {}
         # Association verdict-mapped lifecycles; single_event is only PROVISIONAL.
         assert by_pair[("dev-a", "ct-2")]["lifecycle"] == "confirmed"  # branch wins over assoc
         assert by_pair[("dev-d", "ct-5")]["lifecycle"] == "provisional"  # single_event
@@ -303,6 +308,47 @@ def test_backfill_from_three_sources_is_deduplicated(tmp_path: Path) -> None:
         assert retired["valid_until"] == NOW
     finally:
         db.close()
+
+
+def test_backfill_writes_a_legacy_source_key_v031_removes(tmp_path: Path) -> None:
+    """v015's provenance is real, but it is not an ``EdgeEvidence`` field.
+
+    Pinned in both directions: v015 writes ``{"source": ...}`` (which is what
+    made the mapping edge unloadable), and v031 removes it so the row can be
+    rebuilt as a contract.  Splitting the assertions keeps v015's intent visible
+    instead of silently relaxing the backfill test above.
+    """
+    from wattmosaic_engine.storage.migrations.v031_evidence_key_repair import MIGRATION
+
+    path = tmp_path / "v015-source.db"
+    conn = _build_schema11(path)
+    _seed(conn)
+    # ``_build_schema11`` stopped at v11; apply only the released migrations
+    # through v015, so v031 has not run yet.
+    from wattmosaic_engine.storage.migrations import MIGRATIONS
+
+    for migration in MIGRATIONS:
+        if migration.version > _V015.version:
+            break
+        if migration.version <= PRE_MIGRATION_VERSION:
+            continue
+        for statement in migration.statements:
+            conn.execute(statement)
+        if migration.apply is not None:
+            migration.apply(conn)
+    conn.commit()
+
+    row = conn.execute(
+        "SELECT evidence_json FROM mapping_edges WHERE subject_id='dev-c' AND endpoint_id='ct-4'"
+    ).fetchone()
+    assert json.loads(row[0]) == {"source": "auto_placement"}
+
+    MIGRATION.apply(conn)  # noqa: SLF001
+    row = conn.execute(
+        "SELECT evidence_json FROM mapping_edges WHERE subject_id='dev-c' AND endpoint_id='ct-4'"
+    ).fetchone()
+    assert json.loads(row[0]) == {}
+    conn.close()
 
 
 def test_verdict_mapping_without_a_competing_source(tmp_path: Path) -> None:

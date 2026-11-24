@@ -25,6 +25,7 @@ from ..contracts import (
 from ..devices.service import endpoints_from_repo
 from ..electrical.topology_graph import DisplayNode, TopologyGraph
 from ..electrical.topology_placement import apply_user_placements, exclude_readers
+from ..versioning.service import edge_evidence_payload
 
 log = logging.getLogger("wattmosaic.main")
 
@@ -250,12 +251,21 @@ def _topology_graph(service: Any, version_id: str | None = None) -> TopologyGrap
 
 
 def _edge_row(row: dict[str, Any]) -> dict[str, Any]:
-    """Normalise a raw repository row for the :class:`TopologyEdgeV3` contract."""
+    """Normalise a raw repository row for the :class:`TopologyEdgeV3` contract.
+
+    ``evidence`` is sanitised through :func:`edge_evidence_payload`, so a stored
+    row still carrying a legacy key (``{"source": ...}`` from migration 14/29)
+    loads instead of raising and taking the engine down.  The sanitising is the
+    same one ``VersionService`` uses, so every stored-row read agrees.
+    """
     data = dict(row)
     evidence = data.get("evidence", data.get("evidence_json", {}))
     if isinstance(evidence, str):
-        evidence = json.loads(evidence or "{}")
-    data["evidence"] = evidence
+        try:
+            evidence = json.loads(evidence or "{}")
+        except (TypeError, ValueError):
+            evidence = {}
+    data["evidence"] = edge_evidence_payload(evidence)
     data.pop("evidence_json", None)
     for field in ("valid_from", "valid_until"):
         val = data.get(field)

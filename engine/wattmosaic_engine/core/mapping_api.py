@@ -156,6 +156,8 @@ class MappingApiMixin:
         import json
         from datetime import datetime
 
+        from ..versioning.service import edge_evidence_payload
+
         data = dict(row)
         evidence = data.get("evidence", data.get("evidence_json", {}))
         if isinstance(evidence, str):
@@ -163,7 +165,7 @@ class MappingApiMixin:
                 evidence = json.loads(evidence or "{}")
             except (TypeError, ValueError):
                 evidence = {}
-        data["evidence"] = evidence
+        data["evidence"] = edge_evidence_payload(evidence)
         data.pop("evidence_json", None)
         for field in ("valid_from", "valid_until"):
             value = data.get(field)

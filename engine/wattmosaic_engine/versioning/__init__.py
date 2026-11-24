@@ -13,9 +13,11 @@ the injected S14/S15 repositories.  ``runtime.fakes`` is never imported.
 from .service import (
     VersionConflictError,
     VersionService,
+    edge_evidence_payload,
 )
 
 __all__ = [
     "VersionConflictError",
     "VersionService",
+    "edge_evidence_payload",
 ]
