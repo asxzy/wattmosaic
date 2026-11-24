@@ -59,14 +59,7 @@ assigns each reader a mains leg (`L`/`R`/`both`/`unknown`) and a branch-current
 tag used as T5 tie-breaks and vetoes. Migration v030 adds the optional endpoint
 columns; the schemas are regenerated for contract 4.1.0.
 
-## v0.3.0-dev.5 — 2026-11-20 (development channel)
-
-Automatic development build.
-
-### Changes
-
-- ci(release): release on demand via workflow_dispatch, never on push
-- fix(packaging): ship inference/evidence_weights.json in the wheel
+## v0.3.0-dev.6 — 2026-11-24 (development channel)
 
 ### Fix — boot crash on legacy edge evidence
 
@@ -98,6 +91,15 @@ The legacy `source` value is dropped rather than preserved: it never was a
 contract field, and what it recorded is already durable in `declared_by`,
 `valid_from`, the deterministic edge id and the derived `relation`. Per-table
 counts and the dropped key names are logged at INFO.
+
+## v0.3.0-dev.5 — 2026-11-20 (development channel)
+
+Automatic development build.
+
+### Changes
+
+- ci(release): release on demand via workflow_dispatch, never on push
+- fix(packaging): ship inference/evidence_weights.json in the wheel
 
 ## v0.3.0-dev.4 — 2026-11-20 (development channel)
 

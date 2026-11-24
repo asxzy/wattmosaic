@@ -24,7 +24,7 @@
 #   disabled_sensors       -> WM_DISABLED_SENSORS (comma-separated)
 
 name: "WattMosaic Engine"
-version: "0.3.0-dev.5"
+version: "0.3.0-dev.6"
 slug: "wattmosaic_engine"
 description: >-
   Multi-CT load disaggregation engine for WattMosaic. Learns device-level power
